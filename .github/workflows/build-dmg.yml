@@ -1,0 +1,111 @@
+name: Build macOS DMG
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "自定义版本号（留空则自动读取 Tag 或默认版本）"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-dmg-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
+jobs:
+  build-macos-dmg:
+    name: Build & Package DMG (macOS arm64)
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: KernelRust
+
+      - name: Install FFmpeg & libass via Homebrew
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          brew install ffmpeg libass
+
+      - name: Resolve build version
+        id: meta
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            VER="${{ inputs.version }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VER="${GITHUB_REF_NAME#v}"
+          else
+            VER="1.1.0-${GITHUB_SHA::7}"
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "Resolved Donby version: ${VER}"
+
+      - name: Build native kernel
+        run: |
+          chmod +x build_kernel.sh build_app.sh scripts/package_dmg.sh
+          ./build_kernel.sh
+
+      - name: Package self-contained Donby.app & DMG
+        env:
+          DONBY_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          ./scripts/package_dmg.sh
+
+      - name: Verify standalone dylib closure & bundle signature
+        run: |
+          codesign --verify --deep --strict Donby.app
+          echo "=== Main Executable Dynamic Links ==="
+          otool -L Donby.app/Contents/MacOS/Donby
+          if otool -L Donby.app/Contents/MacOS/Donby Donby.app/Contents/Frameworks/*.dylib | grep -E "(/opt/homebrew|/usr/local)"; then
+            echo "ERROR: Found unbundled external Homebrew dylib paths!" >&2
+            exit 1
+          fi
+          echo "All third-party dylibs are cleanly bundled inside Contents/Frameworks."
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Donby-${{ steps.meta.outputs.version }}-macOS-arm64
+          path: |
+            dist/*.dmg
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release (on Tag push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.dmg
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
+          body: |
+            ### 安装说明 (macOS 14.0+ Apple Silicon)
+            1. 下载下方 `Donby-*.dmg` 并双击挂载，将 `Donby.app` 拖入 `Applications`（应用程序）。
+            2. 安装包已内嵌全部 `FFmpeg` / `libass` 运行库，无需额外部署 Homebrew 环境。
+            3. 由于开源构建采用本地 Ad-hoc 签名（未接入付费 Apple Developer 公证），首次打开如提示“无法验证开发者”或“已损坏”，请在终端执行一次：
+               ```bash
+               sudo xattr -rd com.apple.quarantine /Applications/Donby.app
+               ```

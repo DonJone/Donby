@@ -73,7 +73,10 @@ let package = Package(
         .executableTarget(
             name: "DonbyApp",
             dependencies: ["DonbyCore", "DonbyNetwork", "DonbyStorage", "DonbyKernelC", "DonbyMetalRenderer"],
-            path: "Sources/DonbyApp"
+            path: "Sources/DonbyApp",
+            linkerSettings: [
+                .unsafeFlags(["-Xlinker", "-headerpad_max_install_names"])
+            ]
         )
     ],
     cxxLanguageStandard: .cxx20

@@ -2,6 +2,8 @@
 .swiftpm/
 Donby.app/
 build_kernel/
+dist/
+*.dmg
 KernelRust/target/
 Resources/AppIcon.iconset/
 tmp/

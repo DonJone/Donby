@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/DonJone/Donby/actions/workflows/build-dmg.yml"><img src="https://github.com/DonJone/Donby/actions/workflows/build-dmg.yml/badge.svg" alt="Build macOS DMG" /></a>
   <img src="https://img.shields.io/badge/Platform-macOS%2014%2B-111827?style=flat-square&logo=apple" alt="Platform" />
   <img src="https://img.shields.io/badge/Renderer-Metal%20%2B%20VideoToolbox-0A84FF?style=flat-square" alt="Metal" />
   <img src="https://img.shields.io/badge/Protocol-Emby%20%2F%20UHDNow-00C2FF?style=flat-square" alt="Protocol" />
@@ -60,7 +61,18 @@ cd Donby
 脚本会自动完成：
 1. 编译 `KernelRust` 与 `DonbyKernelC` 静态库（`./build_kernel.sh`）
 2. 构建 Release 版 Swift 二进制并生成原生高清 `AppIcon.icns`
-3. 组装并签名输出 `./Donby.app`
+3. 自动递归收集并内嵌 `FFmpeg` / `libass` 动态库至 `Contents/Frameworks`（脱离本机 Homebrew 独立运行）
+4. 组装并签名输出 `./Donby.app`
+
+### 3. 打包可分发的 `.dmg` 安装镜像
+
+```bash
+./scripts/package_dmg.sh
+```
+
+执行后将在 `dist/` 目录下生成带 `Applications` 拖拽引导的自包含压缩镜像 `Donby-<version>-macOS-<arch>.dmg` 及 `SHA256SUMS.txt`。
+
+> **CI 自动构建与发布**：仓库已内置 GitHub Actions 工作流（[`.github/workflows/build-dmg.yml`](./.github/workflows/build-dmg.yml)）。每次推送 `main` 分支或手动触发均会自动产出 `.dmg` 构建产物；推送 `v*` 标签（如 `git tag v1.1.0 && git push origin v1.1.0`）将自动创建 GitHub Release 并挂载 `.dmg` 安装包。
 
 ---
 
@@ -68,6 +80,7 @@ cd Donby
 
 ```text
 Donby/
+├── .github/workflows/          # GitHub Actions 自动编译与 DMG 打包发布工作流
 ├── KernelRust/                 # Rust 滑动内存池与 Dolby Vision RPU/FEL 检测
 ├── Sources/
 │   ├── DonbyKernelC/           # C++20 解封装、VideoToolbox 硬解、AudioQueue 时钟与线程管理
@@ -77,6 +90,8 @@ Donby/
 │   ├── DonbyStorage/           # Keychain 安全凭据存储
 │   └── DonbyApp/               # 原生 macOS SwiftUI 界面与播放器交互层
 ├── scripts/generate_icon.swift # macOS 应用图标生成脚本
+├── scripts/bundle_dylibs.py    # 第三方动态库递归收集与 @rpath 重写脚本
+├── scripts/package_dmg.sh      # macOS DMG 安装镜像打包与校验脚本
 ├── build_kernel.sh             # 原生播放内核构建脚本
 └── build_app.sh                # Donby.app 完整构建与签名脚本
 ```

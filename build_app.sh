@@ -34,7 +34,9 @@ if [ -f "Resources/AppIcon.icns" ]; then
     cp "Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 fi
 
-cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
+APP_VERSION="${DONBY_VERSION:-1.1.0}"
+
+cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -56,7 +58,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.1.0</string>
+    <string>${APP_VERSION}</string>
     <key>CFBundleVersion</key>
     <string>2</string>
     <key>LSMinimumSystemVersion</key>
@@ -87,5 +89,11 @@ PLIST
 
 echo -n "APPL????" > "$APP_DIR/Contents/PkgInfo"
 
+if [ "${BUNDLE_DYLIBS:-1}" = "1" ]; then
+    echo "==> Bundling standalone FFmpeg & libass dylibs..."
+    python3 scripts/bundle_dylibs.py "$APP_DIR"
+fi
+
 codesign --force --deep --sign - "$APP_DIR"
+codesign --verify --deep --strict "$APP_DIR"
 echo "==> Packaged and signed: $(pwd)/$APP_DIR"
