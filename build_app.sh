@@ -1,0 +1,91 @@
+#!/bin/zsh
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+if [ ! -f "build_kernel/libdonby_kernel.a" ]; then
+    echo "==> Building native playback kernel first..."
+    ./build_kernel.sh
+fi
+
+SDK_PATH="/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk"
+if [ ! -d "$SDK_PATH" ]; then
+    SDK_PATH="$(xcrun --show-sdk-path)"
+fi
+
+echo "==> Building Donby release binary..."
+swift build --sdk "$SDK_PATH" -c release
+
+BIN_PATH="$(swift build --sdk "$SDK_PATH" -c release --show-bin-path)/Donby"
+APP_DIR="Donby.app"
+
+rm -rf "$APP_DIR"
+mkdir -p "$APP_DIR/Contents/MacOS"
+mkdir -p "$APP_DIR/Contents/Resources"
+
+cp "$BIN_PATH" "$APP_DIR/Contents/MacOS/Donby"
+chmod +x "$APP_DIR/Contents/MacOS/Donby"
+
+if [ ! -f "Resources/AppIcon.icns" ]; then
+    echo "==> Generating native macOS AppIcon..."
+    swift -sdk "$SDK_PATH" scripts/generate_icon.swift
+fi
+if [ -f "Resources/AppIcon.icns" ]; then
+    cp "Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+fi
+
+cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+    <key>CFBundleDisplayName</key>
+    <string>Donby</string>
+    <key>CFBundleExecutable</key>
+    <string>Donby</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.don.Donby</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Donby</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>2</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>CFBundleURLName</key>
+            <string>com.don.Donby.scheme</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>donby</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>
+PLIST
+
+echo -n "APPL????" > "$APP_DIR/Contents/PkgInfo"
+
+codesign --force --deep --sign - "$APP_DIR"
+echo "==> Packaged and signed: $(pwd)/$APP_DIR"

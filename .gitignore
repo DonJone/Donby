@@ -1,0 +1,11 @@
+.build/
+.swiftpm/
+Donby.app/
+build_kernel/
+KernelRust/target/
+Resources/AppIcon.iconset/
+tmp/
+uhdnowdoc.md
+.DS_Store
+**/.DS_Store
+*.xcuserdata
