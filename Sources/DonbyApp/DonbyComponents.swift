@@ -343,9 +343,9 @@ public struct DonbyAppLogoView: View {
                     dPath,
                     with: .linearGradient(
                         Gradient(colors: [
-                            Color(red: 0.88, green: 0.91, blue: 0.96),
-                            Color(red: 0.56, green: 0.60, blue: 0.68),
-                            Color(red: 0.32, green: 0.36, blue: 0.43)
+                            Color.white,
+                            Color(red: 0.86, green: 0.89, blue: 0.94),
+                            Color(red: 0.66, green: 0.71, blue: 0.80)
                         ]),
                         startPoint: CGPoint(x: w * 0.25, y: h * 0.2),
                         endPoint: CGPoint(x: w * 0.60, y: h * 0.8)
@@ -362,7 +362,7 @@ public struct DonbyAppLogoView: View {
                 context.fill(
                     play,
                     with: .linearGradient(
-                        Gradient(colors: [.white, Color(red: 0.78, green: 0.82, blue: 0.88)]),
+                        Gradient(colors: [.white, Color(red: 0.90, green: 0.93, blue: 0.98)]),
                         startPoint: CGPoint(x: w * 0.45, y: h * 0.32),
                         endPoint: CGPoint(x: w * 0.78, y: h * 0.68)
                     )
@@ -695,7 +695,7 @@ public struct ToolbarCircleActionButton: View {
     }
 }
 
-public struct SenToolbarCapsuleModifier: ViewModifier {
+public struct DonbyToolbarCapsuleModifier: ViewModifier {
     public var width: CGFloat
     public init(width: CGFloat = 34) {
         self.width = width
@@ -725,11 +725,11 @@ public struct SenToolbarCapsuleModifier: ViewModifier {
 }
 
 public extension View {
-    func senToolbarMenuCapsule(width: CGFloat = 34) -> some View {
-        modifier(SenToolbarCapsuleModifier(width: width))
+    func donbyToolbarMenuCapsule(width: CGFloat = 34) -> some View {
+        modifier(DonbyToolbarCapsuleModifier(width: width))
     }
 }
-public struct SenToolbarCircleView: View {
+public struct DonbyToolbarCircleView: View {
     public let systemName: String
     public var showChevron: Bool = false
 
@@ -768,7 +768,7 @@ public struct SenToolbarCircleView: View {
     }
 }
 
-public struct SenSearchPillField: View {
+public struct DonbySearchPillField: View {
     public let placeholder: String
     @Binding public var text: String
     public var width: CGFloat = 260
@@ -1261,7 +1261,7 @@ public struct LibraryCardView: View {
 }
 
 // MARK: - Native 3D Module Card
-public struct SenModuleCardView: View {
+public struct DonbyModuleCardView: View {
     public let title: String
     public let subtitle: String
     public let assetName: String

@@ -155,7 +155,7 @@ public struct EmbyMainView: View {
                         appState.isSidebarCollapsed = false
                     }
                 } label: {
-                    SenToolbarCircleView(systemName: "sidebar.left")
+                    DonbyToolbarCircleView(systemName: "sidebar.left")
                 }
                 .buttonStyle(.plain)
                 .padding(.leading, 58)
@@ -309,7 +309,7 @@ public struct EmbyMainView: View {
                 }
             }
 
-            SenSearchPillField(
+            DonbySearchPillField(
                 placeholder: "搜索媒体",
                 text: $inlineSearchText,
                 width: 185
@@ -572,7 +572,7 @@ public struct MLibListView: View {
                     .frame(width: 200)
                 }
 
-                SenSearchPillField(placeholder: "搜索", text: $searchQuery, width: 200)
+                DonbySearchPillField(placeholder: "搜索", text: $searchQuery, width: 200)
             }
             .padding(.horizontal, 24)
             .frame(height: 54)

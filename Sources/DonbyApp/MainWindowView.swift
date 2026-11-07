@@ -87,7 +87,7 @@ public struct MainWindowView: View {
                         appState.isSidebarCollapsed = true
                     }
                 } label: {
-                    SenToolbarCircleView(systemName: "sidebar.left")
+                    DonbyToolbarCircleView(systemName: "sidebar.left")
                 }
                 .buttonStyle(.plain)
                 .padding(.trailing, 10)
@@ -203,7 +203,7 @@ public struct FilesModuleView: View {
                                 appState.isSidebarCollapsed = false
                             }
                         } label: {
-                            SenToolbarCircleView(systemName: "sidebar.left")
+                            DonbyToolbarCircleView(systemName: "sidebar.left")
                         }
                         .buttonStyle(.plain)
                         .padding(.leading, 54)
@@ -610,7 +610,7 @@ public struct IPTVModuleView: View {
                             appState.isSidebarCollapsed = false
                         }
                     } label: {
-                        SenToolbarCircleView(systemName: "sidebar.left")
+                        DonbyToolbarCircleView(systemName: "sidebar.left")
                     }
                     .buttonStyle(.plain)
                     .padding(.leading, 54)
@@ -627,7 +627,7 @@ public struct IPTVModuleView: View {
 
                 Spacer()
 
-                SenSearchPillField(placeholder: "搜索频道名称或地址", text: $searchText, width: 220)
+                DonbySearchPillField(placeholder: "搜索频道名称或地址", text: $searchText, width: 220)
 
                 Button {
                     newChannelName = ""
@@ -987,7 +987,7 @@ public struct RecordsView: View {
                             appState.isSidebarCollapsed = false
                         }
                     } label: {
-                        SenToolbarCircleView(systemName: "sidebar.left")
+                        DonbyToolbarCircleView(systemName: "sidebar.left")
                     }
                     .buttonStyle(.plain)
                     .padding(.leading, 54)
@@ -1311,7 +1311,7 @@ public struct GlobalSearchView: View {
                                 appState.isSidebarCollapsed = false
                             }
                         } label: {
-                            SenToolbarCircleView(systemName: "sidebar.left")
+                            DonbyToolbarCircleView(systemName: "sidebar.left")
                         }
                         .buttonStyle(.plain)
                         .padding(.leading, 54)
@@ -1587,7 +1587,7 @@ public struct SettingsView: View {
                             appState.isSidebarCollapsed = false
                         }
                     } label: {
-                        SenToolbarCircleView(systemName: "sidebar.left")
+                        DonbyToolbarCircleView(systemName: "sidebar.left")
                     }
                     .buttonStyle(.plain)
                     .padding(.leading, 64)
@@ -1888,7 +1888,7 @@ public struct SettingsView: View {
                     Text("Donby")
                         .font(.system(size: 20, weight: .heavy, design: .rounded))
                         .foregroundStyle(.white)
-                    Text("版本 1.2.0 (Build 2026.11) · macOS Apple Silicon")
+                    Text("版本 1.2.1 (Build 2026.11) · macOS Apple Silicon")
                         .font(.system(size: 12))
                         .foregroundStyle(Color(white: 0.55))
                 }
@@ -1910,6 +1910,19 @@ public struct SettingsView: View {
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(.white)
                 Text("Donby 官方原生深度支持 UHDNow 服务端生态协议，包括 ServerDomains 动态负载均衡、专属 302 直连通道与高规格 4K 媒体流直解。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color(white: 0.65))
+            }
+            .padding(18)
+            .background(Color.white.opacity(0.035))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+
+            // Design Inspiration & Open Source Acknowledgements
+            VStack(alignment: .leading, spacing: 8) {
+                Text("设计灵感与开源致谢")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white)
+                Text("部分界面交互与毛玻璃视觉体验在设计上参考并致敬了 Apple TV、SenPlayer 与 Infuse 等优秀的生态应用；底层音视频与字幕能力构建于 FFmpeg 与 libass 之上。Donby 全部源码、图形资源与 Metal 色彩管线均为独立从零实现，与上述第三方商业软件无官方隶属或背书关系。")
                     .font(.system(size: 12))
                     .foregroundStyle(Color(white: 0.65))
             }

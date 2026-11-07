@@ -93,15 +93,16 @@ func renderIcon(size: Int) -> Data? {
 
     // Restrained deep-graphite center depth halo behind aperture
     let depthGlowColors = [
-        CGColor(srgbRed: 0.46, green: 0.52, blue: 0.64, alpha: 0.09),
+        CGColor(srgbRed: 0.82, green: 0.87, blue: 0.96, alpha: 0.17),
+        CGColor(srgbRed: 0.42, green: 0.47, blue: 0.56, alpha: 0.06),
         CGColor(srgbRed: 0.08, green: 0.09, blue: 0.11, alpha: 0.0)
     ] as CFArray
-    if let depthGrad = CGGradient(colorsSpace: colorSpace, colors: depthGlowColors, locations: [0.0, 1.0]) {
-        let glowCenter = CGPoint(x: s * 0.52, y: s * 0.48)
+    if let depthGrad = CGGradient(colorsSpace: colorSpace, colors: depthGlowColors, locations: [0.0, 0.46, 1.0]) {
+        let glowCenter = CGPoint(x: s * 0.51, y: s * 0.50)
         ctx.drawRadialGradient(
             depthGrad,
             startCenter: glowCenter, startRadius: 0,
-            endCenter: glowCenter, endRadius: bodySize * 0.54,
+            endCenter: glowCenter, endRadius: bodySize * 0.58,
             options: []
         )
     }
@@ -110,7 +111,7 @@ func renderIcon(size: Int) -> Data? {
     ctx.saveGState()
     let ringRadius = bodySize * 0.355
     let ringRect = CGRect(x: s * 0.5 - ringRadius, y: s * 0.5 - ringRadius, width: ringRadius * 2, height: ringRadius * 2)
-    ctx.setStrokeColor(CGColor(srgbRed: 0.82, green: 0.85, blue: 0.92, alpha: 0.085))
+    ctx.setStrokeColor(CGColor(srgbRed: 0.88, green: 0.91, blue: 0.97, alpha: 0.125))
     ctx.setLineWidth(max(1.0, s * 0.008))
     ctx.strokeEllipse(in: ringRect)
     ctx.restoreGState()
@@ -179,24 +180,36 @@ func renderIcon(size: Int) -> Data? {
     ctx.saveGState()
     ctx.setShadow(
         offset: CGSize(width: 0, height: -s * 0.016),
-        blur: s * 0.035,
+        blur: s * 0.038,
         color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.85)
     )
     ctx.addPath(strokedDRibbon)
-    ctx.setFillColor(CGColor(srgbRed: 0.52, green: 0.56, blue: 0.64, alpha: 1.0))
+    ctx.setFillColor(CGColor(srgbRed: 0.84, green: 0.87, blue: 0.93, alpha: 1.0))
     ctx.fillPath()
     ctx.restoreGState()
 
-    // Gradient fill on D-ribbon (Machined Platinum-Titanium -> Brushed Space Steel -> Deep Gunmetal)
+    // Soft silver ambient bloom around D-ribbon so centerpiece pops crisply against Space Black
+    ctx.saveGState()
+    ctx.setShadow(
+        offset: .zero,
+        blur: s * 0.030,
+        color: CGColor(srgbRed: 0.85, green: 0.90, blue: 1.00, alpha: 0.24)
+    )
+    ctx.addPath(strokedDRibbon)
+    ctx.setFillColor(CGColor(srgbRed: 0.90, green: 0.93, blue: 0.98, alpha: 1.0))
+    ctx.fillPath()
+    ctx.restoreGState()
+
+    // Gradient fill on D-ribbon (High-Luminance Liquid Platinum -> Bright Polished Silver -> Light Titanium)
     ctx.saveGState()
     ctx.addPath(strokedDRibbon)
     ctx.clip()
     let ribbonColors = [
+        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 1.0),
         CGColor(srgbRed: 0.88, green: 0.91, blue: 0.96, alpha: 1.0),
-        CGColor(srgbRed: 0.55, green: 0.60, blue: 0.68, alpha: 1.0),
-        CGColor(srgbRed: 0.30, green: 0.34, blue: 0.41, alpha: 1.0)
+        CGColor(srgbRed: 0.70, green: 0.75, blue: 0.83, alpha: 1.0)
     ] as CFArray
-    if let ribGrad = CGGradient(colorsSpace: colorSpace, colors: ribbonColors, locations: [0.0, 0.52, 1.0]) {
+    if let ribGrad = CGGradient(colorsSpace: colorSpace, colors: ribbonColors, locations: [0.0, 0.50, 1.0]) {
         ctx.drawLinearGradient(
             ribGrad,
             start: CGPoint(x: dLeft, y: dTop + strokeW * 0.5),
@@ -229,7 +242,18 @@ func renderIcon(size: Int) -> Data? {
     ctx.setShadow(
         offset: CGSize(width: 0, height: -s * 0.014),
         blur: s * 0.036,
-        color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.78)
+        color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.82)
+    )
+    ctx.addPath(playPath)
+    ctx.setFillColor(CGColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 1.0))
+    ctx.fillPath()
+    ctx.restoreGState()
+
+    ctx.saveGState()
+    ctx.setShadow(
+        offset: .zero,
+        blur: s * 0.028,
+        color: CGColor(srgbRed: 0.92, green: 0.96, blue: 1.00, alpha: 0.32)
     )
     ctx.addPath(playPath)
     ctx.setFillColor(CGColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 1.0))
@@ -242,8 +266,8 @@ func renderIcon(size: Int) -> Data? {
     ctx.clip()
     let playColors = [
         CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 1.0),
-        CGColor(srgbRed: 0.91, green: 0.93, blue: 0.97, alpha: 1.0),
-        CGColor(srgbRed: 0.76, green: 0.80, blue: 0.86, alpha: 1.0)
+        CGColor(srgbRed: 0.97, green: 0.98, blue: 1.00, alpha: 1.0),
+        CGColor(srgbRed: 0.89, green: 0.92, blue: 0.97, alpha: 1.0)
     ] as CFArray
     if let playGrad = CGGradient(colorsSpace: colorSpace, colors: playColors, locations: [0.0, 0.6, 1.0]) {
         ctx.drawLinearGradient(

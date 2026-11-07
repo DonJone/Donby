@@ -36,7 +36,7 @@ public struct ServerListView: View {
                             appState.isSidebarCollapsed = false
                         }
                     } label: {
-                        SenToolbarCircleView(systemName: "sidebar.left")
+                        DonbyToolbarCircleView(systemName: "sidebar.left")
                     }
                     .buttonStyle(.plain)
                     .padding(.leading, 54)
@@ -188,7 +188,7 @@ public struct ServerListView: View {
                 }
 
                 if appState.displaySearchBox {
-                    SenSearchPillField(placeholder: "搜索服务器", text: $searchText, width: 210)
+                    DonbySearchPillField(placeholder: "搜索服务器", text: $searchText, width: 210)
                 }
             }
             .padding(.horizontal, 24)

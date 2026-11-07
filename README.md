@@ -31,8 +31,9 @@
 - **UHDNow 生态原生支持**：深度对接 [`emby_ext_domains`](https://github.com/uhdnow/emby_ext_domains)（`ServerDomains` 扩展接口），登录后自动拉取全部云端加速节点，支持并发延迟测速、秒级无阻塞切线与最优节点自动优选。
 - **开箱即用空槽与剪贴板识别**：默认预置干净的 `UHDNow` 待配置空槽（不含任何演示数据），支持点击直接填写或从剪贴板一键解析导入服务器地址、端口、账号与备用线路。
 - **macOS 原生硬解与 Metal 渲染**：
-  - 基于 `VideoToolbox` 硬件加速解码与 `CAMetalLayer` 直出渲染（支持 8-bit `NV12`、10-bit `P010` BT.2020 HDR 及 `BGRA` 管线）。
-  - 基于 `AudioToolbox`（`AudioQueue`）硬件采样计数主时钟实现高精度音画同步，支持 `libass` 字幕解析与多音轨/多字幕实时切换。
+  - 基于 `VideoToolbox` 硬件加速解码（含 `IOSurface` 10-bit 软解无缝回退）与 `.rgba16Float` `extendedLinearDisplayP3` 广色域 EDR 管线。
+  - 完整支持 **Dolby Vision（Profile 5 / Profile 8 动态 RPU 矩阵与多项式/MMR 重塑）**、**HDR10（SMPTE ST 2084 PQ）**、**HLG** 以及 **ITU-R BT.2390** 自适应色调映射与等亮度色域压缩。
+  - 基于 `AudioToolbox`（`AudioQueue`）硬件采样计数主时钟实现高精度音画同步（兼容 TrueHD Atmos 7.1 下混），支持内封/外挂 `ASS/SSA`、`SRT` 与蓝光 `PGS` 位图字幕渲染及实时切换。
 - **原画 302 直连播放**：自动解析 Emby `PlaybackInfo` 与 302 重定向原画直链，实时同步服务端播放进度、续播断点与观看历史。
 - **多源媒体管理**：统一支持 Emby / UHDNow / Jellyfin 媒体库、本地大码率视频文件直解以及 M3U IPTV 频道播放。
 
@@ -95,6 +96,14 @@ Donby/
 ├── build_kernel.sh             # 原生播放内核构建脚本
 └── build_app.sh                # Donby.app 完整构建与签名脚本
 ```
+
+---
+
+## 致谢与设计灵感 (Acknowledgements)
+
+- **开源基础组件**：底层媒体解封装、软解回退与字幕排版构建于优秀的开源项目 [FFmpeg](https://ffmpeg.org/) 与 [libass](https://github.com/libass/libass) 之上；云端多线路动态同步对接了 [uhdnow/emby_ext_domains](https://github.com/uhdnow/emby_ext_domains) 协议规范。
+- **UI / UX 设计致敬**：Donby 在 macOS 桌面端的媒体库浏览动线、胶囊工具栏与磨砂悬浮控制栏等部分交互视觉细节上，借鉴并致敬了 **SenPlayer**、**Infuse** 以及 **Apple TV** 的优秀设计语言，特此向相关独立开发者与设计团队致以敬意。如果您需要在 iOS / iPadOS / tvOS / macOS 全家桶获得开箱即用的成熟商业客户端体验，非常推荐购买并支持正版 SenPlayer 或 Infuse。
+- **独立实现声明**：本项目全部前后端代码、纯代码矢量图形与 C++20 / Rust / Metal 播放渲染内核均由作者独立从零编写（Clean-room implementation），未包含任何第三方商业软件的专有代码、拆包文件或商标资源，且与 SenPlayer、Infuse、Emby 官方不存在任何隶属、合作或背书关系。
 
 ---
 
