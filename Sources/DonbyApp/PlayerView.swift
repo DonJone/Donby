@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import AppKit
+import UniformTypeIdentifiers
 import DonbyCore
 import DonbyNetwork
 import DonbyKernelC
@@ -36,6 +37,10 @@ public struct PlayerView: View {
     @State private var activeDrawer: PlayerDrawerTab? = nil
     @State private var selectedAudioIdx: Int?
     @State private var selectedSubIdx: Int?
+    @State private var activeExternalSubtitleURL: URL? = nil
+    @State private var kernelAudioTracks: [MediaStream] = []
+    @State private var kernelSubtitleTracks: [MediaStream] = []
+    @State private var didHandlePlaybackEnded: Bool = false
     @State private var systemClockString: String = ""
     @State private var kernelStats = DKRuntimeStats()
     @State private var autoHideTask: Task<Void, Never>? = nil
@@ -253,6 +258,19 @@ public struct PlayerView: View {
             if dur > 0 { duration = dur }
             else if currentItem.durationSeconds > 0 { duration = currentItem.durationSeconds }
             dk_player_get_stats(handle, &kernelStats)
+
+            let pState = dk_player_get_state(handle)
+            if pState == DK_STATE_ENDED && !didHandlePlaybackEnded {
+                didHandlePlaybackEnded = true
+                isPlaying = false
+                if let idx = session.episodesQueue.firstIndex(where: { $0.id == currentItem.id }),
+                   session.episodesQueue.indices.contains(idx + 1) {
+                    let nextEp = session.episodesQueue[idx + 1]
+                    appState.showToast("正在自动连播下一集: \(nextEp.name)", icon: "forward.end.fill")
+                    switchToEpisode(nextEp)
+                    return
+                }
+            }
 
             // Update watch history periodically (every 5s) to avoid UI frame drops
             if abs(currentTime - lastRecordedPosition) >= 5.0 {
@@ -568,8 +586,14 @@ public struct PlayerView: View {
 
                 case .tracks:
                     VStack(alignment: .leading, spacing: 16) {
+                        let audioList = currentItem.audioStreams.isEmpty ? kernelAudioTracks : currentItem.audioStreams
+                        let subList = currentItem.subtitleStreams.isEmpty ? kernelSubtitleTracks : currentItem.subtitleStreams
+
                         Text("音频轨道").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
-                        ForEach(currentItem.audioStreams) { stream in
+                        if audioList.isEmpty {
+                            Text("未检测到可用音轨").font(.system(size: 12)).foregroundStyle(.secondary)
+                        }
+                        ForEach(audioList) { stream in
                             let isSel = selectedAudioIdx == stream.index
                             Button {
                                 selectedAudioIdx = stream.index
@@ -591,13 +615,15 @@ public struct PlayerView: View {
                         Text("字幕轨道").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary).padding(.top, 6)
                         Button {
                             selectedSubIdx = nil
+                            activeExternalSubtitleURL = nil
                             if let handle = playerHandle {
                                 dk_player_select_track(handle, 2, -1)
                                 appState.showToast("已关闭字幕", icon: "captions.bubble")
                             }
                         } label: {
                             HStack {
-                                Image(systemName: selectedSubIdx == nil ? "checkmark.circle.fill" : "circle").foregroundStyle(selectedSubIdx == nil ? appState.accentColor : .secondary)
+                                let isOff = (selectedSubIdx == nil && activeExternalSubtitleURL == nil)
+                                Image(systemName: isOff ? "checkmark.circle.fill" : "circle").foregroundStyle(isOff ? appState.accentColor : .secondary)
                                 Text("关闭字幕").font(.system(size: 12)).foregroundStyle(.white)
                                 Spacer()
                             }
@@ -605,11 +631,15 @@ public struct PlayerView: View {
                         }
                         .buttonStyle(.plain)
 
-                        ForEach(currentItem.subtitleStreams) { stream in
-                            let isSel = selectedSubIdx == stream.index
+                        ForEach(subList) { stream in
+                            let isSel = (activeExternalSubtitleURL == nil && selectedSubIdx == stream.index)
                             Button {
                                 selectedSubIdx = stream.index
-                                if let handle = playerHandle, let idx = stream.index {
+                                activeExternalSubtitleURL = nil
+                                if (stream.isExternal == true || (stream.deliveryUrl != nil && !(stream.deliveryUrl?.isEmpty ?? true))),
+                                   let extItem = matchingExternalSubtitleResource(for: stream) {
+                                    loadRemoteExternalSubtitle(item: extItem, streamIndex: stream.index)
+                                } else if let handle = playerHandle, let idx = stream.index {
                                     dk_player_select_track(handle, 2, Int32(idx))
                                     appState.showToast("已切换字幕: \(stream.readableLabel)", icon: "captions.bubble.fill")
                                 }
@@ -623,6 +653,40 @@ public struct PlayerView: View {
                             }
                             .buttonStyle(.plain)
                         }
+
+                        if !currentResource.subtitleURLs.isEmpty && subList.isEmpty {
+                            ForEach(currentResource.subtitleURLs) { extSub in
+                                let isExtSel = (activeExternalSubtitleURL == extSub.url)
+                                Button {
+                                    selectedSubIdx = nil
+                                    loadRemoteExternalSubtitle(item: extSub, streamIndex: nil)
+                                } label: {
+                                    HStack {
+                                        Image(systemName: isExtSel ? "checkmark.circle.fill" : "circle")
+                                            .foregroundStyle(isExtSel ? appState.accentColor : .secondary)
+                                        Text(extSub.name).font(.system(size: 12)).foregroundStyle(.white)
+                                        Spacer()
+                                    }
+                                    .padding(9).background(Color.white.opacity(0.05)).clipShape(RoundedRectangle(cornerRadius: 8))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+
+                        Button {
+                            promptLocalExternalSubtitleFile()
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "doc.badge.plus").font(.system(size: 12, weight: .semibold))
+                                Text("加载本地外挂字幕 (.srt / .ass)...").font(.system(size: 12, weight: .medium))
+                                Spacer()
+                            }
+                            .foregroundStyle(appState.accentColor)
+                            .padding(9)
+                            .background(Color.white.opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
                     }
 
                 case .mediaInfo:
@@ -712,6 +776,8 @@ public struct PlayerView: View {
         let thisGeneration = activePlaybackGeneration
         isOpeningMedia = true
         openingErrorMessage = nil
+        didHandlePlaybackEnded = false
+        activeExternalSubtitleURL = nil
 
         let urlStr = currentResource.streamURL.absoluteString
         let headersStr = currentResource.headers.map { "\($0.key): \($0.value)\r\n" }.joined()
@@ -754,11 +820,26 @@ public struct PlayerView: View {
                 dk_player_set_rate(validHandle, speed)
                 dk_player_set_volume(validHandle, vol, muted)
 
+                let discovered = Self.queryKernelTracks(handle: validHandle)
+                self.kernelAudioTracks = discovered.audio
+                self.kernelSubtitleTracks = discovered.subtitles
+
                 if let aIdx = audioIdx, aIdx >= 0 {
                     dk_player_select_track(validHandle, 1, Int32(aIdx))
+                } else if let autoAudio = discovered.selectedAudioIndex {
+                    self.selectedAudioIdx = autoAudio
                 }
+
                 if let sIdx = subIdx, sIdx >= 0 {
-                    dk_player_select_track(validHandle, 2, Int32(sIdx))
+                    if let embySub = self.currentItem.subtitleStreams.first(where: { $0.index == sIdx }),
+                       (embySub.isExternal == true || !(embySub.deliveryUrl ?? "").isEmpty),
+                       let extItem = self.matchingExternalSubtitleResource(for: embySub) {
+                        self.loadRemoteExternalSubtitle(item: extItem, streamIndex: sIdx)
+                    } else {
+                        dk_player_select_track(validHandle, 2, Int32(sIdx))
+                    }
+                } else if let autoSub = discovered.selectedSubIndex {
+                    self.selectedSubIdx = autoSub
                 }
                 self.isPlaying = true
                 DonbyLogger.shared.log("原生播放器配置就绪，画面启动渲染", level: .info, subsystem: "Player")
@@ -789,6 +870,14 @@ public struct PlayerView: View {
 
     private func togglePlayPause() {
         guard let handle = playerHandle else { return }
+        if dk_player_get_state(handle) == DK_STATE_ENDED {
+            didHandlePlaybackEnded = false
+            currentTime = 0
+            dk_player_seek(handle, 0, true)
+            dk_player_play(handle)
+            isPlaying = true
+            return
+        }
         if isPlaying {
             dk_player_pause(handle)
             isPlaying = false
@@ -805,9 +894,136 @@ public struct PlayerView: View {
     }
 
     private func seekTo(_ seconds: Double) {
+        didHandlePlaybackEnded = false
         currentTime = seconds
         if let handle = playerHandle {
             dk_player_seek(handle, seconds, true)
+        }
+    }
+
+    private static func queryKernelTracks(handle: OpaquePointer) -> (
+        audio: [MediaStream],
+        subtitles: [MediaStream],
+        selectedAudioIndex: Int?,
+        selectedSubIndex: Int?
+    ) {
+        func readString<T>(_ tuple: T, maxLen: Int) -> String {
+            withUnsafePointer(to: tuple) { ptr in
+                ptr.withMemoryRebound(to: CChar.self, capacity: maxLen) { String(cString: $0) }
+            }
+        }
+
+        var audios: [MediaStream] = []
+        var selAudio: Int? = nil
+        let aCount = dk_player_get_track_count(handle, 1)
+        for ord in 0..<aCount {
+            var info = DKTrackInfo()
+            guard dk_player_get_track_info(handle, 1, ord, &info) else { continue }
+            let idx = Int(info.stream_index)
+            let codec = readString(info.codec, maxLen: 32)
+            let lang = readString(info.language, maxLen: 32)
+            let title = readString(info.title, maxLen: 128)
+            let chLayout: String? = info.channels >= 8 ? "7.1" : (info.channels == 6 ? "5.1" : (info.channels > 0 ? "\(info.channels).0" : nil))
+            if info.is_selected { selAudio = idx }
+            audios.append(MediaStream(
+                index: idx,
+                type: "Audio",
+                codec: codec.isEmpty ? nil : codec,
+                language: lang.isEmpty ? nil : lang,
+                title: title.isEmpty ? nil : title,
+                isDefault: info.is_default,
+                channels: Int(info.channels),
+                channelLayout: chLayout
+            ))
+        }
+
+        var subs: [MediaStream] = []
+        var selSub: Int? = nil
+        let sCount = dk_player_get_track_count(handle, 2)
+        for ord in 0..<sCount {
+            var info = DKTrackInfo()
+            guard dk_player_get_track_info(handle, 2, ord, &info) else { continue }
+            let idx = Int(info.stream_index)
+            let codec = readString(info.codec, maxLen: 32)
+                .replacingOccurrences(of: "hdmv_pgs_subtitle", with: "PGS")
+                .replacingOccurrences(of: "subrip", with: "SRT")
+            let lang = readString(info.language, maxLen: 32)
+            let title = readString(info.title, maxLen: 128)
+            if info.is_selected { selSub = idx }
+            subs.append(MediaStream(
+                index: idx,
+                type: "Subtitle",
+                codec: codec.isEmpty ? nil : codec,
+                language: lang.isEmpty ? nil : lang,
+                title: title.isEmpty ? nil : title,
+                isDefault: info.is_default
+            ))
+        }
+
+        return (audios, subs, selAudio, selSub)
+    }
+
+    private func matchingExternalSubtitleResource(for stream: MediaStream) -> SubtitleResourceItem? {
+        if let found = currentResource.subtitleURLs.first(where: { $0.name == stream.readableLabel }) {
+            return found
+        }
+        return currentResource.subtitleURLs.first
+    }
+
+    private func loadRemoteExternalSubtitle(item: SubtitleResourceItem, streamIndex: Int?) {
+        selectedSubIdx = streamIndex
+        activeExternalSubtitleURL = item.url
+        let headers = currentResource.headers
+        let url = item.url
+        let label = item.name
+        Task.detached(priority: .userInitiated) {
+            var req = URLRequest(url: url, timeoutInterval: 15)
+            for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+            guard let (data, _) = try? await URLSession.shared.data(for: req),
+                  let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) else {
+                await MainActor.run {
+                    appState.showToast("下载外挂字幕失败", icon: "exclamationmark.triangle.fill", isError: true)
+                }
+                return
+            }
+            let ext = url.pathExtension.lowercased()
+            let isAss = (ext == "ass" || ext == "ssa" || text.contains("[Script Info]"))
+            await MainActor.run {
+                if let handle = self.playerHandle {
+                    dk_player_load_external_subtitle(handle, text, isAss)
+                    self.appState.showToast("已加载外挂字幕: \(label)", icon: "captions.bubble.fill")
+                }
+            }
+        }
+    }
+
+    private func promptLocalExternalSubtitleFile() {
+        let panel = NSOpenPanel()
+        panel.title = "选择外挂字幕文件 (.srt / .ass / .ssa / .vtt)"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        var types: [UTType] = [.plainText]
+        for ext in ["srt", "ass", "ssa", "vtt"] {
+            if let t = UTType(filenameExtension: ext) { types.append(t) }
+        }
+        panel.allowedContentTypes = types
+        if panel.runModal() == .OK, let url = panel.url {
+            guard let data = try? Data(contentsOf: url),
+                  let text = String(data: data, encoding: .utf8)
+                      ?? String(data: data, encoding: .utf16)
+                      ?? String(data: data, encoding: String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)))) else {
+                appState.showToast("读取字幕文件失败", icon: "exclamationmark.triangle.fill", isError: true)
+                return
+            }
+            let ext = url.pathExtension.lowercased()
+            let isAss = (ext == "ass" || ext == "ssa" || text.contains("[Script Info]"))
+            if let handle = playerHandle {
+                selectedSubIdx = nil
+                activeExternalSubtitleURL = url
+                dk_player_load_external_subtitle(handle, text, isAss)
+                appState.showToast("已加载本地字幕: \(url.lastPathComponent)", icon: "captions.bubble.fill")
+            }
         }
     }
 

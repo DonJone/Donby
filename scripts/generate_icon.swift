@@ -46,9 +46,9 @@ func renderIcon(size: Int) -> Data? {
         ctx.setShadow(
             offset: CGSize(width: 0, height: -s * 0.018),
             blur: s * 0.038,
-            color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.48)
+            color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.56)
         )
-        ctx.setFillColor(CGColor(srgbRed: 0.05, green: 0.07, blue: 0.13, alpha: 1.0))
+        ctx.setFillColor(CGColor(srgbRed: 0.04, green: 0.042, blue: 0.048, alpha: 1.0))
         ctx.addPath(squirclePath)
         ctx.fillPath()
         ctx.restoreGState()
@@ -59,13 +59,13 @@ func renderIcon(size: Int) -> Data? {
     ctx.addPath(squirclePath)
     ctx.clip()
 
-    // Base deep obsidian-navy gradient (top -> bottom)
+    // Base Apple Pro Space Black / Obsidian Titanium gradient (top -> bottom)
     let bgColors = [
-        CGColor(srgbRed: 0.085, green: 0.125, blue: 0.235, alpha: 1.0),
-        CGColor(srgbRed: 0.045, green: 0.065, blue: 0.135, alpha: 1.0),
-        CGColor(srgbRed: 0.028, green: 0.036, blue: 0.078, alpha: 1.0)
+        CGColor(srgbRed: 0.105, green: 0.110, blue: 0.124, alpha: 1.0),
+        CGColor(srgbRed: 0.048, green: 0.050, blue: 0.058, alpha: 1.0),
+        CGColor(srgbRed: 0.018, green: 0.019, blue: 0.024, alpha: 1.0)
     ] as CFArray
-    let bgLocs: [CGFloat] = [0.0, 0.55, 1.0]
+    let bgLocs: [CGFloat] = [0.0, 0.54, 1.0]
     if let bgGrad = CGGradient(colorsSpace: colorSpace, colors: bgColors, locations: bgLocs) {
         ctx.drawLinearGradient(
             bgGrad,
@@ -75,33 +75,33 @@ func renderIcon(size: Int) -> Data? {
         )
     }
 
-    // Ambient sapphire-cyan glow top-left
-    let cyanGlowColors = [
-        CGColor(srgbRed: 0.12, green: 0.58, blue: 0.98, alpha: 0.36),
-        CGColor(srgbRed: 0.10, green: 0.38, blue: 0.88, alpha: 0.12),
-        CGColor(srgbRed: 0.05, green: 0.10, blue: 0.22, alpha: 0.0)
+    // Subtle anodized Space Black titanium top-left studio sheen
+    let titaniumSheenColors = [
+        CGColor(srgbRed: 0.72, green: 0.76, blue: 0.84, alpha: 0.12),
+        CGColor(srgbRed: 0.32, green: 0.35, blue: 0.42, alpha: 0.04),
+        CGColor(srgbRed: 0.05, green: 0.05, blue: 0.06, alpha: 0.0)
     ] as CFArray
-    if let cyanGrad = CGGradient(colorsSpace: colorSpace, colors: cyanGlowColors, locations: [0.0, 0.5, 1.0]) {
-        let glowCenter = CGPoint(x: bodyRect.minX + bodySize * 0.24, y: bodyRect.maxY - bodySize * 0.20)
+    if let titaniumGrad = CGGradient(colorsSpace: colorSpace, colors: titaniumSheenColors, locations: [0.0, 0.48, 1.0]) {
+        let glowCenter = CGPoint(x: bodyRect.minX + bodySize * 0.24, y: bodyRect.maxY - bodySize * 0.18)
         ctx.drawRadialGradient(
-            cyanGrad,
+            titaniumGrad,
             startCenter: glowCenter, startRadius: 0,
-            endCenter: glowCenter, endRadius: bodySize * 0.72,
+            endCenter: glowCenter, endRadius: bodySize * 0.68,
             options: []
         )
     }
 
-    // Subtle cinema violet-indigo backlight bottom-right
-    let violetGlowColors = [
-        CGColor(srgbRed: 0.38, green: 0.22, blue: 0.92, alpha: 0.28),
-        CGColor(srgbRed: 0.20, green: 0.12, blue: 0.52, alpha: 0.0)
+    // Restrained deep-graphite center depth halo behind aperture
+    let depthGlowColors = [
+        CGColor(srgbRed: 0.46, green: 0.52, blue: 0.64, alpha: 0.09),
+        CGColor(srgbRed: 0.08, green: 0.09, blue: 0.11, alpha: 0.0)
     ] as CFArray
-    if let violetGrad = CGGradient(colorsSpace: colorSpace, colors: violetGlowColors, locations: [0.0, 1.0]) {
-        let glowCenter = CGPoint(x: bodyRect.maxX - bodySize * 0.18, y: bodyRect.minY + bodySize * 0.18)
+    if let depthGrad = CGGradient(colorsSpace: colorSpace, colors: depthGlowColors, locations: [0.0, 1.0]) {
+        let glowCenter = CGPoint(x: s * 0.52, y: s * 0.48)
         ctx.drawRadialGradient(
-            violetGrad,
+            depthGrad,
             startCenter: glowCenter, startRadius: 0,
-            endCenter: glowCenter, endRadius: bodySize * 0.65,
+            endCenter: glowCenter, endRadius: bodySize * 0.54,
             options: []
         )
     }
@@ -110,7 +110,7 @@ func renderIcon(size: Int) -> Data? {
     ctx.saveGState()
     let ringRadius = bodySize * 0.355
     let ringRect = CGRect(x: s * 0.5 - ringRadius, y: s * 0.5 - ringRadius, width: ringRadius * 2, height: ringRadius * 2)
-    ctx.setStrokeColor(CGColor(srgbRed: 0.45, green: 0.75, blue: 1.0, alpha: 0.10))
+    ctx.setStrokeColor(CGColor(srgbRed: 0.82, green: 0.85, blue: 0.92, alpha: 0.085))
     ctx.setLineWidth(max(1.0, s * 0.008))
     ctx.strokeEllipse(in: ringRect)
     ctx.restoreGState()
@@ -180,21 +180,21 @@ func renderIcon(size: Int) -> Data? {
     ctx.setShadow(
         offset: CGSize(width: 0, height: -s * 0.016),
         blur: s * 0.035,
-        color: CGColor(srgbRed: 0.02, green: 0.08, blue: 0.24, alpha: 0.75)
+        color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.85)
     )
     ctx.addPath(strokedDRibbon)
-    ctx.setFillColor(CGColor(srgbRed: 0.14, green: 0.52, blue: 0.98, alpha: 1.0))
+    ctx.setFillColor(CGColor(srgbRed: 0.52, green: 0.56, blue: 0.64, alpha: 1.0))
     ctx.fillPath()
     ctx.restoreGState()
 
-    // Gradient fill on D-ribbon (electric cyan -> royal blue -> indigo)
+    // Gradient fill on D-ribbon (Machined Platinum-Titanium -> Brushed Space Steel -> Deep Gunmetal)
     ctx.saveGState()
     ctx.addPath(strokedDRibbon)
     ctx.clip()
     let ribbonColors = [
-        CGColor(srgbRed: 0.32, green: 0.86, blue: 1.00, alpha: 1.0),
-        CGColor(srgbRed: 0.15, green: 0.54, blue: 0.98, alpha: 1.0),
-        CGColor(srgbRed: 0.26, green: 0.34, blue: 0.95, alpha: 1.0)
+        CGColor(srgbRed: 0.88, green: 0.91, blue: 0.96, alpha: 1.0),
+        CGColor(srgbRed: 0.55, green: 0.60, blue: 0.68, alpha: 1.0),
+        CGColor(srgbRed: 0.30, green: 0.34, blue: 0.41, alpha: 1.0)
     ] as CFArray
     if let ribGrad = CGGradient(colorsSpace: colorSpace, colors: ribbonColors, locations: [0.0, 0.52, 1.0]) {
         ctx.drawLinearGradient(
@@ -229,21 +229,21 @@ func renderIcon(size: Int) -> Data? {
     ctx.setShadow(
         offset: CGSize(width: 0, height: -s * 0.014),
         blur: s * 0.036,
-        color: CGColor(srgbRed: 0.08, green: 0.45, blue: 0.98, alpha: 0.65)
+        color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.78)
     )
     ctx.addPath(playPath)
     ctx.setFillColor(CGColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 1.0))
     ctx.fillPath()
     ctx.restoreGState()
 
-    // Luminous white -> ice-cyan gradient fill on Play Prism
+    // Specular Diamond White -> Cool Moonlight Silver gradient fill on Play Prism
     ctx.saveGState()
     ctx.addPath(playPath)
     ctx.clip()
     let playColors = [
         CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 1.0),
-        CGColor(srgbRed: 0.86, green: 0.95, blue: 1.00, alpha: 1.0),
-        CGColor(srgbRed: 0.66, green: 0.88, blue: 1.00, alpha: 1.0)
+        CGColor(srgbRed: 0.91, green: 0.93, blue: 0.97, alpha: 1.0),
+        CGColor(srgbRed: 0.76, green: 0.80, blue: 0.86, alpha: 1.0)
     ] as CFArray
     if let playGrad = CGGradient(colorsSpace: colorSpace, colors: playColors, locations: [0.0, 0.6, 1.0]) {
         ctx.drawLinearGradient(
@@ -269,7 +269,7 @@ func renderIcon(size: Int) -> Data? {
     ctx.addPath(glossPath)
     ctx.clip()
     let glossColors = [
-        CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.09),
+        CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.065),
         CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.0)
     ] as CFArray
     if let glossGrad = CGGradient(colorsSpace: colorSpace, colors: glossColors, locations: [0.0, 1.0]) {
@@ -291,7 +291,7 @@ func renderIcon(size: Int) -> Data? {
         cornerHeight: cornerRadius - insetAmt,
         transform: nil
     )
-    ctx.setStrokeColor(CGColor(srgbRed: 0.65, green: 0.85, blue: 1.0, alpha: 0.22))
+    ctx.setStrokeColor(CGColor(srgbRed: 0.82, green: 0.85, blue: 0.90, alpha: 0.16))
     ctx.setLineWidth(max(1.0, s * 0.006))
     ctx.addPath(innerPath)
     ctx.strokePath()
