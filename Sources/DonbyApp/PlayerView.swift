@@ -14,6 +14,139 @@ public enum PlayerDrawerTab: String, CaseIterable, Identifiable {
     public var id: String { rawValue }
 }
 
+private enum PlayerSubtitleSelection: Equatable {
+    case off
+    case embedded(avStreamIndex: Int)
+    case remoteExternal(url: URL)
+    case localExternal(url: URL)
+}
+
+private struct PlayerAudioTrackOption: Identifiable, Equatable {
+    var id: String { "audio-\(avStreamIndex)" }
+    let avStreamIndex: Int
+    let embyIndex: Int?
+    let label: String
+}
+
+private struct PlayerSubtitleTrackOption: Identifiable, Equatable {
+    let id: String
+    let selection: PlayerSubtitleSelection
+    let embyIndex: Int?
+    let label: String
+    let badge: String?
+    let externalItem: SubtitleResourceItem?
+}
+
+/// Custom Liquid Glass video scrubber with real-time ahead-of-playhead buffered progress indicator
+private struct PlayerTimelineScrubberView: View {
+    let currentTime: Double
+    let bufferedAheadSeconds: Double
+    let duration: Double
+    let accentColor: Color
+    @Binding var isScrubbing: Bool
+    @Binding var scrubTime: Double
+    let onCommitSeek: (Double) -> Void
+
+    @State private var isHovered: Bool = false
+
+    private var safeDuration: Double { max(1.0, duration) }
+    private var displayedTime: Double { isScrubbing ? scrubTime : currentTime }
+    private var playedRatio: CGFloat {
+        CGFloat(max(0.0, min(1.0, displayedTime / safeDuration)))
+    }
+    private var bufferedRatio: CGFloat {
+        let target = max(displayedTime, currentTime + max(0.0, bufferedAheadSeconds))
+        return CGFloat(max(Double(playedRatio), min(1.0, target / safeDuration)))
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let width = max(1.0, geo.size.width)
+            let trackHeight: CGFloat = (isHovered || isScrubbing) ? 7.5 : 5.5
+            let knobSize: CGFloat = (isHovered || isScrubbing) ? 15.0 : 11.5
+            let playedW = width * playedRatio
+            let bufferedW = width * bufferedRatio
+
+            ZStack(alignment: .leading) {
+                // Unbuffered background track
+                Capsule()
+                    .fill(Color.white.opacity(0.15))
+                    .overlay(
+                        Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 0.6)
+                    )
+                    .frame(width: width, height: trackHeight)
+
+                // Cached / Buffered progress indicator ahead of playhead
+                if bufferedW > 0 {
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.46),
+                                    Color(red: 0.86, green: 0.92, blue: 1.0).opacity(0.34)
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .overlay(
+                            Capsule().strokeBorder(Color.white.opacity(0.32), lineWidth: 0.5)
+                        )
+                        .frame(width: min(width, bufferedW), height: trackHeight)
+                        .animation(.linear(duration: 0.20), value: bufferedRatio)
+                }
+
+                // Played progress segment (Apple Music Red / Theme Accent)
+                if playedW > 0 {
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [accentColor.opacity(0.92), accentColor],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .shadow(color: accentColor.opacity(0.48), radius: 5, y: 0)
+                        .frame(width: min(width, max(trackHeight, playedW)), height: trackHeight)
+                }
+
+                // Liquid Glass playhead knob
+                Circle()
+                    .fill(Color.white)
+                    .overlay(
+                        Circle().strokeBorder(accentColor, lineWidth: isScrubbing ? 2.4 : 1.6)
+                    )
+                    .shadow(color: .black.opacity(0.45), radius: 4, y: 1.5)
+                    .frame(width: knobSize, height: knobSize)
+                    .offset(x: min(max(0, playedW - knobSize * 0.5), max(0, width - knobSize)))
+            }
+            .frame(width: width, height: geo.size.height)
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                withAnimation(.easeOut(duration: 0.14)) {
+                    isHovered = hovering
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let ratio = max(0.0, min(1.0, Double(value.location.x / width)))
+                        isScrubbing = true
+                        scrubTime = ratio * safeDuration
+                    }
+                    .onEnded { value in
+                        let ratio = max(0.0, min(1.0, Double(value.location.x / width)))
+                        let target = ratio * safeDuration
+                        scrubTime = target
+                        isScrubbing = false
+                        onCommitSeek(target)
+                    }
+            )
+        }
+        .frame(height: 20)
+    }
+}
+
 public struct PlayerView: View {
     @EnvironmentObject private var appState: AppState
     public let session: ActivePlaybackSession
@@ -23,6 +156,7 @@ public struct PlayerView: View {
     @State private var currentResource: DonbyCore.ResolvedPlaybackResource
     @State private var isPlaying: Bool = true
     @State private var currentTime: Double = 0
+    @State private var bufferedAheadSeconds: Double = 0
     @State private var duration: Double = 1
     @State private var isScrubbing: Bool = false
     @State private var scrubTime: Double = 0
@@ -37,7 +171,9 @@ public struct PlayerView: View {
     @State private var activeDrawer: PlayerDrawerTab? = nil
     @State private var selectedAudioIdx: Int?
     @State private var selectedSubIdx: Int?
-    @State private var activeExternalSubtitleURL: URL? = nil
+    @State private var activeAudioAVIndex: Int? = nil
+    @State private var activeSubtitleSelection: PlayerSubtitleSelection = .off
+    @State private var localExternalSubtitleName: String? = nil
     @State private var kernelAudioTracks: [MediaStream] = []
     @State private var kernelSubtitleTracks: [MediaStream] = []
     @State private var didHandlePlaybackEnded: Bool = false
@@ -50,7 +186,7 @@ public struct PlayerView: View {
     @State private var lastMouseMoveTimestamp: TimeInterval = 0
     @State private var activePlaybackGeneration: Int = 0
 
-    private let progressTimer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+    private let progressTimer = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
     private let embySyncTimer = Timer.publish(every: 10.0, on: .main, in: .common).autoconnect()
 
     public init(session: ActivePlaybackSession) {
@@ -254,6 +390,7 @@ public struct PlayerView: View {
             updateClock()
             guard let handle = playerHandle, !isScrubbing else { return }
             currentTime = dk_player_get_position(handle)
+            bufferedAheadSeconds = dk_player_get_buffered_duration(handle)
             let dur = dk_player_get_duration(handle)
             if dur > 0 { duration = dur }
             else if currentItem.durationSeconds > 0 { duration = currentItem.durationSeconds }
@@ -306,15 +443,16 @@ public struct PlayerView: View {
 
     private var topOSDBar: some View {
         HStack(spacing: 14) {
-            Button { exitPlayer() } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "chevron.left").font(.system(size: 13, weight: .bold))
-                    Text("退出播放").font(.system(size: 13, weight: .semibold))
-                }
-                .foregroundStyle(.white).padding(.horizontal, 14).padding(.vertical, 7)
-                .background(.ultraThinMaterial).clipShape(Capsule())
+            LiquidGlassCapsuleButton(
+                title: "退出播放",
+                systemImage: "chevron.left",
+                tint: nil,
+                horizontalPadding: 15,
+                verticalPadding: 7.5,
+                fontSize: 13
+            ) {
+                exitPlayer()
             }
-            .buttonStyle(.plain)
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 8) {
@@ -355,9 +493,7 @@ public struct PlayerView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .background(.ultraThinMaterial)
-                .clipShape(Capsule())
-                .overlay(Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.8))
+                .background(DonbyLiquidGlassCapsuleSurface(tint: nil, isHovered: false))
             }
             .buttonStyle(.plain)
             .help("切换当前播放线路")
@@ -365,14 +501,17 @@ public struct PlayerView: View {
             Text(systemClockString)
                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.85))
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .background(Color.black.opacity(0.4)).clipShape(Capsule())
+                .padding(.horizontal, 11).padding(.vertical, 6)
+                .background(DonbyLiquidGlassCapsuleSurface(tint: nil, isHovered: false))
         }
         .padding(.horizontal, 24).padding(.top, 18).padding(.bottom, 24)
         .background(
             ZStack {
-                Color.black.opacity(0.8)
-                LinearGradient(colors: [Color.black.opacity(0.8), Color.clear], startPoint: .top, endPoint: .bottom)
+                LinearGradient(
+                    colors: [Color.black.opacity(0.82), Color.black.opacity(0.35), Color.clear],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
             }
         )
     }
@@ -390,17 +529,26 @@ public struct PlayerView: View {
                     .foregroundStyle(.white.opacity(0.9))
                     .frame(width: 64, alignment: .leading)
 
-                Slider(
-                    value: Binding(
-                        get: { isScrubbing ? scrubTime : currentTime },
-                        set: { newVal in isScrubbing = true; scrubTime = newVal }
-                    ),
-                    in: 0...max(1, duration),
-                    onEditingChanged: { editing in
-                        if !editing { seekTo(scrubTime); isScrubbing = false }
-                    }
+                PlayerTimelineScrubberView(
+                    currentTime: currentTime,
+                    bufferedAheadSeconds: bufferedAheadSeconds,
+                    duration: duration,
+                    accentColor: appState.accentColor,
+                    isScrubbing: $isScrubbing,
+                    scrubTime: $scrubTime,
+                    onCommitSeek: { target in seekTo(target) }
                 )
-                .tint(appState.accentColor)
+
+                if bufferedAheadSeconds >= 0.8 {
+                    Text("已缓存 +\(Int(min(999, bufferedAheadSeconds.rounded())))s")
+                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color.white.opacity(0.72))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .background(Color.white.opacity(0.10))
+                        .clipShape(Capsule())
+                        .fixedSize()
+                }
 
                 Button { showRemainingTime.toggle() } label: {
                     Text(showRemainingTime ? "-\(formatTime(max(0, duration - currentTime)))" : formatTime(duration))
@@ -468,7 +616,9 @@ public struct PlayerView: View {
 
                     Button { togglePlayPause() } label: {
                         ZStack {
-                            Circle().fill(appState.accentColor).frame(width: 44, height: 44)
+                            DonbyLiquidGlassCapsuleSurface(tint: appState.accentColor, isHovered: false)
+                                .frame(width: 46, height: 46)
+                                .shadow(color: appState.accentColor.opacity(0.45), radius: 12, y: 4)
                             Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                                 .font(.system(size: 18, weight: .bold)).foregroundStyle(.white)
                                 .offset(x: isPlaying ? 0 : 1.5)
@@ -530,13 +680,108 @@ public struct PlayerView: View {
             }
         }
         .padding(.horizontal, 22).padding(.vertical, 14)
-        .frame(maxWidth: isFloat ? 860 : .infinity)
-        .background(.ultraThinMaterial)
+        .frame(maxWidth: isFloat ? 900 : .infinity)
+        .background(
+            Group {
+                if isFloat {
+                    DonbyLiquidGlassRoundedSurface(cornerRadius: 22, tint: nil, isHovered: false)
+                } else {
+                    Rectangle().fill(.ultraThinMaterial)
+                }
+            }
+        )
         .clipShape(RoundedRectangle(cornerRadius: isFloat ? 22 : 0, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: isFloat ? 22 : 0, style: .continuous).strokeBorder(Color.white.opacity(0.16), lineWidth: isFloat ? 0.8 : 0))
         .shadow(color: .black.opacity(0.45), radius: 18, y: 6)
         .padding(.horizontal, isFloat ? 32 : 0)
         .padding(.bottom, isFloat ? 24 : 0)
+    }
+
+    // MARK: - Deterministic FFmpeg AVStream <-> Emby MediaSource Track Resolution
+
+    private var embyAudioStreams: [MediaStream] {
+        let sourceStreams = currentResource.mediaSource.mediaStreams ?? currentItem.allStreams
+        return sourceStreams.filter { $0.type?.lowercased() == "audio" }
+    }
+
+    private var embySubtitleStreams: [MediaStream] {
+        let sourceStreams = currentResource.mediaSource.mediaStreams ?? currentItem.allStreams
+        return sourceStreams.filter { $0.type?.lowercased() == "subtitle" }
+    }
+
+    private var resolvedAudioOptions: [PlayerAudioTrackOption] {
+        let embyAudios = embyAudioStreams
+        if !kernelAudioTracks.isEmpty {
+            return kernelAudioTracks.enumerated().map { ord, kStream in
+                let avIdx = kStream.index ?? ord
+                let matchedEmby = embyAudios.indices.contains(ord)
+                    ? embyAudios[ord]
+                    : embyAudios.first(where: { $0.index == avIdx })
+                let label = matchedEmby?.readableLabel ?? kStream.readableLabel
+                return PlayerAudioTrackOption(
+                    avStreamIndex: avIdx,
+                    embyIndex: matchedEmby?.index,
+                    label: label
+                )
+            }
+        }
+        return embyAudios.compactMap { eStream in
+            guard let idx = eStream.index else { return nil }
+            return PlayerAudioTrackOption(avStreamIndex: idx, embyIndex: idx, label: eStream.readableLabel)
+        }
+    }
+
+    private var resolvedSubtitleOptions: [PlayerSubtitleTrackOption] {
+        var options: [PlayerSubtitleTrackOption] = []
+        let embyEmbeddedSubs = embySubtitleStreams.filter { $0.isExternal != true }
+
+        // 1. Embedded subtitle tracks backed by real FFmpeg AVStream indices
+        for (ord, kStream) in kernelSubtitleTracks.enumerated() {
+            guard let avIdx = kStream.index else { continue }
+            let matchedEmby = embyEmbeddedSubs.indices.contains(ord)
+                ? embyEmbeddedSubs[ord]
+                : embyEmbeddedSubs.first(where: { $0.index == avIdx })
+            let label = matchedEmby?.readableLabel ?? kStream.readableLabel
+            let codecTag = (kStream.codec ?? matchedEmby?.codec)?.uppercased()
+            options.append(PlayerSubtitleTrackOption(
+                id: "emb-\(avIdx)",
+                selection: .embedded(avStreamIndex: avIdx),
+                embyIndex: matchedEmby?.index,
+                label: label,
+                badge: codecTag,
+                externalItem: nil
+            ))
+        }
+
+        // 2. External text subtitle tracks (or fallback remote tracks when container has no embedded subs)
+        let extCandidates = kernelSubtitleTracks.isEmpty
+            ? currentResource.subtitleURLs
+            : currentResource.subtitleURLs.filter(\.isExternal)
+        var seenURLs = Set<String>()
+        for ext in extCandidates {
+            guard seenURLs.insert(ext.url.absoluteString).inserted else { continue }
+            options.append(PlayerSubtitleTrackOption(
+                id: "ext-\(ext.id)",
+                selection: .remoteExternal(url: ext.url),
+                embyIndex: ext.streamIndex,
+                label: ext.name,
+                badge: "外挂",
+                externalItem: ext
+            ))
+        }
+
+        // 3. Currently loaded local subtitle file (if any)
+        if case .localExternal(let localURL) = activeSubtitleSelection {
+            options.append(PlayerSubtitleTrackOption(
+                id: "local-\(localURL.absoluteString)",
+                selection: .localExternal(url: localURL),
+                embyIndex: nil,
+                label: localExternalSubtitleName ?? localURL.lastPathComponent,
+                badge: "本地",
+                externalItem: nil
+            ))
+        }
+
+        return options
     }
 
     private func rightDrawerPanel(tab: PlayerDrawerTab) -> some View {
@@ -586,91 +831,70 @@ public struct PlayerView: View {
 
                 case .tracks:
                     VStack(alignment: .leading, spacing: 16) {
-                        let audioList = currentItem.audioStreams.isEmpty ? kernelAudioTracks : currentItem.audioStreams
-                        let subList = currentItem.subtitleStreams.isEmpty ? kernelSubtitleTracks : currentItem.subtitleStreams
+                        let audioOptions = resolvedAudioOptions
+                        let subOptions = resolvedSubtitleOptions
 
                         Text("音频轨道").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
-                        if audioList.isEmpty {
+                        if audioOptions.isEmpty {
                             Text("未检测到可用音轨").font(.system(size: 12)).foregroundStyle(.secondary)
                         }
-                        ForEach(audioList) { stream in
-                            let isSel = selectedAudioIdx == stream.index
+                        ForEach(audioOptions) { option in
+                            let isSel = (activeAudioAVIndex == option.avStreamIndex)
                             Button {
-                                selectedAudioIdx = stream.index
-                                if let handle = playerHandle, let idx = stream.index {
-                                    dk_player_select_track(handle, 1, Int32(idx))
-                                    appState.showToast("已切换音轨: \(stream.readableLabel)", icon: "speaker.wave.2.fill")
-                                }
+                                selectAudioOption(option)
                             } label: {
                                 HStack {
                                     Image(systemName: isSel ? "checkmark.circle.fill" : "circle").foregroundStyle(isSel ? appState.accentColor : .secondary)
-                                    Text(stream.readableLabel).font(.system(size: 12)).foregroundStyle(.white)
+                                    Text(option.label).font(.system(size: 12, weight: isSel ? .semibold : .regular)).foregroundStyle(.white)
                                     Spacer()
                                 }
-                                .padding(9).background(Color.white.opacity(0.05)).clipShape(RoundedRectangle(cornerRadius: 8))
+                                .padding(10)
+                                .background(DonbyLiquidGlassRoundedSurface(cornerRadius: 10, tint: isSel ? appState.accentColor : nil, isHovered: false))
                             }
                             .buttonStyle(.plain)
                         }
 
                         Text("字幕轨道").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary).padding(.top, 6)
                         Button {
-                            selectedSubIdx = nil
-                            activeExternalSubtitleURL = nil
-                            if let handle = playerHandle {
-                                dk_player_select_track(handle, 2, -1)
-                                appState.showToast("已关闭字幕", icon: "captions.bubble")
-                            }
+                            disableSubtitles(showFeedback: true)
                         } label: {
                             HStack {
-                                let isOff = (selectedSubIdx == nil && activeExternalSubtitleURL == nil)
+                                let isOff = (activeSubtitleSelection == .off)
                                 Image(systemName: isOff ? "checkmark.circle.fill" : "circle").foregroundStyle(isOff ? appState.accentColor : .secondary)
-                                Text("关闭字幕").font(.system(size: 12)).foregroundStyle(.white)
+                                Text("关闭字幕").font(.system(size: 12, weight: isOff ? .semibold : .regular)).foregroundStyle(.white)
                                 Spacer()
                             }
-                            .padding(9).background(Color.white.opacity(0.05)).clipShape(RoundedRectangle(cornerRadius: 8))
+                            .padding(10)
+                            .background(DonbyLiquidGlassRoundedSurface(cornerRadius: 10, tint: activeSubtitleSelection == .off ? appState.accentColor : nil, isHovered: false))
                         }
                         .buttonStyle(.plain)
 
-                        ForEach(subList) { stream in
-                            let isSel = (activeExternalSubtitleURL == nil && selectedSubIdx == stream.index)
+                        ForEach(subOptions) { option in
+                            let isSel = (activeSubtitleSelection == option.selection)
                             Button {
-                                selectedSubIdx = stream.index
-                                activeExternalSubtitleURL = nil
-                                if (stream.isExternal == true || (stream.deliveryUrl != nil && !(stream.deliveryUrl?.isEmpty ?? true))),
-                                   let extItem = matchingExternalSubtitleResource(for: stream) {
-                                    loadRemoteExternalSubtitle(item: extItem, streamIndex: stream.index)
-                                } else if let handle = playerHandle, let idx = stream.index {
-                                    dk_player_select_track(handle, 2, Int32(idx))
-                                    appState.showToast("已切换字幕: \(stream.readableLabel)", icon: "captions.bubble.fill")
-                                }
+                                selectSubtitleOption(option)
                             } label: {
-                                HStack {
+                                HStack(spacing: 8) {
                                     Image(systemName: isSel ? "checkmark.circle.fill" : "circle").foregroundStyle(isSel ? appState.accentColor : .secondary)
-                                    Text(stream.readableLabel).font(.system(size: 12)).foregroundStyle(.white)
+                                    Text(option.label)
+                                        .font(.system(size: 12, weight: isSel ? .semibold : .regular))
+                                        .foregroundStyle(.white)
+                                        .lineLimit(2)
                                     Spacer()
+                                    if let badge = option.badge, !badge.isEmpty {
+                                        Text(badge)
+                                            .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                                            .foregroundStyle(.white.opacity(0.85))
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.white.opacity(0.14))
+                                            .clipShape(Capsule())
+                                    }
                                 }
-                                .padding(9).background(Color.white.opacity(0.05)).clipShape(RoundedRectangle(cornerRadius: 8))
+                                .padding(10)
+                                .background(DonbyLiquidGlassRoundedSurface(cornerRadius: 10, tint: isSel ? appState.accentColor : nil, isHovered: false))
                             }
                             .buttonStyle(.plain)
-                        }
-
-                        if !currentResource.subtitleURLs.isEmpty && subList.isEmpty {
-                            ForEach(currentResource.subtitleURLs) { extSub in
-                                let isExtSel = (activeExternalSubtitleURL == extSub.url)
-                                Button {
-                                    selectedSubIdx = nil
-                                    loadRemoteExternalSubtitle(item: extSub, streamIndex: nil)
-                                } label: {
-                                    HStack {
-                                        Image(systemName: isExtSel ? "checkmark.circle.fill" : "circle")
-                                            .foregroundStyle(isExtSel ? appState.accentColor : .secondary)
-                                        Text(extSub.name).font(.system(size: 12)).foregroundStyle(.white)
-                                        Spacer()
-                                    }
-                                    .padding(9).background(Color.white.opacity(0.05)).clipShape(RoundedRectangle(cornerRadius: 8))
-                                }
-                                .buttonStyle(.plain)
-                            }
                         }
 
                         Button {
@@ -678,13 +902,12 @@ public struct PlayerView: View {
                         } label: {
                             HStack(spacing: 8) {
                                 Image(systemName: "doc.badge.plus").font(.system(size: 12, weight: .semibold))
-                                Text("加载本地外挂字幕 (.srt / .ass)...").font(.system(size: 12, weight: .medium))
+                                Text("加载本地外挂字幕 (.srt / .ass / .vtt)...").font(.system(size: 12, weight: .semibold))
                                 Spacer()
                             }
                             .foregroundStyle(appState.accentColor)
-                            .padding(9)
-                            .background(Color.white.opacity(0.06))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .padding(10)
+                            .background(DonbyLiquidGlassRoundedSurface(cornerRadius: 10, tint: nil, isHovered: false))
                         }
                         .buttonStyle(.plain)
                     }
@@ -693,6 +916,7 @@ public struct PlayerView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         osdInfoRow("解码方式", kernelStats.is_hw_accelerated ? "Apple VideoToolbox 硬件解码" : "CPU 软件解码")
                         osdInfoRow("动态范围", kernelStats.is_dolby_vision ? "Dolby Vision" : (kernelStats.is_hdr ? "HDR10" : "SDR"))
+                        osdInfoRow("超前缓冲时长", String(format: "+%.1f 秒", bufferedAheadSeconds))
                         osdInfoRow("流预读缓存", "\(kernelStats.cached_bytes / 1024 / 1024) MB")
                         osdInfoRow("分辨率", "\(kernelStats.width) × \(kernelStats.height)")
                         osdInfoRow("帧率", String(format: "%.3f fps", kernelStats.fps))
@@ -777,7 +1001,8 @@ public struct PlayerView: View {
         isOpeningMedia = true
         openingErrorMessage = nil
         didHandlePlaybackEnded = false
-        activeExternalSubtitleURL = nil
+        bufferedAheadSeconds = 0
+        localExternalSubtitleName = nil
 
         let urlStr = currentResource.streamURL.absoluteString
         let headersStr = currentResource.headers.map { "\($0.key): \($0.value)\r\n" }.joined()
@@ -787,6 +1012,7 @@ public struct PlayerView: View {
         let muted = isMuted
         let audioIdx = selectedAudioIdx
         let subIdx = selectedSubIdx
+        let hasEmbyStreamCatalog = !(currentResource.mediaSource.mediaStreams ?? []).isEmpty
 
         DonbyLogger.shared.log("启动原生播放内核 (URL: \(urlStr))", level: .info, subsystem: "Player")
 
@@ -824,22 +1050,42 @@ public struct PlayerView: View {
                 self.kernelAudioTracks = discovered.audio
                 self.kernelSubtitleTracks = discovered.subtitles
 
-                if let aIdx = audioIdx, aIdx >= 0 {
-                    dk_player_select_track(validHandle, 1, Int32(aIdx))
+                // Resolve initial audio track (mapping Emby MediaStream.index -> FFmpeg AVStream index via ordinal)
+                let audioOpts = self.resolvedAudioOptions
+                if let requestedEmbyAudio = audioIdx,
+                   let matchedAudio = audioOpts.first(where: { $0.embyIndex == requestedEmbyAudio })
+                       ?? audioOpts.first(where: { $0.avStreamIndex == requestedEmbyAudio }) {
+                    self.activeAudioAVIndex = matchedAudio.avStreamIndex
+                    if discovered.selectedAudioIndex != matchedAudio.avStreamIndex {
+                        dk_player_select_track(validHandle, 1, Int32(matchedAudio.avStreamIndex))
+                    }
                 } else if let autoAudio = discovered.selectedAudioIndex {
-                    self.selectedAudioIdx = autoAudio
+                    self.activeAudioAVIndex = autoAudio
                 }
 
-                if let sIdx = subIdx, sIdx >= 0 {
-                    if let embySub = self.currentItem.subtitleStreams.first(where: { $0.index == sIdx }),
-                       (embySub.isExternal == true || !(embySub.deliveryUrl ?? "").isEmpty),
-                       let extItem = self.matchingExternalSubtitleResource(for: embySub) {
-                        self.loadRemoteExternalSubtitle(item: extItem, streamIndex: sIdx)
-                    } else {
-                        dk_player_select_track(validHandle, 2, Int32(sIdx))
+                // Resolve initial subtitle track (respecting explicit "Off", external URLs, or embedded ordinal)
+                let subOpts = self.resolvedSubtitleOptions
+                if let requestedEmbySub = subIdx, requestedEmbySub >= 0 {
+                    if let matchedOpt = subOpts.first(where: { $0.embyIndex == requestedEmbySub })
+                        ?? subOpts.first(where: {
+                            if case .embedded(let avIdx) = $0.selection { return avIdx == requestedEmbySub }
+                            return false
+                        }) {
+                        self.applySubtitleOptionOnStartup(matchedOpt, handle: validHandle, defaultSelectedAV: discovered.selectedSubIndex)
+                    } else if let autoSub = discovered.selectedSubIndex {
+                        self.activeSubtitleSelection = .embedded(avStreamIndex: autoSub)
+                    }
+                } else if hasEmbyStreamCatalog {
+                    // User explicitly chose "关闭字幕" (nil) on an Emby item
+                    self.activeSubtitleSelection = .off
+                    if discovered.selectedSubIndex != nil {
+                        dk_player_select_track(validHandle, 2, -1)
                     }
                 } else if let autoSub = discovered.selectedSubIndex {
-                    self.selectedSubIdx = autoSub
+                    // Direct URL / local file without pre-playback selector: keep default subtitle
+                    self.activeSubtitleSelection = .embedded(avStreamIndex: autoSub)
+                } else {
+                    self.activeSubtitleSelection = .off
                 }
                 self.isPlaying = true
                 DonbyLogger.shared.log("原生播放器配置就绪，画面启动渲染", level: .info, subsystem: "Player")
@@ -963,16 +1209,71 @@ public struct PlayerView: View {
         return (audios, subs, selAudio, selSub)
     }
 
-    private func matchingExternalSubtitleResource(for stream: MediaStream) -> SubtitleResourceItem? {
-        if let found = currentResource.subtitleURLs.first(where: { $0.name == stream.readableLabel }) {
-            return found
+    private func selectAudioOption(_ option: PlayerAudioTrackOption) {
+        activeAudioAVIndex = option.avStreamIndex
+        selectedAudioIdx = option.embyIndex ?? option.avStreamIndex
+        if let handle = playerHandle {
+            dk_player_select_track(handle, 1, Int32(option.avStreamIndex))
+            appState.showToast("已切换音轨: \(option.label)", icon: "speaker.wave.2.fill")
         }
-        return currentResource.subtitleURLs.first
     }
 
-    private func loadRemoteExternalSubtitle(item: SubtitleResourceItem, streamIndex: Int?) {
-        selectedSubIdx = streamIndex
-        activeExternalSubtitleURL = item.url
+    private func disableSubtitles(showFeedback: Bool) {
+        selectedSubIdx = nil
+        activeSubtitleSelection = .off
+        localExternalSubtitleName = nil
+        if let handle = playerHandle {
+            dk_player_select_track(handle, 2, -1)
+            if showFeedback {
+                appState.showToast("已关闭字幕", icon: "captions.bubble")
+            }
+        }
+    }
+
+    private func applySubtitleOptionOnStartup(_ option: PlayerSubtitleTrackOption, handle: OpaquePointer, defaultSelectedAV: Int?) {
+        switch option.selection {
+        case .off:
+            activeSubtitleSelection = .off
+            dk_player_select_track(handle, 2, -1)
+        case .embedded(let avIdx):
+            activeSubtitleSelection = .embedded(avStreamIndex: avIdx)
+            if defaultSelectedAV != avIdx {
+                dk_player_select_track(handle, 2, Int32(avIdx))
+            }
+        case .remoteExternal:
+            if let ext = option.externalItem {
+                loadRemoteExternalSubtitle(item: ext, embyStreamIndex: option.embyIndex, silentToast: true)
+            }
+        case .localExternal:
+            break
+        }
+    }
+
+    private func selectSubtitleOption(_ option: PlayerSubtitleTrackOption) {
+        selectedSubIdx = option.embyIndex
+        switch option.selection {
+        case .off:
+            disableSubtitles(showFeedback: true)
+        case .embedded(let avIdx):
+            localExternalSubtitleName = nil
+            activeSubtitleSelection = .embedded(avStreamIndex: avIdx)
+            if let handle = playerHandle {
+                dk_player_select_track(handle, 2, Int32(avIdx))
+                appState.showToast("已切换字幕: \(option.label)", icon: "captions.bubble.fill")
+            }
+        case .remoteExternal:
+            if let ext = option.externalItem {
+                localExternalSubtitleName = nil
+                loadRemoteExternalSubtitle(item: ext, embyStreamIndex: option.embyIndex, silentToast: false)
+            }
+        case .localExternal:
+            break
+        }
+    }
+
+    private func loadRemoteExternalSubtitle(item: SubtitleResourceItem, embyStreamIndex: Int?, silentToast: Bool) {
+        selectedSubIdx = embyStreamIndex
+        activeSubtitleSelection = .remoteExternal(url: item.url)
         let headers = currentResource.headers
         let url = item.url
         let label = item.name
@@ -980,7 +1281,9 @@ public struct PlayerView: View {
             var req = URLRequest(url: url, timeoutInterval: 15)
             for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
             guard let (data, _) = try? await URLSession.shared.data(for: req),
-                  let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) else {
+                  let text = String(data: data, encoding: .utf8)
+                      ?? String(data: data, encoding: .utf16)
+                      ?? String(data: data, encoding: String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)))) else {
                 await MainActor.run {
                     appState.showToast("下载外挂字幕失败", icon: "exclamationmark.triangle.fill", isError: true)
                 }
@@ -991,7 +1294,9 @@ public struct PlayerView: View {
             await MainActor.run {
                 if let handle = self.playerHandle {
                     dk_player_load_external_subtitle(handle, text, isAss)
-                    self.appState.showToast("已加载外挂字幕: \(label)", icon: "captions.bubble.fill")
+                    if !silentToast {
+                        self.appState.showToast("已加载外挂字幕: \(label)", icon: "captions.bubble.fill")
+                    }
                 }
             }
         }
@@ -1020,7 +1325,8 @@ public struct PlayerView: View {
             let isAss = (ext == "ass" || ext == "ssa" || text.contains("[Script Info]"))
             if let handle = playerHandle {
                 selectedSubIdx = nil
-                activeExternalSubtitleURL = url
+                localExternalSubtitleName = url.lastPathComponent
+                activeSubtitleSelection = .localExternal(url: url)
                 dk_player_load_external_subtitle(handle, text, isAss)
                 appState.showToast("已加载本地字幕: \(url.lastPathComponent)", icon: "captions.bubble.fill")
             }
@@ -1042,6 +1348,7 @@ public struct PlayerView: View {
             if let res = try? await EmbyClient.shared.resolvePlaybackResource(
                 server: session.server,
                 item: nextEp,
+                preferredPreset: appState.preferredVersionPreset,
                 audioStreamIndex: selectedAudioIdx,
                 subtitleStreamIndex: selectedSubIdx
             ) {

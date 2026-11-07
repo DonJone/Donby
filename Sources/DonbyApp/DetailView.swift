@@ -61,6 +61,9 @@ public struct DetailView: View {
             .padding(.bottom, 48)
         }
         .background(Color(red: 0.098, green: 0.098, blue: 0.106))
+        .onChange(of: selectedSourceId) { _, _ in
+            syncStreamsForSelectedSource()
+        }
         .task(id: initialItem.id) {
             await loadFullDetailData()
         }
@@ -85,18 +88,16 @@ public struct DetailView: View {
 
             VStack(alignment: .leading, spacing: 18) {
                 HStack(spacing: 10) {
-                    Button {
+                    LiquidGlassCapsuleButton(
+                        title: "返回",
+                        systemImage: "chevron.left",
+                        tint: nil,
+                        horizontalPadding: 15,
+                        verticalPadding: 7.5,
+                        fontSize: 13
+                    ) {
                         withAnimation(.easeOut(duration: 0.18)) { appState.popDetail() }
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "chevron.left").font(.system(size: 13, weight: .bold))
-                            Text("返回").font(.system(size: 13, weight: .semibold))
-                        }
-                        .foregroundStyle(.white).padding(.horizontal, 14).padding(.vertical, 7)
-                        .background(.ultraThinMaterial).clipShape(Capsule())
-                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.8))
                     }
-                    .buttonStyle(.plain)
                     .padding(.leading, appState.isSidebarCollapsed ? 68 : 0)
 
                     Spacer()
@@ -122,9 +123,7 @@ public struct DetailView: View {
                                     .foregroundStyle(.white.opacity(0.65))
                             }
                             .padding(.horizontal, 12).padding(.vertical, 5.5)
-                            .background(.ultraThinMaterial)
-                            .clipShape(Capsule())
-                            .overlay(Capsule().strokeBorder(Color.white.opacity(0.16), lineWidth: 0.8))
+                            .background(DonbyLiquidGlassCapsuleSurface(tint: nil, isHovered: false))
                         }
                         .buttonStyle(.plain)
                         .fixedSize(horizontal: true, vertical: false)
@@ -179,7 +178,14 @@ public struct DetailView: View {
                         }
 
                         HStack(spacing: 12) {
-                            Button {
+                            LiquidGlassCapsuleButton(
+                                title: item.resumePositionSeconds > 0 ? "继续播放" : (item.isSeries ? "播放第 1 集" : "立即播放"),
+                                systemImage: "play.fill",
+                                tint: appState.accentColor,
+                                horizontalPadding: 22,
+                                verticalPadding: 10.5,
+                                fontSize: 13.5
+                            ) {
                                 Task {
                                     await appState.startPlayback(
                                         item: item,
@@ -189,60 +195,43 @@ public struct DetailView: View {
                                         subtitleStreamIndex: selectedSubtitleIndex
                                     )
                                 }
-                            } label: {
-                                HStack(spacing: 7) {
-                                    Image(systemName: "play.fill").font(.system(size: 13, weight: .bold))
-                                    Text(item.resumePositionSeconds > 0 ? "继续播放" : (item.isSeries ? "播放第 1 集" : "立即播放"))
-                                        .font(.system(size: 13.5, weight: .bold))
-                                }
-                                .foregroundStyle(.white).padding(.horizontal, 20).padding(.vertical, 10)
-                                .background(appState.accentColor).clipShape(Capsule())
                             }
-                            .buttonStyle(.plain)
 
-                            Button {
+                            LiquidGlassCircleButton(
+                                systemImage: "sparkles",
+                                size: 39,
+                                tooltip: "原画规格直解 (选择最高码率/分辨率版本播放)"
+                            ) {
                                 playHighestSpecification()
-                            } label: {
-                                Image(systemName: "sparkles")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundStyle(.white)
-                                    .frame(width: 38, height: 38).background(.ultraThinMaterial).clipShape(Circle())
                             }
-                            .buttonStyle(.plain)
-                            .help("原画规格直解 (选择最高码率/分辨率版本播放)")
 
-                            Button {
+                            LiquidGlassCircleButton(
+                                systemImage: "link",
+                                size: 39,
+                                tooltip: "复制原画直链"
+                            ) {
                                 Task {
                                     await appState.copyStreamDirectURL(item: item, preferredSourceId: selectedSourceId)
                                 }
-                            } label: {
-                                Image(systemName: "link")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundStyle(.white)
-                                    .frame(width: 38, height: 38).background(.ultraThinMaterial).clipShape(Circle())
                             }
-                            .buttonStyle(.plain)
-                            .help("复制原画直链")
 
-                            Button {
+                            LiquidGlassCircleButton(
+                                systemImage: (item.userData?.isFavorite == true) ? "heart.fill" : "heart",
+                                iconColor: (item.userData?.isFavorite == true) ? AppState.appleMusicRed : .white,
+                                size: 39,
+                                tooltip: "加入 / 取消收藏"
+                            ) {
                                 Task { item = await appState.toggleFavorite(for: item) }
-                            } label: {
-                                Image(systemName: (item.userData?.isFavorite == true) ? "heart.fill" : "heart")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundStyle((item.userData?.isFavorite == true) ? .pink : .white)
-                                    .frame(width: 38, height: 38).background(.ultraThinMaterial).clipShape(Circle())
                             }
-                            .buttonStyle(.plain)
 
-                            Button {
+                            LiquidGlassCircleButton(
+                                systemImage: (item.userData?.played == true) ? "checkmark.circle.fill" : "checkmark.circle",
+                                iconColor: (item.userData?.played == true) ? Color(red: 0.22, green: 0.86, blue: 0.38) : .white,
+                                size: 39,
+                                tooltip: "标记已观看 / 未观看"
+                            ) {
                                 Task { item = await appState.togglePlayed(for: item) }
-                            } label: {
-                                Image(systemName: (item.userData?.played == true) ? "checkmark.circle.fill" : "checkmark.circle")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundStyle((item.userData?.played == true) ? .green : .white)
-                                    .frame(width: 38, height: 38).background(.ultraThinMaterial).clipShape(Circle())
                             }
-                            .buttonStyle(.plain)
                         }
                     }
                 }
@@ -254,47 +243,112 @@ public struct DetailView: View {
     }
 
     private var streamAndLineSelectorSection: some View {
-        HStack(spacing: 14) {
-            if let sources = item.mediaSources, !sources.isEmpty {
-                selectorCard(title: "资源版本", icon: "film.stack") {
-                    Picker("资源版本", selection: $selectedSourceId) {
-                        ForEach(sources) { src in Text(src.displayVersionName).tag(src.id) }
+        let sources = item.mediaSources ?? []
+        let currentVersionText = selectedMediaSource?.displayVersionName
+            ?? (item.container.map { "\($0.uppercased()) · 原画直连" } ?? "自动选择版本")
+        let currentAudioText = audioStreams.first(where: { $0.index == selectedAudioIndex })?.readableLabel
+            ?? audioStreams.first?.readableLabel
+            ?? "默认主音轨"
+        let currentSubText: String = {
+            guard let idx = selectedSubtitleIndex else { return "关闭字幕" }
+            return subtitleStreams.first(where: { $0.index == idx })?.readableLabel ?? "字幕轨道 #\(idx)"
+        }()
+
+        return HStack(spacing: 14) {
+            LiquidGlassSelectorCard(
+                title: "资源版本",
+                icon: "film.stack.fill",
+                valueText: currentVersionText,
+                badgeText: appState.preferredVersionPreset.shortTitle,
+                accentColor: appState.accentColor
+            ) {
+                if sources.isEmpty {
+                    Button("默认原画版本") {}
+                } else {
+                    ForEach(sources) { src in
+                        Button {
+                            selectedSourceId = src.id
+                        } label: {
+                            if src.id == selectedMediaSource?.id {
+                                Label(src.displayVersionName, systemImage: "checkmark")
+                            } else {
+                                Text(src.displayVersionName)
+                            }
+                        }
                     }
-                    .labelsHidden().pickerStyle(.menu)
+                }
+                Divider()
+                ForEach(PreferredVersionPreset.allCases) { preset in
+                    Button {
+                        appState.preferredVersionPreset = preset
+                        if let matched = sources.preferredSource(for: preset) {
+                            selectedSourceId = matched.id
+                        }
+                        appState.showToast("已切换默认预设：\(preset.title)", icon: "slider.horizontal.3")
+                    } label: {
+                        if appState.preferredVersionPreset == preset {
+                            Label("默认预设：\(preset.title)", systemImage: "checkmark")
+                        } else {
+                            Text("默认预设：\(preset.title)")
+                        }
+                    }
                 }
             }
 
-            if !audioStreams.isEmpty {
-                selectorCard(title: "音轨选择", icon: "speaker.wave.2.fill") {
-                    Picker("音轨", selection: $selectedAudioIndex) {
-                        ForEach(audioStreams) { stream in Text(stream.readableLabel).tag(stream.index as Int?) }
+            LiquidGlassSelectorCard(
+                title: "音轨选择",
+                icon: "speaker.wave.2.fill",
+                valueText: currentAudioText,
+                accentColor: appState.accentColor
+            ) {
+                if audioStreams.isEmpty {
+                    Button("自动默认音轨") {}
+                } else {
+                    ForEach(audioStreams) { stream in
+                        Button {
+                            selectedAudioIndex = stream.index
+                        } label: {
+                            if stream.index == selectedAudioIndex {
+                                Label(stream.readableLabel, systemImage: "checkmark")
+                            } else {
+                                Text(stream.readableLabel)
+                            }
+                        }
                     }
-                    .labelsHidden().pickerStyle(.menu)
                 }
             }
 
-            selectorCard(title: "主字幕", icon: "captions.bubble.fill") {
-                Picker("字幕", selection: $selectedSubtitleIndex) {
-                    Text("关闭字幕").tag(nil as Int?)
-                    ForEach(subtitleStreams) { stream in Text(stream.readableLabel).tag(stream.index as Int?) }
+            LiquidGlassSelectorCard(
+                title: "主字幕",
+                icon: "captions.bubble.fill",
+                valueText: currentSubText,
+                accentColor: appState.accentColor
+            ) {
+                Button {
+                    selectedSubtitleIndex = nil
+                } label: {
+                    if selectedSubtitleIndex == nil {
+                        Label("关闭字幕", systemImage: "checkmark")
+                    } else {
+                        Text("关闭字幕")
+                    }
                 }
-                .labelsHidden().pickerStyle(.menu)
+                if !subtitleStreams.isEmpty {
+                    Divider()
+                    ForEach(subtitleStreams) { stream in
+                        Button {
+                            selectedSubtitleIndex = stream.index
+                        } label: {
+                            if stream.index == selectedSubtitleIndex {
+                                Label(stream.readableLabel, systemImage: "checkmark")
+                            } else {
+                                Text(stream.readableLabel)
+                            }
+                        }
+                    }
+                }
             }
         }
-    }
-
-    private func selectorCard<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 5) {
-                Image(systemName: icon).font(.system(size: 11, weight: .bold)).foregroundStyle(appState.accentColor)
-                Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
-            }
-            content().frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white.opacity(0.04))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.white.opacity(0.08), lineWidth: 0.8))
     }
 
     private var episodesSection: some View {
@@ -318,8 +372,12 @@ public struct DetailView: View {
                                         .font(.system(size: 12, weight: .bold))
                                         .foregroundStyle(selectedSeasonIndex == sNum ? .white : .secondary)
                                         .padding(.horizontal, 12).padding(.vertical, 6)
-                                        .background(selectedSeasonIndex == sNum ? appState.accentColor : Color.white.opacity(0.06))
-                                        .clipShape(Capsule())
+                                        .background(
+                                            DonbyLiquidGlassCapsuleSurface(
+                                                tint: selectedSeasonIndex == sNum ? appState.accentColor : nil,
+                                                isHovered: false
+                                            )
+                                        )
                                 }
                                 .buttonStyle(.plain)
                             }
@@ -371,24 +429,25 @@ public struct DetailView: View {
                 .padding(.horizontal, 28)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 18) {
-                    ForEach(people.prefix(15)) { person in
-                        VStack(spacing: 8) {
-                            ZStack {
-                                Circle().fill(LinearGradient(colors: [appState.accentColor.opacity(0.35), Color.purple.opacity(0.25)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                                    .frame(width: 68, height: 68)
-                                Text(String(person.name.prefix(1)))
-                                    .font(.system(size: 22, weight: .bold, design: .rounded))
-                                    .foregroundStyle(.white)
-                            }
-                            .overlay(Circle().strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
+                    ForEach(people.prefix(20)) { person in
+                        VStack(spacing: 9) {
+                            PersonAvatarView(
+                                server: appState.activeServer,
+                                person: person,
+                                size: 72,
+                                accentColor: appState.accentColor
+                            )
 
                             VStack(spacing: 2) {
-                                Text(person.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                                Text(person.name)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(0.94))
+                                    .lineLimit(1)
                                 if let role = person.role, !role.isEmpty {
                                     Text(role).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                                 }
                             }
-                            .frame(width: 90)
+                            .frame(width: 94)
                         }
                     }
                 }
@@ -560,8 +619,23 @@ public struct DetailView: View {
     }
 
     private func syncDefaultTracks() {
-        if let firstSource = item.mediaSources?.first { selectedSourceId = firstSource.id }
-        if let defAudio = audioStreams.first(where: { $0.isDefault == true }) ?? audioStreams.first { selectedAudioIndex = defAudio.index }
-        if let defSub = subtitleStreams.first(where: { $0.isDefault == true }) ?? subtitleStreams.first { selectedSubtitleIndex = defSub.index }
+        if let preferredSource = item.mediaSources?.preferredSource(for: appState.preferredVersionPreset) ?? item.mediaSources?.first {
+            selectedSourceId = preferredSource.id
+        }
+        syncStreamsForSelectedSource()
+    }
+
+    private func syncStreamsForSelectedSource() {
+        if let selAudio = selectedAudioIndex, audioStreams.contains(where: { $0.index == selAudio }) {
+            // keep valid audio selection
+        } else {
+            selectedAudioIndex = (audioStreams.first(where: { $0.isDefault == true }) ?? audioStreams.first)?.index
+        }
+
+        if let selSub = selectedSubtitleIndex, subtitleStreams.contains(where: { $0.index == selSub }) {
+            // keep valid subtitle selection
+        } else {
+            selectedSubtitleIndex = (subtitleStreams.first(where: { $0.isDefault == true }) ?? subtitleStreams.first)?.index
+        }
     }
 }

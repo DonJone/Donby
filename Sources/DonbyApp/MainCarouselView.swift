@@ -1,7 +1,138 @@
 import SwiftUI
 import Combine
+import AppKit
 import DonbyCore
 import DonbyNetwork
+
+/// Captures macOS two-finger trackpad horizontal swipes over its host bounds without
+/// intercepting vertical scrolling or button hit-testing.
+private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
+    let onSwipeNext: () -> Void
+    let onSwipePrev: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onSwipeNext: onSwipeNext, onSwipePrev: onSwipePrev)
+    }
+
+    func makeNSView(context: Context) -> AnchorNSView {
+        let view = AnchorNSView()
+        context.coordinator.attach(to: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: AnchorNSView, context: Context) {
+        context.coordinator.onSwipeNext = onSwipeNext
+        context.coordinator.onSwipePrev = onSwipePrev
+    }
+
+    static func dismantleNSView(_ nsView: AnchorNSView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    final class AnchorNSView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+
+    final class Coordinator {
+        var onSwipeNext: () -> Void
+        var onSwipePrev: () -> Void
+        private weak var anchorView: NSView?
+        private var monitor: Any?
+        private var accumulatedDeltaX: CGFloat = 0
+        private var didFireForCurrentSwipe: Bool = false
+        private var lastDiscreteTriggerTime: TimeInterval = 0
+
+        init(onSwipeNext: @escaping () -> Void, onSwipePrev: @escaping () -> Void) {
+            self.onSwipeNext = onSwipeNext
+            self.onSwipePrev = onSwipePrev
+        }
+
+        func attach(to view: NSView) {
+            detach()
+            self.anchorView = view
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self = self else { return event }
+                return self.handleScrollWheel(event)
+            }
+        }
+
+        func detach() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
+
+        private func handleScrollWheel(_ event: NSEvent) -> NSEvent? {
+            guard let view = anchorView,
+                  let win = view.window,
+                  event.window === win,
+                  win.isVisible else {
+                return event
+            }
+
+            let localPt = view.convert(event.locationInWindow, from: nil)
+            guard view.bounds.contains(localPt) else {
+                return event
+            }
+
+            let dx = event.scrollingDeltaX
+            let dy = event.scrollingDeltaY
+
+            // Reset state at gesture start / completion
+            if event.phase == .began {
+                accumulatedDeltaX = 0
+                didFireForCurrentSwipe = false
+            } else if event.phase == .ended || event.phase == .cancelled {
+                accumulatedDeltaX = 0
+                didFireForCurrentSwipe = false
+            }
+
+            // Let vertical page scrolling pass through untouched
+            guard abs(dx) > abs(dy) * 1.15, abs(dx) > 0.4 else {
+                return event
+            }
+
+            // Ignore post-lift trackpad inertia so one flick advances exactly one poster
+            if !event.momentumPhase.isEmpty {
+                return nil
+            }
+
+            if event.hasPreciseScrollingDeltas {
+                guard !didFireForCurrentSwipe else { return nil }
+                // Normalize finger motion: swiping two fingers LEFT advances to next poster
+                let fingerDeltaX = event.isDirectionInvertedFromDevice ? dx : -dx
+                accumulatedDeltaX += fingerDeltaX
+                let threshold: CGFloat = 28.0
+                if accumulatedDeltaX <= -threshold {
+                    didFireForCurrentSwipe = true
+                    accumulatedDeltaX = 0
+                    DispatchQueue.main.async { self.onSwipeNext() }
+                } else if accumulatedDeltaX >= threshold {
+                    didFireForCurrentSwipe = true
+                    accumulatedDeltaX = 0
+                    DispatchQueue.main.async { self.onSwipePrev() }
+                }
+                return nil
+            } else {
+                // Discrete horizontal scroll wheel / tilt wheel with cooldown
+                let now = ProcessInfo.processInfo.systemUptime
+                guard now - lastDiscreteTriggerTime > 0.35 else { return nil }
+                lastDiscreteTriggerTime = now
+                if dx < 0 {
+                    DispatchQueue.main.async { self.onSwipeNext() }
+                } else {
+                    DispatchQueue.main.async { self.onSwipePrev() }
+                }
+                return nil
+            }
+        }
+
+        deinit {
+            detach()
+        }
+    }
+}
 
 public struct MainCarouselView: View {
     @EnvironmentObject private var appState: AppState
@@ -11,6 +142,8 @@ public struct MainCarouselView: View {
 
     @State private var currentIndex: Int = 0
     @State private var isHovering: Bool = false
+    @State private var slideDirection: Int = 1
+    @State private var lastManualInteraction: Date = .distantPast
 
     private let timer = Timer.publish(every: 6.0, on: .main, in: .common).autoconnect()
 
@@ -30,6 +163,15 @@ public struct MainCarouselView: View {
         return items[safeIdx]
     }
 
+    private func stepSlide(_ delta: Int) {
+        guard items.count > 1 else { return }
+        slideDirection = delta >= 0 ? 1 : -1
+        lastManualInteraction = Date()
+        withAnimation(.spring(response: 0.36, dampingFraction: 0.86)) {
+            currentIndex = (currentIndex + delta + items.count) % items.count
+        }
+    }
+
     public var body: some View {
         if let item = currentItem {
             ZStack(alignment: .bottomLeading) {
@@ -43,16 +185,21 @@ public struct MainCarouselView: View {
                 .frame(maxWidth: .infinity)
                 .frame(height: 365)
                 .clipped()
-                .transition(.opacity)
+                .transition(
+                    .asymmetric(
+                        insertion: .opacity.combined(with: .offset(x: CGFloat(slideDirection) * 28)),
+                        removal: .opacity
+                    )
+                )
 
                 LinearGradient(
-                    colors: [Color.black.opacity(0.85), Color.black.opacity(0.40), Color.clear],
+                    colors: [Color.black.opacity(0.86), Color.black.opacity(0.42), Color.clear],
                     startPoint: .leading,
                     endPoint: .trailing
                 )
 
                 LinearGradient(
-                    colors: [Color.clear, Color.black.opacity(0.35), Color.black.opacity(0.90)],
+                    colors: [Color.clear, Color.black.opacity(0.34), Color.black.opacity(0.90)],
                     startPoint: .top,
                     endPoint: .bottom
                 )
@@ -118,25 +265,27 @@ public struct MainCarouselView: View {
                     }
 
                     HStack(spacing: 12) {
-                        Button { onPlay(item) } label: {
-                            HStack(spacing: 7) {
-                                Image(systemName: "play.fill").font(.system(size: 13, weight: .bold))
-                                Text(item.resumePositionSeconds > 0 ? "继续播放" : "立即播放").font(.system(size: 14, weight: .bold))
-                            }
-                            .foregroundStyle(.white).padding(.horizontal, 22).padding(.vertical, 10)
-                            .background(appState.accentColor).clipShape(Capsule())
+                        LiquidGlassCapsuleButton(
+                            title: item.resumePositionSeconds > 0 ? "继续播放" : "立即播放",
+                            systemImage: "play.fill",
+                            tint: appState.accentColor,
+                            horizontalPadding: 24,
+                            verticalPadding: 11,
+                            fontSize: 14
+                        ) {
+                            onPlay(item)
                         }
-                        .buttonStyle(.plain)
 
-                        Button { onSelectDetail(item) } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: "info.circle.fill").font(.system(size: 13))
-                                Text("详情").font(.system(size: 14, weight: .semibold))
-                            }
-                            .foregroundStyle(.white).padding(.horizontal, 18).padding(.vertical, 10)
-                            .background(.ultraThinMaterial).clipShape(Capsule())
+                        LiquidGlassCapsuleButton(
+                            title: "详情",
+                            systemImage: "info.circle.fill",
+                            tint: nil,
+                            horizontalPadding: 20,
+                            verticalPadding: 11,
+                            fontSize: 14
+                        ) {
+                            onSelectDetail(item)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, 28)
@@ -144,27 +293,82 @@ public struct MainCarouselView: View {
                 .padding(.trailing, 160) // reserve room for indicators
             }
             .frame(height: 365)
+            .background(
+                TrackpadHorizontalSwipeDetector(
+                    onSwipeNext: { stepSlide(1) },
+                    onSwipePrev: { stepSlide(-1) }
+                )
+            )
+            .gesture(
+                DragGesture(minimumDistance: 28)
+                    .onEnded { val in
+                        guard abs(val.translation.width) > abs(val.translation.height) else { return }
+                        if val.translation.width < -32 {
+                            stepSlide(1)
+                        } else if val.translation.width > 32 {
+                            stepSlide(-1)
+                        }
+                    }
+            )
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                if isHovering && items.count > 1 {
+                    HStack {
+                        LiquidGlassCircleButton(
+                            systemImage: "chevron.left",
+                            size: 36,
+                            tooltip: "上一部 (支持触控板双指左右滑动)"
+                        ) {
+                            stepSlide(-1)
+                        }
+                        Spacer()
+                        LiquidGlassCircleButton(
+                            systemImage: "chevron.right",
+                            size: 36,
+                            tooltip: "下一部 (支持触控板双指左右滑动)"
+                        ) {
+                            stepSlide(1)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .transition(.opacity)
+                }
+            }
             .overlay(
                 HStack(spacing: 6) {
                     ForEach(Array(items.enumerated()), id: \.element.id) { idx, _ in
                         Capsule()
-                            .fill(idx == currentIndex ? Color.white : Color.white.opacity(0.32))
+                            .fill(idx == currentIndex ? appState.accentColor : Color.white.opacity(0.34))
                             .frame(width: idx == currentIndex ? 22 : 7, height: 7)
-                            .onTapGesture { withAnimation(.easeInOut(duration: 0.25)) { currentIndex = idx } }
+                            .onTapGesture {
+                                slideDirection = idx >= currentIndex ? 1 : -1
+                                lastManualInteraction = Date()
+                                withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { currentIndex = idx }
+                            }
                     }
                 }
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .background(Color.black.opacity(0.40)).clipShape(Capsule())
+                .padding(.horizontal, 11).padding(.vertical, 7)
+                .background(DonbyLiquidGlassCapsuleSurface(tint: nil, isHovered: false))
                 .padding(.trailing, 24)
                 .padding(.bottom, 24),
                 alignment: .bottomTrailing
             )
-            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.28), Color.white.opacity(0.08), Color.white.opacity(0.16)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
+            )
             .onHover { h in withAnimation(.easeInOut(duration: 0.2)) { isHovering = h } }
             .onReceive(timer) { _ in
-                guard !isHovering && items.count > 1 else { return }
-                withAnimation(.easeInOut(duration: 0.3)) { currentIndex = (currentIndex + 1) % items.count }
+                guard !isHovering && items.count > 1 && Date().timeIntervalSince(lastManualInteraction) > 5.0 else { return }
+                slideDirection = 1
+                withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) { currentIndex = (currentIndex + 1) % items.count }
             }
         }
     }

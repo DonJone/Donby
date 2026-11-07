@@ -556,6 +556,59 @@ public struct MediaSourceInfo: Codable, Identifiable, Hashable, Sendable {
         if let brStr = formattedBitrate { parts.append(brStr) }
         return parts.isEmpty ? "默认版本" : parts.joined(separator: " · ")
     }
+
+    /// Composite bitrate / specification score (in estimated bps) used for automatic version selection.
+    public var estimatedQualityScore: Int64 {
+        if let bitrate, bitrate > 0 {
+            return Int64(bitrate)
+        }
+        if let size, size > 0, let ticks = runTimeTicks, ticks > 0 {
+            return (size * 8 * 10_000_000) / max(1, ticks)
+        }
+        var score: Int64 = 0
+        if let vStream = mediaStreams?.first(where: { $0.type?.lowercased() == "video" }) {
+            if let br = vStream.bitRate, br > 0 {
+                return Int64(br)
+            }
+            let w = vStream.width ?? 0
+            if w >= 3800 { score += 40_000_000 }
+            else if w >= 2500 { score += 20_000_000 }
+            else if w >= 1900 { score += 12_000_000 }
+            else if w >= 1200 { score += 5_000_000 }
+            else if w > 0 { score += 2_000_000 }
+        }
+        let label = ((name ?? "") + " " + (path ?? "")).lowercased()
+        if label.contains("remux") || label.contains("bdmv") || label.contains("bluray") || label.contains("iso") {
+            score += 35_000_000
+        }
+        if label.contains("2160p") || label.contains("4k") || label.contains("uhd") {
+            score = max(score, 28_000_000)
+        } else if label.contains("1080p") {
+            score = max(score, 10_000_000)
+        } else if label.contains("720p") {
+            score = max(score, 4_000_000)
+        }
+        if label.contains("dovi") || label.contains("dolby") || label.contains("dv") || label.contains("hdr") {
+            score += 4_000_000
+        }
+        if let size, size > 0 {
+            score += min(10_000_000, size / (1024 * 1024))
+        }
+        return score
+    }
+}
+
+public extension Array where Element == MediaSourceInfo {
+    func preferredSource(for preset: PreferredVersionPreset) -> MediaSourceInfo? {
+        guard !isEmpty else { return nil }
+        if count == 1 { return first }
+        switch preset {
+        case .higherBitrate:
+            return self.max { $0.estimatedQualityScore < $1.estimatedQualityScore }
+        case .lowerBitrate:
+            return self.min { $0.estimatedQualityScore < $1.estimatedQualityScore }
+        }
+    }
 }
 
 public struct MediaStream: Codable, Identifiable, Hashable, Sendable {

@@ -541,16 +541,20 @@ public final class DKMetalLayerView: NSView {
         return float4(outP3, c.a);
     }
 
-    // Premultiplied RGBA8 subtitle overlay blended in linear Display P3 light (~180 nits paper white)
+    // Premultiplied RGBA8 subtitle overlay blended in linear Display P3 light with steady SDR/HDR paper-white calibration
     fragment float4 fragment_subtitle(VertexOut in [[stage_in]],
-                                      texture2d<float, access::sample> texSub [[texture(0)]]) {
+                                      texture2d<float, access::sample> texSub [[texture(0)]],
+                                      constant DKGpuColorUniformsMSL &u [[buffer(0)]]) {
         constexpr sampler s(address::clamp_to_edge, filter::linear);
         float4 sub = texSub.sample(s, in.texCoord);
         if (sub.a <= 1e-4f) {
             return float4(0.0f);
         }
-        float3 srgb = clamp(sub.rgb / sub.a, 0.0f, 1.0f);
-        float3 lin = srgb_to_linear(srgb) * 0.88f;
+        float3 srgb = clamp(sub.rgb / max(sub.a, 1.0f / 255.0f), 0.0f, 1.0f);
+        float paperWhite = (u.transfer_fn != 0)
+            ? mix(0.90f, 0.98f, clamp((max(u.edr_headroom, 1.0f) - 1.0f) / 1.5f, 0.0f, 1.0f))
+            : 0.88f;
+        float3 lin = srgb_to_linear(srgb) * paperWhite;
         float3 p3 = gamut_map_to_linear_p3(lin, 0);
         return float4(p3 * sub.a, sub.a);
     }
@@ -764,7 +768,11 @@ public final class DKMetalLayerView: NSView {
         }
     }
 
-    private func encodeSubtitleOverlayIfNeeded(encoder: MTLRenderCommandEncoder, scale: SIMD2<Float>) {
+    private func encodeSubtitleOverlayIfNeeded(
+        encoder: MTLRenderCommandEncoder,
+        scale: SIMD2<Float>,
+        uniforms: inout DKGpuColorUniforms
+    ) {
         guard hasActiveSubtitle,
               let subPipe = pipelineSubtitle,
               let subTex = subtitleTexture else {
@@ -774,6 +782,7 @@ public final class DKMetalLayerView: NSView {
         encoder.setRenderPipelineState(subPipe)
         encoder.setVertexBytes(&subVU, length: MemoryLayout<DKVertexUniforms>.stride, index: 0)
         encoder.setFragmentTexture(subTex, index: 0)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<DKGpuColorUniforms>.stride, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
 
@@ -834,7 +843,7 @@ public final class DKMetalLayerView: NSView {
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<DKGpuColorUniforms>.stride, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
 
-        encodeSubtitleOverlayIfNeeded(encoder: encoder, scale: scale)
+        encodeSubtitleOverlayIfNeeded(encoder: encoder, scale: scale, uniforms: &uniforms)
         encoder.endEncoding()
 
         buffer.present(drawable)
@@ -877,7 +886,9 @@ public final class DKMetalLayerView: NSView {
         encoder.setFragmentTexture(bgraTex, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
 
-        encodeSubtitleOverlayIfNeeded(encoder: encoder, scale: scale)
+        var sdrUniforms = DKGpuColorUniforms()
+        sdrUniforms.edr_headroom = currentEDRHeadroom
+        encodeSubtitleOverlayIfNeeded(encoder: encoder, scale: scale, uniforms: &sdrUniforms)
         encoder.endEncoding()
 
         buffer.present(drawable)
@@ -986,6 +997,7 @@ public final class DKMetalLayerView: NSView {
                     enc.setRenderPipelineState(subPipe)
                     enc.setVertexBytes(&svu, length: MemoryLayout<DKVertexUniforms>.stride, index: 0)
                     enc.setFragmentTexture(sTex, index: 0)
+                    enc.setFragmentBytes(&uniforms, length: MemoryLayout<DKGpuColorUniforms>.stride, index: 0)
                     enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                 }
             }
@@ -1142,7 +1154,8 @@ public struct DKMetalVideoView: NSViewRepresentable {
             let pixbuf = unmanagedBuf.takeRetainedValue()
             let bufPtr = Unmanaged.passUnretained(pixbuf).toOpaque()
 
-            let subClockPts = max(pts, dk_player_get_position(p))
+            let masterPos = dk_player_get_position(p)
+            let subClockPts = masterPos > 0 ? masterPos : max(0.0, pts)
             let cleanW = Int32(max(640, CVPixelBufferGetWidth(pixbuf)))
             let cleanH = Int32(max(360, CVPixelBufferGetHeight(pixbuf)))
             var subRgba: UnsafePointer<UInt8>? = nil

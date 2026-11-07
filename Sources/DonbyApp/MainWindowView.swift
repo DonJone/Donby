@@ -103,12 +103,12 @@ public struct MainWindowView: View {
                     } label: {
                         HStack(spacing: 11) {
                             Image(systemName: tab.icon)
-                                .font(.system(size: 15, weight: .regular))
-                                .foregroundStyle(isSelected ? Color.white : Color(white: 0.65))
+                                .font(.system(size: 15, weight: isSelected ? .semibold : .medium))
+                                .foregroundStyle(isSelected ? Color.white : appState.accentColor)
                                 .frame(width: 20, alignment: .center)
 
                             Text(tab.title)
-                                .font(.system(size: 13.5, weight: isSelected ? .medium : .regular))
+                                .font(.system(size: 13.5, weight: isSelected ? .semibold : .regular))
                                 .foregroundStyle(isSelected ? Color.white : Color(white: 0.90))
 
                             Spacer()
@@ -116,8 +116,13 @@ public struct MainWindowView: View {
                         .padding(.horizontal, 12)
                         .frame(height: 35)
                         .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(isSelected ? appState.accentColor.opacity(0.85) : Color.clear)
+                            Group {
+                                if isSelected {
+                                    DonbyLiquidGlassRoundedSurface(cornerRadius: 9, tint: appState.accentColor, isHovered: false)
+                                } else {
+                                    Color.clear
+                                }
+                            }
                         )
                     }
                     .buttonStyle(.plain)
@@ -154,8 +159,13 @@ public struct MainWindowView: View {
                             .padding(.horizontal, 12)
                             .frame(height: 33)
                             .background(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(isServerOpen ? appState.accentColor.opacity(0.85) : Color.clear)
+                                Group {
+                                    if isServerOpen {
+                                        DonbyLiquidGlassRoundedSurface(cornerRadius: 9, tint: appState.accentColor, isHovered: false)
+                                    } else {
+                                        Color.clear
+                                    }
+                                }
                             )
                         }
                         .buttonStyle(.plain)
@@ -1740,6 +1750,27 @@ public struct SettingsView: View {
 
                 Divider().opacity(0.12)
 
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("默认优先版本选择")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.white)
+                        Spacer()
+                        Picker("", selection: $appState.preferredVersionPresetRaw) {
+                            ForEach(PreferredVersionPreset.allCases) { preset in
+                                Text(preset.title).tag(preset.rawValue)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 220)
+                    }
+                    Text(appState.preferredVersionPreset.subtitle)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Color(white: 0.52))
+                }
+
+                Divider().opacity(0.12)
+
                 HStack {
                     Text("控制栏显示样式")
                         .font(.system(size: 13))
@@ -1888,7 +1919,7 @@ public struct SettingsView: View {
                     Text("Donby")
                         .font(.system(size: 20, weight: .heavy, design: .rounded))
                         .foregroundStyle(.white)
-                    Text("版本 1.2.1 (Build 2026.11) · macOS Apple Silicon")
+                    Text("版本 1.3.0 (Build 2026.11) · macOS Apple Silicon")
                         .font(.system(size: 12))
                         .foregroundStyle(Color(white: 0.55))
                 }

@@ -28,7 +28,7 @@ public final class EmbyClient: Sendable {
     public static let shared = EmbyClient()
 
     public let clientName = "Donby"
-    public let appVersion = "1.2.0"
+    public let appVersion = "1.3.0"
     public let deviceName: String
     public let deviceId: String
 
@@ -452,6 +452,7 @@ public final class EmbyClient: Sendable {
         server: EmbyServerConfig,
         item: EmbyItem,
         preferredSourceId: String? = nil,
+        preferredPreset: PreferredVersionPreset = .higherBitrate,
         audioStreamIndex: Int? = nil,
         subtitleStreamIndex: Int? = nil
     ) async throws -> ResolvedPlaybackResource {
@@ -459,16 +460,28 @@ public final class EmbyClient: Sendable {
             throw EmbyClientError.noPlayableStream
         }
 
+        let effectivePreferredId: String? = {
+            if let pref = preferredSourceId, !pref.isEmpty { return pref }
+            return item.mediaSources?.preferredSource(for: preferredPreset)?.id
+        }()
+
         let playbackInfo = try? await fetchPlaybackInfo(
             server: server,
             itemId: item.id,
-            mediaSourceId: preferredSourceId,
+            mediaSourceId: effectivePreferredId,
             audioStreamIndex: audioStreamIndex,
             subtitleStreamIndex: subtitleStreamIndex
         )
 
         let allSources = playbackInfo?.mediaSources ?? item.mediaSources ?? []
-        guard let selectedSource = allSources.first(where: { $0.id == preferredSourceId }) ?? allSources.first else {
+        let resolvedSource: MediaSourceInfo? = {
+            if let pref = preferredSourceId, !pref.isEmpty,
+               let exact = allSources.first(where: { $0.id == pref }) {
+                return exact
+            }
+            return allSources.preferredSource(for: preferredPreset) ?? allSources.first
+        }()
+        guard let selectedSource = resolvedSource else {
             throw EmbyClientError.noPlayableStream
         }
 
@@ -525,10 +538,23 @@ public final class EmbyClient: Sendable {
 
         var subtitleURLs: [SubtitleResourceItem] = []
         for stream in selectedSource.mediaStreams ?? [] where stream.type?.lowercased() == "subtitle" {
+            let lowerCodec = (stream.codec ?? "").lowercased()
+            let isBitmapSub = lowerCodec.contains("pgs") || lowerCodec.contains("dvd") || lowerCodec.contains("dvb") || lowerCodec.contains("vobsub")
+            if isBitmapSub { continue }
+            let isExt = (stream.isExternal == true)
             if let deliv = stream.deliveryUrl, !deliv.isEmpty {
+                let lowerDeliv = deliv.lowercased()
+                let looksLikeTextSub = isExt || lowerDeliv.contains(".srt") || lowerDeliv.contains(".ass") || lowerDeliv.contains(".ssa") || lowerDeliv.contains(".vtt")
+                guard looksLikeTextSub else { continue }
                 let fullSub = resolveRelativeOrAbsoluteURL(deliv, baseURL: baseURL, token: server.accessToken)
                 if let subURL = URL(string: fullSub) {
-                    subtitleURLs.append(SubtitleResourceItem(name: stream.readableLabel, url: subURL))
+                    subtitleURLs.append(SubtitleResourceItem(
+                        name: stream.readableLabel,
+                        url: subURL,
+                        streamIndex: stream.index,
+                        codec: stream.codec,
+                        isExternal: isExt
+                    ))
                 }
             }
         }
@@ -723,7 +749,56 @@ public final class EmbyClient: Sendable {
 
         var urlStr = "\(base)/emby/Items/\(targetItemId)/Images/\(imageTypePath)?maxWidth=\(maxWidth)&quality=90"
         if let tag, !tag.isEmpty { urlStr += "&tag=\(tag)" }
+        if !server.accessToken.isEmpty { urlStr += "&api_key=\(server.accessToken)" }
         return URL(string: urlStr)
+    }
+
+    /// Builds ordered candidate URLs for an actor/director (`EmbyPerson`) portrait across Emby, Jellyfin, and UHDNow proxies.
+    public func personImageURLs(
+        server: EmbyServerConfig,
+        person: EmbyPerson,
+        maxWidth: Int = 260
+    ) -> [URL] {
+        guard !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return []
+        }
+        let base = server.activeBaseURL
+        let tokenPart = server.accessToken.isEmpty ? "" : "&api_key=\(server.accessToken)"
+        var urls: [URL] = []
+
+        if !person.id.isEmpty {
+            if let tag = person.primaryImageTag, !tag.isEmpty {
+                if let u = URL(string: "\(base)/emby/Items/\(person.id)/Images/Primary?maxWidth=\(maxWidth)&quality=88&tag=\(tag)\(tokenPart)") {
+                    urls.append(u)
+                }
+            }
+            if let u = URL(string: "\(base)/emby/Items/\(person.id)/Images/Primary?maxWidth=\(maxWidth)&quality=88\(tokenPart)") {
+                urls.append(u)
+            }
+        }
+
+        if !person.name.isEmpty,
+           let encodedName = person.name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) {
+            var byName = "\(base)/emby/Persons/\(encodedName)/Images/Primary?maxWidth=\(maxWidth)&quality=88\(tokenPart)"
+            if let tag = person.primaryImageTag, !tag.isEmpty {
+                byName += "&tag=\(tag)"
+            }
+            if let u = URL(string: byName) {
+                urls.append(u)
+            }
+        }
+
+        return urls
+    }
+
+    public func makeImageRequest(url: URL, server: EmbyServerConfig?) -> URLRequest {
+        var req = URLRequest(url: url, timeoutInterval: 12)
+        req.setValue("Donby/\(appVersion) (macOS)", forHTTPHeaderField: "User-Agent")
+        if let server, !server.accessToken.isEmpty {
+            req.setValue(server.accessToken, forHTTPHeaderField: "X-Emby-Token")
+            req.setValue(buildAuthorizationHeader(userId: server.userId, token: server.accessToken), forHTTPHeaderField: "X-Emby-Authorization")
+        }
+        return req
     }
 
     private func validateResponse(_ response: URLResponse) throws {

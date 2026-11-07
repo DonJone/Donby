@@ -30,7 +30,7 @@ if [ -f "Resources/AppIcon.icns" ]; then
     cp "Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 fi
 
-APP_VERSION="${DONBY_VERSION:-1.2.1}"
+APP_VERSION="${DONBY_VERSION:-1.3.0}"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

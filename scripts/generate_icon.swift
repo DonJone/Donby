@@ -2,6 +2,33 @@ import AppKit
 import CoreGraphics
 import Foundation
 
+/// Draws an inner meniscus highlight or inner shadow clipped strictly inside `path`
+/// using an even-odd outer cutout (requires `path` to be non-self-intersecting).
+private func drawInnerMeniscus(
+    in ctx: CGContext,
+    path: CGPath,
+    canvasSize s: CGFloat,
+    offset: CGSize,
+    blur: CGFloat,
+    color: CGColor,
+    blendMode: CGBlendMode = .normal
+) {
+    ctx.saveGState()
+    ctx.setBlendMode(blendMode)
+    ctx.addPath(path)
+    ctx.clip()
+
+    let cutout = CGMutablePath()
+    cutout.addRect(CGRect(x: -s, y: -s, width: s * 3.0, height: s * 3.0))
+    cutout.addPath(path)
+
+    ctx.setShadow(offset: offset, blur: blur, color: color)
+    ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+    ctx.addPath(cutout)
+    ctx.fillPath(using: .evenOdd)
+    ctx.restoreGState()
+}
+
 func renderIcon(size: Int) -> Data? {
     let s = CGFloat(size)
     guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
@@ -20,6 +47,7 @@ func renderIcon(size: Int) -> Data? {
     ctx.setAllowsAntialiasing(true)
     ctx.setShouldAntialias(true)
     ctx.interpolationQuality = .high
+    let gradAllOptions: CGGradientDrawingOptions = [.drawsBeforeStartLocation, .drawsAfterEndLocation]
 
     let nsCtx = NSGraphicsContext(cgContext: ctx, flipped: false)
     NSGraphicsContext.saveGraphicsState()
@@ -59,42 +87,58 @@ func renderIcon(size: Int) -> Data? {
     ctx.addPath(squirclePath)
     ctx.clip()
 
-    // Base Apple Pro Space Black / Obsidian Titanium gradient (top -> bottom)
+    // 2A. Base Apple Pro Space Black / Obsidian Liquid Glass chassis (top -> bottom)
     let bgColors = [
-        CGColor(srgbRed: 0.105, green: 0.110, blue: 0.124, alpha: 1.0),
-        CGColor(srgbRed: 0.048, green: 0.050, blue: 0.058, alpha: 1.0),
-        CGColor(srgbRed: 0.018, green: 0.019, blue: 0.024, alpha: 1.0)
+        CGColor(srgbRed: 0.112, green: 0.118, blue: 0.134, alpha: 1.0),
+        CGColor(srgbRed: 0.045, green: 0.048, blue: 0.056, alpha: 1.0),
+        CGColor(srgbRed: 0.016, green: 0.018, blue: 0.023, alpha: 1.0)
     ] as CFArray
-    let bgLocs: [CGFloat] = [0.0, 0.54, 1.0]
+    let bgLocs: [CGFloat] = [0.0, 0.55, 1.0]
     if let bgGrad = CGGradient(colorsSpace: colorSpace, colors: bgColors, locations: bgLocs) {
         ctx.drawLinearGradient(
             bgGrad,
-            start: CGPoint(x: s * 0.5, y: bodyRect.maxY),
-            end: CGPoint(x: s * 0.5, y: bodyRect.minY),
+            start: CGPoint(x: s * 0.42, y: bodyRect.maxY),
+            end: CGPoint(x: s * 0.58, y: bodyRect.minY),
+            options: gradAllOptions
+        )
+    }
+
+    // Top-left Liquid Glass studio refraction wash on Space Black chassis
+    let titaniumSheenColors = [
+        CGColor(srgbRed: 0.78, green: 0.84, blue: 0.94, alpha: 0.16),
+        CGColor(srgbRed: 0.36, green: 0.41, blue: 0.50, alpha: 0.05),
+        CGColor(srgbRed: 0.05, green: 0.05, blue: 0.06, alpha: 0.0)
+    ] as CFArray
+    if let titaniumGrad = CGGradient(colorsSpace: colorSpace, colors: titaniumSheenColors, locations: [0.0, 0.48, 1.0]) {
+        let glowCenter = CGPoint(x: bodyRect.minX + bodySize * 0.20, y: bodyRect.maxY - bodySize * 0.16)
+        ctx.drawRadialGradient(
+            titaniumGrad,
+            startCenter: glowCenter, startRadius: 0,
+            endCenter: glowCenter, endRadius: bodySize * 0.72,
             options: []
         )
     }
 
-    // Subtle anodized Space Black titanium top-left studio sheen
-    let titaniumSheenColors = [
-        CGColor(srgbRed: 0.72, green: 0.76, blue: 0.84, alpha: 0.12),
-        CGColor(srgbRed: 0.32, green: 0.35, blue: 0.42, alpha: 0.04),
-        CGColor(srgbRed: 0.05, green: 0.05, blue: 0.06, alpha: 0.0)
+    // Subtle bottom-right internal bounce reflection inside dark glass slab
+    let bounceSheenColors = [
+        CGColor(srgbRed: 0.68, green: 0.78, blue: 0.95, alpha: 0.085),
+        CGColor(srgbRed: 0.24, green: 0.30, blue: 0.40, alpha: 0.025),
+        CGColor(srgbRed: 0.02, green: 0.02, blue: 0.03, alpha: 0.0)
     ] as CFArray
-    if let titaniumGrad = CGGradient(colorsSpace: colorSpace, colors: titaniumSheenColors, locations: [0.0, 0.48, 1.0]) {
-        let glowCenter = CGPoint(x: bodyRect.minX + bodySize * 0.24, y: bodyRect.maxY - bodySize * 0.18)
+    if let bounceGrad = CGGradient(colorsSpace: colorSpace, colors: bounceSheenColors, locations: [0.0, 0.50, 1.0]) {
+        let bounceCenter = CGPoint(x: bodyRect.maxX - bodySize * 0.18, y: bodyRect.minY + bodySize * 0.16)
         ctx.drawRadialGradient(
-            titaniumGrad,
-            startCenter: glowCenter, startRadius: 0,
-            endCenter: glowCenter, endRadius: bodySize * 0.68,
+            bounceGrad,
+            startCenter: bounceCenter, startRadius: 0,
+            endCenter: bounceCenter, endRadius: bodySize * 0.60,
             options: []
         )
     }
 
     // Restrained deep-graphite center depth halo behind aperture
     let depthGlowColors = [
-        CGColor(srgbRed: 0.82, green: 0.87, blue: 0.96, alpha: 0.17),
-        CGColor(srgbRed: 0.42, green: 0.47, blue: 0.56, alpha: 0.06),
+        CGColor(srgbRed: 0.84, green: 0.90, blue: 0.99, alpha: 0.18),
+        CGColor(srgbRed: 0.44, green: 0.50, blue: 0.62, alpha: 0.065),
         CGColor(srgbRed: 0.08, green: 0.09, blue: 0.11, alpha: 0.0)
     ] as CFArray
     if let depthGrad = CGGradient(colorsSpace: colorSpace, colors: depthGlowColors, locations: [0.0, 0.46, 1.0]) {
@@ -107,38 +151,18 @@ func renderIcon(size: Int) -> Data? {
         )
     }
 
-    // Subtle precision optical ring in background
-    ctx.saveGState()
-    let ringRadius = bodySize * 0.355
-    let ringRect = CGRect(x: s * 0.5 - ringRadius, y: s * 0.5 - ringRadius, width: ringRadius * 2, height: ringRadius * 2)
-    ctx.setStrokeColor(CGColor(srgbRed: 0.88, green: 0.91, blue: 0.97, alpha: 0.125))
-    ctx.setLineWidth(max(1.0, s * 0.008))
-    ctx.strokeEllipse(in: ringRect)
-    ctx.restoreGState()
-
-    // 3. Centerpiece Emblem: Sculpted "D + Play Prism" Cinema Mark
-    // Outer luminous D-aperture arc/ribbon + crisp floating optical play triangle
+    // Precompute Centerpiece "D" Aperture geometry so background elements can refract cleanly behind it
     let cx = s * 0.50
     let cy = s * 0.50
-
-    // Create outer sculpted D-frame path (thick rounded geometric D-loop open slightly to frame the play prism)
     let dLeft = cx - bodySize * 0.245
     let dTop = cy + bodySize * 0.255
     let dBot = cy - bodySize * 0.255
     let dArcCenterX = cx - bodySize * 0.045
     let dRadius = (dTop - dBot) * 0.5
     let strokeW = bodySize * 0.105
+    // Corner radius > 0.5 * strokeW guarantees a smooth non-self-intersecting stroked outline
+    let dCornerR = strokeW * 0.56
 
-    let dTrack = CGMutablePath()
-    // Start from upper-right of D curve, sweep around bottom, up left stem, back to top-left curve
-    dTrack.addArc(
-        center: CGPoint(x: dArcCenterX, y: cy),
-        radius: dRadius,
-        startAngle: CGFloat.pi * 0.27,
-        endAngle: -CGFloat.pi * 0.27,
-        clockwise: false
-    )
-    // Wait: let's construct clean closed/stroked geometric D-ribbon explicitly for rock-solid control!
     let dRibbon = CGMutablePath()
     dRibbon.move(to: CGPoint(x: dArcCenterX + dRadius * cos(0.32 * .pi), y: cy + dRadius * sin(0.32 * .pi)))
     dRibbon.addArc(
@@ -148,17 +172,15 @@ func renderIcon(size: Int) -> Data? {
         endAngle: 0.5 * .pi,
         clockwise: false
     )
-    dRibbon.addLine(to: CGPoint(x: dLeft + strokeW * 0.35, y: dTop))
     dRibbon.addArc(
         tangent1End: CGPoint(x: dLeft, y: dTop),
-        tangent2End: CGPoint(x: dLeft, y: cy),
-        radius: strokeW * 0.42
+        tangent2End: CGPoint(x: dLeft, y: dBot),
+        radius: dCornerR
     )
-    dRibbon.addLine(to: CGPoint(x: dLeft, y: dBot + strokeW * 0.42))
     dRibbon.addArc(
         tangent1End: CGPoint(x: dLeft, y: dBot),
         tangent2End: CGPoint(x: dArcCenterX, y: dBot),
-        radius: strokeW * 0.42
+        radius: dCornerR
     )
     dRibbon.addLine(to: CGPoint(x: dArcCenterX, y: dBot))
     dRibbon.addArc(
@@ -176,45 +198,264 @@ func renderIcon(size: Int) -> Data? {
         miterLimit: 4.0
     )
 
-    // Drop shadow behind D-ribbon
-    ctx.saveGState()
-    ctx.setShadow(
-        offset: CGSize(width: 0, height: -s * 0.016),
-        blur: s * 0.038,
-        color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.85)
-    )
-    ctx.addPath(strokedDRibbon)
-    ctx.setFillColor(CGColor(srgbRed: 0.84, green: 0.87, blue: 0.93, alpha: 1.0))
-    ctx.fillPath()
-    ctx.restoreGState()
+    let outsideDClip = CGMutablePath()
+    outsideDClip.addRect(CGRect(x: -s, y: -s, width: s * 3.0, height: s * 3.0))
+    outsideDClip.addPath(strokedDRibbon)
 
-    // Soft silver ambient bloom around D-ribbon so centerpiece pops crisply against Space Black
-    ctx.saveGState()
-    ctx.setShadow(
-        offset: .zero,
-        blur: s * 0.030,
-        color: CGColor(srgbRed: 0.85, green: 0.90, blue: 1.00, alpha: 0.24)
+    // 2B. Concentric Liquid Glass Optical Ring (sharp outside D-ribbon, frosted-diffused inside D-ribbon)
+    let ringRadius = bodySize * 0.355
+    let ringRect = CGRect(x: s * 0.5 - ringRadius, y: s * 0.5 - ringRadius, width: ringRadius * 2, height: ringRadius * 2)
+    let ringStrokeWidth = max(0.75, s * 0.014)
+    let ringCirclePath = CGPath(ellipseIn: ringRect, transform: nil)
+    let strokedRingHalo = ringCirclePath.copy(
+        strokingWithWidth: ringStrokeWidth,
+        lineCap: .round,
+        lineJoin: .round,
+        miterLimit: 4.0
     )
-    ctx.addPath(strokedDRibbon)
-    ctx.setFillColor(CGColor(srgbRed: 0.90, green: 0.93, blue: 0.98, alpha: 1.0))
-    ctx.fillPath()
-    ctx.restoreGState()
 
-    // Gradient fill on D-ribbon (High-Luminance Liquid Platinum -> Bright Polished Silver -> Light Titanium)
+    ctx.saveGState()
+    ctx.addPath(outsideDClip)
+    ctx.clip(using: .evenOdd)
+
+    // Soft ambient glass aura under concentric ring
+    if size >= 32 {
+        ctx.saveGState()
+        ctx.setShadow(
+            offset: CGSize(width: 0, height: -s * 0.004),
+            blur: s * 0.012,
+            color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.55)
+        )
+        ctx.addPath(strokedRingHalo)
+        ctx.setFillColor(CGColor(srgbRed: 0.78, green: 0.85, blue: 0.96, alpha: 0.06))
+        ctx.fillPath()
+        ctx.restoreGState()
+    }
+
+    // Directional Liquid Glass specular fill along concentric ring (bright top-left & bottom-right glints)
+    ctx.saveGState()
+    ctx.addPath(strokedRingHalo)
+    ctx.clip()
+    let ringColors = [
+        CGColor(srgbRed: 0.96, green: 0.98, blue: 1.00, alpha: 0.38),
+        CGColor(srgbRed: 0.76, green: 0.83, blue: 0.94, alpha: 0.10),
+        CGColor(srgbRed: 0.88, green: 0.94, blue: 1.00, alpha: 0.28)
+    ] as CFArray
+    if let ringGrad = CGGradient(colorsSpace: colorSpace, colors: ringColors, locations: [0.0, 0.52, 1.0]) {
+        ctx.drawLinearGradient(
+            ringGrad,
+            start: CGPoint(x: ringRect.minX, y: ringRect.maxY),
+            end: CGPoint(x: ringRect.maxX, y: ringRect.minY),
+            options: gradAllOptions
+        )
+    }
+    ctx.restoreGState()
+    if size >= 64 {
+        drawInnerMeniscus(
+            in: ctx,
+            path: strokedRingHalo,
+            canvasSize: s,
+            offset: CGSize(width: s * 0.002, height: -s * 0.002),
+            blur: s * 0.003,
+            color: CGColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.35),
+            blendMode: .screen
+        )
+    }
+    ctx.restoreGState() // end outsideDClip for sharp background ring
+
+    // 3. Centerpiece Emblem: Sculpted Liquid Glass "D" Aperture + Solid Radiant Play Prism
+    // 3A. Grounding shadow + transmitted Liquid Glass caustic bloom beneath D-ribbon
+    // (Cast using an exterior clip so the translucent glass interior isn't muddied by solid shadow fill)
+    if size >= 32 {
+        // Deep elevation shadow onto Space Black slab
+        ctx.saveGState()
+        ctx.addPath(outsideDClip)
+        ctx.clip(using: .evenOdd)
+        ctx.setShadow(
+            offset: CGSize(width: 0, height: -s * 0.018),
+            blur: s * 0.038,
+            color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.82)
+        )
+        ctx.addPath(strokedDRibbon)
+        ctx.setFillColor(CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 1.0))
+        ctx.fillPath()
+        ctx.restoreGState()
+
+        // Transmitted caustic light focus & luminous halo around Liquid Glass D-ribbon
+        ctx.saveGState()
+        ctx.addPath(outsideDClip)
+        ctx.clip(using: .evenOdd)
+        ctx.setShadow(
+            offset: CGSize(width: s * 0.006, height: -s * 0.008),
+            blur: s * 0.030,
+            color: CGColor(srgbRed: 0.86, green: 0.93, blue: 1.00, alpha: 0.26)
+        )
+        ctx.addPath(strokedDRibbon)
+        ctx.setFillColor(CGColor(srgbRed: 0.92, green: 0.96, blue: 1.00, alpha: 1.0))
+        ctx.fillPath()
+        ctx.restoreGState()
+    }
+
+    // 3B. Sculpted Translucent Crystal-Silver Liquid Glass Body of D-ribbon
     ctx.saveGState()
     ctx.addPath(strokedDRibbon)
     ctx.clip()
+
+    // Frosted backdrop diffusion of the concentric optical ring underneath the thick D glass lens
+    // (Soft Gaussian bloom rather than an unblurred sharp line, matching real Apple Liquid Glass backdrop blur)
+    ctx.saveGState()
+    let refractedRadius = ringRadius * 1.022
+    let refractedCenter = CGPoint(x: s * 0.505, y: s * 0.495)
+    let refractedRect = CGRect(
+        x: refractedCenter.x - refractedRadius,
+        y: refractedCenter.y - refractedRadius,
+        width: refractedRadius * 2.0,
+        height: refractedRadius * 2.0
+    )
+    ctx.setShadow(
+        offset: .zero,
+        blur: s * 0.038,
+        color: CGColor(srgbRed: 0.90, green: 0.96, blue: 1.00, alpha: 0.42)
+    )
+    ctx.setStrokeColor(CGColor(srgbRed: 0.92, green: 0.97, blue: 1.00, alpha: 0.04))
+    ctx.setLineWidth(max(1.0, s * 0.032))
+    ctx.strokeEllipse(in: refractedRect)
+    ctx.restoreGState()
+
+    // Smooth High-Luminance Translucent Crystal-Silver Glass Body
+    // Luminous pearl-crystal interior (~0.80-0.88) so the 1.00 pure-white liquid meniscus lip
+    // pops crisply all the way around (including top-left shoulder & rounded tips)
     let ribbonColors = [
-        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 1.0),
-        CGColor(srgbRed: 0.88, green: 0.91, blue: 0.96, alpha: 1.0),
-        CGColor(srgbRed: 0.70, green: 0.75, blue: 0.83, alpha: 1.0)
+        CGColor(srgbRed: 0.93, green: 0.96, blue: 1.00, alpha: 0.80),
+        CGColor(srgbRed: 0.85, green: 0.90, blue: 0.98, alpha: 0.72),
+        CGColor(srgbRed: 0.79, green: 0.85, blue: 0.95, alpha: 0.68),
+        CGColor(srgbRed: 0.88, green: 0.94, blue: 1.00, alpha: 0.78)
     ] as CFArray
-    if let ribGrad = CGGradient(colorsSpace: colorSpace, colors: ribbonColors, locations: [0.0, 0.50, 1.0]) {
+    if let ribGrad = CGGradient(colorsSpace: colorSpace, colors: ribbonColors, locations: [0.0, 0.38, 0.72, 1.0]) {
         ctx.drawLinearGradient(
             ribGrad,
             start: CGPoint(x: dLeft, y: dTop + strokeW * 0.5),
             end: CGPoint(x: cx + bodySize * 0.24, y: dBot - strokeW * 0.5),
+            options: gradAllOptions
+        )
+    }
+
+    // Feathered studio softbox glow across upper-left shoulder of the D lens (zero hard cutoff edges)
+    let softboxCenter = CGPoint(x: dLeft + bodySize * 0.06, y: dTop - bodySize * 0.02)
+    let dSheenColors = [
+        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.20),
+        CGColor(srgbRed: 0.96, green: 0.98, blue: 1.00, alpha: 0.07),
+        CGColor(srgbRed: 0.94, green: 0.97, blue: 1.00, alpha: 0.0)
+    ] as CFArray
+    if let dSheenGrad = CGGradient(colorsSpace: colorSpace, colors: dSheenColors, locations: [0.0, 0.50, 1.0]) {
+        ctx.drawRadialGradient(
+            dSheenGrad,
+            startCenter: softboxCenter, startRadius: 0,
+            endCenter: softboxCenter, endRadius: bodySize * 0.36,
             options: []
+        )
+    }
+
+    // Radiant white light bounce cast from the solid center Play triangle onto the D aperture jaws
+    let prismBounceCenter = CGPoint(x: cx + bodySize * 0.05, y: cy)
+    let prismBounceColors = [
+        CGColor(srgbRed: 0.94, green: 0.98, blue: 1.00, alpha: 0.28),
+        CGColor(srgbRed: 0.84, green: 0.92, blue: 1.00, alpha: 0.10),
+        CGColor(srgbRed: 0.80, green: 0.90, blue: 1.00, alpha: 0.0)
+    ] as CFArray
+    if let prismBounceGrad = CGGradient(colorsSpace: colorSpace, colors: prismBounceColors, locations: [0.0, 0.52, 1.0]) {
+        ctx.drawRadialGradient(
+            prismBounceGrad,
+            startCenter: prismBounceCenter, startRadius: bodySize * 0.08,
+            endCenter: prismBounceCenter, endRadius: bodySize * 0.34,
+            options: []
+        )
+    }
+
+    ctx.saveGState()
+    // Subtle cool azure refractive dispersion whisper near lower-right curve & upper-right tip
+    let dispersionCenter = CGPoint(x: dArcCenterX + dRadius * 0.65, y: dBot)
+    let dispersionColors = [
+        CGColor(srgbRed: 0.78, green: 0.90, blue: 1.00, alpha: 0.24),
+        CGColor(srgbRed: 0.78, green: 0.90, blue: 1.00, alpha: 0.0)
+    ] as CFArray
+    if let dispGrad = CGGradient(colorsSpace: colorSpace, colors: dispersionColors, locations: [0.0, 1.0]) {
+        ctx.drawRadialGradient(
+            dispGrad,
+            startCenter: dispersionCenter, startRadius: 0,
+            endCenter: dispersionCenter, endRadius: strokeW * 2.1,
+            options: []
+        )
+    }
+    ctx.restoreGState()
+
+    ctx.restoreGState()
+
+    // 3C. Smooth Pillowed Liquid Glass Volume & Wet Meniscus Edge Reflections inside D-ribbon
+    // Wide smooth convex glass shading on underside (no harsh bands)
+    drawInnerMeniscus(
+        in: ctx,
+        path: strokedDRibbon,
+        canvasSize: s,
+        offset: CGSize(width: -s * 0.008, height: s * 0.010),
+        blur: strokeW * 0.44,
+        color: CGColor(srgbRed: 0.16, green: 0.21, blue: 0.32, alpha: 0.25),
+        blendMode: .multiply
+    )
+    // Wide velvety convex highlight cushion from top-left
+    drawInnerMeniscus(
+        in: ctx,
+        path: strokedDRibbon,
+        canvasSize: s,
+        offset: CGSize(width: s * 0.009, height: -s * 0.010),
+        blur: strokeW * 0.30,
+        color: CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.44),
+        blendMode: .screen
+    )
+    // Tight wet liquid meniscus specular lip along top-left perimeter
+    drawInnerMeniscus(
+        in: ctx,
+        path: strokedDRibbon,
+        canvasSize: s,
+        offset: CGSize(width: s * 0.0050, height: -s * 0.0055),
+        blur: s * 0.0070,
+        color: CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.98),
+        blendMode: .screen
+    )
+    // Tight opposite internal refractive bounce lip along bottom-right curvature & rounded tips
+    drawInnerMeniscus(
+        in: ctx,
+        path: strokedDRibbon,
+        canvasSize: s,
+        offset: CGSize(width: -s * 0.0042, height: s * 0.0046),
+        blur: s * 0.0065,
+        color: CGColor(srgbRed: 0.90, green: 0.96, blue: 1.00, alpha: 0.84),
+        blendMode: .screen
+    )
+
+    // 3D. Crisp Dual-Rim Specular Glass Bevel around D-ribbon
+    ctx.saveGState()
+    ctx.addPath(strokedDRibbon)
+    ctx.clip()
+    let dRimBorder = strokedDRibbon.copy(
+        strokingWithWidth: max(0.8, s * 0.0085),
+        lineCap: .round,
+        lineJoin: .round,
+        miterLimit: 4.0
+    )
+    ctx.addPath(dRimBorder)
+    ctx.clip()
+    let dRimColors = [
+        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.98),
+        CGColor(srgbRed: 0.88, green: 0.93, blue: 1.00, alpha: 0.38),
+        CGColor(srgbRed: 0.94, green: 0.98, blue: 1.00, alpha: 0.88)
+    ] as CFArray
+    if let dRimGrad = CGGradient(colorsSpace: colorSpace, colors: dRimColors, locations: [0.0, 0.52, 1.0]) {
+        ctx.drawLinearGradient(
+            dRimGrad,
+            start: CGPoint(x: dLeft - strokeW * 0.5, y: dTop + strokeW * 0.5),
+            end: CGPoint(x: cx + bodySize * 0.22, y: dBot - strokeW * 0.5),
+            options: gradAllOptions
         )
     }
     ctx.restoreGState()
@@ -274,40 +515,52 @@ func renderIcon(size: Int) -> Data? {
             playGrad,
             start: CGPoint(x: triLeftX, y: cy + triHalfH),
             end: CGPoint(x: triRightX, y: cy - triHalfH),
-            options: []
+            options: gradAllOptions
         )
     }
     ctx.restoreGState()
 
-    // Subtle top glass reflection across upper squircle
+    // 5. Chassis Liquid Glass Surface Sheet & Dual-Rim Meniscus Bevel
     ctx.saveGState()
-    let glossPath = CGMutablePath()
-    glossPath.move(to: CGPoint(x: bodyRect.minX, y: bodyRect.maxY))
-    glossPath.addLine(to: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY))
-    glossPath.addLine(to: CGPoint(x: bodyRect.maxX, y: bodyRect.midY + bodySize * 0.08))
-    glossPath.addQuadCurve(
-        to: CGPoint(x: bodyRect.minX, y: bodyRect.midY + bodySize * 0.14),
-        control: CGPoint(x: s * 0.5, y: bodyRect.midY - bodySize * 0.02)
-    )
-    glossPath.closeSubpath()
-    ctx.addPath(glossPath)
-    ctx.clip()
     let glossColors = [
-        CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.065),
+        CGColor(srgbRed: 0.96, green: 0.98, blue: 1.00, alpha: 0.095),
+        CGColor(srgbRed: 0.90, green: 0.95, blue: 1.00, alpha: 0.022),
         CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.0)
     ] as CFArray
-    if let glossGrad = CGGradient(colorsSpace: colorSpace, colors: glossColors, locations: [0.0, 1.0]) {
+    if let glossGrad = CGGradient(colorsSpace: colorSpace, colors: glossColors, locations: [0.0, 0.48, 1.0]) {
         ctx.drawLinearGradient(
             glossGrad,
             start: CGPoint(x: s * 0.5, y: bodyRect.maxY),
-            end: CGPoint(x: s * 0.5, y: bodyRect.midY),
+            end: CGPoint(x: s * 0.5, y: bodyRect.midY + bodySize * 0.04),
             options: []
         )
     }
     ctx.restoreGState()
 
-    // Inner specular border along squircle edge
-    let insetAmt = max(0.5, s * 0.004)
+    // Soft inner liquid meniscus cushion around the Space Black squircle perimeter
+    if size >= 32 {
+        drawInnerMeniscus(
+            in: ctx,
+            path: squirclePath,
+            canvasSize: s,
+            offset: CGSize(width: s * 0.006, height: -s * 0.006),
+            blur: s * 0.016,
+            color: CGColor(srgbRed: 0.90, green: 0.95, blue: 1.00, alpha: 0.17),
+            blendMode: .screen
+        )
+        drawInnerMeniscus(
+            in: ctx,
+            path: squirclePath,
+            canvasSize: s,
+            offset: CGSize(width: -s * 0.005, height: s * 0.005),
+            blur: s * 0.014,
+            color: CGColor(srgbRed: 0.76, green: 0.86, blue: 1.00, alpha: 0.11),
+            blendMode: .screen
+        )
+    }
+
+    // Directional Liquid Glass specular rim along squircle edge (bright top-left lip + bottom-right bounce)
+    let insetAmt = max(0.4, s * 0.0035)
     let innerRect = bodyRect.insetBy(dx: insetAmt, dy: insetAmt)
     let innerPath = CGPath(
         roundedRect: innerRect,
@@ -315,10 +568,29 @@ func renderIcon(size: Int) -> Data? {
         cornerHeight: cornerRadius - insetAmt,
         transform: nil
     )
-    ctx.setStrokeColor(CGColor(srgbRed: 0.82, green: 0.85, blue: 0.90, alpha: 0.16))
-    ctx.setLineWidth(max(1.0, s * 0.006))
-    ctx.addPath(innerPath)
-    ctx.strokePath()
+    let strokedSquircleRim = innerPath.copy(
+        strokingWithWidth: max(0.7, s * 0.0065),
+        lineCap: .round,
+        lineJoin: .round,
+        miterLimit: 4.0
+    )
+    ctx.saveGState()
+    ctx.addPath(strokedSquircleRim)
+    ctx.clip()
+    let rimColors = [
+        CGColor(srgbRed: 0.98, green: 0.99, blue: 1.00, alpha: 0.56),
+        CGColor(srgbRed: 0.80, green: 0.85, blue: 0.94, alpha: 0.12),
+        CGColor(srgbRed: 0.86, green: 0.92, blue: 1.00, alpha: 0.34)
+    ] as CFArray
+    if let rimGrad = CGGradient(colorsSpace: colorSpace, colors: rimColors, locations: [0.0, 0.52, 1.0]) {
+        ctx.drawLinearGradient(
+            rimGrad,
+            start: CGPoint(x: bodyRect.minX, y: bodyRect.maxY),
+            end: CGPoint(x: bodyRect.maxX, y: bodyRect.minY),
+            options: gradAllOptions
+        )
+    }
+    ctx.restoreGState()
 
     ctx.restoreGState() // end squircle clip
 

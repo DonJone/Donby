@@ -163,6 +163,7 @@ public struct IconLibraryEntry: Codable, Identifiable, Hashable, Sendable {
 }
 
 public enum AppThemeColor: String, Codable, CaseIterable, Identifiable, Sendable {
+    case appleMusicRed = "appleMusicRed"
     case blue = "blue"
     case cyan = "cyan"
     case green = "green"
@@ -174,6 +175,7 @@ public enum AppThemeColor: String, Codable, CaseIterable, Identifiable, Sendable
     public var id: String { rawValue }
     public var title: String {
         switch self {
+        case .appleMusicRed: return "经典音乐红"
         case .blue: return "经典蓝"
         case .cyan: return "极光青"
         case .green: return "翡翠绿"
@@ -186,8 +188,12 @@ public enum AppThemeColor: String, Codable, CaseIterable, Identifiable, Sendable
 }
 
 public struct ThemeColorPalette {
+    /// Apple Music App classic dark-mode crimson (#FA2D48)
+    public static let appleMusicRedRGB = (r: 0.980, g: 0.176, b: 0.282)
+
     public static func color(for theme: AppThemeColor) -> (r: Double, g: Double, b: Double) {
         switch theme {
+        case .appleMusicRed: return appleMusicRedRGB
         case .blue: return (0.16, 0.49, 0.96)
         case .cyan: return (0.12, 0.78, 0.92)
         case .green: return (0.18, 0.80, 0.45)
@@ -195,6 +201,34 @@ public struct ThemeColorPalette {
         case .orange: return (1.0, 0.55, 0.16)
         case .pink: return (0.96, 0.34, 0.58)
         case .indigo: return (0.38, 0.42, 0.96)
+        }
+    }
+}
+
+public enum PreferredVersionPreset: String, Codable, CaseIterable, Identifiable, Sendable {
+    case higherBitrate = "higherBitrate"
+    case lowerBitrate = "lowerBitrate"
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .higherBitrate: return "更高码率优先"
+        case .lowerBitrate: return "更低码率优先"
+        }
+    }
+
+    public var shortTitle: String {
+        switch self {
+        case .higherBitrate: return "高码率"
+        case .lowerBitrate: return "低码率"
+        }
+    }
+
+    public var subtitle: String {
+        switch self {
+        case .higherBitrate: return "默认自动选择原盘或最高码率/分辨率资源版本"
+        case .lowerBitrate: return "默认自动选择更低码率资源版本，兼顾带宽与起播流畅度"
         }
     }
 }

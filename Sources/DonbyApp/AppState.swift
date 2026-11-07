@@ -70,7 +70,7 @@ public final class AppState: ObservableObject {
     @AppStorage("donby.displayAeroGlass") public var displayAeroGlass: Bool = true
     @AppStorage("donby.hideEncryptedServers") public var hideEncryptedServers: Bool = false
 
-    @AppStorage("donby.themeColor") public var themeColorRaw: String = AppThemeColor.blue.rawValue
+    @AppStorage("donby.themeColor.v2") public var themeColorRaw: String = AppThemeColor.appleMusicRed.rawValue
     @AppStorage("donby.showCarousel") public var showCarousel: Bool = true
     @AppStorage("donby.showMyMedia") public var showMyMedia: Bool = true
     @AppStorage("donby.showContinueWatching") public var showContinueWatching: Bool = true
@@ -84,6 +84,7 @@ public final class AppState: ObservableObject {
     @AppStorage("donby.edSeconds") public var edSeconds: Int = 90
     @AppStorage("donby.enableDanmaku") public var enableDanmaku: Bool = true
     @AppStorage("donby.enableHardwareDecode") public var enableHardwareDecode: Bool = true
+    @AppStorage("donby.preferredVersionPreset") public var preferredVersionPresetRaw: String = PreferredVersionPreset.higherBitrate.rawValue
 
     // 线路与网络设置
     @AppStorage("donby.autoSyncDomains") public var autoSyncDomains: Bool = true
@@ -92,10 +93,20 @@ public final class AppState: ObservableObject {
     @AppStorage("donby.cachePoolSizeMB") public var cachePoolSizeMB: Int = 256
     @AppStorage("donby.defaultSidebarCollapsed") public var defaultSidebarCollapsed: Bool = false
 
+    public static var appleMusicRed: Color {
+        let rgb = ThemeColorPalette.appleMusicRedRGB
+        return Color(red: rgb.r, green: rgb.g, blue: rgb.b)
+    }
+
     public var accentColor: Color {
-        let theme = AppThemeColor(rawValue: themeColorRaw) ?? .blue
+        let theme = AppThemeColor(rawValue: themeColorRaw) ?? .appleMusicRed
         let rgb = ThemeColorPalette.color(for: theme)
         return Color(red: rgb.r, green: rgb.g, blue: rgb.b)
+    }
+
+    public var preferredVersionPreset: PreferredVersionPreset {
+        get { PreferredVersionPreset(rawValue: preferredVersionPresetRaw) ?? .higherBitrate }
+        set { preferredVersionPresetRaw = newValue.rawValue }
     }
 
     public var controlBarStyle: ControlBarPositionStyle {
@@ -782,6 +793,7 @@ public final class AppState: ObservableObject {
                 server: server,
                 item: targetItem,
                 preferredSourceId: preferredSourceId,
+                preferredPreset: preferredVersionPreset,
                 audioStreamIndex: audioStreamIndex,
                 subtitleStreamIndex: subtitleStreamIndex
             )
