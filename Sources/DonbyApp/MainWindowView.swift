@@ -129,18 +129,12 @@ public struct MainWindowView: View {
                             Group {
                                 if isSelected {
                                     RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                        .fill(
-                                            LinearGradient(
-                                                colors: [appState.accentColor.opacity(0.92), appState.accentColor.opacity(0.82)],
-                                                startPoint: .top,
-                                                endPoint: .bottom
-                                            )
-                                        )
+                                        .fill(appState.accentColor.opacity(0.16))
                                         .overlay(
                                             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                                .strokeBorder(Color.white.opacity(0.24), lineWidth: 0.6)
+                                                .strokeBorder(appState.accentColor.opacity(0.32), lineWidth: 0.65)
                                         )
-                                        .shadow(color: appState.accentColor.opacity(0.28), radius: 6, y: 1.5)
+                                        .shadow(color: Color.black.opacity(0.20), radius: 4, y: 1)
                                 } else {
                                     Color.clear
                                 }
@@ -184,18 +178,12 @@ public struct MainWindowView: View {
                                 Group {
                                     if isServerOpen {
                                         RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                            .fill(
-                                                LinearGradient(
-                                                    colors: [appState.accentColor.opacity(0.92), appState.accentColor.opacity(0.82)],
-                                                    startPoint: .top,
-                                                    endPoint: .bottom
-                                                )
-                                            )
+                                            .fill(appState.accentColor.opacity(0.16))
                                             .overlay(
                                                 RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                                    .strokeBorder(Color.white.opacity(0.24), lineWidth: 0.6)
+                                                    .strokeBorder(appState.accentColor.opacity(0.32), lineWidth: 0.65)
                                             )
-                                            .shadow(color: appState.accentColor.opacity(0.28), radius: 6, y: 1.5)
+                                            .shadow(color: Color.black.opacity(0.20), radius: 4, y: 1)
                                     } else {
                                         Color.clear
                                     }
@@ -1108,30 +1096,9 @@ public struct RecordsView: View {
     private func watchRecordRow(_ record: WatchRecordItem) -> some View {
         HStack(spacing: 16) {
             // Artwork / Poster Thumbnail
-            ZStack {
-                if let key = record.posterKey, let img = ArtworkImageCache.shared.localPoster(key) {
-                    Image(nsImage: img)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: 78, height: 114)
-                        .clipped()
-                } else {
-                    LinearGradient(
-                        colors: [appState.accentColor.opacity(0.35), Color.purple.opacity(0.25)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                    .frame(width: 78, height: 114)
-
-                    Image(systemName: "film")
-                        .font(.system(size: 24))
-                        .foregroundStyle(Color.white.opacity(0.4))
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.8)
+            RecordArtworkThumbnailView(
+                record: record,
+                server: appState.activeServer
             )
 
             // Info and Progress

@@ -621,7 +621,7 @@ public struct PlayerView: View {
                         }
                         .frame(width: 46, height: 46)
                         .donbyLiquidGlassCapsule(tint: appState.accentColor, interactive: true, isHovered: false)
-                        .shadow(color: appState.accentColor.opacity(0.52), radius: 14, y: 4)
+                        .shadow(color: Color.black.opacity(0.35), radius: 8, y: 3)
                     }
                     .buttonStyle(.plain)
 

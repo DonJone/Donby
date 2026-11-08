@@ -932,6 +932,15 @@ public final class AppState: ObservableObject {
             if viewName == "emby", let first = servers.first { openServer(first) }
             else if viewName == "servers" { selectSidebarModule(.servers) }
             else if viewName == "files" { selectSidebarModule(.files) }
+            else if viewName == "records" { selectSidebarModule(.records) }
+            else if viewName == "iptv" { selectSidebarModule(.iptv) }
+            else if viewName == "search" { selectSidebarModule(.search) }
+            else if viewName == "settings" { selectSidebarModule(.settings) }
+            else if viewName == "detail" {
+                if let item = allLoadedMediaItems.first ?? resumeItems.first {
+                    openDetail(for: item)
+                }
+            }
             return
         }
 

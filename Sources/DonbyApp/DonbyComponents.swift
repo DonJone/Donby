@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import AVFoundation
 import DonbyCore
 import DonbyNetwork
 
@@ -1038,26 +1039,16 @@ public struct PosterCardView: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(
-                        isHovered
-                            ? LinearGradient(
-                                colors: [Color.white.opacity(0.70), appState.accentColor, appState.accentColor.opacity(0.40)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                            : LinearGradient(
-                                colors: [Color.white.opacity(0.12), Color.white.opacity(0.03)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            ),
-                        lineWidth: isHovered ? 1.2 : 0.65
+                        isHovered ? Color.white.opacity(0.24) : Color.white.opacity(0.06),
+                        lineWidth: 0.65
                     )
             )
             .shadow(
-                color: isHovered ? appState.accentColor.opacity(0.35) : Color.black.opacity(0.25),
-                radius: isHovered ? 12 : 5,
-                y: 3
+                color: Color.black.opacity(isHovered ? 0.35 : 0.20),
+                radius: isHovered ? 10 : 4,
+                y: isHovered ? 4 : 2
             )
-            .scaleEffect(isHovered ? 1.025 : 1.0)
+            .scaleEffect(isHovered ? 1.02 : 1.0)
             .animation(.easeOut(duration: 0.18), value: isHovered)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -1168,24 +1159,14 @@ public struct LandscapeCardView: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(
-                        isHovered
-                            ? LinearGradient(
-                                colors: [Color.white.opacity(0.70), appState.accentColor, appState.accentColor.opacity(0.40)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                            : LinearGradient(
-                                colors: [Color.white.opacity(0.12), Color.white.opacity(0.03)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            ),
-                        lineWidth: isHovered ? 1.2 : 0.65
+                        isHovered ? Color.white.opacity(0.24) : Color.white.opacity(0.06),
+                        lineWidth: 0.65
                     )
             )
             .shadow(
-                color: isHovered ? appState.accentColor.opacity(0.35) : Color.black.opacity(0.25),
-                radius: isHovered ? 12 : 5,
-                y: 3
+                color: Color.black.opacity(isHovered ? 0.35 : 0.20),
+                radius: isHovered ? 10 : 4,
+                y: isHovered ? 4 : 2
             )
             .scaleEffect(isHovered ? 1.02 : 1.0)
             .animation(.easeOut(duration: 0.18), value: isHovered)
@@ -1267,26 +1248,16 @@ public struct LibraryCardView: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(
-                        isHovered
-                            ? LinearGradient(
-                                colors: [Color.white.opacity(0.70), appState.accentColor, appState.accentColor.opacity(0.40)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                            : LinearGradient(
-                                colors: [Color.white.opacity(0.12), Color.white.opacity(0.04)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            ),
-                        lineWidth: isHovered ? 1.2 : 0.65
+                        isHovered ? Color.white.opacity(0.24) : Color.white.opacity(0.06),
+                        lineWidth: 0.65
                     )
             )
             .shadow(
-                color: isHovered ? appState.accentColor.opacity(0.35) : Color.black.opacity(0.25),
-                radius: isHovered ? 14 : 5,
-                y: 3
+                color: Color.black.opacity(isHovered ? 0.35 : 0.20),
+                radius: isHovered ? 10 : 4,
+                y: isHovered ? 4 : 2
             )
-            .scaleEffect(isHovered ? 1.025 : 1.0)
+            .scaleEffect(isHovered ? 1.02 : 1.0)
             .animation(.easeOut(duration: 0.18), value: isHovered)
         }
         .buttonStyle(.plain)
@@ -1505,76 +1476,71 @@ private struct DonbyLiquidGlassCapsuleModifier: ViewModifier {
         content
             .background(
                 ZStack {
-                    // 1. Frosted crystal backdrop blur
-                    DonbyBackdropBlur(material: .hudWindow, alpha: tint != nil ? 0.22 : 0.55)
-                        .clipShape(Capsule())
+                    // 1. Native Compositor Optical Translucency
+                    Capsule()
+                        .fill(.ultraThinMaterial)
 
-                    // 2. Optical glass body (crystal clear smoked or vibrant liquid gem)
+                    // 2. Optical Smoked Body or Pure Vibrant Gem
                     if let tint {
                         Capsule()
                             .fill(
                                 LinearGradient(
-                                    stops: [
-                                        .init(color: tint.opacity(isHovered ? 0.96 : 0.90), location: 0.0),
-                                        .init(color: Color(red: 0.65, green: 0.06, blue: 0.15).opacity(isHovered ? 0.92 : 0.84), location: 1.0)
+                                    colors: [
+                                        tint,
+                                        Color(red: 0.82, green: 0.06, blue: 0.16)
                                     ],
                                     startPoint: .top,
                                     endPoint: .bottom
                                 )
                             )
-                    } else {
+                        // Smooth internal luminescence (no split meniscus cut)
                         Capsule()
                             .fill(
                                 LinearGradient(
-                                    stops: [
-                                        .init(color: Color.white.opacity(isHovered ? 0.19 : 0.11), location: 0.0),
-                                        .init(color: Color.white.opacity(isHovered ? 0.06 : 0.02), location: 0.45),
-                                        .init(color: Color(red: 0.02, green: 0.03, blue: 0.05).opacity(0.40), location: 0.65),
-                                        .init(color: Color.white.opacity(isHovered ? 0.13 : 0.06), location: 1.0)
+                                    colors: [
+                                        Color.white.opacity(isHovered ? 0.20 : 0.10),
+                                        Color.clear
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .center
+                                )
+                            )
+                    } else {
+                        // Crystal clear smoked obsidian
+                        Capsule()
+                            .fill(
+                                LinearGradient(
+                                    colors: [
+                                        Color.white.opacity(isHovered ? 0.10 : 0.05),
+                                        Color.white.opacity(isHovered ? 0.03 : 0.01)
                                     ],
                                     startPoint: .top,
                                     endPoint: .bottom
                                 )
                             )
                     }
-
-                    // 3. Convex liquid meniscus lens reflection (surface tension glare)
-                    Capsule()
-                        .fill(
-                            LinearGradient(
-                                stops: [
-                                    .init(color: Color.white.opacity(tint != nil ? (isHovered ? 0.36 : 0.26) : (isHovered ? 0.28 : 0.18)), location: 0.0),
-                                    .init(color: Color.white.opacity(0.04), location: 0.38),
-                                    .init(color: Color.clear, location: 0.58)
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
                 }
                 .clipShape(Capsule())
             )
             .overlay(
-                // 4. Razor-sharp dual specular edge bevel
+                // 3. Precision Optical Specular Rim (micro-bevel, no fake cyan)
                 Capsule()
                     .strokeBorder(
                         LinearGradient(
                             stops: [
-                                .init(color: Color.white.opacity(tint != nil ? 0.88 : (isHovered ? 0.82 : 0.58)), location: 0.0),
-                                .init(color: Color.white.opacity(0.12), location: 0.25),
-                                .init(color: Color.clear, location: 0.55),
-                                .init(color: Color(red: 0.72, green: 0.86, blue: 1.0).opacity(tint != nil ? 0.35 : 0.25), location: 1.0)
+                                .init(color: Color.white.opacity(tint != nil ? 0.34 : (isHovered ? 0.24 : 0.14)), location: 0.0),
+                                .init(color: Color.white.opacity(tint != nil ? 0.08 : 0.04), location: 1.0)
                             ],
                             startPoint: .top,
                             endPoint: .bottom
                         ),
-                        lineWidth: 0.8
+                        lineWidth: 0.65
                     )
             )
             .shadow(
-                color: (tint ?? Color.black).opacity(tint != nil ? (isHovered ? 0.38 : 0.26) : (isHovered ? 0.42 : 0.32)),
-                radius: isHovered ? 12 : 7,
-                y: tint != nil ? 3 : 2
+                color: Color.black.opacity(tint != nil ? (isHovered ? 0.30 : 0.20) : (isHovered ? 0.24 : 0.16)),
+                radius: isHovered ? 8 : 4,
+                y: tint != nil ? 2.5 : 2
             )
     }
 }
@@ -1590,74 +1556,57 @@ private struct DonbyLiquidGlassRectModifier: ViewModifier {
         content
             .background(
                 ZStack {
-                    // 1. Frosted crystal backdrop blur
-                    DonbyBackdropBlur(material: .hudWindow, alpha: tint != nil ? 0.22 : 0.55)
-                        .clipShape(shape)
+                    shape.fill(.ultraThinMaterial)
 
-                    // 2. Optical glass body
                     if let tint {
                         shape
                             .fill(
                                 LinearGradient(
-                                    stops: [
-                                        .init(color: tint.opacity(isHovered ? 0.88 : 0.78), location: 0.0),
-                                        .init(color: Color(red: 0.60, green: 0.06, blue: 0.14).opacity(isHovered ? 0.80 : 0.68), location: 1.0)
-                                    ],
+                                    colors: [tint, Color(red: 0.82, green: 0.06, blue: 0.16)],
                                     startPoint: .top,
                                     endPoint: .bottom
+                                )
+                            )
+                        shape
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color.white.opacity(isHovered ? 0.20 : 0.10), Color.clear],
+                                    startPoint: .top,
+                                    endPoint: .center
                                 )
                             )
                     } else {
                         shape
                             .fill(
                                 LinearGradient(
-                                    stops: [
-                                        .init(color: Color.white.opacity(isHovered ? 0.18 : 0.10), location: 0.0),
-                                        .init(color: Color.white.opacity(isHovered ? 0.06 : 0.02), location: 0.45),
-                                        .init(color: Color(red: 0.02, green: 0.03, blue: 0.05).opacity(0.40), location: 0.65),
-                                        .init(color: Color.white.opacity(isHovered ? 0.12 : 0.05), location: 1.0)
+                                    colors: [
+                                        Color.white.opacity(isHovered ? 0.10 : 0.05),
+                                        Color.white.opacity(isHovered ? 0.03 : 0.01)
                                     ],
                                     startPoint: .top,
                                     endPoint: .bottom
                                 )
                             )
                     }
-
-                    // 3. Convex liquid meniscus reflection
-                    shape
-                        .fill(
-                            LinearGradient(
-                                stops: [
-                                    .init(color: Color.white.opacity(tint != nil ? (isHovered ? 0.26 : 0.18) : (isHovered ? 0.22 : 0.14)), location: 0.0),
-                                    .init(color: Color.white.opacity(0.03), location: 0.35),
-                                    .init(color: Color.clear, location: 0.52)
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
                 }
                 .clipShape(shape)
             )
             .overlay(
-                // 4. Dual specular bevel rim
                 shape.strokeBorder(
                     LinearGradient(
                         stops: [
-                            .init(color: Color.white.opacity(tint != nil ? 0.55 : (isHovered ? 0.68 : 0.45)), location: 0.0),
-                            .init(color: Color.white.opacity(0.08), location: 0.30),
-                            .init(color: Color.clear, location: 0.60),
-                            .init(color: Color(red: 0.72, green: 0.86, blue: 1.0).opacity(tint != nil ? 0.22 : 0.18), location: 1.0)
+                            .init(color: Color.white.opacity(tint != nil ? 0.32 : (isHovered ? 0.24 : 0.14)), location: 0.0),
+                            .init(color: Color.white.opacity(tint != nil ? 0.08 : 0.04), location: 1.0)
                         ],
                         startPoint: .top,
                         endPoint: .bottom
                     ),
-                    lineWidth: 0.8
+                    lineWidth: 0.65
                 )
             )
             .shadow(
-                color: (tint ?? Color.black).opacity(tint != nil ? (isHovered ? 0.28 : 0.18) : (isHovered ? 0.34 : 0.24)),
-                radius: isHovered ? 10 : 5,
+                color: Color.black.opacity(tint != nil ? (isHovered ? 0.28 : 0.18) : (isHovered ? 0.22 : 0.14)),
+                radius: isHovered ? 8 : 4,
                 y: tint != nil ? 2.5 : 2
             )
     }
@@ -1790,11 +1739,10 @@ public struct LiquidGlassCircleButton: View {
                 Image(systemName: systemImage)
                     .font(.system(size: size * 0.37, weight: .semibold))
                     .foregroundStyle(iconColor)
-                    .shadow(color: .black.opacity(0.28), radius: 1.5, y: 1)
+                    .shadow(color: .black.opacity(0.20), radius: 1, y: 0.5)
             }
             .frame(width: size, height: size)
             .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: isHovered)
-            .shadow(color: .black.opacity(isHovered ? 0.40 : 0.30), radius: isHovered ? 10 : 6, y: 3)
             .contentShape(Circle())
             .scaleEffect(isHovered ? 1.04 : 1.0)
             .animation(.easeOut(duration: 0.15), value: isHovered)
@@ -1892,9 +1840,8 @@ public struct LiquidGlassSelectorCard<MenuItems: View>: View {
         .menuIndicator(.hidden)
         .padding(.horizontal, 15)
         .padding(.vertical, 12)
-        .donbyLiquidGlassRect(cornerRadius: 16, tint: nil, interactive: true, isHovered: isHovered)
-        .shadow(color: .black.opacity(isHovered ? 0.38 : 0.28), radius: isHovered ? 14 : 8, y: 4)
-        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .donbyLiquidGlassRect(cornerRadius: 15, tint: nil, interactive: true, isHovered: isHovered)
+        .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
         .onHover { isHovered = $0 }
     }
 }
@@ -2001,6 +1948,136 @@ public struct PersonAvatarView: View {
                     continue
                 }
             }
+        }
+    }
+}
+
+
+// MARK: - Watch Record Poster & Video Frame Thumbnail View
+public struct RecordArtworkThumbnailView: View {
+    public let record: WatchRecordItem
+    public let server: EmbyServerConfig?
+    public var width: CGFloat = 78
+    public var height: CGFloat = 114
+
+    @State private var thumbnail: NSImage? = nil
+
+    public init(record: WatchRecordItem, server: EmbyServerConfig?, width: CGFloat = 78, height: CGFloat = 114) {
+        self.record = record
+        self.server = server
+        self.width = width
+        self.height = height
+    }
+
+    private var cacheKey: String {
+        "record_thumb_\(record.id)_\(record.posterURL ?? "")"
+    }
+
+    public var body: some View {
+        ZStack {
+            if let img = thumbnail {
+                Image(nsImage: img)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: width, height: height)
+                    .clipped()
+            } else {
+                Color(red: 0.10, green: 0.11, blue: 0.14)
+                    .frame(width: width, height: height)
+
+                VStack(spacing: 5) {
+                    Image(systemName: record.sourceType == "Local" ? "play.rectangle.fill" : "film")
+                        .font(.system(size: 22))
+                        .foregroundStyle(Color.white.opacity(0.35))
+                    Text(record.sourceType)
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.40))
+                }
+            }
+        }
+        .frame(width: width, height: height)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.65)
+        )
+        .shadow(color: Color.black.opacity(0.24), radius: 5, y: 2)
+        .task(id: "\(record.id)|\(record.posterURL ?? "")") {
+            await loadThumbnail()
+        }
+    }
+
+    private func loadThumbnail() async {
+        if let cached = ArtworkImageCache.shared.image(for: cacheKey) {
+            self.thumbnail = cached
+            return
+        }
+
+        // 1. Try remote posterURL string
+        if let urlStr = record.posterURL, let url = URL(string: urlStr) {
+            if let img = await fetchImage(url: url) {
+                ArtworkImageCache.shared.store(img, for: cacheKey)
+                self.thumbnail = img
+                return
+            }
+        }
+
+        // 2. Try Emby item ID with server
+        if let itemId = record.embyItemId, let server, !server.host.isEmpty {
+            if let url = EmbyClient.shared.imageURL(server: server, itemId: itemId, kind: .primary, maxWidth: 300) {
+                if let img = await fetchImage(url: url) {
+                    ArtworkImageCache.shared.store(img, for: cacheKey)
+                    self.thumbnail = img
+                    return
+                }
+            }
+        }
+
+        // 3. Try local video file frame extraction via AVAssetImageGenerator
+        if let streamStr = record.streamURLString {
+            let fileURL: URL? = {
+                if let u = URL(string: streamStr), u.isFileURL { return u }
+                if streamStr.hasPrefix("/") && FileManager.default.fileExists(atPath: streamStr) {
+                    return URL(fileURLWithPath: streamStr)
+                }
+                return nil
+            }()
+            if let fileURL, let img = await extractLocalThumbnail(fileURL: fileURL) {
+                ArtworkImageCache.shared.store(img, for: cacheKey)
+                self.thumbnail = img
+                return
+            }
+        }
+    }
+
+    private func fetchImage(url: URL) async -> NSImage? {
+        if let cached = ArtworkImageCache.shared.image(for: url.absoluteString) {
+            return cached
+        }
+        do {
+            let req = server.map { EmbyClient.shared.makeImageRequest(url: url, server: $0) } ?? URLRequest(url: url)
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            if let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
+               let img = NSImage(data: data) {
+                ArtworkImageCache.shared.store(img, for: url.absoluteString)
+                return img
+            }
+        } catch {}
+        return nil
+    }
+
+    private func extractLocalThumbnail(fileURL: URL) async -> NSImage? {
+        let asset = AVURLAsset(url: fileURL)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 320, height: 480)
+        let pos = max(1.0, min(record.positionSeconds, 120.0))
+        let time = CMTime(seconds: pos, preferredTimescale: 600)
+        do {
+            let (cgImage, _) = try await generator.image(at: time)
+            return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        } catch {
+            return nil
         }
     }
 }

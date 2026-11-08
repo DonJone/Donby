@@ -704,6 +704,28 @@ public final class EmbyClient: Sendable {
 
     public func imageURL(
         server: EmbyServerConfig,
+        itemId: String,
+        kind: EmbyImageKind = .primary,
+        maxWidth: Int = 600
+    ) -> URL? {
+        guard !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        let base = server.activeBaseURL
+        let imageTypePath: String
+        switch kind {
+        case .primary: imageTypePath = "Primary"
+        case .backdrop: imageTypePath = "Backdrop/0"
+        case .thumb: imageTypePath = "Thumb"
+        case .logo: imageTypePath = "Logo"
+        }
+        var urlStr = "\(base)/emby/Items/\(itemId)/Images/\(imageTypePath)?maxWidth=\(maxWidth)&quality=90"
+        if !server.accessToken.isEmpty { urlStr += "&api_key=\(server.accessToken)" }
+        return URL(string: urlStr)
+    }
+
+    public func imageURL(
+        server: EmbyServerConfig,
         item: EmbyItem,
         kind: EmbyImageKind = .primary,
         maxWidth: Int = 600
