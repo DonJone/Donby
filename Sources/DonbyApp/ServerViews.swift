@@ -44,7 +44,7 @@ public struct ServerListView: View {
 
                 Text("服务器")
                     .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(Color(white: 0.92))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
                 Spacer()
 
@@ -206,7 +206,7 @@ public struct ServerListView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(DonbyGlassPalette.canvasBlack)
+        .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
     }
 
     private func importFromClipboard() {
@@ -230,9 +230,9 @@ public struct ServerCardView: View {
     public var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color(red: 0.138, green: 0.142, blue: 0.156))
+                .fill(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
 
-            if appState.displayAeroGlass {
+            if appState.displayAeroGlass && !appState.isLightMode {
                 RadialGradient(
                     colors: [
                         Color(red: 0.12, green: 0.32, blue: 0.64).opacity(0.36),
@@ -251,7 +251,7 @@ public struct ServerCardView: View {
                     HStack(alignment: .center, spacing: 6) {
                         Text(server.name)
                             .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                             .lineLimit(1)
 
                         if isUnconfigured {
@@ -331,7 +331,7 @@ public struct ServerCardView: View {
         .frame(width: 225, height: 124)
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(isHovered ? Color.white.opacity(0.18) : Color.white.opacity(0.04), lineWidth: 0.8)
+                .strokeBorder(isHovered ? appState.accentColor.opacity(0.50) : DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
         )
         .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .onHover { isHovered = $0 }

@@ -377,7 +377,10 @@ public struct EmbyItem: Codable, Identifiable, Hashable, Sendable {
         self.id = id; self.name = name; self.originalTitle = originalTitle; self.serverId = serverId; self.type = type; self.collectionType = collectionType; self.overview = overview; self.taglines = taglines; self.genres = genres; self.communityRating = communityRating; self.criticRating = criticRating; self.officialRating = officialRating; self.productionYear = productionYear; self.premiereDate = premiereDate; self.endDate = endDate; self.status = status; self.runTimeTicks = runTimeTicks; self.container = container; self.path = path; self.isFolder = isFolder; self.parentId = parentId; self.seriesId = seriesId; self.seriesName = seriesName; self.seasonId = seasonId; self.seasonName = seasonName; self.indexNumber = indexNumber; self.parentIndexNumber = parentIndexNumber; self.childCount = childCount; self.recursiveItemCount = recursiveItemCount; self.imageTags = imageTags; self.backdropImageTags = backdropImageTags; self.parentBackdropItemId = parentBackdropItemId; self.parentBackdropImageTags = parentBackdropImageTags; self.seriesPrimaryImageTag = seriesPrimaryImageTag; self.primaryImageAspectRatio = primaryImageAspectRatio; self.userData = userData; self.mediaSources = mediaSources; self.mediaStreams = mediaStreams; self.people = people; self.studios = studios; self.providerIds = providerIds; self.chapters = chapters; self.dateCreated = dateCreated
     }
 
-    public var isSeries: Bool { type?.lowercased() == "series" }
+    public var isSeries: Bool {
+        let t = type?.lowercased() ?? ""
+        return t == "series" || t == "show" || t == "season"
+    }
     public var isEpisode: Bool { type?.lowercased() == "episode" }
     public var isMovie: Bool { type?.lowercased() == "movie" }
 
@@ -416,6 +419,30 @@ public struct EmbyItem: Codable, Identifiable, Hashable, Sendable {
     public var resumePositionSeconds: Double {
         guard let ticks = userData?.playbackPositionTicks, ticks > 0 else { return 0 }
         return Double(ticks) / 10_000_000.0
+    }
+
+    public var resumePositionString: String {
+        let total = Int(resumePositionSeconds)
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
+        if h > 0 {
+            return String(format: "%02d:%02d:%02d", h, m, s)
+        } else {
+            return String(format: "%02d:%02d", m, s)
+        }
+    }
+
+    public var premiereDateString: String? {
+        guard let premiereDate, premiereDate.count >= 10 else {
+            return productionYear.map { "\($0)年" }
+        }
+        let ymd = String(premiereDate.prefix(10))
+        let parts = ymd.split(separator: "-")
+        if parts.count == 3 {
+            return "\(parts[0])年\(Int(parts[1]) ?? 1)月\(Int(parts[2]) ?? 1)日"
+        }
+        return ymd
     }
 
     public var progressFraction: Double {

@@ -141,7 +141,7 @@ public struct EmbyMainView: View {
                     .safeAreaInset(edge: .top, spacing: 0) {
                         embyTopToolbar
                     }
-                    .background(DonbyGlassPalette.canvasBlack)
+                    .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
                 }
             }
     }
@@ -167,7 +167,7 @@ public struct EmbyMainView: View {
 
                     Text(server.name)
                         .font(.system(size: 15.5, weight: .bold))
-                        .foregroundStyle(Color(white: 0.94))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                         .lineLimit(1)
 
                     if server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -198,28 +198,12 @@ public struct EmbyMainView: View {
 
                                 Text(server.activeLineName)
                                     .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(Color(white: 0.92))
+                                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                                     .lineLimit(1)
 
-                                if let ms = server.activeLineLatencyMs {
-                                    let msCol: Color = ms < 100 ? Color(red: 0.22, green: 0.84, blue: 0.36) : (ms < 260 ? Color(red: 0.24, green: 0.74, blue: 0.98) : .orange)
-                                    HStack(spacing: 3.5) {
-                                        Circle()
-                                            .fill(msCol)
-                                            .frame(width: 5, height: 5)
-                                        Text("\(ms)ms")
-                                            .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                                            .foregroundStyle(msCol)
-                                    }
-                                } else {
-                                    Circle()
-                                        .fill(Color(red: 0.22, green: 0.84, blue: 0.36))
-                                        .frame(width: 5.5, height: 5.5)
-                                }
-
                                 Image(systemName: "chevron.down")
-                                    .font(.system(size: 8.5, weight: .bold))
-                                    .foregroundStyle(Color(white: 0.68))
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                             }
                             .padding(.horizontal, 11)
                             .padding(.vertical, 6)
@@ -240,7 +224,8 @@ public struct EmbyMainView: View {
                     tooltip: "切换线路 (⌘L)",
                     action: { appState.linePickerServer = server }
                 ) { hovered in
-                    RouteSwitchVectorIcon(size: 15, color: hovered ? .white : Color(white: 0.88))
+                    let iconColor = appState.isLightMode ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28)) : (hovered ? .white : Color(white: 0.88))
+                    RouteSwitchVectorIcon(size: 15, color: iconColor)
                 }
 
                 ToolbarVectorButton(
@@ -253,9 +238,10 @@ public struct EmbyMainView: View {
                         }
                     }
                 ) { hovered in
+                    let iconColor = appState.isLightMode ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28)) : (hovered ? .white : Color(white: 0.88))
                     RefreshVectorIcon(
                         size: 15,
-                        color: hovered ? .white : Color(white: 0.88),
+                        color: iconColor,
                         isSpinning: appState.isLoadingHome || appState.isSyncingDomains
                     )
                 }
@@ -265,7 +251,8 @@ public struct EmbyMainView: View {
                     isActive: showViewOptionsPopover,
                     action: { showViewOptionsPopover.toggle() }
                 ) { hovered in
-                    MoreDotsVectorIcon(size: 15, color: hovered ? .white : Color(white: 0.88))
+                    let iconColor = appState.isLightMode ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28)) : (hovered ? .white : Color(white: 0.88))
+                    MoreDotsVectorIcon(size: 15, color: iconColor)
                 }
                 .popover(isPresented: $showViewOptionsPopover, arrowEdge: .bottom) {
                     VStack(alignment: .leading, spacing: 11) {
@@ -313,8 +300,8 @@ public struct EmbyMainView: View {
         .background(
             LinearGradient(
                 colors: [
-                    DonbyGlassPalette.canvasBlack.opacity(0.84),
-                    DonbyGlassPalette.canvasBlack.opacity(0.36),
+                    DonbyGlassPalette.canvas(isLight: appState.isLightMode).opacity(0.92),
+                    DonbyGlassPalette.canvas(isLight: appState.isLightMode).opacity(0.40),
                     Color.clear
                 ],
                 startPoint: .top,
@@ -484,8 +471,8 @@ public struct SectionHeaderView: View {
 
     public var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(title).font(.system(size: 17, weight: .bold)).foregroundStyle(Color(white: 0.94))
-            if let subtitle { Text(subtitle).font(.system(size: 12)).foregroundStyle(Color(white: 0.55)) }
+            Text(title).font(.system(size: 17, weight: .bold)).foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+            if let subtitle { Text(subtitle).font(.system(size: 12)).foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode)) }
             Spacer()
             if let actionTitle, let action {
                 Button(action: action) {
@@ -493,7 +480,7 @@ public struct SectionHeaderView: View {
                         Text(actionTitle).font(.system(size: 12.5, weight: .medium))
                         Image(systemName: "chevron.right").font(.system(size: 10, weight: .bold))
                     }
-                    .foregroundStyle(Color(white: 0.62))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
                 .buttonStyle(.plain)
             }
@@ -601,7 +588,7 @@ public struct MLibListView: View {
                 }
             }
         }
-        .background(DonbyGlassPalette.canvasBlack)
+        .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
         .task(id: "\(library.id)|\(sortField.rawValue)|\(ascending)|\(filterUnwatchedOnly)|\(filterFavoritesOnly)") {
             await loadLibraryItems()
         }

@@ -187,6 +187,21 @@ public enum AppThemeColor: String, Codable, CaseIterable, Identifiable, Sendable
     }
 }
 
+public enum AppAppearanceMode: String, Codable, CaseIterable, Identifiable, Sendable {
+    case light = "light"
+    case dark = "dark"
+    case auto = "auto"
+
+    public var id: String { rawValue }
+    public var title: String {
+        switch self {
+        case .light: return "浅色模式 (默认)"
+        case .dark: return "深色模式"
+        case .auto: return "跟随系统"
+        }
+    }
+}
+
 public struct ThemeColorPalette {
     /// Apple Music App classic dark-mode crimson (#FA2D48)
     public static let appleMusicRedRGB = (r: 0.980, g: 0.176, b: 0.282)

@@ -5,21 +5,66 @@ import DonbyCore
 import DonbyNetwork
 
 // MARK: - Native Artwork & Local Poster Cache
-@MainActor
 public final class ArtworkImageCache {
     public static let shared = ArtworkImageCache()
-    private let cache = NSCache<NSString, NSImage>()
+    private let memoryCache = NSCache<NSString, NSImage>()
+    private let diskQueue = DispatchQueue(label: "com.don.ArtworkDiskCache", qos: .utility)
+    private let fileManager = FileManager.default
+    private let cacheDirectoryURL: URL
 
     private init() {
-        cache.countLimit = 400
+        memoryCache.countLimit = 800
+        memoryCache.totalCostLimit = 200 * 1024 * 1024 // 200 MB
+
+        let base = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let dir = base.appendingPathComponent("com.don.Donby/ArtworkCache", isDirectory: true)
+        self.cacheDirectoryURL = dir
+        try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
+    }
+
+    private func diskFileName(for key: String) -> String {
+        let hash = key.utf8.reduce(5381) { ($0 << 5) &+ $0 &+ Int($1) }
+        let cleanPrefix = key.components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .joined()
+            .prefix(24)
+        return "\(cleanPrefix)_\(abs(hash)).img"
     }
 
     public func image(for key: String) -> NSImage? {
-        cache.object(forKey: key as NSString)
+        if let mem = memoryCache.object(forKey: key as NSString) {
+            return mem
+        }
+        let fileURL = cacheDirectoryURL.appendingPathComponent(diskFileName(for: key))
+        if let data = try? Data(contentsOf: fileURL),
+           let img = NSImage(data: data) {
+            memoryCache.setObject(img, forKey: key as NSString, cost: data.count)
+            return img
+        }
+        return nil
     }
 
     public func store(_ image: NSImage, for key: String) {
-        cache.setObject(image, forKey: key as NSString)
+        memoryCache.setObject(image, forKey: key as NSString)
+        diskQueue.async { [cacheDirectoryURL] in
+            guard let tiff = image.tiffRepresentation,
+                  let rep = NSBitmapImageRep(data: tiff),
+                  let data = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.90]) else {
+                return
+            }
+            let fileURL = cacheDirectoryURL.appendingPathComponent(self.diskFileName(for: key))
+            try? data.write(to: fileURL, options: .atomic)
+        }
+    }
+
+    public func storeRawData(_ data: Data, for key: String) {
+        if let img = NSImage(data: data) {
+            memoryCache.setObject(img, forKey: key as NSString, cost: data.count)
+        }
+        diskQueue.async { [cacheDirectoryURL] in
+            let fileURL = cacheDirectoryURL.appendingPathComponent(self.diskFileName(for: key))
+            try? data.write(to: fileURL, options: .atomic)
+        }
     }
 
     public func systemAsset(_ name: String) -> NSImage? {
@@ -747,6 +792,7 @@ public extension View {
     }
 }
 public struct DonbyToolbarCircleView: View {
+    @Environment(\.colorScheme) private var colorScheme
     public let systemName: String
     public var showChevron: Bool = false
 
@@ -759,11 +805,11 @@ public struct DonbyToolbarCircleView: View {
         HStack(spacing: 3) {
             Image(systemName: systemName)
                 .font(.system(size: 13.5, weight: .medium))
-                .foregroundStyle(Color(white: 0.86))
+                .foregroundStyle(colorScheme == .light ? Color(red: 0.12, green: 0.12, blue: 0.14) : Color(white: 0.90))
             if showChevron {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8.5, weight: .bold))
-                    .foregroundStyle(Color(white: 0.65))
+                    .foregroundStyle(colorScheme == .light ? Color(red: 0.40, green: 0.40, blue: 0.44) : Color(white: 0.65))
             }
         }
         .frame(width: showChevron ? 42 : 36, height: 34)
@@ -772,6 +818,7 @@ public struct DonbyToolbarCircleView: View {
 }
 
 public struct DonbySearchPillField: View {
+    @Environment(\.colorScheme) private var colorScheme
     public let placeholder: String
     @Binding public var text: String
     public var width: CGFloat = 260
@@ -798,7 +845,7 @@ public struct DonbySearchPillField: View {
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
-                .foregroundStyle(.white)
+                .foregroundStyle(colorScheme == .light ? Color(red: 0.10, green: 0.10, blue: 0.12) : .white)
                 .onSubmit {
                     onSubmit?()
                 }
@@ -851,6 +898,31 @@ public struct MediaArtworkView: View {
         return EmbyClient.shared.imageURL(server: server, item: item, kind: kind, maxWidth: maxWidth)
     }
 
+    private var candidateURLs: [URL] {
+        guard let server, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+        var urls: [URL] = []
+        if let direct = EmbyClient.shared.imageURL(server: server, itemId: item.id, kind: kind, maxWidth: maxWidth) {
+            urls.append(direct)
+        }
+        if let primary = EmbyClient.shared.imageURL(server: server, item: item, kind: kind, maxWidth: maxWidth), !urls.contains(primary) {
+            urls.append(primary)
+        }
+        if item.isEpisode {
+            if let thumb = EmbyClient.shared.imageURL(server: server, itemId: item.id, kind: .thumb, maxWidth: maxWidth), !urls.contains(thumb) {
+                urls.append(thumb)
+            }
+            if let sId = item.seriesId {
+                if let sBackdrop = EmbyClient.shared.imageURL(server: server, itemId: sId, kind: .backdrop, maxWidth: maxWidth), !urls.contains(sBackdrop) {
+                    urls.append(sBackdrop)
+                }
+                if let sPrimary = EmbyClient.shared.imageURL(server: server, itemId: sId, kind: .primary, maxWidth: maxWidth), !urls.contains(sPrimary) {
+                    urls.append(sPrimary)
+                }
+            }
+        }
+        return urls
+    }
+
     public var body: some View {
         GeometryReader { geo in
             ZStack {
@@ -882,34 +954,53 @@ public struct MediaArtworkView: View {
                         .clipped()
                     }
                 } else {
-                    Color(red: 0.14, green: 0.15, blue: 0.17)
+                    ZStack {
+                        Color(red: 0.88, green: 0.89, blue: 0.92)
+                        Image(systemName: "film")
+                            .font(.system(size: 24, weight: .light))
+                            .foregroundStyle(Color.black.opacity(0.18))
+                    }
                 }
             }
         }
-        .task(id: remoteURL?.absoluteString ?? item.id) {
+        .task(id: "\(server?.activeBaseURL ?? "")|\(item.id)|\(kind.rawValue)") {
             if let key = localPosterKey, let localImg = ArtworkImageCache.shared.localPoster(key) {
                 self.loadedImage = localImg
                 return
             }
-            guard let url = remoteURL else { return }
-            if let cached = ArtworkImageCache.shared.image(for: url.absoluteString) {
-                self.loadedImage = cached
-                return
-            }
-            do {
-                let req = EmbyClient.shared.makeImageRequest(url: url, server: server)
-                let (data, resp) = try await URLSession.shared.data(for: req)
-                if let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
-                   let img = NSImage(data: data) {
-                    ArtworkImageCache.shared.store(img, for: url.absoluteString)
-                    self.loadedImage = img
+            let urls = candidateURLs
+            guard let server else { return }
+            for url in urls {
+                if Task.isCancelled { return }
+                if let cached = ArtworkImageCache.shared.image(for: url.absoluteString) {
+                    self.loadedImage = cached
+                    return
                 }
-            } catch {}
+                do {
+                    let req = EmbyClient.shared.makeImageRequest(url: url, server: server)
+                    let (data, resp) = try await URLSession.shared.data(for: req)
+                    if let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
+                       data.count > 128,
+                       let img = NSImage(data: data),
+                       img.size.width > 1 {
+                        ArtworkImageCache.shared.storeRawData(data, for: url.absoluteString)
+                        self.loadedImage = img
+                        return
+                    }
+                } catch {
+                    continue
+                }
+            }
         }
     }
 
     private var resolvedImage: NSImage? {
         if let loadedImage { return loadedImage }
+        for url in candidateURLs {
+            if let cached = ArtworkImageCache.shared.image(for: url.absoluteString) {
+                return cached
+            }
+        }
         if let key = localPosterKey {
             return ArtworkImageCache.shared.localPoster(key)
         }
@@ -1054,12 +1145,12 @@ public struct PosterCardView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.name)
                     .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(Color(white: 0.92))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     .lineLimit(1)
 
                 Text(item.displaySubtitle.isEmpty ? (item.isSeries ? "剧集" : "电影") : item.displaySubtitle)
                     .font(.system(size: 11))
-                    .foregroundStyle(Color(white: 0.55))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     .lineLimit(1)
             }
             .frame(width: targetWidth, alignment: .leading)
@@ -1176,12 +1267,12 @@ public struct LandscapeCardView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.isEpisode ? (item.seriesName ?? item.name) : item.name)
                         .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(Color(white: 0.92))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                         .lineLimit(1)
 
                     Text(subtitleOverride ?? (item.isEpisode ? item.name : item.displaySubtitle))
                         .font(.system(size: 11))
-                        .foregroundStyle(Color(white: 0.55))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                         .lineLimit(1)
                 }
                 Spacer()
@@ -1410,13 +1501,65 @@ public struct ToastBannerView: View {
 // MARK: - Apple Liquid Glass Design System (Authentic Multi-Layer Optical Refraction)
 
 public enum DonbyGlassPalette {
-    /// Deep Space Black cinema canvas (replaces flat mid-gray #19191B)
+    /// Deep Space Black cinema canvas
     public static let canvasBlack = Color(red: 0.043, green: 0.046, blue: 0.056)
-    /// Subtle obsidian smoked backing so clear optical glass stays legible over bright artwork without turning milky gray
+    /// SenPlayer-inspired Light Mode canvas
+    public static let canvasLight = Color(red: 0.945, green: 0.948, blue: 0.960)
     public static let smokedBacking = Color(red: 0.020, green: 0.024, blue: 0.036)
+
+    public static func canvas(isLight: Bool) -> Color {
+        isLight ? canvasLight : canvasBlack
+    }
+
+    public static func sidebar(isLight: Bool) -> Color {
+        isLight ? Color(red: 0.92, green: 0.925, blue: 0.94) : Color(red: 0.075, green: 0.080, blue: 0.095)
+    }
+
+    public static func cardBackground(isLight: Bool) -> Color {
+        isLight ? Color.white.opacity(0.85) : Color(red: 0.09, green: 0.095, blue: 0.11)
+    }
+
+    public static func primaryText(isLight: Bool) -> Color {
+        isLight ? Color(red: 0.10, green: 0.10, blue: 0.12) : Color.white
+    }
+
+    public static func secondaryText(isLight: Bool) -> Color {
+        isLight ? Color(red: 0.42, green: 0.42, blue: 0.46) : Color(white: 0.60)
+    }
+
+    public static func tertiaryText(isLight: Bool) -> Color {
+        isLight ? Color(red: 0.58, green: 0.58, blue: 0.62) : Color(white: 0.42)
+    }
+
+    public static func separator(isLight: Bool) -> Color {
+        isLight ? Color.black.opacity(0.08) : Color.white.opacity(0.08)
+    }
 }
 
-/// Optical Backdrop Diffusion View (hardware AppKit visual effect for real glass refraction)
+/// Optical Visual Effect View for sidebar translucency and desktop-bleed
+public struct DonbyVisualEffectView: NSViewRepresentable {
+    public var material: NSVisualEffectView.Material = .sidebar
+    public var blendingMode: NSVisualEffectView.BlendingMode = .behindWindow
+
+    public init(material: NSVisualEffectView.Material = .sidebar, blendingMode: NSVisualEffectView.BlendingMode = .behindWindow) {
+        self.material = material
+        self.blendingMode = blendingMode
+    }
+
+    public func makeNSView(context: Context) -> NSVisualEffectView {
+        let v = NSVisualEffectView()
+        v.material = material
+        v.blendingMode = blendingMode
+        v.state = .active
+        return v
+    }
+
+    public func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        nsView.material = material
+        nsView.blendingMode = blendingMode
+    }
+}
+
 public struct DonbyBackdropBlur: NSViewRepresentable {
     var material: NSVisualEffectView.Material = .hudWindow
     var alpha: CGFloat = 0.45
@@ -1468,37 +1611,39 @@ public struct DonbyGlassContainer<Content: View>: View {
 }
 
 private struct DonbyLiquidGlassCapsuleModifier: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
     let tint: Color?
     let interactive: Bool
     let isHovered: Bool
 
     func body(content: Content) -> some View {
+        let isLight = (colorScheme == .light)
         content
             .background(
                 ZStack {
                     // 1. Native Compositor Optical Translucency
-                    Capsule()
+                    Capsule(style: .continuous)
                         .fill(.ultraThinMaterial)
 
                     // 2. Optical Smoked Body or Pure Vibrant Gem
                     if let tint {
-                        Capsule()
+                        Capsule(style: .continuous)
                             .fill(
                                 LinearGradient(
                                     colors: [
-                                        tint,
-                                        Color(red: 0.82, green: 0.06, blue: 0.16)
+                                        tint.opacity(0.96),
+                                        tint.opacity(0.85)
                                     ],
                                     startPoint: .top,
                                     endPoint: .bottom
                                 )
                             )
                         // Smooth internal luminescence (no split meniscus cut)
-                        Capsule()
+                        Capsule(style: .continuous)
                             .fill(
                                 LinearGradient(
                                     colors: [
-                                        Color.white.opacity(isHovered ? 0.20 : 0.10),
+                                        Color.white.opacity(isHovered ? 0.24 : 0.14),
                                         Color.clear
                                     ],
                                     startPoint: .top,
@@ -1506,52 +1651,79 @@ private struct DonbyLiquidGlassCapsuleModifier: ViewModifier {
                                 )
                             )
                     } else {
-                        // Crystal clear smoked obsidian
-                        Capsule()
-                            .fill(
-                                LinearGradient(
-                                    colors: [
-                                        Color.white.opacity(isHovered ? 0.10 : 0.05),
-                                        Color.white.opacity(isHovered ? 0.03 : 0.01)
-                                    ],
-                                    startPoint: .top,
-                                    endPoint: .bottom
+                        if isLight {
+                            Capsule(style: .continuous)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [
+                                           Color.white.opacity(isHovered ? 0.66 : 0.52),
+                                           Color.white.opacity(isHovered ? 0.52 : 0.38)
+                                        ],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    )
                                 )
-                            )
+                           // Specular lens reflection (top-down internal sheen)
+                           Capsule(style: .continuous)
+                               .fill(
+                                   LinearGradient(
+                                       stops: [
+                                           .init(color: Color.white.opacity(isHovered ? 0.52 : 0.36), location: 0.0),
+                                           .init(color: Color.white.opacity(0.0), location: 0.52)
+                                       ],
+                                       startPoint: .top,
+                                       endPoint: .bottom
+                                   )
+                               )
+                        } else {
+                            Capsule(style: .continuous)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [
+                                            Color.white.opacity(isHovered ? 0.14 : 0.08),
+                                            Color.white.opacity(isHovered ? 0.06 : 0.02)
+                                        ],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    )
+                                )
+                        }
                     }
                 }
                 .clipShape(Capsule())
             )
             .overlay(
                 // 3. Precision Optical Specular Rim (micro-bevel, no fake cyan)
-                Capsule()
+                Capsule(style: .continuous)
                     .strokeBorder(
                         LinearGradient(
                             stops: [
-                                .init(color: Color.white.opacity(tint != nil ? 0.34 : (isHovered ? 0.24 : 0.14)), location: 0.0),
-                                .init(color: Color.white.opacity(tint != nil ? 0.08 : 0.04), location: 1.0)
+                               .init(color: tint != nil ? Color.white.opacity(0.40) : (isLight ? Color.white.opacity(isHovered ? 0.95 : 0.82) : Color.white.opacity(isHovered ? 0.28 : 0.16)), location: 0.0),
+                               .init(color: tint != nil ? Color.white.opacity(0.12) : (isLight ? Color.black.opacity(0.06) : Color.white.opacity(0.04)), location: 1.0)
                             ],
                             startPoint: .top,
                             endPoint: .bottom
                         ),
-                        lineWidth: 0.65
+                       lineWidth: 0.55
                     )
             )
             .shadow(
-                color: Color.black.opacity(tint != nil ? (isHovered ? 0.30 : 0.20) : (isHovered ? 0.24 : 0.16)),
-                radius: isHovered ? 8 : 4,
-                y: tint != nil ? 2.5 : 2
+               color: Color.black.opacity(tint != nil ? (isHovered ? 0.26 : 0.18) : (isLight ? (isHovered ? 0.09 : 0.05) : (isHovered ? 0.32 : 0.20))),
+               radius: isHovered ? 7 : (isLight ? 3.5 : 4),
+               y: isLight ? (isHovered ? 3.5 : 2.0) : (tint != nil ? 2.5 : 2)
             )
     }
 }
 
 private struct DonbyLiquidGlassRectModifier: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
     let cornerRadius: CGFloat
     let tint: Color?
     let interactive: Bool
     let isHovered: Bool
 
     func body(content: Content) -> some View {
+        let isLight = (colorScheme == .light)
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         content
             .background(
@@ -1562,7 +1734,7 @@ private struct DonbyLiquidGlassRectModifier: ViewModifier {
                         shape
                             .fill(
                                 LinearGradient(
-                                    colors: [tint, Color(red: 0.82, green: 0.06, blue: 0.16)],
+                                    colors: [tint.opacity(0.96), tint.opacity(0.85)],
                                     startPoint: .top,
                                     endPoint: .bottom
                                 )
@@ -1570,23 +1742,49 @@ private struct DonbyLiquidGlassRectModifier: ViewModifier {
                         shape
                             .fill(
                                 LinearGradient(
-                                    colors: [Color.white.opacity(isHovered ? 0.20 : 0.10), Color.clear],
+                                    colors: [Color.white.opacity(isHovered ? 0.24 : 0.14), Color.clear],
                                     startPoint: .top,
                                     endPoint: .center
                                 )
                             )
                     } else {
-                        shape
-                            .fill(
-                                LinearGradient(
-                                    colors: [
-                                        Color.white.opacity(isHovered ? 0.10 : 0.05),
-                                        Color.white.opacity(isHovered ? 0.03 : 0.01)
-                                    ],
-                                    startPoint: .top,
-                                    endPoint: .bottom
+                        if isLight {
+                            shape
+                                .fill(
+                                    LinearGradient(
+                                        colors: [
+                                           Color.white.opacity(isHovered ? 0.66 : 0.52),
+                                           Color.white.opacity(isHovered ? 0.52 : 0.38)
+                                        ],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    )
                                 )
-                            )
+                           // Specular lens reflection
+                           shape
+                               .fill(
+                                   LinearGradient(
+                                       stops: [
+                                           .init(color: Color.white.opacity(isHovered ? 0.52 : 0.36), location: 0.0),
+                                           .init(color: Color.white.opacity(0.0), location: 0.52)
+                                       ],
+                                       startPoint: .top,
+                                       endPoint: .bottom
+                                   )
+                               )
+                        } else {
+                           shape
+                               .fill(
+                                   LinearGradient(
+                                       colors: [
+                                           Color.white.opacity(isHovered ? 0.14 : 0.08),
+                                           Color.white.opacity(isHovered ? 0.06 : 0.02)
+                                       ],
+                                       startPoint: .top,
+                                       endPoint: .bottom
+                                   )
+                               )
+                        }
                     }
                 }
                 .clipShape(shape)
@@ -1595,19 +1793,19 @@ private struct DonbyLiquidGlassRectModifier: ViewModifier {
                 shape.strokeBorder(
                     LinearGradient(
                         stops: [
-                            .init(color: Color.white.opacity(tint != nil ? 0.32 : (isHovered ? 0.24 : 0.14)), location: 0.0),
-                            .init(color: Color.white.opacity(tint != nil ? 0.08 : 0.04), location: 1.0)
+                           .init(color: tint != nil ? Color.white.opacity(0.40) : (isLight ? Color.white.opacity(isHovered ? 0.95 : 0.82) : Color.white.opacity(isHovered ? 0.28 : 0.16)), location: 0.0),
+                           .init(color: tint != nil ? Color.white.opacity(0.12) : (isLight ? Color.black.opacity(0.06) : Color.white.opacity(0.04)), location: 1.0)
                         ],
                         startPoint: .top,
                         endPoint: .bottom
                     ),
-                    lineWidth: 0.65
+                   lineWidth: 0.55
                 )
             )
             .shadow(
-                color: Color.black.opacity(tint != nil ? (isHovered ? 0.28 : 0.18) : (isHovered ? 0.22 : 0.14)),
-                radius: isHovered ? 8 : 4,
-                y: tint != nil ? 2.5 : 2
+               color: Color.black.opacity(tint != nil ? (isHovered ? 0.26 : 0.18) : (isLight ? (isHovered ? 0.09 : 0.05) : (isHovered ? 0.32 : 0.20))),
+               radius: isHovered ? 7 : (isLight ? 3.5 : 4),
+               y: isLight ? (isHovered ? 3.5 : 2.0) : (tint != nil ? 2.5 : 2)
             )
     }
 }
@@ -1655,6 +1853,7 @@ public struct DonbyLiquidGlassCapsuleSurface: View {
 }
 
 public struct LiquidGlassCapsuleButton: View {
+    @Environment(\.colorScheme) private var colorScheme
     public let title: String
     public let systemImage: String
     public var tint: Color? = nil
@@ -1683,6 +1882,13 @@ public struct LiquidGlassCapsuleButton: View {
         self.action = action
     }
 
+    private var textColor: Color {
+        if tint != nil {
+            return .white
+        }
+        return colorScheme == .light ? Color(red: 0.10, green: 0.10, blue: 0.12) : .white
+    }
+
     public var body: some View {
         Button(action: action) {
             HStack(spacing: 7) {
@@ -1691,8 +1897,8 @@ public struct LiquidGlassCapsuleButton: View {
                 Text(title)
                     .font(.system(size: fontSize, weight: tint != nil ? .bold : .semibold))
             }
-            .foregroundStyle(.white)
-            .shadow(color: .black.opacity(tint != nil ? 0.35 : 0.25), radius: 2, y: 1)
+            .foregroundStyle(textColor)
+            .shadow(color: tint != nil ? Color.black.opacity(0.35) : (colorScheme == .light ? Color.clear : Color.black.opacity(0.25)), radius: 2, y: 1)
             .padding(.horizontal, horizontalPadding)
             .padding(.vertical, verticalPadding)
             .donbyLiquidGlassCapsule(tint: tint, interactive: true, isHovered: isHovered)
@@ -1711,8 +1917,9 @@ public struct LiquidGlassCapsuleButton: View {
 }
 
 public struct LiquidGlassCircleButton: View {
+    @Environment(\.colorScheme) private var colorScheme
     public let systemImage: String
-    public var iconColor: Color = .white
+    public var iconColor: Color? = nil
     public var size: CGFloat = 39
     public var tooltip: String = ""
     public let action: () -> Void
@@ -1721,7 +1928,7 @@ public struct LiquidGlassCircleButton: View {
 
     public init(
         systemImage: String,
-        iconColor: Color = .white,
+        iconColor: Color? = nil,
         size: CGFloat = 39,
         tooltip: String = "",
         action: @escaping () -> Void
@@ -1733,13 +1940,18 @@ public struct LiquidGlassCircleButton: View {
         self.action = action
     }
 
+    private var effectiveIconColor: Color {
+        if let iconColor { return iconColor }
+        return colorScheme == .light ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white
+    }
+
     public var body: some View {
         Button(action: action) {
             ZStack {
                 Image(systemName: systemImage)
-                    .font(.system(size: size * 0.37, weight: .semibold))
-                    .foregroundStyle(iconColor)
-                    .shadow(color: .black.opacity(0.20), radius: 1, y: 0.5)
+                    .font(.system(size: size * 0.38, weight: .semibold))
+                    .foregroundStyle(effectiveIconColor)
+                    .shadow(color: colorScheme == .light ? Color.clear : Color.black.opacity(0.20), radius: 1, y: 0.5)
             }
             .frame(width: size, height: size)
             .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: isHovered)
@@ -1753,8 +1965,63 @@ public struct LiquidGlassCircleButton: View {
     }
 }
 
+/// Sculpted Liquid Glass circular Menu button with unified physical optics matching LiquidGlassCircleButton
+public struct LiquidGlassCircleMenu<MenuItems: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    public let systemImage: String
+    public var size: CGFloat = 38
+    public var tooltip: String = ""
+    @ViewBuilder public let menuContent: () -> MenuItems
+
+    @State private var isHovered: Bool = false
+
+    public init(
+        systemImage: String,
+        size: CGFloat = 38,
+        tooltip: String = "",
+        @ViewBuilder menuContent: @escaping () -> MenuItems
+    ) {
+        self.systemImage = systemImage
+        self.size = size
+        self.tooltip = tooltip
+        self.menuContent = menuContent
+    }
+
+    private var effectiveIconColor: Color {
+        colorScheme == .light ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white
+    }
+
+    public var body: some View {
+        ZStack {
+            Circle()
+                .fill(.clear)
+                .frame(width: size, height: size)
+                .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: isHovered)
+
+            Menu {
+                menuContent()
+            } label: {
+                Image(systemName: systemImage)
+                    .font(.system(size: size * 0.38, weight: .semibold))
+                    .foregroundStyle(effectiveIconColor)
+                    .frame(width: size, height: size)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: size, height: size)
+        }
+        .frame(width: size, height: size)
+        .contentShape(Circle())
+        .onHover { isHovered = $0 }
+        .help(tooltip)
+    }
+}
+
 /// Sculpted Liquid Glass selector card (`资源版本` / `音轨选择` / `主字幕`) replacing stock grey NSPopUpButton
 public struct LiquidGlassSelectorCard<MenuItems: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
     public let title: String
     public let icon: String
     public let valueText: String
@@ -1808,7 +2075,7 @@ public struct LiquidGlassSelectorCard<MenuItems: View>: View {
                     HStack(spacing: 6) {
                         Text(title)
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Color.white.opacity(0.66))
+                            .foregroundStyle(colorScheme == .light ? Color(red: 0.44, green: 0.44, blue: 0.48) : Color.white.opacity(0.66))
                         if let badgeText, !badgeText.isEmpty {
                             Text(badgeText)
                                 .font(.system(size: 9.5, weight: .bold, design: .rounded))
@@ -1822,7 +2089,7 @@ public struct LiquidGlassSelectorCard<MenuItems: View>: View {
 
                     Text(valueText)
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(colorScheme == .light ? Color(red: 0.10, green: 0.10, blue: 0.12) : .white)
                         .lineLimit(1)
                 }
 
@@ -1830,7 +2097,7 @@ public struct LiquidGlassSelectorCard<MenuItems: View>: View {
 
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 10.5, weight: .bold))
-                    .foregroundStyle(Color.white.opacity(isHovered ? 0.92 : 0.58))
+                    .foregroundStyle(colorScheme == .light ? Color(red: 0.40, green: 0.40, blue: 0.44) : Color.white.opacity(isHovered ? 0.92 : 0.58))
                     .padding(.trailing, 2)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1847,8 +2114,11 @@ public struct LiquidGlassSelectorCard<MenuItems: View>: View {
 }
 
 public struct PersonAvatarView: View {
+    @Environment(\.colorScheme) private var colorScheme
     public let server: EmbyServerConfig?
     public let person: EmbyPerson
+    public var width: CGFloat = 78
+    public var height: CGFloat = 100
     public var size: CGFloat = 70
     public var accentColor: Color = Color(
         red: ThemeColorPalette.appleMusicRedRGB.r,
@@ -1861,6 +2131,8 @@ public struct PersonAvatarView: View {
     public init(
         server: EmbyServerConfig?,
         person: EmbyPerson,
+        width: CGFloat = 78,
+        height: CGFloat = 100,
         size: CGFloat = 70,
         accentColor: Color = Color(
             red: ThemeColorPalette.appleMusicRedRGB.r,
@@ -1870,6 +2142,8 @@ public struct PersonAvatarView: View {
     ) {
         self.server = server
         self.person = person
+        self.width = width
+        self.height = height
         self.size = size
         self.accentColor = accentColor
     }
@@ -1879,48 +2153,60 @@ public struct PersonAvatarView: View {
     }
 
     public var body: some View {
+        let isLight = (colorScheme == .light)
+        let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
         ZStack {
             if let img = avatarImage {
                 Image(nsImage: img)
                     .resizable()
                     .scaledToFill()
-                    .frame(width: size, height: size, alignment: .top)
-                    .clipShape(Circle())
+                    .frame(width: width, height: height, alignment: .top)
+                    .clipShape(shape)
             } else {
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                accentColor.opacity(0.34),
-                                Color(red: 0.16, green: 0.17, blue: 0.22)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
+                if isLight {
+                    shape
+                        .fill(
+                            LinearGradient(
+                                colors: [Color(red: 0.90, green: 0.91, blue: 0.93), Color(red: 0.85, green: 0.86, blue: 0.89)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
                         )
-                    )
-                    .frame(width: size, height: size)
-                Text(String(person.name.prefix(1)))
-                    .font(.system(size: size * 0.32, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.92))
+                    Text(String(person.name.prefix(1)))
+                        .font(.system(size: min(width, height) * 0.36, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color(red: 0.40, green: 0.40, blue: 0.45))
+                } else {
+                    shape
+                        .fill(
+                            LinearGradient(
+                                colors: [accentColor.opacity(0.34), Color(red: 0.16, green: 0.17, blue: 0.22)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    Text(String(person.name.prefix(1)))
+                        .font(.system(size: min(width, height) * 0.36, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.92))
+                }
             }
         }
-        .frame(width: size, height: size)
+        .frame(width: width, height: height)
         .overlay(
-            Circle()
+            shape
                 .strokeBorder(
                     LinearGradient(
                         colors: [
-                            Color.white.opacity(0.46),
-                            Color.white.opacity(0.10),
-                            Color.white.opacity(0.24)
+                            Color.white.opacity(isLight ? 0.85 : 0.46),
+                            Color.white.opacity(isLight ? 0.30 : 0.10),
+                            (isLight ? Color.black.opacity(0.06) : Color.white.opacity(0.24))
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
-                    lineWidth: 1.0
+                    lineWidth: 0.65
                 )
         )
-        .shadow(color: .black.opacity(0.38), radius: 8, y: 4)
+        .shadow(color: Color.black.opacity(isLight ? 0.08 : 0.32), radius: isLight ? 5 : 8, y: isLight ? 2.5 : 4)
         .task(id: cacheKey) {
             if let cached = ArtworkImageCache.shared.image(for: cacheKey) {
                 self.avatarImage = cached
@@ -1975,7 +2261,7 @@ public struct RecordArtworkThumbnailView: View {
 
     public var body: some View {
         ZStack {
-            if let img = thumbnail {
+            if let img = resolvedThumbnail {
                 Image(nsImage: img)
                     .resizable()
                     .scaledToFill()
@@ -2005,6 +2291,11 @@ public struct RecordArtworkThumbnailView: View {
         .task(id: "\(record.id)|\(record.posterURL ?? "")") {
             await loadThumbnail()
         }
+    }
+
+    private var resolvedThumbnail: NSImage? {
+        if let thumbnail { return thumbnail }
+        return ArtworkImageCache.shared.image(for: cacheKey)
     }
 
     private func loadThumbnail() async {

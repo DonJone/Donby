@@ -71,6 +71,7 @@ public final class AppState: ObservableObject {
     @AppStorage("donby.hideEncryptedServers") public var hideEncryptedServers: Bool = false
 
     @AppStorage("donby.themeColor.v2") public var themeColorRaw: String = AppThemeColor.appleMusicRed.rawValue
+    @AppStorage("donby.appearanceMode.v2") public var appearanceModeRaw: String = AppAppearanceMode.light.rawValue
     @AppStorage("donby.showCarousel") public var showCarousel: Bool = true
     @AppStorage("donby.showMyMedia") public var showMyMedia: Bool = true
     @AppStorage("donby.showContinueWatching") public var showContinueWatching: Bool = true
@@ -96,6 +97,31 @@ public final class AppState: ObservableObject {
     public static var appleMusicRed: Color {
         let rgb = ThemeColorPalette.appleMusicRedRGB
         return Color(red: rgb.r, green: rgb.g, blue: rgb.b)
+    }
+
+    public var appearanceMode: AppAppearanceMode {
+        get { AppAppearanceMode(rawValue: appearanceModeRaw) ?? .light }
+        set {
+            appearanceModeRaw = newValue.rawValue
+            objectWillChange.send()
+        }
+    }
+
+    public var isLightMode: Bool {
+        switch appearanceMode {
+        case .light: return true
+        case .dark: return false
+        case .auto:
+            return NSApp.effectiveAppearance.name.rawValue.lowercased().contains("dark") == false
+        }
+    }
+
+    public var colorScheme: ColorScheme? {
+        switch appearanceMode {
+        case .light: return .light
+        case .dark: return .dark
+        case .auto: return nil
+        }
     }
 
     public var accentColor: Color {

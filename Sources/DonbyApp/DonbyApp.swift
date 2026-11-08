@@ -39,7 +39,7 @@ public struct DonbyApp: App {
             MainWindowView()
                 .environmentObject(appState)
                 .frame(minWidth: 920, minHeight: 640)
-                .preferredColorScheme(.dark)
+                .preferredColorScheme(appState.colorScheme)
                 .onOpenURL { url in appState.handleIncomingURL(url) }
         }
         .windowStyle(.hiddenTitleBar)

@@ -22,17 +22,13 @@ public struct MainWindowView: View {
                             .frame(width: 206)
                             .background(
                                 ZStack {
-                                    Color(red: 0.075, green: 0.080, blue: 0.095)
-                                    LinearGradient(
-                                        colors: [Color.white.opacity(0.025), Color.clear],
-                                        startPoint: .top,
-                                        endPoint: .bottom
-                                    )
+                                    DonbyVisualEffectView(material: .sidebar, blendingMode: .behindWindow)
+                                    DonbyGlassPalette.sidebar(isLight: appState.isLightMode).opacity(appState.isLightMode ? 0.35 : 0.85)
                                 }
                             )
 
                         Rectangle()
-                            .fill(Color.white.opacity(0.06))
+                            .fill(DonbyGlassPalette.separator(isLight: appState.isLightMode))
                             .frame(width: 1)
                     }
 
@@ -61,7 +57,7 @@ public struct MainWindowView: View {
                             }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(DonbyGlassPalette.canvasBlack)
+                        .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
                     }
                 }
                 .ignoresSafeArea(.container, edges: .top)
@@ -114,12 +110,12 @@ public struct MainWindowView: View {
                         HStack(spacing: 11) {
                             Image(systemName: tab.icon)
                                 .font(.system(size: 15, weight: isSelected ? .semibold : .medium))
-                                .foregroundStyle(isSelected ? Color.white : appState.accentColor)
+                                .foregroundStyle(isSelected ? Color.white : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                                 .frame(width: 20, alignment: .center)
 
                             Text(tab.title)
                                 .font(.system(size: 13.5, weight: isSelected ? .semibold : .regular))
-                                .foregroundStyle(isSelected ? Color.white : Color(white: 0.90))
+                                .foregroundStyle(isSelected ? Color.white : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
                             Spacer()
                         }
@@ -128,13 +124,9 @@ public struct MainWindowView: View {
                         .background(
                             Group {
                                 if isSelected {
-                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                        .fill(appState.accentColor.opacity(0.16))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                                .strokeBorder(appState.accentColor.opacity(0.32), lineWidth: 0.65)
-                                        )
-                                        .shadow(color: Color.black.opacity(0.20), radius: 4, y: 1)
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .fill(appState.accentColor)
+                                        .shadow(color: appState.accentColor.opacity(0.35), radius: 4, y: 1.5)
                                 } else {
                                     Color.clear
                                 }
@@ -149,7 +141,7 @@ public struct MainWindowView: View {
 
             Text("服务器")
                 .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(Color(white: 0.46))
+                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 .padding(.horizontal, 22)
                 .padding(.top, 18)
                 .padding(.bottom, 6)
@@ -167,7 +159,7 @@ public struct MainWindowView: View {
 
                                 Text(server.name)
                                     .font(.system(size: 13, weight: isServerOpen ? .semibold : .regular))
-                                    .foregroundStyle(isServerOpen ? Color.white : Color(white: 0.88))
+                                    .foregroundStyle(isServerOpen ? Color.white : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                                     .lineLimit(1)
 
                                 Spacer()
@@ -177,13 +169,9 @@ public struct MainWindowView: View {
                             .background(
                                 Group {
                                     if isServerOpen {
-                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                            .fill(appState.accentColor.opacity(0.16))
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                                    .strokeBorder(appState.accentColor.opacity(0.32), lineWidth: 0.65)
-                                            )
-                                            .shadow(color: Color.black.opacity(0.20), radius: 4, y: 1)
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .fill(appState.accentColor)
+                                            .shadow(color: appState.accentColor.opacity(0.35), radius: 4, y: 1.5)
                                     } else {
                                         Color.clear
                                     }
@@ -244,10 +232,10 @@ public struct FilesModuleView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("本地与直链播放")
                             .font(.system(size: 19, weight: .bold))
-                            .foregroundStyle(Color(white: 0.94))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                         Text("支持 4K 原画直解、低延迟硬件解码与网络串流")
                             .font(.system(size: 11.5))
-                            .foregroundStyle(Color(white: 0.52))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     }
 
                     Spacer()
@@ -303,10 +291,10 @@ public struct FilesModuleView: View {
                         HStack(alignment: .firstTextBaseline) {
                             Text("最近播放与直链")
                                 .font(.system(size: 15, weight: .bold))
-                                .foregroundStyle(Color(white: 0.90))
+                                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                             Text("共 \(appState.urlMediaItems.count) 项")
                                 .font(.system(size: 12))
-                                .foregroundStyle(Color(white: 0.50))
+                                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                             Spacer()
                         }
                         .padding(.top, 6)
@@ -325,7 +313,7 @@ public struct FilesModuleView: View {
                     .padding(.vertical, 20)
                 }
             }
-            .background(DonbyGlassPalette.canvasBlack)
+            .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
             .onDrop(of: [.fileURL, .url], isTargeted: $isDropTargeted) { providers in
                 handleDroppedProviders(providers)
             }
@@ -356,10 +344,10 @@ public struct FilesModuleView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("拖拽视频文件至此，或点击直接选取")
                         .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(Color(white: 0.92))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Text("支持 MP4、MKV、MOV、WebM、AVI、HLS m3u8 等超清原画直解")
                         .font(.system(size: 11.5))
-                        .foregroundStyle(Color(white: 0.55))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
 
                 Spacer()
@@ -377,12 +365,12 @@ public struct FilesModuleView: View {
                 .clipShape(Capsule())
             }
             .padding(18)
-            .background(Color.white.opacity(0.04))
+            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .strokeBorder(
-                        isDropTargeted ? appState.accentColor : Color.white.opacity(0.08),
+                        isDropTargeted ? appState.accentColor : DonbyGlassPalette.separator(isLight: appState.isLightMode),
                         lineWidth: isDropTargeted ? 2 : 0.8
                     )
             )
@@ -421,11 +409,11 @@ public struct FilesModuleView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(media.name)
                         .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(Color(white: 0.92))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                         .lineLimit(1)
                     Text(media.urlString)
                         .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(Color(white: 0.48))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                         .lineLimit(1)
                 }
 
@@ -500,11 +488,11 @@ public struct FilesModuleView: View {
             }
         }
         .padding(14)
-        .background(Color.white.opacity(0.035))
+        .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.07), lineWidth: 0.8)
+                .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
         )
     }
 
@@ -651,10 +639,10 @@ public struct IPTVModuleView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("IPTV 电视直播")
                         .font(.system(size: 19, weight: .bold))
-                        .foregroundStyle(Color(white: 0.94))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Text("超清 4K HLS 直播源 · 智能低延迟预读")
                         .font(.system(size: 11.5))
-                        .foregroundStyle(Color(white: 0.52))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
 
                 Spacer()
@@ -691,11 +679,14 @@ public struct IPTVModuleView: View {
                         Text("导入 M3U 订阅")
                             .font(.system(size: 12.5, weight: .medium))
                     }
-                    .foregroundStyle(Color(white: 0.90))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     .padding(.horizontal, 13)
                     .padding(.vertical, 7)
-                    .background(Color.white.opacity(0.08))
+                    .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
                     .clipShape(Capsule())
+                    .overlay(
+                        Capsule().strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+                    )
                 }
                 .buttonStyle(.plain)
             }
@@ -712,10 +703,10 @@ public struct IPTVModuleView: View {
                     } label: {
                         Text(grp)
                             .font(.system(size: 12, weight: isSel ? .bold : .medium))
-                            .foregroundStyle(isSel ? .white : Color(white: 0.60))
+                            .foregroundStyle(isSel ? .white : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                             .padding(.horizontal, 14)
                             .padding(.vertical, 6)
-                            .background(isSel ? appState.accentColor : Color.white.opacity(0.05))
+                            .background(isSel ? appState.accentColor : (appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.06)))
                             .clipShape(Capsule())
                     }
                     .buttonStyle(.plain)
@@ -725,7 +716,7 @@ public struct IPTVModuleView: View {
             .padding(.horizontal, 28)
             .padding(.bottom, 14)
 
-            Divider().opacity(0.12)
+            Divider().opacity(appState.isLightMode ? 0.35 : 0.12)
 
             // Channels Grid
             ScrollView {
@@ -742,7 +733,7 @@ public struct IPTVModuleView: View {
                 }
             }
         }
-        .background(DonbyGlassPalette.canvasBlack)
+        .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
         .sheet(isPresented: $showAddChannelSheet) {
             addChannelSheetContent
         }
@@ -798,7 +789,7 @@ public struct IPTVModuleView: View {
                     HStack {
                         Text(channel.name)
                             .font(.system(size: 13.5, weight: .bold))
-                            .foregroundStyle(Color(white: 0.94))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                             .lineLimit(1)
                         Spacer()
                         Text(channel.group)
@@ -812,16 +803,16 @@ public struct IPTVModuleView: View {
 
                     Text(channel.urlString)
                         .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(Color(white: 0.46))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                         .lineLimit(1)
                 }
             }
             .padding(12)
-            .background(Color.white.opacity(0.035))
+            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.8)
+                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
             )
         }
         .buttonStyle(.plain)
@@ -1028,10 +1019,10 @@ public struct RecordsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("观看记录")
                         .font(.system(size: 19, weight: .bold))
-                        .foregroundStyle(Color(white: 0.94))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Text("跨 Emby 服务器、本地文件与网络直链的历史进度")
                         .font(.system(size: 11.5))
-                        .foregroundStyle(Color(white: 0.52))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
 
                 Spacer()
@@ -1082,7 +1073,7 @@ public struct RecordsView: View {
                 }
             }
         }
-        .background(DonbyGlassPalette.canvasBlack)
+        .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
         .alert("清除观看记录", isPresented: $showClearAlert) {
             Button("取消", role: .cancel) {}
             Button("确认清除全部", role: .destructive) {
@@ -1106,7 +1097,7 @@ public struct RecordsView: View {
                 HStack(spacing: 8) {
                     Text(record.title)
                         .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(Color(white: 0.94))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
                     if let tag = record.resolutionTag {
                         Text(tag)
@@ -1220,11 +1211,11 @@ public struct RecordsView: View {
             }
         }
         .padding(14)
-        .background(Color.white.opacity(0.035))
+        .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.07), lineWidth: 0.8)
+                .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
         )
     }
 
@@ -1330,12 +1321,12 @@ public struct GlobalSearchView: View {
 
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(Color(white: 0.60))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
 
                     TextField("搜索电影、电视剧、演员、本地视频或 IPTV 频道...", text: $query)
                         .textFieldStyle(.plain)
                         .font(.system(size: 15))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
                     if !query.isEmpty {
                         Button {
@@ -1343,18 +1334,18 @@ public struct GlobalSearchView: View {
                         } label: {
                             Image(systemName: "xmark.circle.fill")
                                 .font(.system(size: 14))
-                                .foregroundStyle(Color(white: 0.50))
+                                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                         }
                         .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, 16)
                 .frame(height: 44)
-                .background(Color.white.opacity(0.06))
+                .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.8)
+                        .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
                 )
 
                 // Filter Chips
@@ -1366,10 +1357,10 @@ public struct GlobalSearchView: View {
                         } label: {
                             Text(chip)
                                 .font(.system(size: 12, weight: isSel ? .bold : .medium))
-                                .foregroundStyle(isSel ? .white : Color(white: 0.60))
+                                .foregroundStyle(isSel ? .white : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                                 .padding(.horizontal, 14)
                                 .padding(.vertical, 6)
-                                .background(isSel ? appState.accentColor : Color.white.opacity(0.05))
+                                .background(isSel ? appState.accentColor : (appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.06)))
                                 .clipShape(Capsule())
                         }
                         .buttonStyle(.plain)
@@ -1380,7 +1371,7 @@ public struct GlobalSearchView: View {
                     if !query.isEmpty {
                         Text("共找到 \(totalResultCount) 条结果")
                             .font(.system(size: 12))
-                            .foregroundStyle(Color(white: 0.50))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     }
                 }
             }
@@ -1388,7 +1379,7 @@ public struct GlobalSearchView: View {
             .padding(.top, 22)
             .padding(.bottom, 16)
 
-            Divider().opacity(0.12)
+            Divider().opacity(appState.isLightMode ? 0.35 : 0.12)
 
             ScrollView {
                 if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1401,7 +1392,7 @@ public struct GlobalSearchView: View {
                             VStack(alignment: .leading, spacing: 14) {
                                 Text("影视作品 (\(searchResults.count))")
                                     .font(.system(size: 15, weight: .bold))
-                                    .foregroundStyle(Color(white: 0.90))
+                                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
                                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 16)], spacing: 16) {
                                     ForEach(searchResults) { item in
@@ -1420,7 +1411,7 @@ public struct GlobalSearchView: View {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text("本地与网络流 (\(matchingMediaFiles.count))")
                                     .font(.system(size: 15, weight: .bold))
-                                    .foregroundStyle(Color(white: 0.90))
+                                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
                                 ForEach(matchingMediaFiles) { file in
                                     HStack {
@@ -1428,7 +1419,7 @@ public struct GlobalSearchView: View {
                                             .foregroundStyle(appState.accentColor)
                                         Text(file.name)
                                             .font(.system(size: 13, weight: .medium))
-                                            .foregroundStyle(.white)
+                                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                                         Spacer()
                                         Button("播放") {
                                             if let url = URL(string: file.urlString) {
@@ -1439,8 +1430,12 @@ public struct GlobalSearchView: View {
                                         .controlSize(.small)
                                     }
                                     .padding(12)
-                                    .background(Color.white.opacity(0.04))
+                                    .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
                                     .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+                                    )
                                 }
                             }
                         }
@@ -1449,7 +1444,7 @@ public struct GlobalSearchView: View {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text("IPTV 频道 (\(matchingChannels.count))")
                                     .font(.system(size: 15, weight: .bold))
-                                    .foregroundStyle(Color(white: 0.90))
+                                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
                                 ForEach(matchingChannels) { ch in
                                     HStack {
@@ -1457,7 +1452,7 @@ public struct GlobalSearchView: View {
                                             .foregroundStyle(Color.purple)
                                         Text(ch.name)
                                             .font(.system(size: 13, weight: .medium))
-                                            .foregroundStyle(.white)
+                                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                                         Text(ch.group)
                                             .font(.system(size: 11))
                                             .foregroundStyle(.secondary)
@@ -1471,8 +1466,12 @@ public struct GlobalSearchView: View {
                                         .controlSize(.small)
                                     }
                                     .padding(12)
-                                    .background(Color.white.opacity(0.04))
+                                    .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
                                     .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+                                    )
                                 }
                             }
                         }
@@ -1482,7 +1481,7 @@ public struct GlobalSearchView: View {
                 }
             }
         }
-        .background(DonbyGlassPalette.canvasBlack)
+        .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
         .task(id: query) {
             let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !q.isEmpty,
@@ -1526,7 +1525,7 @@ public struct GlobalSearchView: View {
                 VStack(alignment: .leading, spacing: 20) {
                     Text("近期更新与推荐")
                         .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(Color(white: 0.90))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 16)], spacing: 16) {
                         ForEach(items) { item in
                             PosterCardView(
@@ -1607,7 +1606,7 @@ public struct SettingsView: View {
 
                 Text("偏好设置")
                     .font(.system(size: 17, weight: .bold))
-                    .foregroundStyle(Color(white: 0.94))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     .padding(.horizontal, 16)
                     .padding(.top, 24)
                     .padding(.bottom, 12)
@@ -1624,12 +1623,12 @@ public struct SettingsView: View {
                                 .frame(width: 20)
                             Text(tab.rawValue)
                                 .font(.system(size: 13, weight: isSel ? .semibold : .regular))
-                                .foregroundStyle(isSel ? .white : Color(white: 0.85))
+                                .foregroundStyle(isSel ? .white : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                             Spacer()
                         }
                         .padding(.horizontal, 14)
                         .frame(height: 34)
-                        .background(isSel ? Color.white.opacity(0.08) : Color.clear)
+                        .background(isSel ? appState.accentColor : Color.clear)
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
                     .buttonStyle(.plain)
@@ -1639,10 +1638,10 @@ public struct SettingsView: View {
                 Spacer()
             }
             .frame(width: 190)
-            .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+            .background(DonbyGlassPalette.sidebar(isLight: appState.isLightMode))
 
             Rectangle()
-                .fill(Color.white.opacity(0.08))
+                .fill(DonbyGlassPalette.separator(isLight: appState.isLightMode))
                 .frame(width: 1)
 
             // Content Area
@@ -1669,7 +1668,7 @@ public struct SettingsView: View {
                     .frame(maxWidth: 680, alignment: .leading)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(DonbyGlassPalette.canvasBlack)
+                .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
             }
         }
     }
@@ -1679,11 +1678,36 @@ public struct SettingsView: View {
         VStack(alignment: .leading, spacing: 24) {
             settingsHeader(title: "基础设置", subtitle: "个性化外观、主题强调色与主窗口布局")
 
+            // Appearance Mode (Light / Dark / Auto)
+            VStack(alignment: .leading, spacing: 12) {
+                Text("外观模式")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+
+                Picker("", selection: Binding(
+                    get: { appState.appearanceMode },
+                    set: { appState.appearanceMode = $0 }
+                )) {
+                    ForEach(AppAppearanceMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            .padding(18)
+            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+            )
+
             // Theme Accent Color (7 colors)
             VStack(alignment: .leading, spacing: 12) {
                 Text("主题强调色")
                     .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 80), spacing: 10)], spacing: 10) {
                     ForEach(AppThemeColor.allCases) { theme in
@@ -1705,7 +1729,7 @@ public struct SettingsView: View {
                                 }
                                 Text(theme.title)
                                     .font(.system(size: 11.5, weight: isSel ? .bold : .regular))
-                                    .foregroundStyle(isSel ? .white : Color(white: 0.70))
+                                    .foregroundStyle(isSel ? appState.accentColor : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 8)
@@ -1717,14 +1741,18 @@ public struct SettingsView: View {
                 }
             }
             .padding(18)
-            .background(Color.white.opacity(0.035))
+            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
             .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+            )
 
             // Sidebar and Glass
             VStack(alignment: .leading, spacing: 16) {
                 Text("界面与布局")
                     .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
                 Toggle("默认折叠侧边栏", isOn: $appState.defaultSidebarCollapsed)
                 Toggle("启用毛玻璃效果 (Aero Glass Material)", isOn: $appState.displayAeroGlass)
@@ -1733,8 +1761,12 @@ public struct SettingsView: View {
                 Toggle("展示流媒体解码统计信息 (FPS / 码率)", isOn: $appState.displayMediaStatistics)
             }
             .padding(18)
-            .background(Color.white.opacity(0.035))
+            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
             .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+            )
         }
     }
 
@@ -1984,10 +2016,10 @@ public struct SettingsView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
                 .font(.system(size: 18, weight: .bold))
-                .foregroundStyle(Color(white: 0.94))
+                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
             Text(subtitle)
                 .font(.system(size: 12))
-                .foregroundStyle(Color(white: 0.50))
+                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
         }
     }
 

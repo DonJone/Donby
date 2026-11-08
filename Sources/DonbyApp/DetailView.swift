@@ -16,6 +16,7 @@ public struct DetailView: View {
     @State private var episodes: [EmbyItem] = []
     @State private var similarItems: [EmbyItem] = []
     @State private var isLoadingDetails: Bool = false
+    @State private var focusedEpisodeId: String? = nil
 
     public init(item: EmbyItem) {
         self.initialItem = item
@@ -37,7 +38,7 @@ public struct DetailView: View {
 
     public var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 26) {
+            VStack(alignment: .leading, spacing: 24) {
                 heroHeaderSection
 
                 if item.isSeries || !episodes.isEmpty {
@@ -57,7 +58,7 @@ public struct DetailView: View {
             }
             .padding(.bottom, 48)
         }
-        .background(DonbyGlassPalette.canvasBlack)
+        .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
         .onChange(of: selectedSourceId) { _, _ in
             syncStreamsForSelectedSource()
         }
@@ -68,127 +69,263 @@ public struct DetailView: View {
 
     private var heroHeaderSection: some View {
         ZStack(alignment: .bottomLeading) {
+            // 1. Clear High-Resolution Backdrop Fanart (Cinematic bleed)
             GeometryReader { bgGeo in
                 MediaArtworkView(server: appState.activeServer, item: item, kind: .backdrop, maxWidth: 1600)
                     .frame(width: bgGeo.size.width, height: bgGeo.size.height)
-                    .saturation(1.22)
-                    .blur(radius: 22)
                     .clipped()
             }
+            .frame(height: 420)
             .clipped()
 
+            // 2. Ambient Gradient Dissolve into Canvas
             LinearGradient(
-                colors: [
-                    Color.black.opacity(0.28),
-                    Color.black.opacity(0.56),
-                    DonbyGlassPalette.canvasBlack.opacity(0.86),
-                    DonbyGlassPalette.canvasBlack
+                stops: [
+                    .init(color: .clear, location: 0.0),
+                    .init(color: (appState.isLightMode ? DonbyGlassPalette.canvasLight : DonbyGlassPalette.canvasBlack).opacity(0.18), location: 0.44),
+                    .init(color: (appState.isLightMode ? DonbyGlassPalette.canvasLight : DonbyGlassPalette.canvasBlack).opacity(0.74), location: 0.74),
+                    .init(color: (appState.isLightMode ? DonbyGlassPalette.canvasLight : DonbyGlassPalette.canvasBlack), location: 1.0)
                 ],
                 startPoint: .top,
                 endPoint: .bottom
             )
+            .frame(height: 420)
 
-            VStack(alignment: .leading, spacing: 20) {
-                DonbyGlassContainer(spacing: 10) {
-                HStack(spacing: 10) {
-                    LiquidGlassCapsuleButton(
-                        title: "返回",
-                        systemImage: "chevron.left",
-                        tint: nil,
-                        horizontalPadding: 15,
-                        verticalPadding: 7.5,
-                        fontSize: 13
-                    ) {
-                        withAnimation(.easeOut(duration: 0.18)) { appState.popDetail() }
+            // 3. Floating Navigation Capsules & Hero Metadata Content
+            VStack(alignment: .leading, spacing: 0) {
+                // Top Floating Navigation Bar
+                HStack {
+                    // Floating Left Capsule: [ < | 🏠 ]
+                    HStack(spacing: 8) {
+                        Button {
+                            withAnimation(.easeOut(duration: 0.18)) { appState.popDetail() }
+                        } label: {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
+                                .frame(width: 26, height: 26)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        Rectangle()
+                            .fill(appState.isLightMode ? Color.black.opacity(0.10) : Color.white.opacity(0.14))
+                            .frame(width: 0.75, height: 14)
+
+                        Button {
+                            withAnimation(.easeOut(duration: 0.18)) {
+                                appState.detailStack.removeAll()
+                            }
+                        } label: {
+                            Image(systemName: "house")
+                                .font(.system(size: 13.5, weight: .medium))
+                                .foregroundStyle(appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
+                                .frame(width: 26, height: 26)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
                     }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .donbyLiquidGlassCapsule()
                     .padding(.leading, appState.isSidebarCollapsed ? 68 : 0)
 
                     Spacer()
 
-                    ToolbarVectorButton(
-                        tooltip: "刷新详情信息",
-                        action: { Task { await loadFullDetailData() } }
-                    ) { hovered in
-                        RefreshVectorIcon(size: 14.5, color: hovered ? .white : Color(white: 0.90), isSpinning: isLoadingDetails)
-                    }
-
-                    if let server = appState.activeServer {
-                        Button { appState.linePickerServer = server } label: {
-                            HStack(spacing: 6.5) {
-                                RouteSwitchVectorIcon(size: 13, color: appState.accentColor)
-                                Text(server.activeLineName)
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(.white)
-                                    .lineLimit(1)
-                                LatencyBadgeView(latencyMs: server.activeLineLatencyMs, isPinging: appState.isPingingLines)
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 8.5, weight: .bold))
-                                    .foregroundStyle(.white.opacity(0.65))
-                            }
-                            .padding(.horizontal, 12).padding(.vertical, 5.5)
-                            .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: false)
+                    // Floating Right Capsule: [ 🔍 | ⋯ ∨ ]
+                    HStack(spacing: 8) {
+                        Button {
+                            appState.selectSidebarModule(.search)
+                        } label: {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
+                                .frame(width: 26, height: 26)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .fixedSize(horizontal: true, vertical: false)
-                    }
-                }
-                }
 
-                HStack(alignment: .bottom, spacing: 26) {
-                    MediaArtworkView(server: appState.activeServer, item: item, kind: .primary, maxWidth: 500)
-                        .frame(width: 185, height: 278)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.white.opacity(0.2), lineWidth: 1))
-                        .shadow(color: .black.opacity(0.5), radius: 16, y: 8)
+                        Rectangle()
+                            .fill(appState.isLightMode ? Color.black.opacity(0.10) : Color.white.opacity(0.14))
+                            .frame(width: 0.75, height: 14)
 
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack(spacing: 8) {
-                            if let res = item.resolutionBadge { specPill(res, highlight: true) }
-                            if let vCodec = item.videoCodecTag { specPill(vCodec) }
-                            if let dyn = item.dynamicRangeTag { specPill(dyn) }
-                            if let audioTag = item.audioSummaryTag { specPill(audioTag) }
-                            if let official = item.officialRating, !official.isEmpty { specPill(official) }
-                        }
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(item.name)
-                                .font(.system(size: 30, weight: .heavy, design: .rounded))
-                                .foregroundStyle(.white)
-                                .lineLimit(2)
-
-                            if let orig = item.originalTitle, !orig.isEmpty, orig != item.name {
-                                Text(orig).font(.system(size: 13.5, weight: .medium)).foregroundStyle(.white.opacity(0.68))
+                        Menu {
+                            Button {
+                                Task { await loadFullDetailData() }
+                            } label: {
+                                Label("刷新详情信息", systemImage: "arrow.clockwise")
                             }
-                        }
 
-                        HStack(spacing: 14) {
-                            if let rating = item.communityRating, rating > 0 {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "star.fill").foregroundStyle(.yellow)
-                                    Text(String(format: "IMDb %.1f", rating)).font(.system(size: 12.5, weight: .bold, design: .rounded)).foregroundStyle(.white)
+                            if let server = appState.activeServer {
+                                Button {
+                                    appState.linePickerServer = server
+                                } label: {
+                                    Label("切换线路 (\(server.activeLineName))", systemImage: "arrow.triangle.swap")
                                 }
                             }
-                            if let year = item.productionYear { Text(String(year)).font(.system(size: 12.5, weight: .medium)).foregroundStyle(.white.opacity(0.85)) }
-                            if let runtime = item.runtimeMinutesString { Text(runtime).font(.system(size: 12.5, weight: .medium)).foregroundStyle(.white.opacity(0.85)) }
-                            if let genres = item.genres, !genres.isEmpty { Text(genres.joined(separator: " / ")).font(.system(size: 12.5, weight: .medium)).foregroundStyle(.white.opacity(0.78)) }
-                        }
 
-                        if let overview = item.overview, !overview.isEmpty {
-                            Text(overview)
-                                .font(.system(size: 13))
-                                .foregroundStyle(.white.opacity(0.85))
-                                .lineLimit(3)
-                                .frame(maxWidth: 720, alignment: .leading)
-                        }
+                            Button {
+                                playHighestSpecification()
+                            } label: {
+                                Label("以最高规格直解播放", systemImage: "sparkles")
+                            }
 
-                        DonbyGlassContainer(spacing: 12) {
-                        HStack(spacing: 12) {
+                            Button {
+                                Task {
+                                    await appState.copyStreamDirectURL(item: item, preferredSourceId: selectedSourceId)
+                                }
+                            } label: {
+                                Label("复制原画直链", systemImage: "link")
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "ellipsis")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 8, weight: .bold))
+                            }
+                            .foregroundStyle(appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
+                            .frame(height: 26)
+                            .padding(.horizontal, 4)
+                            .contentShape(Rectangle())
+                            .fixedSize()
+                        }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .fixedSize()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .donbyLiquidGlassCapsule()
+                    .fixedSize()
+                }
+                .padding(.horizontal, 28)
+                .padding(.top, 18)
+
+                Spacer()
+
+                // Hero Title + Actions + Metadata Row
+                VStack(alignment: .leading, spacing: 14) {
+                    // Big Cinematic Title
+                    Text(item.name)
+                        .font(.system(size: 38, weight: .heavy, design: .rounded))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        .shadow(color: appState.isLightMode ? Color.white.opacity(0.85) : Color.black.opacity(0.50), radius: 3, y: 1)
+                        .lineLimit(2)
+
+                    HStack(alignment: .top, spacing: 28) {
+                        // Left Column: Action Buttons
+                        VStack(alignment: .leading, spacing: 12) {
+                            // Circular action buttons row
+                            HStack(spacing: 11) {
+                                LiquidGlassCircleButton(
+                                    systemImage: "arrow.counterclockwise",
+                                    size: 38,
+                                    tooltip: "从头开始播放"
+                                ) {
+                                    startPlaybackFromBeginning()
+                                }
+
+                                LiquidGlassCircleButton(
+                                    systemImage: (item.userData?.played == true) ? "checkmark.circle.fill" : "checkmark",
+                                    iconColor: (item.userData?.played == true) ? Color(red: 0.22, green: 0.86, blue: 0.38) : nil,
+                                    size: 38,
+                                    tooltip: "标记已看 / 未看"
+                                ) {
+                                    Task { item = await appState.togglePlayed(for: item) }
+                                }
+
+                                LiquidGlassCircleButton(
+                                    systemImage: (item.userData?.isFavorite == true) ? "heart.fill" : "heart",
+                                    iconColor: (item.userData?.isFavorite == true) ? AppState.appleMusicRed : nil,
+                                    size: 38,
+                                    tooltip: "加入 / 取消收藏"
+                                ) {
+                                    Task { item = await appState.toggleFavorite(for: item) }
+                                }
+
+                                LiquidGlassCircleMenu(
+                                    systemImage: "film.stack",
+                                    size: 38,
+                                    tooltip: "选择资源版本"
+                                ) {
+                                    if let sources = item.mediaSources, !sources.isEmpty {
+                                        ForEach(sources) { src in
+                                            Button {
+                                                selectedSourceId = src.id
+                                            } label: {
+                                                if src.id == selectedMediaSource?.id {
+                                                    Label(src.displayVersionName, systemImage: "checkmark")
+                                                } else {
+                                                    Text(src.displayVersionName)
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        Button("原画版本 (默认)") {}
+                                    }
+                                }
+
+                                LiquidGlassCircleMenu(
+                                    systemImage: "headphones",
+                                    size: 38,
+                                    tooltip: "选择音频轨道"
+                                ) {
+                                    if !audioStreams.isEmpty {
+                                        ForEach(audioStreams) { stream in
+                                            Button {
+                                                selectedAudioIndex = stream.index
+                                            } label: {
+                                                if stream.index == selectedAudioIndex {
+                                                    Label(stream.readableLabel, systemImage: "checkmark")
+                                                } else {
+                                                    Text(stream.readableLabel)
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        Button("默认音轨") {}
+                                    }
+                                }
+
+                                LiquidGlassCircleMenu(
+                                    systemImage: "bubble.left.and.bubble.right",
+                                    size: 38,
+                                    tooltip: "选择字幕语言"
+                                ) {
+                                    Button {
+                                        selectedSubtitleIndex = nil
+                                    } label: {
+                                        if selectedSubtitleIndex == nil {
+                                            Label("关闭字幕", systemImage: "checkmark")
+                                        } else {
+                                            Text("关闭字幕")
+                                        }
+                                    }
+                                    if !subtitleStreams.isEmpty {
+                                        Divider()
+                                        ForEach(subtitleStreams) { stream in
+                                            Button {
+                                                selectedSubtitleIndex = stream.index
+                                            } label: {
+                                                if stream.index == selectedSubtitleIndex {
+                                                    Label(stream.readableLabel, systemImage: "checkmark")
+                                                } else {
+                                                    Text(stream.readableLabel)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Main Wide Frosted Capsule Play Button
                             LiquidGlassCapsuleButton(
-                                title: item.resumePositionSeconds > 0 ? "继续播放" : (item.isSeries ? "播放第 1 集" : "立即播放"),
+                                title: mainPlayButtonTitle,
                                 systemImage: "play.fill",
-                                tint: appState.accentColor,
-                                horizontalPadding: 22,
-                                verticalPadding: 10.5,
+                                tint: nil,
+                                horizontalPadding: 24,
+                                verticalPadding: 10,
                                 fontSize: 13.5
                             ) {
                                 Task {
@@ -201,53 +338,85 @@ public struct DetailView: View {
                                     )
                                 }
                             }
+                        }
 
-                            LiquidGlassCircleButton(
-                                systemImage: "sparkles",
-                                size: 39,
-                                tooltip: "原画规格直解 (选择最高码率/分辨率版本播放)"
-                            ) {
-                                playHighestSpecification()
-                            }
+                        // Right Column: Rating, Specs & Synopsis
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 8) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "star.fill")
+                                        .font(.system(size: 12.5, weight: .bold))
+                                        .foregroundStyle(AppState.appleMusicRed)
+                                    Text(String(format: "%.1f", item.communityRating ?? 10.0))
+                                        .font(.system(size: 13.5, weight: .heavy, design: .rounded))
+                                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                                }
 
-                            LiquidGlassCircleButton(
-                                systemImage: "link",
-                                size: 39,
-                                tooltip: "复制原画直链"
-                            ) {
-                                Task {
-                                    await appState.copyStreamDirectURL(item: item, preferredSourceId: selectedSourceId)
+                                if let genres = item.genres, !genres.isEmpty {
+                                    Text(genres.joined(separator: " · "))
+                                        .font(.system(size: 12.5, weight: .semibold))
+                                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                                 }
                             }
 
-                            LiquidGlassCircleButton(
-                                systemImage: (item.userData?.isFavorite == true) ? "heart.fill" : "heart",
-                                iconColor: (item.userData?.isFavorite == true) ? AppState.appleMusicRed : .white,
-                                size: 39,
-                                tooltip: "加入 / 取消收藏"
-                            ) {
-                                Task { item = await appState.toggleFavorite(for: item) }
-                            }
+                            // Specs Line (e.g. 29分钟 2026年7月16日 4K HDR10 24FPS 3.85G)
+                            Text(specsSummaryLine)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                                .lineLimit(1)
 
-                            LiquidGlassCircleButton(
-                                systemImage: (item.userData?.played == true) ? "checkmark.circle.fill" : "checkmark.circle",
-                                iconColor: (item.userData?.played == true) ? Color(red: 0.22, green: 0.86, blue: 0.38) : .white,
-                                size: 39,
-                                tooltip: "标记已观看 / 未观看"
-                            ) {
-                                Task { item = await appState.togglePlayed(for: item) }
+                            // Synopsis Overview
+                            if let overview = item.overview, !overview.isEmpty {
+                                Text(overview)
+                                    .font(.system(size: 12.5))
+                                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                                    .lineLimit(3)
+                                    .frame(maxWidth: 580, alignment: .leading)
                             }
                         }
-                        }
+                        .padding(.top, 2)
                     }
                 }
-
-                streamAndLineSelectorSection
-                    .padding(.top, 4)
+                .padding(.horizontal, 28)
+                .padding(.bottom, 14)
             }
-            .padding(.horizontal, 28)
-            .padding(.top, 18)
-            .padding(.bottom, 12)
+        }
+    }
+
+    private var mainPlayButtonTitle: String {
+        if item.resumePositionSeconds > 0 {
+            return "播放 \(item.resumePositionString)"
+        } else if item.isSeries {
+            return "播放第 1 集"
+        } else {
+            return "播放"
+        }
+    }
+
+    private var specsSummaryLine: String {
+        var parts: [String] = []
+        if let runtime = item.runtimeMinutesString { parts.append(runtime) }
+        if let date = item.premiereDateString ?? (item.productionYear.map { "\($0)年" }) { parts.append(date) }
+        if let res = item.resolutionBadge { parts.append(res) }
+        if let dyn = item.dynamicRangeTag { parts.append(dyn) }
+        if let fps = selectedMediaSource?.mediaStreams?.first(where: { $0.type?.lowercased() == "video" })?.averageFrameRate {
+            let cleanFps = Int(fps)
+            parts.append("\(cleanFps)FPS")
+        }
+        if let size = selectedMediaSource?.formattedFileSize { parts.append(size) }
+        return parts.joined(separator: " · ")
+    }
+
+    private func startPlaybackFromBeginning() {
+        Task {
+            await appState.startPlayback(
+                item: item,
+                episodesQueue: episodes,
+                preferredSourceId: selectedSourceId,
+                audioStreamIndex: selectedAudioIndex,
+                subtitleStreamIndex: selectedSubtitleIndex,
+                fromBeginning: true
+            )
         }
     }
 
@@ -364,38 +533,62 @@ public struct DetailView: View {
 
     private var episodesSection: some View {
         VStack(alignment: .leading, spacing: 10) {
+            // Episodes Section Header: [ 第 1 季 ∨ ]  ...  [ ← → 更多 ]
             HStack {
-                SectionHeaderView(
-                    title: "选集列表",
-                    subtitle: "第 \(selectedSeasonIndex) 季 · 共 \(episodes.count) 集"
-                )
-                Spacer()
-                if seasons.count > 1 {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        DonbyGlassContainer(spacing: 8) {
-                        HStack(spacing: 8) {
-                            ForEach(Array(seasons.enumerated()), id: \.element.id) { idx, season in
-                                let sNum = season.indexNumber ?? (idx + 1)
-                                Button {
-                                    selectedSeasonIndex = sNum
-                                    Task { await loadEpisodesForSeason(season, seasonNumber: sNum) }
-                                } label: {
+                Menu {
+                    if seasons.count > 1 {
+                        ForEach(Array(seasons.enumerated()), id: \.element.id) { idx, season in
+                            let sNum = season.indexNumber ?? (idx + 1)
+                            Button {
+                                selectedSeasonIndex = sNum
+                                Task { await loadEpisodesForSeason(season, seasonNumber: sNum) }
+                            } label: {
+                                if selectedSeasonIndex == sNum {
+                                    Label(season.name, systemImage: "checkmark")
+                                } else {
                                     Text(season.name)
-                                        .font(.system(size: 12, weight: .bold))
-                                        .foregroundStyle(selectedSeasonIndex == sNum ? .white : .secondary)
-                                        .padding(.horizontal, 12).padding(.vertical, 6)
-                                        .donbyLiquidGlassCapsule(
-                                            tint: selectedSeasonIndex == sNum ? appState.accentColor : nil,
-                                            interactive: true,
-                                            isHovered: false
-                                        )
                                 }
-                                .buttonStyle(.plain)
                             }
                         }
-                        }
+                    } else {
+                        Button("第 1 季 (当前)") {}
                     }
-                    .frame(maxWidth: 360)
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(item.isSeries ? "第 \(selectedSeasonIndex) 季" : "选集列表")
+                            .font(.system(size: 17, weight: .bold))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    }
+                }
+                .menuStyle(.borderlessButton)
+
+                Spacer()
+
+                HStack(spacing: 14) {
+                    Button {
+                        scrollEpisodes(direction: -1)
+                    } label: {
+                        Image(systemName: "arrow.left")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        scrollEpisodes(direction: 1)
+                    } label: {
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    }
+                    .buttonStyle(.plain)
+
+                    Text("更多")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
             }
             .padding(.horizontal, 28)
@@ -408,30 +601,162 @@ public struct DetailView: View {
                 .padding(.horizontal, 28)
                 .padding(.vertical, 20)
             } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 16) {
-                        ForEach(episodes) { ep in
-                            LandscapeCardView(
-                                item: ep,
-                                width: 248,
-                                onPlay: {
-                                    Task {
-                                        await appState.startPlayback(
-                                            item: ep,
-                                            episodesQueue: episodes,
-                                            audioStreamIndex: selectedAudioIndex,
-                                            subtitleStreamIndex: selectedSubtitleIndex
-                                        )
-                                    }
-                                },
-                                onDetail: { appState.openDetail(for: ep) }
-                            )
+                ScrollViewReader { proxy in
+                    ZStack(alignment: .leading) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 16) {
+                            ForEach(episodes) { ep in
+                                let isSelected = (ep.id == (focusedEpisodeId ?? episodes.first?.id))
+                                episodeCardItem(ep, isSelected: isSelected)
+                                    .id(ep.id)
+                            }
+                        }
+                        .padding(.horizontal, 28)
+                        .padding(.vertical, 8)
+                    }
+
+                    // Floating < and > glass buttons on the carousel
+                    HStack {
+                        if (currentFocusedIndex ?? 0) > 0 {
+                            Button {
+                                scrollEpisodes(direction: -1)
+                            } label: {
+                                ZStack {
+                                    Image(systemName: "chevron.left")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundStyle(appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
+                                }
+                                .frame(width: 32, height: 32)
+                                .donbyLiquidGlassCapsule()
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.leading, 14)
+                        }
+
+                        Spacer()
+
+                        if (currentFocusedIndex ?? 0) < episodes.count - 1 {
+                            Button {
+                                scrollEpisodes(direction: 1)
+                            } label: {
+                                ZStack {
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundStyle(appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
+                                }
+                                .frame(width: 32, height: 32)
+                                .donbyLiquidGlassCapsule()
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.trailing, 14)
                         }
                     }
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 8)
+                    }
+                    .onChange(of: focusedEpisodeId) { _, newId in
+                        if let newId {
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                proxy.scrollTo(newId, anchor: .center)
+                            }
+                        }
+                    }
                 }
             }
+        }
+    }
+
+    private var currentFocusedIndex: Int? {
+        let targetId = focusedEpisodeId ?? episodes.first?.id
+        return episodes.firstIndex(where: { $0.id == targetId })
+    }
+
+    private func scrollEpisodes(direction: Int) {
+        guard !episodes.isEmpty else { return }
+        let cur = currentFocusedIndex ?? 0
+        let nextIdx = max(0, min(episodes.count - 1, cur + direction))
+        focusedEpisodeId = episodes[nextIdx].id
+    }
+
+    private func episodeCardItem(_ ep: EmbyItem, isSelected: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ZStack(alignment: .bottomLeading) {
+                MediaArtworkView(server: appState.activeServer, item: ep, kind: .primary, maxWidth: 560)
+                    .frame(width: 256, height: 144)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                LinearGradient(
+                    colors: [.clear, Color.black.opacity(0.65)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                // Progress Bar at bottom of card
+                if ep.progressFraction > 0 {
+                    GeometryReader { barGeo in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Color.white.opacity(0.35))
+                            Capsule()
+                                .fill(Color.white)
+                                .frame(width: barGeo.size.width * ep.progressFraction)
+                        }
+                    }
+                    .frame(height: 3)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 8)
+                }
+
+                // Subtle play icon in center
+                ZStack {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .frame(width: 36, height: 36)
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white)
+                        .offset(x: 1)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            }
+            .frame(width: 256, height: 144)
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(
+                        isSelected ? Color.white : Color.white.opacity(0.12),
+                        lineWidth: isSelected ? 2.5 : 0.65
+                    )
+            )
+            .shadow(color: Color.black.opacity(isSelected ? 0.32 : 0.16), radius: isSelected ? 8 : 4, y: 2)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                focusedEpisodeId = ep.id
+                Task {
+                    await appState.startPlayback(
+                        item: ep,
+                        episodesQueue: episodes,
+                        audioStreamIndex: selectedAudioIndex,
+                        subtitleStreamIndex: selectedSubtitleIndex
+                    )
+                }
+            }
+
+            // Episode Title and Overview
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(ep.episodeCodeString ?? "E01") · \(ep.name)")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    .lineLimit(1)
+
+                if let overview = ep.overview, !overview.isEmpty {
+                    Text(overview)
+                        .font(.system(size: 11))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                        .lineLimit(2)
+                        .frame(height: 30, alignment: .topLeading)
+                } else {
+                    Spacer().frame(height: 30)
+                }
+            }
+            .frame(width: 256, alignment: .leading)
         }
     }
 
@@ -442,24 +767,25 @@ public struct DetailView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 18) {
                     ForEach(people.prefix(20)) { person in
-                        VStack(spacing: 9) {
+                        VStack(spacing: 8) {
                             PersonAvatarView(
                                 server: appState.activeServer,
                                 person: person,
-                                size: 72,
+                                width: 78,
+                                height: 100,
                                 accentColor: appState.accentColor
                             )
 
                             VStack(spacing: 2) {
                                 Text(person.name)
                                     .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(.white.opacity(0.94))
+                                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                                     .lineLimit(1)
                                 if let role = person.role, !role.isEmpty {
-                                    Text(role).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                                    Text(role).font(.system(size: 11)).foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode)).lineLimit(1)
                                 }
                             }
-                            .frame(width: 94)
+                            .frame(width: 82)
                         }
                     }
                 }
@@ -489,13 +815,13 @@ public struct DetailView: View {
 
     private func specCell(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(label).font(.system(size: 11)).foregroundStyle(.secondary)
-            Text(value).font(.system(size: 12.5, weight: .semibold, design: .rounded)).foregroundStyle(.primary).lineLimit(1)
+            Text(label).font(.system(size: 11)).foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+            Text(value).font(.system(size: 12.5, weight: .semibold, design: .rounded)).foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode)).lineLimit(1)
         }
         .padding(11).frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white.opacity(0.035))
+        .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.white.opacity(0.07), lineWidth: 0.6))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6))
     }
 
     private var similarSection: some View {
