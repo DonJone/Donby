@@ -44,8 +44,11 @@ public final class ArtworkImageCache {
         return nil
     }
 
-    public func store(_ image: NSImage, for key: String) {
+    public func store(_ image: NSImage, for key: String, aliases: [String] = []) {
         memoryCache.setObject(image, forKey: key as NSString)
+        for alias in aliases where !alias.isEmpty {
+            memoryCache.setObject(image, forKey: alias as NSString)
+        }
         diskQueue.async { [cacheDirectoryURL] in
             guard let tiff = image.tiffRepresentation,
                   let rep = NSBitmapImageRep(data: tiff),
@@ -54,16 +57,27 @@ public final class ArtworkImageCache {
             }
             let fileURL = cacheDirectoryURL.appendingPathComponent(self.diskFileName(for: key))
             try? data.write(to: fileURL, options: .atomic)
+            for alias in aliases where !alias.isEmpty {
+                let aliasURL = cacheDirectoryURL.appendingPathComponent(self.diskFileName(for: alias))
+                try? data.write(to: aliasURL, options: .atomic)
+            }
         }
     }
 
-    public func storeRawData(_ data: Data, for key: String) {
+    public func storeRawData(_ data: Data, for key: String, aliases: [String] = []) {
         if let img = NSImage(data: data) {
             memoryCache.setObject(img, forKey: key as NSString, cost: data.count)
+            for alias in aliases where !alias.isEmpty {
+                memoryCache.setObject(img, forKey: alias as NSString, cost: data.count)
+            }
         }
         diskQueue.async { [cacheDirectoryURL] in
             let fileURL = cacheDirectoryURL.appendingPathComponent(self.diskFileName(for: key))
             try? data.write(to: fileURL, options: .atomic)
+            for alias in aliases where !alias.isEmpty {
+                let aliasURL = cacheDirectoryURL.appendingPathComponent(self.diskFileName(for: alias))
+                try? data.write(to: aliasURL, options: .atomic)
+            }
         }
     }
 
@@ -79,6 +93,25 @@ public final class ArtworkImageCache {
 
     public func localPoster(_ key: String) -> NSImage? {
         return nil
+    }
+
+    public func aliasKeys(_ aliases: [String], to canonicalKey: String) {
+        if let img = image(for: canonicalKey) {
+            for alias in aliases where !alias.isEmpty {
+                memoryCache.setObject(img, forKey: alias as NSString)
+            }
+            diskQueue.async { [cacheDirectoryURL] in
+                guard let tiff = img.tiffRepresentation,
+                      let rep = NSBitmapImageRep(data: tiff),
+                      let data = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.90]) else {
+                    return
+                }
+                for alias in aliases where !alias.isEmpty {
+                    let aliasURL = cacheDirectoryURL.appendingPathComponent(self.diskFileName(for: alias))
+                    try? data.write(to: aliasURL, options: .atomic)
+                }
+            }
+        }
     }
 }
 
@@ -983,7 +1016,13 @@ public struct MediaArtworkView: View {
                        data.count > 128,
                        let img = NSImage(data: data),
                        img.size.width > 1 {
-                        ArtworkImageCache.shared.storeRawData(data, for: url.absoluteString)
+                        let aliases = [
+                            self.item.id,
+                            "item_\(self.item.id)",
+                            "item_\(self.item.id)_\(self.kind.rawValue)",
+                            "emby_\(self.item.id)"
+                        ]
+                        ArtworkImageCache.shared.storeRawData(data, for: url.absoluteString, aliases: aliases)
                         self.loadedImage = img
                         return
                     }
@@ -998,6 +1037,11 @@ public struct MediaArtworkView: View {
         if let loadedImage { return loadedImage }
         for url in candidateURLs {
             if let cached = ArtworkImageCache.shared.image(for: url.absoluteString) {
+                return cached
+            }
+        }
+        for key in ["item_\(item.id)_\(kind.rawValue)", "item_\(item.id)", item.id, "emby_\(item.id)"] {
+            if let cached = ArtworkImageCache.shared.image(for: key) {
                 return cached
             }
         }
@@ -1441,32 +1485,7 @@ public struct LatencyBadgeView: View {
     }
 
     public var body: some View {
-        HStack(spacing: 4.5) {
-            if isPinging && latencyMs == nil {
-                RefreshVectorIcon(size: 9.5, color: badgeColor, isSpinning: true)
-            } else {
-                Circle()
-                    .fill(badgeColor)
-                    .frame(width: 5.5, height: 5.5)
-            }
-            if let ms = latencyMs {
-                Text("\(ms) ms")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(badgeColor)
-            } else if isPinging {
-                Text("测速中")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(badgeColor)
-            } else {
-                Text("待测速")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(badgeColor.opacity(0.14))
-        .clipShape(Capsule())
+        EmptyView()
     }
 }
 
@@ -2241,6 +2260,7 @@ public struct PersonAvatarView: View {
 
 // MARK: - Watch Record Poster & Video Frame Thumbnail View
 public struct RecordArtworkThumbnailView: View {
+    @EnvironmentObject private var appState: AppState
     public let record: WatchRecordItem
     public let server: EmbyServerConfig?
     public var width: CGFloat = 78
@@ -2268,16 +2288,16 @@ public struct RecordArtworkThumbnailView: View {
                     .frame(width: width, height: height)
                     .clipped()
             } else {
-                Color(red: 0.10, green: 0.11, blue: 0.14)
+                (appState.isLightMode ? Color(red: 0.91, green: 0.92, blue: 0.94) : Color(red: 0.10, green: 0.11, blue: 0.14))
                     .frame(width: width, height: height)
 
                 VStack(spacing: 5) {
-                    Image(systemName: record.sourceType == "Local" ? "play.rectangle.fill" : "film")
+                    Image(systemName: (record.sourceType == "Local" || record.sourceType == "本地文件") ? "play.rectangle.fill" : "film")
                         .font(.system(size: 22))
-                        .foregroundStyle(Color.white.opacity(0.35))
+                        .foregroundStyle(appState.isLightMode ? Color.black.opacity(0.28) : Color.white.opacity(0.35))
                     Text(record.sourceType)
                         .font(.system(size: 9.5, weight: .semibold))
-                        .foregroundStyle(Color.white.opacity(0.40))
+                        .foregroundStyle(appState.isLightMode ? Color.black.opacity(0.40) : Color.white.opacity(0.40))
                 }
             }
         }
@@ -2295,11 +2315,27 @@ public struct RecordArtworkThumbnailView: View {
 
     private var resolvedThumbnail: NSImage? {
         if let thumbnail { return thumbnail }
-        return ArtworkImageCache.shared.image(for: cacheKey)
+        if let cached = ArtworkImageCache.shared.image(for: cacheKey) {
+            return cached
+        }
+        if let urlStr = record.posterURL, let cached = ArtworkImageCache.shared.image(for: urlStr) {
+            return cached
+        }
+        if let embyId = record.embyItemId {
+            for alias in ["item_\(embyId)_Primary", "item_\(embyId)_Thumb", "item_\(embyId)", embyId, "emby_\(embyId)"] {
+                if let cached = ArtworkImageCache.shared.image(for: alias) {
+                    return cached
+                }
+            }
+        }
+        if let stream = record.streamURLString, let cached = ArtworkImageCache.shared.image(for: "local_frame_\(stream)") {
+            return cached
+        }
+        return nil
     }
 
     private func loadThumbnail() async {
-        if let cached = ArtworkImageCache.shared.image(for: cacheKey) {
+        if let cached = resolvedThumbnail {
             self.thumbnail = cached
             return
         }
@@ -2307,7 +2343,11 @@ public struct RecordArtworkThumbnailView: View {
         // 1. Try remote posterURL string
         if let urlStr = record.posterURL, let url = URL(string: urlStr) {
             if let img = await fetchImage(url: url) {
-                ArtworkImageCache.shared.store(img, for: cacheKey)
+                var aliases = [cacheKey, "record_\(record.id)"]
+                if let embyId = record.embyItemId {
+                    aliases.append(contentsOf: ["item_\(embyId)", "item_\(embyId)_Primary", embyId])
+                }
+                ArtworkImageCache.shared.store(img, for: cacheKey, aliases: aliases)
                 self.thumbnail = img
                 return
             }
@@ -2317,7 +2357,7 @@ public struct RecordArtworkThumbnailView: View {
         if let itemId = record.embyItemId, let server, !server.host.isEmpty {
             if let url = EmbyClient.shared.imageURL(server: server, itemId: itemId, kind: .primary, maxWidth: 300) {
                 if let img = await fetchImage(url: url) {
-                    ArtworkImageCache.shared.store(img, for: cacheKey)
+                    ArtworkImageCache.shared.store(img, for: cacheKey, aliases: ["item_\(itemId)", "item_\(itemId)_Primary", itemId])
                     self.thumbnail = img
                     return
                 }
@@ -2334,7 +2374,7 @@ public struct RecordArtworkThumbnailView: View {
                 return nil
             }()
             if let fileURL, let img = await extractLocalThumbnail(fileURL: fileURL) {
-                ArtworkImageCache.shared.store(img, for: cacheKey)
+                ArtworkImageCache.shared.store(img, for: cacheKey, aliases: ["local_frame_\(streamStr)"])
                 self.thumbnail = img
                 return
             }

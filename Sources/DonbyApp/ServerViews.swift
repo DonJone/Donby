@@ -295,7 +295,7 @@ public struct ServerCardView: View {
                                 .font(.system(size: 12, weight: .regular))
                         }
                     }
-                    .foregroundStyle(Color(white: 0.62))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     .padding(.bottom, 7)
                 }
 
@@ -313,13 +313,13 @@ public struct ServerCardView: View {
                     } else {
                         Text(server.note.isEmpty ? server.activeLineName : server.note)
                             .font(.system(size: 12))
-                            .foregroundStyle(Color(white: 0.56))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                             .lineLimit(1)
                         Spacer()
                         if appState.displayWatchTime {
                             Text(server.relativeWatchTimeText)
                                 .font(.system(size: 12))
-                                .foregroundStyle(Color(white: 0.56))
+                                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                                 .lineLimit(1)
                         }
                     }
@@ -375,7 +375,6 @@ public struct ServerLinePickSheet: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
     public let serverId: UUID
-    @State private var isSelectingFastest: Bool = false
 
     private var server: EmbyServerConfig? { appState.servers.first(where: { $0.id == serverId }) }
 
@@ -391,7 +390,7 @@ public struct ServerLinePickSheet: View {
                         HStack(spacing: 8) {
                             Text("切换线路 · \(server.name)")
                                 .font(.system(size: 16.5, weight: .bold))
-                                .foregroundStyle(.white)
+                                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                             if server.autoSyncedLineCount > 0 {
                                 HStack(spacing: 4) {
                                     RouteSwitchVectorIcon(size: 10.5, color: appState.accentColor)
@@ -405,38 +404,25 @@ public struct ServerLinePickSheet: View {
                                 .clipShape(Capsule())
                             }
                         }
-                        Text("当前使用：\(server.activeLineName) · 切换无需重新登录")
+                        Text("当前使用：\(server.activeLineName) · 点击即时切换")
                             .font(.system(size: 11.5))
-                            .foregroundStyle(Color(white: 0.56))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     }
 
                     Spacer()
 
                     ToolbarVectorButton(
-                        tooltip: "重新测速所有线路",
-                        action: {
-                            guard !appState.isPingingLines else { return }
-                            Task { await appState.pingAllLines(for: server.id) }
-                        }
-                    ) { hovered in
-                        RefreshVectorIcon(
-                            size: 14.5,
-                            color: hovered ? .white : Color(white: 0.86),
-                            isSpinning: appState.isPingingLines
-                        )
-                    }
-
-                    ToolbarVectorButton(
                         tooltip: "关闭",
                         action: { dismiss() }
                     ) { hovered in
+                        let iconCol = appState.isLightMode ? (hovered ? Color.black : Color(white: 0.35)) : (hovered ? .white : Color(white: 0.72))
                         Image(systemName: "xmark")
                             .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(hovered ? .white : Color(white: 0.72))
+                            .foregroundStyle(iconCol)
                     }
                 }
 
-                Divider().opacity(0.12)
+                Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
 
                 let rowCount = 1 + server.backupLines.count
                 let listHeight = min(max(CGFloat(rowCount) * 62, 128), 312)
@@ -447,8 +433,6 @@ public struct ServerLinePickSheet: View {
                             title: "默认主线路",
                             url: server.mainLineURL,
                             isAutoSynced: false,
-                            latencyMs: server.mainLineLatencyMs,
-                            isPinging: appState.isPingingLines,
                             isSelected: server.selectedLineId == nil,
                             accentColor: appState.accentColor
                         ) {
@@ -460,8 +444,6 @@ public struct ServerLinePickSheet: View {
                                 title: line.name,
                                 url: line.url,
                                 isAutoSynced: line.isAutoSynced,
-                                latencyMs: line.latencyMs,
-                                isPinging: appState.isPingingLines,
                                 isSelected: server.selectedLineId == line.id,
                                 accentColor: appState.accentColor
                             ) {
@@ -474,7 +456,7 @@ public struct ServerLinePickSheet: View {
                 }
                 .frame(height: listHeight)
 
-                Divider().opacity(0.12)
+                Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
 
                 HStack(spacing: 10) {
                     Button {
@@ -484,39 +466,28 @@ public struct ServerLinePickSheet: View {
                         HStack(spacing: 7) {
                             RefreshVectorIcon(
                                 size: 13.5,
-                                color: Color(white: 0.90),
+                                color: appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : Color(white: 0.90),
                                 isSpinning: appState.isSyncingDomains
                             )
                             Text("同步云端线路")
-                                .foregroundStyle(Color(white: 0.90))
+                                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                         }
                         .font(.system(size: 12.5, weight: .semibold))
                         .padding(.horizontal, 14)
                         .padding(.vertical, 8)
-                        .background(Color.white.opacity(0.08))
-                        .clipShape(Capsule())
-                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.10), lineWidth: 0.8))
+                        .donbyLiquidGlassCapsule()
                     }
                     .buttonStyle(.plain)
 
                     Spacer()
 
                     Button {
-                        guard !isSelectingFastest else { return }
-                        Task {
-                            isSelectingFastest = true
-                            await appState.selectFastestLine(for: server.id)
-                            isSelectingFastest = false
-                            dismiss()
-                        }
+                        dismiss()
                     } label: {
                         HStack(spacing: 7) {
-                            if isSelectingFastest {
-                                RefreshVectorIcon(size: 13, color: .white, isSpinning: true)
-                            } else {
-                                RouteSwitchVectorIcon(size: 13.5, color: .white)
-                            }
-                            Text("智能优选最快线路")
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 12, weight: .bold))
+                            Text("完成")
                         }
                         .font(.system(size: 12.5, weight: .bold))
                         .foregroundStyle(.white)
@@ -531,17 +502,20 @@ public struct ServerLinePickSheet: View {
         }
         .padding(22)
         .frame(width: 530)
-        .background(Color(red: 0.115, green: 0.118, blue: 0.130))
-        .task { await appState.pingAllLines(for: serverId) }
+        .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
+        )
     }
 }
 
 private struct ServerLineOptionRow: View {
+    @EnvironmentObject private var appState: AppState
     let title: String
     let url: String
     let isAutoSynced: Bool
-    let latencyMs: Int?
-    let isPinging: Bool
     let isSelected: Bool
     let accentColor: Color
     let action: () -> Void
@@ -553,7 +527,7 @@ private struct ServerLineOptionRow: View {
             HStack(spacing: 12) {
                 ZStack {
                     Circle()
-                        .strokeBorder(isSelected ? accentColor : Color.white.opacity(0.28), lineWidth: isSelected ? 5.5 : 1.5)
+                        .strokeBorder(isSelected ? accentColor : DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: isSelected ? 5.5 : 1.5)
                         .frame(width: 17, height: 17)
                 }
 
@@ -561,7 +535,7 @@ private struct ServerLineOptionRow: View {
                     HStack(spacing: 6) {
                         Text(title)
                             .font(.system(size: 13.5, weight: .semibold))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                             .lineLimit(1)
                         if isAutoSynced {
                             Text("云端同步")
@@ -575,25 +549,24 @@ private struct ServerLineOptionRow: View {
                     }
                     Text(url)
                         .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(Color(white: 0.52))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                         .lineLimit(1)
                 }
                 Spacer()
-                LatencyBadgeView(latencyMs: latencyMs, isPinging: isPinging)
             }
             .padding(.horizontal, 13)
             .padding(.vertical, 10)
             .background(
                 isSelected
-                    ? accentColor.opacity(0.15)
-                    : (isHovered ? Color.white.opacity(0.075) : Color.white.opacity(0.035))
+                    ? accentColor.opacity(appState.isLightMode ? 0.12 : 0.16)
+                    : (isHovered ? (appState.isLightMode ? Color.black.opacity(0.04) : Color.white.opacity(0.075)) : DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
             )
             .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
                     .strokeBorder(
-                        isSelected ? accentColor.opacity(0.85) : (isHovered ? Color.white.opacity(0.18) : Color.white.opacity(0.07)),
-                        lineWidth: isSelected ? 1.3 : 0.8
+                        isSelected ? accentColor.opacity(0.85) : (isHovered ? DonbyGlassPalette.separator(isLight: appState.isLightMode).opacity(1.5) : DonbyGlassPalette.separator(isLight: appState.isLightMode)),
+                        lineWidth: isSelected ? 1.3 : 0.6
                     )
             )
             .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
@@ -624,6 +597,7 @@ public struct ServerConfigSheet: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(draft.host.isEmpty ? "新增服务器" : "服务配置 · \(draft.name)")
                         .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Text("支持 Emby / UHDNow / Jellyfin，自动同步 ServerDomains").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -724,7 +698,12 @@ public struct ServerConfigSheet: View {
         }
         .padding(24)
         .frame(width: 570)
-        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
+        )
     }
 
     private func pasteFromClipboard() {

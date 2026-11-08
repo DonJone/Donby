@@ -487,7 +487,6 @@ public struct PlayerView: View {
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.white)
                         .lineLimit(1)
-                    LatencyBadgeView(latencyMs: session.server.activeLineLatencyMs, isPinging: appState.isPingingLines)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)

@@ -104,36 +104,7 @@ public struct MainWindowView: View {
             VStack(alignment: .leading, spacing: 3) {
                 ForEach(MainNavigationTab.allCases) { tab in
                     let isSelected = (appState.openedServerId == nil && appState.currentDetailItem == nil && appState.selectedTab == tab)
-                    Button {
-                        appState.selectSidebarModule(tab)
-                    } label: {
-                        HStack(spacing: 11) {
-                            Image(systemName: tab.icon)
-                                .font(.system(size: 15, weight: isSelected ? .semibold : .medium))
-                                .foregroundStyle(isSelected ? Color.white : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                                .frame(width: 20, alignment: .center)
-
-                            Text(tab.title)
-                                .font(.system(size: 13.5, weight: isSelected ? .semibold : .regular))
-                                .foregroundStyle(isSelected ? Color.white : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-
-                            Spacer()
-                        }
-                        .padding(.horizontal, 12)
-                        .frame(height: 35)
-                        .background(
-                            Group {
-                                if isSelected {
-                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .fill(appState.accentColor)
-                                        .shadow(color: appState.accentColor.opacity(0.35), radius: 4, y: 1.5)
-                                } else {
-                                    Color.clear
-                                }
-                            }
-                        )
-                    }
-                    .buttonStyle(.plain)
+                    SidebarTabItemButton(tab: tab, isSelected: isSelected)
                 }
             }
             .padding(.horizontal, 12)
@@ -150,38 +121,7 @@ public struct MainWindowView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     ForEach(appState.servers.filter { !appState.hideEncryptedServers || !$0.isEncrypted }) { server in
                         let isServerOpen = (appState.openedServerId == server.id)
-                        Button {
-                            appState.openServer(server)
-                        } label: {
-                            HStack(spacing: 10) {
-                                ServerIconView(server: server, size: 18)
-                                    .frame(width: 20, alignment: .center)
-
-                                Text(server.name)
-                                    .font(.system(size: 13, weight: isServerOpen ? .semibold : .regular))
-                                    .foregroundStyle(isServerOpen ? Color.white : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                                    .lineLimit(1)
-
-                                Spacer()
-                            }
-                            .padding(.horizontal, 12)
-                            .frame(height: 33)
-                            .background(
-                                Group {
-                                    if isServerOpen {
-                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                            .fill(appState.accentColor)
-                                            .shadow(color: appState.accentColor.opacity(0.35), radius: 4, y: 1.5)
-                                    } else {
-                                        Color.clear
-                                    }
-                                }
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .contextMenu {
-                            ServerContextMenuItems(server: server)
-                        }
+                        SidebarServerItemButton(server: server, isServerOpen: isServerOpen)
                     }
                 }
                 .padding(.horizontal, 12)
@@ -424,15 +364,15 @@ public struct FilesModuleView: View {
                 HStack(spacing: 6) {
                     Text(formatBadgeFor(media.urlString, isLocal: media.isLocalFile))
                         .font(.system(size: 10, weight: .heavy, design: .rounded))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(appState.isLightMode ? Color.black : Color.white)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2.5)
-                        .background(Color.white.opacity(0.12))
+                        .background(appState.isLightMode ? Color.black.opacity(0.08) : Color.white.opacity(0.12))
                         .clipShape(RoundedRectangle(cornerRadius: 4))
 
                     Text(media.isLocalFile ? "本地文件" : "网络直链")
                         .font(.system(size: 11))
-                        .foregroundStyle(Color(white: 0.50))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
 
                 Spacer()
@@ -445,9 +385,9 @@ public struct FilesModuleView: View {
                     } label: {
                         Image(systemName: "doc.on.doc")
                             .font(.system(size: 12))
-                            .foregroundStyle(Color(white: 0.55))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                             .frame(width: 24, height: 24)
-                            .background(Color.white.opacity(0.05))
+                            .background(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.05))
                             .clipShape(Circle())
                     }
                     .buttonStyle(.plain)
@@ -458,9 +398,9 @@ public struct FilesModuleView: View {
                     } label: {
                         Image(systemName: "trash")
                             .font(.system(size: 12))
-                            .foregroundStyle(Color(white: 0.45))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                             .frame(width: 24, height: 24)
-                            .background(Color.white.opacity(0.05))
+                            .background(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.05))
                             .clipShape(Circle())
                     }
                     .buttonStyle(.plain)
@@ -500,10 +440,10 @@ public struct FilesModuleView: View {
         VStack(spacing: 12) {
             Image(systemName: "folder")
                 .font(.system(size: 40))
-                .foregroundStyle(Color(white: 0.28))
+                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode).opacity(0.6))
             Text("暂无最近播放的本地或网络流")
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(Color(white: 0.55))
+                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 40)
@@ -513,12 +453,12 @@ public struct FilesModuleView: View {
         VStack(alignment: .leading, spacing: 18) {
             Text("输入网络直链播放")
                 .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(.white)
+                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("媒体名称 (选填)")
                     .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(Color(white: 0.60))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 TextField("选填自定义标题", text: $directNameInput)
                     .textFieldStyle(.roundedBorder)
             }
@@ -526,7 +466,7 @@ public struct FilesModuleView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("流媒体 URL (支持 MP4, M3U8, MKV 等)")
                     .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(Color(white: 0.60))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 TextField("https://example.com/video.m3u8", text: $directURLInput)
                     .textFieldStyle(.roundedBorder)
             }
@@ -557,7 +497,12 @@ public struct FilesModuleView: View {
         }
         .padding(24)
         .frame(width: 480)
-        .background(Color(red: 0.14, green: 0.14, blue: 0.16))
+        .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
+        )
     }
 
     private func openLocalFileDialog() {
@@ -779,8 +724,6 @@ public struct IPTVModuleView: View {
                         .padding(.vertical, 3)
                         .background(Color.black.opacity(0.65))
                         .clipShape(Capsule())
-
-                        LatencyBadgeView(latencyMs: Int.random(in: 20...36))
                     }
                     .padding(8)
                 }
@@ -841,10 +784,10 @@ public struct IPTVModuleView: View {
         VStack(spacing: 12) {
             Image(systemName: "sparkles.tv")
                 .font(.system(size: 40))
-                .foregroundStyle(Color(white: 0.30))
+                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode).opacity(0.6))
             Text("当前分组下暂无直播频道")
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(Color(white: 0.55))
+                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 40)
@@ -854,12 +797,12 @@ public struct IPTVModuleView: View {
         VStack(alignment: .leading, spacing: 18) {
             Text("添加 IPTV 频道")
                 .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(.white)
+                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("频道名称")
                     .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(Color(white: 0.60))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 TextField("如：CCTV 4K 超高清", text: $newChannelName)
                     .textFieldStyle(.roundedBorder)
             }
@@ -867,7 +810,7 @@ public struct IPTVModuleView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("频道分组")
                     .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(Color(white: 0.60))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 Picker("", selection: $newChannelGroup) {
                     ForEach(["4K UHD", "影视频道", "新闻资讯", "自定义"], id: \.self) { grp in
                         Text(grp).tag(grp)
@@ -879,7 +822,7 @@ public struct IPTVModuleView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("流媒体 m3u8 / 直播地址")
                     .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(Color(white: 0.60))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 TextField("https://example.com/live/master.m3u8", text: $newChannelURL)
                     .textFieldStyle(.roundedBorder)
             }
@@ -906,14 +849,19 @@ public struct IPTVModuleView: View {
         }
         .padding(24)
         .frame(width: 460)
-        .background(Color(red: 0.14, green: 0.14, blue: 0.16))
+        .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
+        )
     }
 
     private var importM3USheetContent: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("导入 M3U 播放列表 / 订阅")
                 .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(.white)
+                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
             Button {
                 let panel = NSOpenPanel()
@@ -939,17 +887,21 @@ public struct IPTVModuleView: View {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 10, weight: .bold))
                 }
-                .foregroundStyle(.white)
+                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                 .padding(12)
-                .background(Color.white.opacity(0.08))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+                )
             }
             .buttonStyle(.plain)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("或直接粘贴 M3U 文本内容")
                     .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(Color(white: 0.60))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
 
                 TextEditor(text: $m3uTextInput)
                     .font(.system(size: 11.5, design: .monospaced))
@@ -978,7 +930,12 @@ public struct IPTVModuleView: View {
         }
         .padding(24)
         .frame(width: 480)
-        .background(Color(red: 0.14, green: 0.14, blue: 0.16))
+        .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
+        )
     }
 }
 
@@ -1111,23 +1068,23 @@ public struct RecordsView: View {
 
                     Text(record.sourceType)
                         .font(.system(size: 10.5))
-                        .foregroundStyle(Color(white: 0.50))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Color.white.opacity(0.08))
+                        .background(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08))
                         .clipShape(RoundedRectangle(cornerRadius: 4))
 
                     Spacer()
 
                     Text(timeAgoDisplay(record.lastWatchedAt))
                         .font(.system(size: 11.5))
-                        .foregroundStyle(Color(white: 0.45))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
 
                 if let sub = record.subtitle {
                     Text(sub)
                         .font(.system(size: 12))
-                        .foregroundStyle(Color(white: 0.62))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
 
                 // Progress Bar
@@ -1135,7 +1092,7 @@ public struct RecordsView: View {
                     GeometryReader { geo in
                         ZStack(alignment: .leading) {
                             Capsule()
-                                .fill(Color.white.opacity(0.12))
+                                .fill(appState.isLightMode ? Color.black.opacity(0.08) : Color.white.opacity(0.12))
                                 .frame(height: 5)
                             Capsule()
                                 .fill(appState.accentColor)
@@ -1154,7 +1111,7 @@ public struct RecordsView: View {
 
                         Text(record.remainingMinutesString)
                             .font(.system(size: 11))
-                            .foregroundStyle(Color(white: 0.55))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     }
                 }
                 .padding(.top, 2)
@@ -1187,10 +1144,10 @@ public struct RecordsView: View {
                             Text("从头播放")
                                 .font(.system(size: 12, weight: .medium))
                         }
-                        .foregroundStyle(Color(white: 0.85))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                         .padding(.horizontal, 12)
                         .padding(.vertical, 5.5)
-                        .background(Color.white.opacity(0.08))
+                        .background(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.08))
                         .clipShape(Capsule())
                     }
                     .buttonStyle(.plain)
@@ -1202,7 +1159,7 @@ public struct RecordsView: View {
                     } label: {
                         Image(systemName: "trash")
                             .font(.system(size: 11))
-                            .foregroundStyle(Color(white: 0.45))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     }
                     .buttonStyle(.plain)
                     .help("删除此条记录")
@@ -1223,13 +1180,13 @@ public struct RecordsView: View {
         VStack(spacing: 12) {
             Image(systemName: "play.rectangle")
                 .font(.system(size: 44))
-                .foregroundStyle(Color(white: 0.30))
+                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode).opacity(0.6))
             Text("暂无观看历史记录")
                 .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(Color(white: 0.55))
+                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
             Text("播放影片或本地视频后，将自动在此记录播放断点")
                 .font(.system(size: 12))
-                .foregroundStyle(Color(white: 0.40))
+                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 50)
@@ -1511,13 +1468,13 @@ public struct GlobalSearchView: View {
                 VStack(spacing: 12) {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 36))
-                        .foregroundStyle(Color(white: 0.28))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode).opacity(0.6))
                     Text("搜索 Emby / UHDNow 媒体库、本地视频或直播频道")
                         .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(Color(white: 0.56))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Text("配置并连接服务器后，可在此实时检索影片")
                         .font(.system(size: 12))
-                        .foregroundStyle(Color(white: 0.40))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 64)
@@ -1547,13 +1504,13 @@ public struct GlobalSearchView: View {
         VStack(spacing: 12) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 40))
-                .foregroundStyle(Color(white: 0.30))
+                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode).opacity(0.6))
             Text("未找到与 “\(query)” 相关的结果")
                 .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(Color(white: 0.60))
+                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
             Text("请尝试更换搜索关键词，或检查名称拼写")
                 .font(.system(size: 12))
-                .foregroundStyle(Color(white: 0.40))
+                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 60)
@@ -1613,26 +1570,9 @@ public struct SettingsView: View {
 
                 ForEach(SettingsSectionTab.allCases) { tab in
                     let isSel = (currentTab == tab)
-                    Button {
+                    SettingsTabRowButton(tab: tab, isSelected: isSel) {
                         currentTab = tab
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: tab.icon)
-                                .font(.system(size: 14))
-                                .foregroundStyle(isSel ? appState.accentColor : Color(white: 0.60))
-                                .frame(width: 20)
-                            Text(tab.rawValue)
-                                .font(.system(size: 13, weight: isSel ? .semibold : .regular))
-                                .foregroundStyle(isSel ? .white : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                            Spacer()
-                        }
-                        .padding(.horizontal, 14)
-                        .frame(height: 34)
-                        .background(isSel ? appState.accentColor : Color.clear)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 10)
                 }
 
                 Spacer()
@@ -1779,15 +1719,15 @@ public struct SettingsView: View {
                 Toggle("启用 Apple VideoToolbox 硬件解码", isOn: $appState.enableHardwareDecode)
                 Text("利用 Apple Silicon 专有硬解芯片直解 10-bit HEVC/H.264/ProRes，显著降低 CPU 负载并提升发热与电池表现。")
                     .font(.system(size: 11.5))
-                    .foregroundStyle(Color(white: 0.52))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
 
-                Divider().opacity(0.12)
+                Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
 
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("默认优先版本选择")
                             .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                         Spacer()
                         Picker("", selection: $appState.preferredVersionPresetRaw) {
                             ForEach(PreferredVersionPreset.allCases) { preset in
@@ -1799,15 +1739,15 @@ public struct SettingsView: View {
                     }
                     Text(appState.preferredVersionPreset.subtitle)
                         .font(.system(size: 11.5))
-                        .foregroundStyle(Color(white: 0.52))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
 
-                Divider().opacity(0.12)
+                Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
 
                 HStack {
                     Text("控制栏显示样式")
                         .font(.system(size: 13))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
                     Picker("", selection: $appState.controlBarStyleRaw) {
                         Text("悬浮胶囊栏").tag(ControlBarPositionStyle.float.rawValue)
@@ -1820,7 +1760,7 @@ public struct SettingsView: View {
                 HStack {
                     Text("默认播放倍速")
                         .font(.system(size: 13))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
                     Picker("", selection: $appState.defaultPlaySpeed) {
                         ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { spd in
@@ -1831,12 +1771,12 @@ public struct SettingsView: View {
                     .frame(width: 100)
                 }
 
-                Divider().opacity(0.12)
+                Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
 
                 HStack {
                     Text("跳过片头秒数")
                         .font(.system(size: 13))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
                     Stepper("\(appState.opSeconds) 秒", value: $appState.opSeconds, in: 0...300, step: 5)
                 }
@@ -1844,7 +1784,7 @@ public struct SettingsView: View {
                 HStack {
                     Text("跳过片尾秒数")
                         .font(.system(size: 13))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
                     Stepper("\(appState.edSeconds) 秒", value: $appState.edSeconds, in: 0...300, step: 5)
                 }
@@ -1852,49 +1792,39 @@ public struct SettingsView: View {
                 Toggle("开启弹幕支持 (Danmaku Layer)", isOn: $appState.enableDanmaku)
             }
             .padding(18)
-            .background(Color.white.opacity(0.035))
+            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
             .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+            )
         }
     }
 
     // 3. 线路与网络
     private var networkSettingsTab: some View {
         VStack(alignment: .leading, spacing: 24) {
-            settingsHeader(title: "线路与网络", subtitle: "ServerDomains 多线路负载、直链缓存与连接调优")
+            settingsHeader(title: "线路与网络", subtitle: "ServerDomains 多线路热备、302 直连缓存与流媒体预读优化")
 
             VStack(alignment: .leading, spacing: 16) {
                 Toggle("ServerDomains 云端线路自动同步", isOn: $appState.autoSyncDomains)
                 Text("连接服务端时自动同步扩展域名与多线路矩阵，确保网络故障时能够平滑热备切换。")
                     .font(.system(size: 11.5))
-                    .foregroundStyle(Color(white: 0.52))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
 
-                Divider().opacity(0.12)
+                Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
 
                 Toggle("启用 302 重定向直连缓存", isOn: $appState.enable302Cache)
                 Text("解析影视直链时智能预热直连 CDN 地址，跳过 Emby 反向代理二次中转，提升 4K 播放起播速度。")
                     .font(.system(size: 11.5))
-                    .foregroundStyle(Color(white: 0.52))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
 
-                Divider().opacity(0.12)
-
-                HStack {
-                    Text("线路测速超时时间")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.white)
-                    Spacer()
-                    Picker("", selection: $appState.pingTimeoutSeconds) {
-                        Text("3 秒").tag(3)
-                        Text("5 秒 (推荐)").tag(5)
-                        Text("10 秒").tag(10)
-                    }
-                    .pickerStyle(.menu)
-                    .frame(width: 120)
-                }
+                Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
 
                 HStack {
                     Text("流媒体预读缓存")
                         .font(.system(size: 13))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
                     Picker("", selection: $appState.cachePoolSizeMB) {
                         Text("128 MB").tag(128)
@@ -1905,38 +1835,17 @@ public struct SettingsView: View {
                     .pickerStyle(.menu)
                     .frame(width: 150)
                 }
-
-                Divider().opacity(0.12)
-
-                HStack {
-                    Text("当前服务器线路测速")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.white)
-                    Spacer()
-                    Button {
-                        if let s = appState.activeServer {
-                            Task {
-                                await appState.pingAllLines(for: s.id)
-                                appState.showToast("已完成线路全量测速", icon: "bolt.horizontal.icloud.fill")
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "bolt.fill")
-                            Text("立即测速所有线路")
-                        }
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 6)
-                        .background(appState.accentColor)
-                        .clipShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                }
+                Text("分配专有环形内存池预读 4K HEVC/H.264 码流切片，大幅降低起播卡顿与快进缓冲等待。")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }
             .padding(18)
-            .background(Color.white.opacity(0.035))
+            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
             .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+            )
         }
     }
 
@@ -1951,54 +1860,66 @@ public struct SettingsView: View {
                 VStack(spacing: 4) {
                     Text("Donby")
                         .font(.system(size: 20, weight: .heavy, design: .rounded))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Text("版本 1.3.0 (Build 2026.11) · macOS Apple Silicon")
                         .font(.system(size: 12))
-                        .foregroundStyle(Color(white: 0.55))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
 
                 Text("专为 4K 原画与流媒体打造的 macOS 原生专业播放器。支持 Apple VideoToolbox 硬件解码、Metal 高动态范围渲染、Dolby Vision 与 ServerDomains 多线路热备。")
                     .font(.system(size: 12.5))
-                    .foregroundStyle(Color(white: 0.72))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 24)
             }
             .frame(maxWidth: .infinity)
             .padding(22)
-            .background(Color.white.opacity(0.035))
+            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
             .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+            )
 
             // UHDNow Support
             VStack(alignment: .leading, spacing: 8) {
                 Text("UHDNow 开发者支持说明")
                     .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                 Text("Donby 官方原生深度支持 UHDNow 服务端生态协议，包括 ServerDomains 动态负载均衡、专属 302 直连通道与高规格 4K 媒体流直解。")
                     .font(.system(size: 12))
-                    .foregroundStyle(Color(white: 0.65))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }
             .padding(18)
-            .background(Color.white.opacity(0.035))
+            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
             .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+            )
 
             // Design Inspiration & Open Source Acknowledgements
             VStack(alignment: .leading, spacing: 8) {
                 Text("设计灵感与开源致谢")
                     .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                 Text("部分界面交互与毛玻璃视觉体验在设计上参考并致敬了 Apple TV、SenPlayer 与 Infuse 等优秀的生态应用；底层音视频与字幕能力构建于 FFmpeg 与 libass 之上。Donby 全部源码、图形资源与 Metal 色彩管线均为独立从零实现，与上述第三方商业软件无官方隶属或背书关系。")
                     .font(.system(size: 12))
-                    .foregroundStyle(Color(white: 0.65))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }
             .padding(18)
-            .background(Color.white.opacity(0.035))
+            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
             .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+            )
 
             // Keyboard Shortcuts Sheet
             VStack(alignment: .leading, spacing: 10) {
                 Text("播放器全局快捷键")
                     .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
                 shortcutRow(key: "Space 空格键", desc: "播放 / 暂停视频")
                 shortcutRow(key: "← / → 方向键", desc: "快退 10 秒 / 快进 10 秒")
@@ -2007,8 +1928,12 @@ public struct SettingsView: View {
                 shortcutRow(key: "Esc 键", desc: "退出播放器返回主界面")
             }
             .padding(18)
-            .background(Color.white.opacity(0.035))
+            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
             .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+            )
         }
     }
 
@@ -2027,18 +1952,150 @@ public struct SettingsView: View {
         HStack {
             Text(key)
                 .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundStyle(.white)
+                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
-                .background(Color.white.opacity(0.12))
+                .background(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.12))
                 .clipShape(RoundedRectangle(cornerRadius: 5))
 
             Spacer()
 
             Text(desc)
                 .font(.system(size: 12))
-                .foregroundStyle(Color(white: 0.70))
+                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
         }
         .padding(.vertical, 2)
+    }
+}
+
+// MARK: - Sidebar & Settings Item Helpers
+private struct SidebarTabItemButton: View {
+    @EnvironmentObject private var appState: AppState
+    let tab: MainNavigationTab
+    let isSelected: Bool
+    @State private var isHovered: Bool = false
+
+    var body: some View {
+        Button {
+            appState.selectSidebarModule(tab)
+        } label: {
+            HStack(spacing: 11) {
+                Image(systemName: tab.icon)
+                    .font(.system(size: 14.5, weight: isSelected ? .semibold : .medium))
+                    .foregroundStyle(isSelected ? Color.white : (isHovered ? DonbyGlassPalette.primaryText(isLight: appState.isLightMode) : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode)))
+                    .frame(width: 20, alignment: .center)
+
+                Text(tab.title)
+                    .font(.system(size: 13.5, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected ? Color.white : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 35)
+            .background(
+                Group {
+                    if isSelected {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(appState.accentColor)
+                            .shadow(color: appState.accentColor.opacity(0.35), radius: 4, y: 1.5)
+                    } else if isHovered {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.07))
+                    } else {
+                        Color.clear
+                    }
+                }
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+    }
+}
+
+private struct SidebarServerItemButton: View {
+    @EnvironmentObject private var appState: AppState
+    let server: EmbyServerConfig
+    let isServerOpen: Bool
+    @State private var isHovered: Bool = false
+
+    var body: some View {
+        Button {
+            appState.openServer(server)
+        } label: {
+            HStack(spacing: 10) {
+                ServerIconView(server: server, size: 18)
+                    .frame(width: 20, alignment: .center)
+
+                Text(server.name)
+                    .font(.system(size: 13, weight: isServerOpen ? .semibold : .regular))
+                    .foregroundStyle(isServerOpen ? Color.white : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    .lineLimit(1)
+
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 33)
+            .background(
+                Group {
+                    if isServerOpen {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(appState.accentColor)
+                            .shadow(color: appState.accentColor.opacity(0.35), radius: 4, y: 1.5)
+                    } else if isHovered {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.07))
+                    } else {
+                        Color.clear
+                    }
+                }
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .contextMenu {
+            ServerContextMenuItems(server: server)
+        }
+    }
+}
+
+private struct SettingsTabRowButton: View {
+    @EnvironmentObject private var appState: AppState
+    let tab: SettingsSectionTab
+    let isSelected: Bool
+    let action: () -> Void
+    @State private var isHovered: Bool = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: tab.icon)
+                    .font(.system(size: 14))
+                    .foregroundStyle(isSelected ? Color.white : (isHovered ? DonbyGlassPalette.primaryText(isLight: appState.isLightMode) : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode)))
+                    .frame(width: 20)
+                Text(tab.rawValue)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected ? .white : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 34)
+            .background(
+                Group {
+                    if isSelected {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(appState.accentColor)
+                    } else if isHovered {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.07))
+                    } else {
+                        Color.clear
+                    }
+                }
+            )
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 10)
+        .onHover { isHovered = $0 }
     }
 }

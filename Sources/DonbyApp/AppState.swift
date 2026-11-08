@@ -398,6 +398,12 @@ public final class AppState: ObservableObject {
         )
         watchHistory.insert(record, at: 0)
         scheduleSaveWatchHistory(immediate: false)
+        if let posterURL, !posterURL.isEmpty {
+            ArtworkImageCache.shared.aliasKeys(["record_thumb_\(recId)_\(posterURL)"], to: posterURL)
+        }
+        if let embyItemId, !embyItemId.isEmpty {
+            ArtworkImageCache.shared.aliasKeys(["record_thumb_\(recId)_\(posterURL ?? "")"], to: "item_\(embyItemId)_Primary")
+        }
     }
 
     public func clearWatchHistory() {
@@ -473,6 +479,18 @@ public final class AppState: ObservableObject {
         openedServerId = server.id
         selectedLibrary = nil
         detailStack.removeAll()
+
+        // Instantaneous switch from memory/disk snapshot
+        if let snap = ServerHomeCacheStore.shared.snapshot(for: server.id), !snap.libraryViews.isEmpty {
+            self.libraryViews = snap.libraryViews
+            self.resumeItems = snap.resumeItems
+            self.nextUpItems = snap.nextUpItems
+            self.favoriteItems = snap.favoriteItems
+            self.latestByLibrary = snap.latestByLibrary
+            self.carouselItems = snap.carouselItems
+            self.isLoadingHome = false
+        }
+
         Task { await loadActiveServerHome(syncDomains: true) }
     }
 
@@ -705,7 +723,9 @@ public final class AppState: ObservableObject {
             return
         }
 
-        isLoadingHome = true
+        if self.libraryViews.isEmpty {
+            isLoadingHome = true
+        }
         homeErrorMessage = nil
 
         if syncDomains {
@@ -768,6 +788,17 @@ public final class AppState: ObservableObject {
             guard currentGen == homeLoadGeneration else { return }
             self.latestByLibrary = latestMap
             self.carouselItems = Array((heroCandidates.isEmpty ? resumes : heroCandidates).prefix(8))
+
+            let snapshot = ServerHomeCacheStore.ServerHomeSnapshot(
+                libraryViews: views,
+                resumeItems: resumes,
+                nextUpItems: nextUps,
+                favoriteItems: favs,
+                latestByLibrary: latestMap,
+                carouselItems: self.carouselItems,
+                cachedAt: Date()
+            )
+            ServerHomeCacheStore.shared.save(snapshot, for: server.id)
             self.isLoadingHome = false
         } catch {
             guard currentGen == homeLoadGeneration else { return }
@@ -1005,6 +1036,54 @@ public final class AppState: ObservableObject {
                     if !iconSets.contains(where: { $0.name == iconSet.name }) { iconSets.append(iconSet) }
                     showToast("成功导入图标库 \(iconSet.name)", icon: "photo.on.rectangle.angled")
                 }
+            }
+        }
+    }
+}
+
+// MARK: - Multi-Tier Server Home Cache Store
+public final class ServerHomeCacheStore {
+    public static let shared = ServerHomeCacheStore()
+    private var inMemorySnapshots: [UUID: ServerHomeSnapshot] = [:]
+    private let cacheDirectoryURL: URL
+
+    public struct ServerHomeSnapshot: Codable {
+        public var libraryViews: [EmbyItem]
+        public var resumeItems: [EmbyItem]
+        public var nextUpItems: [EmbyItem]
+        public var favoriteItems: [EmbyItem]
+        public var latestByLibrary: [String: [EmbyItem]]
+        public var carouselItems: [EmbyItem]
+        public var cachedAt: Date
+    }
+
+    private init() {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let dir = base.appendingPathComponent("com.don.Donby/ServerHomeCache", isDirectory: true)
+        self.cacheDirectoryURL = dir
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
+    }
+
+    public func snapshot(for serverId: UUID) -> ServerHomeSnapshot? {
+        if let mem = inMemorySnapshots[serverId] {
+            return mem
+        }
+        let file = cacheDirectoryURL.appendingPathComponent("home_\(serverId.uuidString).json")
+        if let data = try? Data(contentsOf: file),
+           let snap = try? JSONDecoder().decode(ServerHomeSnapshot.self, from: data) {
+            inMemorySnapshots[serverId] = snap
+            return snap
+        }
+        return nil
+    }
+
+    public func save(_ snapshot: ServerHomeSnapshot, for serverId: UUID) {
+        inMemorySnapshots[serverId] = snapshot
+        DispatchQueue.global(qos: .utility).async { [cacheDirectoryURL] in
+            let file = cacheDirectoryURL.appendingPathComponent("home_\(serverId.uuidString).json")
+            if let data = try? JSONEncoder().encode(snapshot) {
+                try? data.write(to: file, options: .atomic)
             }
         }
     }
