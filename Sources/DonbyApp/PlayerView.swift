@@ -261,9 +261,7 @@ public struct PlayerView: View {
                             .foregroundStyle(.white.opacity(0.6))
                     }
                     .padding(.horizontal, 36).padding(.vertical, 28)
-                    .background(.ultraThinMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Color.white.opacity(0.12), lineWidth: 0.8))
+                    .donbyLiquidGlassRect(cornerRadius: 18, tint: nil, interactive: false, isHovered: false)
                 }
                 .transition(.opacity)
             }
@@ -307,8 +305,7 @@ public struct PlayerView: View {
                         }
                     }
                     .padding(32)
-                    .background(.ultraThinMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .donbyLiquidGlassRect(cornerRadius: 18, tint: nil, interactive: false, isHovered: false)
                 }
                 .transition(.opacity)
             }
@@ -442,6 +439,7 @@ public struct PlayerView: View {
     }
 
     private var topOSDBar: some View {
+        DonbyGlassContainer(spacing: 14) {
         HStack(spacing: 14) {
             LiquidGlassCapsuleButton(
                 title: "退出播放",
@@ -493,7 +491,7 @@ public struct PlayerView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .background(DonbyLiquidGlassCapsuleSurface(tint: nil, isHovered: false))
+                .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: false)
             }
             .buttonStyle(.plain)
             .help("切换当前播放线路")
@@ -502,7 +500,8 @@ public struct PlayerView: View {
                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.85))
                 .padding(.horizontal, 11).padding(.vertical, 6)
-                .background(DonbyLiquidGlassCapsuleSurface(tint: nil, isHovered: false))
+                .donbyLiquidGlassCapsule(tint: nil, interactive: false, isHovered: false)
+        }
         }
         .padding(.horizontal, 24).padding(.top, 18).padding(.bottom, 24)
         .background(
@@ -616,13 +615,13 @@ public struct PlayerView: View {
 
                     Button { togglePlayPause() } label: {
                         ZStack {
-                            DonbyLiquidGlassCapsuleSurface(tint: appState.accentColor, isHovered: false)
-                                .frame(width: 46, height: 46)
-                                .shadow(color: appState.accentColor.opacity(0.45), radius: 12, y: 4)
                             Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                                 .font(.system(size: 18, weight: .bold)).foregroundStyle(.white)
                                 .offset(x: isPlaying ? 0 : 1.5)
                         }
+                        .frame(width: 46, height: 46)
+                        .donbyLiquidGlassCapsule(tint: appState.accentColor, interactive: true, isHovered: false)
+                        .shadow(color: appState.accentColor.opacity(0.52), radius: 14, y: 4)
                     }
                     .buttonStyle(.plain)
 
@@ -652,7 +651,7 @@ public struct PlayerView: View {
                         Text(String(format: "%.2gx", playbackSpeed))
                             .font(.system(size: 12, weight: .bold, design: .rounded))
                             .foregroundStyle(.white).padding(.horizontal, 9).padding(.vertical, 5)
-                            .background(Color.white.opacity(0.14)).clipShape(Capsule())
+                            .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: false)
                     }
                     .menuStyle(.borderlessButton).frame(width: 56)
 
@@ -681,17 +680,8 @@ public struct PlayerView: View {
         }
         .padding(.horizontal, 22).padding(.vertical, 14)
         .frame(maxWidth: isFloat ? 900 : .infinity)
-        .background(
-            Group {
-                if isFloat {
-                    DonbyLiquidGlassRoundedSurface(cornerRadius: 22, tint: nil, isHovered: false)
-                } else {
-                    Rectangle().fill(.ultraThinMaterial)
-                }
-            }
-        )
-        .clipShape(RoundedRectangle(cornerRadius: isFloat ? 22 : 0, style: .continuous))
-        .shadow(color: .black.opacity(0.45), radius: 18, y: 6)
+        .donbyLiquidGlassRect(cornerRadius: isFloat ? 22 : 0, tint: nil, interactive: false, isHovered: false)
+        .shadow(color: .black.opacity(0.55), radius: 22, y: 8)
         .padding(.horizontal, isFloat ? 32 : 0)
         .padding(.bottom, isFloat ? 24 : 0)
     }
@@ -849,7 +839,7 @@ public struct PlayerView: View {
                                     Spacer()
                                 }
                                 .padding(10)
-                                .background(DonbyLiquidGlassRoundedSurface(cornerRadius: 10, tint: isSel ? appState.accentColor : nil, isHovered: false))
+                                .donbyLiquidGlassRect(cornerRadius: 10, tint: isSel ? appState.accentColor : nil, interactive: true, isHovered: false)
                             }
                             .buttonStyle(.plain)
                         }
@@ -865,7 +855,7 @@ public struct PlayerView: View {
                                 Spacer()
                             }
                             .padding(10)
-                            .background(DonbyLiquidGlassRoundedSurface(cornerRadius: 10, tint: activeSubtitleSelection == .off ? appState.accentColor : nil, isHovered: false))
+                            .donbyLiquidGlassRect(cornerRadius: 10, tint: activeSubtitleSelection == .off ? appState.accentColor : nil, interactive: true, isHovered: false)
                         }
                         .buttonStyle(.plain)
 
@@ -892,7 +882,7 @@ public struct PlayerView: View {
                                     }
                                 }
                                 .padding(10)
-                                .background(DonbyLiquidGlassRoundedSurface(cornerRadius: 10, tint: isSel ? appState.accentColor : nil, isHovered: false))
+                                .donbyLiquidGlassRect(cornerRadius: 10, tint: isSel ? appState.accentColor : nil, interactive: true, isHovered: false)
                             }
                             .buttonStyle(.plain)
                         }
@@ -907,7 +897,7 @@ public struct PlayerView: View {
                             }
                             .foregroundStyle(appState.accentColor)
                             .padding(10)
-                            .background(DonbyLiquidGlassRoundedSurface(cornerRadius: 10, tint: nil, isHovered: false))
+                            .donbyLiquidGlassRect(cornerRadius: 10, tint: nil, interactive: true, isHovered: false)
                         }
                         .buttonStyle(.plain)
                     }
@@ -950,7 +940,10 @@ public struct PlayerView: View {
                 }
             }
         }
-        .padding(18).frame(width: 320).frame(maxHeight: .infinity).background(.ultraThinMaterial)
+        .padding(18)
+        .frame(width: 320)
+        .frame(maxHeight: .infinity)
+        .donbyLiquidGlassRect(cornerRadius: 0, tint: nil, interactive: false, isHovered: false)
     }
 
     private func osdInfoRow(_ key: String, _ val: String) -> some View {

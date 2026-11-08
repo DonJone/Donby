@@ -16,11 +16,8 @@ public struct EmbyMainView: View {
             if let library = appState.selectedLibrary {
                 MLibListView(library: library)
             } else {
-                VStack(alignment: .leading, spacing: 0) {
-                    embyTopToolbar
-
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 22) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 22) {
                             if let server = appState.activeServer, server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                 unconfiguredServerHero(server: server)
                                     .padding(.horizontal, 24)
@@ -138,16 +135,19 @@ public struct EmbyMainView: View {
                                 }
                             }
                         }
-                        .padding(.top, 10)
+                        .padding(.top, 6)
                         .padding(.bottom, 36)
                     }
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        embyTopToolbar
+                    }
+                    .background(DonbyGlassPalette.canvasBlack)
                 }
-                .background(Color(red: 0.098, green: 0.098, blue: 0.106))
             }
-        }
     }
 
     private var embyTopToolbar: some View {
+        DonbyGlassContainer(spacing: 9) {
         HStack(spacing: 9) {
             if appState.isSidebarCollapsed {
                 Button {
@@ -219,19 +219,11 @@ public struct EmbyMainView: View {
 
                                 Image(systemName: "chevron.down")
                                     .font(.system(size: 8.5, weight: .bold))
-                                    .foregroundStyle(Color(white: 0.56))
+                                    .foregroundStyle(Color(white: 0.68))
                             }
                             .padding(.horizontal, 11)
                             .padding(.vertical, 6)
-                            .background(isLinePillHovered ? Color.white.opacity(0.11) : Color(red: 0.16, green: 0.16, blue: 0.18))
-                            .clipShape(Capsule())
-                            .overlay(
-                                Capsule()
-                                    .strokeBorder(
-                                        Color.white.opacity(isLinePillHovered ? 0.24 : 0.11),
-                                        lineWidth: 0.8
-                                    )
-                            )
+                            .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: isLinePillHovered)
                         }
                         .buttonStyle(.plain)
                         .fixedSize(horizontal: true, vertical: false)
@@ -315,8 +307,20 @@ public struct EmbyMainView: View {
                 width: 185
             )
         }
+        }
         .padding(.horizontal, 24)
         .frame(height: 54)
+        .background(
+            LinearGradient(
+                colors: [
+                    DonbyGlassPalette.canvasBlack.opacity(0.84),
+                    DonbyGlassPalette.canvasBlack.opacity(0.36),
+                    Color.clear
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
     }
 
     private var inlineSearchResultsSection: some View {
@@ -597,7 +601,7 @@ public struct MLibListView: View {
                 }
             }
         }
-        .background(Color(red: 0.098, green: 0.098, blue: 0.106))
+        .background(DonbyGlassPalette.canvasBlack)
         .task(id: "\(library.id)|\(sortField.rawValue)|\(ascending)|\(filterUnwatchedOnly)|\(filterFavoritesOnly)") {
             await loadLibraryItems()
         }

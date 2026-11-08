@@ -665,25 +665,10 @@ public struct ToolbarVectorButton<Icon: View>: View {
     public var body: some View {
         Button(action: action) {
             ZStack {
-                Circle()
-                    .fill(isHovered || isActive ? Color.white.opacity(0.13) : Color(red: 0.16, green: 0.16, blue: 0.18))
-                    .frame(width: 34, height: 34)
-                Circle()
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(isHovered || isActive ? 0.28 : 0.16),
-                                Color.white.opacity(isHovered || isActive ? 0.10 : 0.04)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: 0.8
-                    )
-                    .frame(width: 34, height: 34)
                 icon(isHovered)
             }
             .frame(width: 34, height: 34)
+            .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: isHovered || isActive)
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -710,22 +695,14 @@ public struct ToolbarCircleActionButton: View {
     public var body: some View {
         Button(action: action) {
             ZStack {
-                Circle()
-                    .fill(isHovered ? Color.white.opacity(0.12) : Color(red: 0.16, green: 0.16, blue: 0.18))
-                    .frame(width: 32, height: 32)
-                Circle()
-                    .strokeBorder(
-                        isHovered ? Color.white.opacity(0.24) : Color.white.opacity(0.08),
-                        lineWidth: 0.8
-                    )
-                    .frame(width: 32, height: 32)
-
                 Image(systemName: systemName)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(isHovered ? .white : Color(white: 0.88))
                     .rotationEffect(Angle(degrees: isRotating ? 360 : 0))
                     .animation(isRotating ? .linear(duration: 0.8).repeatForever(autoreverses: false) : .default, value: isRotating)
             }
+            .frame(width: 32, height: 32)
+            .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: isHovered)
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -789,21 +766,7 @@ public struct DonbyToolbarCircleView: View {
             }
         }
         .frame(width: showChevron ? 42 : 36, height: 34)
-        .background(
-            Capsule()
-                .fill(Color(red: 0.17, green: 0.17, blue: 0.19))
-        )
-        .overlay(
-            Capsule()
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [Color.white.opacity(0.18), Color.white.opacity(0.05)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    ),
-                    lineWidth: 0.8
-                )
-        )
+        .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: false)
     }
 }
 
@@ -853,21 +816,7 @@ public struct DonbySearchPillField: View {
         .padding(.horizontal, 12)
         .frame(minWidth: min(128, width), idealWidth: width, maxWidth: width)
         .frame(height: 34)
-        .background(
-            Capsule()
-                .fill(Color(red: 0.17, green: 0.17, blue: 0.19))
-        )
-        .overlay(
-            Capsule()
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [Color.white.opacity(0.16), Color.white.opacity(0.05)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    ),
-                    lineWidth: 0.8
-                )
-        )
+        .donbyLiquidGlassCapsule(tint: nil, interactive: false, isHovered: false)
     }
 }
 
@@ -1089,11 +1038,26 @@ public struct PosterCardView: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(
-                        isHovered ? appState.accentColor.opacity(0.85) : Color.white.opacity(0.08),
-                        lineWidth: isHovered ? 1.5 : 0.6
+                        isHovered
+                            ? LinearGradient(
+                                colors: [Color.white.opacity(0.70), appState.accentColor, appState.accentColor.opacity(0.40)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                            : LinearGradient(
+                                colors: [Color.white.opacity(0.12), Color.white.opacity(0.03)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            ),
+                        lineWidth: isHovered ? 1.2 : 0.65
                     )
             )
-            .scaleEffect(isHovered ? 1.03 : 1.0)
+            .shadow(
+                color: isHovered ? appState.accentColor.opacity(0.35) : Color.black.opacity(0.25),
+                radius: isHovered ? 12 : 5,
+                y: 3
+            )
+            .scaleEffect(isHovered ? 1.025 : 1.0)
             .animation(.easeOut(duration: 0.18), value: isHovered)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -1204,9 +1168,24 @@ public struct LandscapeCardView: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(
-                        isHovered ? appState.accentColor.opacity(0.85) : Color.white.opacity(0.08),
-                        lineWidth: isHovered ? 1.4 : 0.6
+                        isHovered
+                            ? LinearGradient(
+                                colors: [Color.white.opacity(0.70), appState.accentColor, appState.accentColor.opacity(0.40)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                            : LinearGradient(
+                                colors: [Color.white.opacity(0.12), Color.white.opacity(0.03)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            ),
+                        lineWidth: isHovered ? 1.2 : 0.65
                     )
+            )
+            .shadow(
+                color: isHovered ? appState.accentColor.opacity(0.35) : Color.black.opacity(0.25),
+                radius: isHovered ? 12 : 5,
+                y: 3
             )
             .scaleEffect(isHovered ? 1.02 : 1.0)
             .animation(.easeOut(duration: 0.18), value: isHovered)
@@ -1288,9 +1267,24 @@ public struct LibraryCardView: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(
-                        isHovered ? appState.accentColor.opacity(0.85) : Color.white.opacity(0.10),
-                        lineWidth: isHovered ? 1.5 : 0.7
+                        isHovered
+                            ? LinearGradient(
+                                colors: [Color.white.opacity(0.70), appState.accentColor, appState.accentColor.opacity(0.40)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                            : LinearGradient(
+                                colors: [Color.white.opacity(0.12), Color.white.opacity(0.04)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            ),
+                        lineWidth: isHovered ? 1.2 : 0.65
                     )
+            )
+            .shadow(
+                color: isHovered ? appState.accentColor.opacity(0.35) : Color.black.opacity(0.25),
+                radius: isHovered ? 14 : 5,
+                y: 3
             )
             .scaleEffect(isHovered ? 1.025 : 1.0)
             .animation(.easeOut(duration: 0.18), value: isHovered)
@@ -1442,7 +1436,242 @@ public struct ToastBannerView: View {
     }
 }
 
-// MARK: - Apple Liquid Glass Design System Components
+// MARK: - Apple Liquid Glass Design System (Authentic Multi-Layer Optical Refraction)
+
+public enum DonbyGlassPalette {
+    /// Deep Space Black cinema canvas (replaces flat mid-gray #19191B)
+    public static let canvasBlack = Color(red: 0.043, green: 0.046, blue: 0.056)
+    /// Subtle obsidian smoked backing so clear optical glass stays legible over bright artwork without turning milky gray
+    public static let smokedBacking = Color(red: 0.020, green: 0.024, blue: 0.036)
+}
+
+/// Optical Backdrop Diffusion View (hardware AppKit visual effect for real glass refraction)
+public struct DonbyBackdropBlur: NSViewRepresentable {
+    var material: NSVisualEffectView.Material = .hudWindow
+    var alpha: CGFloat = 0.45
+
+    public init(material: NSVisualEffectView.Material = .hudWindow, alpha: CGFloat = 0.45) {
+        self.material = material
+        self.alpha = alpha
+    }
+
+    public func makeNSView(context: Context) -> NSVisualEffectView {
+        let v = NSVisualEffectView()
+        v.material = material
+        v.blendingMode = .withinWindow
+        v.state = .active
+        v.appearance = NSAppearance(named: .darkAqua)
+        v.alphaValue = alpha
+        return v
+    }
+
+    public func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        nsView.material = material
+        nsView.alphaValue = alpha
+    }
+}
+
+/// Groups nearby Liquid Glass controls into a shared WindowServer refraction & batching field on macOS 26+
+public struct DonbyGlassContainer<Content: View>: View {
+    public var spacing: CGFloat
+    @ViewBuilder public var content: () -> Content
+
+    public init(spacing: CGFloat = 12, @ViewBuilder content: @escaping () -> Content) {
+        self.spacing = spacing
+        self.content = content
+    }
+
+    public var body: some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            GlassEffectContainer(spacing: spacing) {
+                content()
+            }
+        } else {
+            content()
+        }
+        #else
+        content()
+        #endif
+    }
+}
+
+private struct DonbyLiquidGlassCapsuleModifier: ViewModifier {
+    let tint: Color?
+    let interactive: Bool
+    let isHovered: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                ZStack {
+                    // 1. Frosted crystal backdrop blur
+                    DonbyBackdropBlur(material: .hudWindow, alpha: tint != nil ? 0.22 : 0.55)
+                        .clipShape(Capsule())
+
+                    // 2. Optical glass body (crystal clear smoked or vibrant liquid gem)
+                    if let tint {
+                        Capsule()
+                            .fill(
+                                LinearGradient(
+                                    stops: [
+                                        .init(color: tint.opacity(isHovered ? 0.96 : 0.90), location: 0.0),
+                                        .init(color: Color(red: 0.65, green: 0.06, blue: 0.15).opacity(isHovered ? 0.92 : 0.84), location: 1.0)
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                    } else {
+                        Capsule()
+                            .fill(
+                                LinearGradient(
+                                    stops: [
+                                        .init(color: Color.white.opacity(isHovered ? 0.19 : 0.11), location: 0.0),
+                                        .init(color: Color.white.opacity(isHovered ? 0.06 : 0.02), location: 0.45),
+                                        .init(color: Color(red: 0.02, green: 0.03, blue: 0.05).opacity(0.40), location: 0.65),
+                                        .init(color: Color.white.opacity(isHovered ? 0.13 : 0.06), location: 1.0)
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                    }
+
+                    // 3. Convex liquid meniscus lens reflection (surface tension glare)
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                stops: [
+                                    .init(color: Color.white.opacity(tint != nil ? (isHovered ? 0.36 : 0.26) : (isHovered ? 0.28 : 0.18)), location: 0.0),
+                                    .init(color: Color.white.opacity(0.04), location: 0.38),
+                                    .init(color: Color.clear, location: 0.58)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                }
+                .clipShape(Capsule())
+            )
+            .overlay(
+                // 4. Razor-sharp dual specular edge bevel
+                Capsule()
+                    .strokeBorder(
+                        LinearGradient(
+                            stops: [
+                                .init(color: Color.white.opacity(tint != nil ? 0.88 : (isHovered ? 0.82 : 0.58)), location: 0.0),
+                                .init(color: Color.white.opacity(0.12), location: 0.25),
+                                .init(color: Color.clear, location: 0.55),
+                                .init(color: Color(red: 0.72, green: 0.86, blue: 1.0).opacity(tint != nil ? 0.35 : 0.25), location: 1.0)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 0.8
+                    )
+            )
+            .shadow(
+                color: (tint ?? Color.black).opacity(tint != nil ? (isHovered ? 0.38 : 0.26) : (isHovered ? 0.42 : 0.32)),
+                radius: isHovered ? 12 : 7,
+                y: tint != nil ? 3 : 2
+            )
+    }
+}
+
+private struct DonbyLiquidGlassRectModifier: ViewModifier {
+    let cornerRadius: CGFloat
+    let tint: Color?
+    let interactive: Bool
+    let isHovered: Bool
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        content
+            .background(
+                ZStack {
+                    // 1. Frosted crystal backdrop blur
+                    DonbyBackdropBlur(material: .hudWindow, alpha: tint != nil ? 0.22 : 0.55)
+                        .clipShape(shape)
+
+                    // 2. Optical glass body
+                    if let tint {
+                        shape
+                            .fill(
+                                LinearGradient(
+                                    stops: [
+                                        .init(color: tint.opacity(isHovered ? 0.88 : 0.78), location: 0.0),
+                                        .init(color: Color(red: 0.60, green: 0.06, blue: 0.14).opacity(isHovered ? 0.80 : 0.68), location: 1.0)
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                    } else {
+                        shape
+                            .fill(
+                                LinearGradient(
+                                    stops: [
+                                        .init(color: Color.white.opacity(isHovered ? 0.18 : 0.10), location: 0.0),
+                                        .init(color: Color.white.opacity(isHovered ? 0.06 : 0.02), location: 0.45),
+                                        .init(color: Color(red: 0.02, green: 0.03, blue: 0.05).opacity(0.40), location: 0.65),
+                                        .init(color: Color.white.opacity(isHovered ? 0.12 : 0.05), location: 1.0)
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                    }
+
+                    // 3. Convex liquid meniscus reflection
+                    shape
+                        .fill(
+                            LinearGradient(
+                                stops: [
+                                    .init(color: Color.white.opacity(tint != nil ? (isHovered ? 0.26 : 0.18) : (isHovered ? 0.22 : 0.14)), location: 0.0),
+                                    .init(color: Color.white.opacity(0.03), location: 0.35),
+                                    .init(color: Color.clear, location: 0.52)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                }
+                .clipShape(shape)
+            )
+            .overlay(
+                // 4. Dual specular bevel rim
+                shape.strokeBorder(
+                    LinearGradient(
+                        stops: [
+                            .init(color: Color.white.opacity(tint != nil ? 0.55 : (isHovered ? 0.68 : 0.45)), location: 0.0),
+                            .init(color: Color.white.opacity(0.08), location: 0.30),
+                            .init(color: Color.clear, location: 0.60),
+                            .init(color: Color(red: 0.72, green: 0.86, blue: 1.0).opacity(tint != nil ? 0.22 : 0.18), location: 1.0)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 0.8
+                )
+            )
+            .shadow(
+                color: (tint ?? Color.black).opacity(tint != nil ? (isHovered ? 0.28 : 0.18) : (isHovered ? 0.34 : 0.24)),
+                radius: isHovered ? 10 : 5,
+                y: tint != nil ? 2.5 : 2
+            )
+    }
+}
+
+public extension View {
+    func donbyLiquidGlassCapsule(tint: Color? = nil, interactive: Bool = false, isHovered: Bool = false) -> some View {
+        modifier(DonbyLiquidGlassCapsuleModifier(tint: tint, interactive: interactive, isHovered: isHovered))
+    }
+
+    func donbyLiquidGlassRect(cornerRadius: CGFloat = 15, tint: Color? = nil, interactive: Bool = false, isHovered: Bool = false) -> some View {
+        modifier(DonbyLiquidGlassRectModifier(cornerRadius: cornerRadius, tint: tint, interactive: interactive, isHovered: isHovered))
+    }
+}
 
 public struct DonbyLiquidGlassRoundedSurface: View {
     public var cornerRadius: CGFloat = 14
@@ -1456,63 +1685,8 @@ public struct DonbyLiquidGlassRoundedSurface: View {
     }
 
     public var body: some View {
-        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        ZStack {
-            shape.fill(.ultraThinMaterial)
-
-            if let tint {
-                shape.fill(
-                    LinearGradient(
-                        colors: [
-                            tint.opacity(isHovered ? 0.88 : 0.78),
-                            tint.opacity(isHovered ? 0.64 : 0.52),
-                            tint.opacity(isHovered ? 0.80 : 0.68)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-            } else {
-                shape.fill(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(isHovered ? 0.19 : 0.12),
-                            Color.white.opacity(isHovered ? 0.08 : 0.04),
-                            Color.white.opacity(isHovered ? 0.14 : 0.08)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-            }
-
-            // Convex upper-half liquid meniscus reflection
-            shape.fill(
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(tint != nil ? (isHovered ? 0.34 : 0.24) : (isHovered ? 0.22 : 0.14)),
-                        Color.white.opacity(0.02),
-                        Color.clear
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-
-            // Dual-rim optical specular bevel (top-left primary + bottom-right bounce)
-            shape.strokeBorder(
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(tint != nil ? 0.78 : (isHovered ? 0.66 : 0.48)),
-                        Color.white.opacity(isHovered ? 0.18 : 0.10),
-                        Color(red: 0.88, green: 0.94, blue: 1.0).opacity(tint != nil ? 0.46 : (isHovered ? 0.40 : 0.26))
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ),
-                lineWidth: 1.0
-            )
-        }
+        Color.clear
+            .donbyLiquidGlassRect(cornerRadius: cornerRadius, tint: tint, interactive: false, isHovered: isHovered)
     }
 }
 
@@ -1526,60 +1700,8 @@ public struct DonbyLiquidGlassCapsuleSurface: View {
     }
 
     public var body: some View {
-        ZStack {
-            Capsule().fill(.ultraThinMaterial)
-
-            if let tint {
-                Capsule().fill(
-                    LinearGradient(
-                        colors: [
-                            tint.opacity(isHovered ? 0.90 : 0.78),
-                            tint.opacity(isHovered ? 0.66 : 0.54),
-                            tint.opacity(isHovered ? 0.82 : 0.70)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-            } else {
-                Capsule().fill(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(isHovered ? 0.22 : 0.13),
-                            Color.white.opacity(isHovered ? 0.09 : 0.04),
-                            Color.white.opacity(isHovered ? 0.15 : 0.08)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-            }
-
-            Capsule().fill(
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(tint != nil ? (isHovered ? 0.36 : 0.26) : (isHovered ? 0.24 : 0.15)),
-                        Color.white.opacity(0.02),
-                        Color.clear
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-
-            Capsule().strokeBorder(
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(tint != nil ? 0.82 : (isHovered ? 0.68 : 0.48)),
-                        Color.white.opacity(isHovered ? 0.18 : 0.11),
-                        Color(red: 0.90, green: 0.95, blue: 1.0).opacity(tint != nil ? 0.48 : (isHovered ? 0.40 : 0.26))
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ),
-                lineWidth: 1.0
-            )
-        }
+        Color.clear
+            .donbyLiquidGlassCapsule(tint: tint, interactive: false, isHovered: isHovered)
     }
 }
 
@@ -1621,15 +1743,16 @@ public struct LiquidGlassCapsuleButton: View {
                     .font(.system(size: fontSize, weight: tint != nil ? .bold : .semibold))
             }
             .foregroundStyle(.white)
-            .shadow(color: .black.opacity(0.28), radius: 2, y: 1)
+            .shadow(color: .black.opacity(tint != nil ? 0.35 : 0.25), radius: 2, y: 1)
             .padding(.horizontal, horizontalPadding)
             .padding(.vertical, verticalPadding)
-            .background(DonbyLiquidGlassCapsuleSurface(tint: tint, isHovered: isHovered))
+            .donbyLiquidGlassCapsule(tint: tint, interactive: true, isHovered: isHovered)
             .shadow(
-                color: (tint ?? .black).opacity(tint != nil ? (isHovered ? 0.44 : 0.28) : 0.34),
-                radius: isHovered ? 16 : 11,
-                y: 5
+                color: (tint ?? .black).opacity(tint != nil ? (isHovered ? 0.45 : 0.30) : (isHovered ? 0.40 : 0.28)),
+                radius: isHovered ? 14 : 9,
+                y: 4
             )
+            .contentShape(Capsule())
             .scaleEffect(isHovered ? 1.02 : 1.0)
             .animation(.easeOut(duration: 0.16), value: isHovered)
         }
@@ -1664,13 +1787,15 @@ public struct LiquidGlassCircleButton: View {
     public var body: some View {
         Button(action: action) {
             ZStack {
-                DonbyLiquidGlassCapsuleSurface(tint: nil, isHovered: isHovered)
                 Image(systemName: systemImage)
                     .font(.system(size: size * 0.37, weight: .semibold))
                     .foregroundStyle(iconColor)
+                    .shadow(color: .black.opacity(0.28), radius: 1.5, y: 1)
             }
             .frame(width: size, height: size)
-            .shadow(color: .black.opacity(0.34), radius: 10, y: 4)
+            .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: isHovered)
+            .shadow(color: .black.opacity(isHovered ? 0.40 : 0.30), radius: isHovered ? 10 : 6, y: 3)
+            .contentShape(Circle())
             .scaleEffect(isHovered ? 1.04 : 1.0)
             .animation(.easeOut(duration: 0.15), value: isHovered)
         }
@@ -1714,11 +1839,18 @@ public struct LiquidGlassSelectorCard<MenuItems: View>: View {
             HStack(spacing: 11) {
                 ZStack {
                     Circle()
-                        .fill(accentColor.opacity(0.18))
-                        .overlay(
-                            Circle().strokeBorder(accentColor.opacity(0.45), lineWidth: 0.8)
+                        .fill(
+                            RadialGradient(
+                                colors: [accentColor.opacity(0.32), accentColor.opacity(0.10)],
+                                center: .topLeading,
+                                startRadius: 2,
+                                endRadius: 26
+                            )
                         )
-                        .frame(width: 32, height: 32)
+                        .overlay(
+                            Circle().strokeBorder(accentColor.opacity(0.50), lineWidth: 0.75)
+                        )
+                        .frame(width: 33, height: 33)
                     Image(systemName: icon)
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(accentColor)
@@ -1728,14 +1860,14 @@ public struct LiquidGlassSelectorCard<MenuItems: View>: View {
                     HStack(spacing: 6) {
                         Text(title)
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Color.white.opacity(0.62))
+                            .foregroundStyle(Color.white.opacity(0.66))
                         if let badgeText, !badgeText.isEmpty {
                             Text(badgeText)
                                 .font(.system(size: 9.5, weight: .bold, design: .rounded))
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 5.5)
                                 .padding(.vertical, 1.5)
-                                .background(accentColor.opacity(0.75))
+                                .background(accentColor.opacity(0.82))
                                 .clipShape(Capsule())
                         }
                     }
@@ -1748,30 +1880,25 @@ public struct LiquidGlassSelectorCard<MenuItems: View>: View {
 
                 Spacer(minLength: 6)
 
-                ZStack {
-                    Capsule()
-                        .fill(Color.white.opacity(isHovered ? 0.18 : 0.10))
-                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.24), lineWidth: 0.7))
-                        .frame(width: 24, height: 24)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(Color.white.opacity(0.85))
-                }
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10.5, weight: .bold))
+                    .foregroundStyle(Color.white.opacity(isHovered ? 0.92 : 0.58))
+                    .padding(.trailing, 2)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 11)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(DonbyLiquidGlassRoundedSurface(cornerRadius: 15, tint: nil, isHovered: isHovered))
-            .shadow(color: .black.opacity(0.32), radius: isHovered ? 14 : 9, y: 4)
-            .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
+        .padding(.horizontal, 15)
+        .padding(.vertical, 12)
+        .donbyLiquidGlassRect(cornerRadius: 16, tint: nil, interactive: true, isHovered: isHovered)
+        .shadow(color: .black.opacity(isHovered ? 0.38 : 0.28), radius: isHovered ? 14 : 8, y: 4)
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .onHover { isHovered = $0 }
     }
 }
 
-// MARK: - Cast & Crew Avatar View (Multi-URL Emby / Jellyfin / UHDNow Fallback)
 public struct PersonAvatarView: View {
     public let server: EmbyServerConfig?
     public let person: EmbyPerson

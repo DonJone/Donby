@@ -20,10 +20,19 @@ public struct MainWindowView: View {
                     if !appState.isSidebarCollapsed {
                         appSidebarView
                             .frame(width: 206)
-                            .background(Color(red: 0.125, green: 0.125, blue: 0.135))
+                            .background(
+                                ZStack {
+                                    Color(red: 0.075, green: 0.080, blue: 0.095)
+                                    LinearGradient(
+                                        colors: [Color.white.opacity(0.025), Color.clear],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    )
+                                }
+                            )
 
                         Rectangle()
-                            .fill(Color.white.opacity(0.08))
+                            .fill(Color.white.opacity(0.06))
                             .frame(width: 1)
                     }
 
@@ -52,6 +61,7 @@ public struct MainWindowView: View {
                             }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(DonbyGlassPalette.canvasBlack)
                     }
                 }
                 .ignoresSafeArea(.container, edges: .top)
@@ -118,7 +128,19 @@ public struct MainWindowView: View {
                         .background(
                             Group {
                                 if isSelected {
-                                    DonbyLiquidGlassRoundedSurface(cornerRadius: 9, tint: appState.accentColor, isHovered: false)
+                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .fill(
+                                            LinearGradient(
+                                                colors: [appState.accentColor.opacity(0.92), appState.accentColor.opacity(0.82)],
+                                                startPoint: .top,
+                                                endPoint: .bottom
+                                            )
+                                        )
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                                .strokeBorder(Color.white.opacity(0.24), lineWidth: 0.6)
+                                        )
+                                        .shadow(color: appState.accentColor.opacity(0.28), radius: 6, y: 1.5)
                                 } else {
                                     Color.clear
                                 }
@@ -161,7 +183,19 @@ public struct MainWindowView: View {
                             .background(
                                 Group {
                                     if isServerOpen {
-                                        DonbyLiquidGlassRoundedSurface(cornerRadius: 9, tint: appState.accentColor, isHovered: false)
+                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            .fill(
+                                                LinearGradient(
+                                                    colors: [appState.accentColor.opacity(0.92), appState.accentColor.opacity(0.82)],
+                                                    startPoint: .top,
+                                                    endPoint: .bottom
+                                                )
+                                            )
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                                    .strokeBorder(Color.white.opacity(0.24), lineWidth: 0.6)
+                                            )
+                                            .shadow(color: appState.accentColor.opacity(0.28), radius: 6, y: 1.5)
                                     } else {
                                         Color.clear
                                     }
@@ -303,7 +337,7 @@ public struct FilesModuleView: View {
                     .padding(.vertical, 20)
                 }
             }
-            .background(Color(red: 0.098, green: 0.098, blue: 0.106))
+            .background(DonbyGlassPalette.canvasBlack)
             .onDrop(of: [.fileURL, .url], isTargeted: $isDropTargeted) { providers in
                 handleDroppedProviders(providers)
             }
@@ -720,7 +754,7 @@ public struct IPTVModuleView: View {
                 }
             }
         }
-        .background(Color(red: 0.098, green: 0.098, blue: 0.106))
+        .background(DonbyGlassPalette.canvasBlack)
         .sheet(isPresented: $showAddChannelSheet) {
             addChannelSheetContent
         }
@@ -1060,7 +1094,7 @@ public struct RecordsView: View {
                 }
             }
         }
-        .background(Color(red: 0.098, green: 0.098, blue: 0.106))
+        .background(DonbyGlassPalette.canvasBlack)
         .alert("清除观看记录", isPresented: $showClearAlert) {
             Button("取消", role: .cancel) {}
             Button("确认清除全部", role: .destructive) {
@@ -1481,7 +1515,7 @@ public struct GlobalSearchView: View {
                 }
             }
         }
-        .background(Color(red: 0.098, green: 0.098, blue: 0.106))
+        .background(DonbyGlassPalette.canvasBlack)
         .task(id: query) {
             let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !q.isEmpty,
@@ -1668,7 +1702,7 @@ public struct SettingsView: View {
                     .frame(maxWidth: 680, alignment: .leading)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(red: 0.098, green: 0.098, blue: 0.106))
+                .background(DonbyGlassPalette.canvasBlack)
             }
         }
     }

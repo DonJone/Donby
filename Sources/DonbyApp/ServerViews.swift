@@ -206,7 +206,7 @@ public struct ServerListView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(red: 0.098, green: 0.098, blue: 0.106))
+        .background(DonbyGlassPalette.canvasBlack)
     }
 
     private func importFromClipboard() {

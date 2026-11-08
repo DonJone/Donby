@@ -40,9 +40,6 @@ public struct DetailView: View {
             VStack(alignment: .leading, spacing: 26) {
                 heroHeaderSection
 
-                streamAndLineSelectorSection
-                    .padding(.horizontal, 28)
-
                 if item.isSeries || !episodes.isEmpty {
                     episodesSection
                 }
@@ -60,7 +57,7 @@ public struct DetailView: View {
             }
             .padding(.bottom, 48)
         }
-        .background(Color(red: 0.098, green: 0.098, blue: 0.106))
+        .background(DonbyGlassPalette.canvasBlack)
         .onChange(of: selectedSourceId) { _, _ in
             syncStreamsForSelectedSource()
         }
@@ -73,20 +70,26 @@ public struct DetailView: View {
         ZStack(alignment: .bottomLeading) {
             GeometryReader { bgGeo in
                 MediaArtworkView(server: appState.activeServer, item: item, kind: .backdrop, maxWidth: 1600)
-                    .frame(width: bgGeo.size.width, height: 420)
-                    .blur(radius: 16)
+                    .frame(width: bgGeo.size.width, height: bgGeo.size.height)
+                    .saturation(1.22)
+                    .blur(radius: 22)
                     .clipped()
             }
-            .frame(height: 420)
             .clipped()
 
             LinearGradient(
-                colors: [Color.black.opacity(0.40), Color.black.opacity(0.75), Color(red: 0.098, green: 0.098, blue: 0.106)],
+                colors: [
+                    Color.black.opacity(0.28),
+                    Color.black.opacity(0.56),
+                    DonbyGlassPalette.canvasBlack.opacity(0.86),
+                    DonbyGlassPalette.canvasBlack
+                ],
                 startPoint: .top,
                 endPoint: .bottom
             )
 
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 20) {
+                DonbyGlassContainer(spacing: 10) {
                 HStack(spacing: 10) {
                     LiquidGlassCapsuleButton(
                         title: "返回",
@@ -123,11 +126,12 @@ public struct DetailView: View {
                                     .foregroundStyle(.white.opacity(0.65))
                             }
                             .padding(.horizontal, 12).padding(.vertical, 5.5)
-                            .background(DonbyLiquidGlassCapsuleSurface(tint: nil, isHovered: false))
+                            .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: false)
                         }
                         .buttonStyle(.plain)
                         .fixedSize(horizontal: true, vertical: false)
                     }
+                }
                 }
 
                 HStack(alignment: .bottom, spacing: 26) {
@@ -177,6 +181,7 @@ public struct DetailView: View {
                                 .frame(maxWidth: 720, alignment: .leading)
                         }
 
+                        DonbyGlassContainer(spacing: 12) {
                         HStack(spacing: 12) {
                             LiquidGlassCapsuleButton(
                                 title: item.resumePositionSeconds > 0 ? "继续播放" : (item.isSeries ? "播放第 1 集" : "立即播放"),
@@ -233,12 +238,16 @@ public struct DetailView: View {
                                 Task { item = await appState.togglePlayed(for: item) }
                             }
                         }
+                        }
                     }
                 }
+
+                streamAndLineSelectorSection
+                    .padding(.top, 4)
             }
             .padding(.horizontal, 28)
             .padding(.top, 18)
-            .padding(.bottom, 16)
+            .padding(.bottom, 12)
         }
     }
 
@@ -254,7 +263,8 @@ public struct DetailView: View {
             return subtitleStreams.first(where: { $0.index == idx })?.readableLabel ?? "字幕轨道 #\(idx)"
         }()
 
-        return HStack(spacing: 14) {
+        return DonbyGlassContainer(spacing: 14) {
+        HStack(spacing: 14) {
             LiquidGlassSelectorCard(
                 title: "资源版本",
                 icon: "film.stack.fill",
@@ -349,6 +359,7 @@ public struct DetailView: View {
                 }
             }
         }
+        }
     }
 
     private var episodesSection: some View {
@@ -361,6 +372,7 @@ public struct DetailView: View {
                 Spacer()
                 if seasons.count > 1 {
                     ScrollView(.horizontal, showsIndicators: false) {
+                        DonbyGlassContainer(spacing: 8) {
                         HStack(spacing: 8) {
                             ForEach(Array(seasons.enumerated()), id: \.element.id) { idx, season in
                                 let sNum = season.indexNumber ?? (idx + 1)
@@ -372,15 +384,15 @@ public struct DetailView: View {
                                         .font(.system(size: 12, weight: .bold))
                                         .foregroundStyle(selectedSeasonIndex == sNum ? .white : .secondary)
                                         .padding(.horizontal, 12).padding(.vertical, 6)
-                                        .background(
-                                            DonbyLiquidGlassCapsuleSurface(
-                                                tint: selectedSeasonIndex == sNum ? appState.accentColor : nil,
-                                                isHovered: false
-                                            )
+                                        .donbyLiquidGlassCapsule(
+                                            tint: selectedSeasonIndex == sNum ? appState.accentColor : nil,
+                                            interactive: true,
+                                            isHovered: false
                                         )
                                 }
                                 .buttonStyle(.plain)
                             }
+                        }
                         }
                     }
                     .frame(maxWidth: 360)
@@ -512,8 +524,7 @@ public struct DetailView: View {
             .font(.system(size: 11, weight: .bold, design: .rounded))
             .foregroundStyle(.white)
             .padding(.horizontal, 8).padding(.vertical, 3.5)
-            .background(highlight ? appState.accentColor : Color.white.opacity(0.16))
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .donbyLiquidGlassRect(cornerRadius: 6, tint: highlight ? appState.accentColor : nil, interactive: false, isHovered: false)
     }
 
     private func playHighestSpecification() {

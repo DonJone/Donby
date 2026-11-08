@@ -175,6 +175,15 @@ public struct MainCarouselView: View {
     public var body: some View {
         if let item = currentItem {
             ZStack(alignment: .bottomLeading) {
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.12, green: 0.13, blue: 0.16),
+                        Color(red: 0.06, green: 0.07, blue: 0.09)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+
                 MediaArtworkView(
                     server: appState.activeServer,
                     item: item,
@@ -264,27 +273,29 @@ public struct MainCarouselView: View {
                             .frame(maxWidth: 580, alignment: .leading)
                     }
 
-                    HStack(spacing: 12) {
-                        LiquidGlassCapsuleButton(
-                            title: item.resumePositionSeconds > 0 ? "继续播放" : "立即播放",
-                            systemImage: "play.fill",
-                            tint: appState.accentColor,
-                            horizontalPadding: 24,
-                            verticalPadding: 11,
-                            fontSize: 14
-                        ) {
-                            onPlay(item)
-                        }
+                    DonbyGlassContainer(spacing: 12) {
+                        HStack(spacing: 12) {
+                            LiquidGlassCapsuleButton(
+                                title: item.resumePositionSeconds > 0 ? "继续播放" : "立即播放",
+                                systemImage: "play.fill",
+                                tint: appState.accentColor,
+                                horizontalPadding: 24,
+                                verticalPadding: 11,
+                                fontSize: 14
+                            ) {
+                                onPlay(item)
+                            }
 
-                        LiquidGlassCapsuleButton(
-                            title: "详情",
-                            systemImage: "info.circle.fill",
-                            tint: nil,
-                            horizontalPadding: 20,
-                            verticalPadding: 11,
-                            fontSize: 14
-                        ) {
-                            onSelectDetail(item)
+                            LiquidGlassCapsuleButton(
+                                title: "详情",
+                                systemImage: "info.circle.fill",
+                                tint: nil,
+                                horizontalPadding: 20,
+                                verticalPadding: 11,
+                                fontSize: 14
+                            ) {
+                                onSelectDetail(item)
+                            }
                         }
                     }
                 }
@@ -348,7 +359,7 @@ public struct MainCarouselView: View {
                     }
                 }
                 .padding(.horizontal, 11).padding(.vertical, 7)
-                .background(DonbyLiquidGlassCapsuleSurface(tint: nil, isHovered: false))
+                .donbyLiquidGlassCapsule(tint: nil, interactive: false, isHovered: false)
                 .padding(.trailing, 24)
                 .padding(.bottom, 24),
                 alignment: .bottomTrailing
