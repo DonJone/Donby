@@ -26,7 +26,7 @@
 
 - **硬件解码与 HDR / EDR 渲染**：基于 `VideoToolbox` 硬件加速（含 `IOSurface` 10-bit 软解回退）与 `CAMetalLayer` 扩展线性 Display P3 16-bit 浮点管线，支持 Dolby Vision（Profile 5 / Profile 8 动态 RPU 映射）、HDR10、HLG 与 ITU-R BT.2390 色调映射。
 - **音频时钟与多格式字幕**：采用 `AudioQueue` 硬件采样计数驱动音画同步，支持 TrueHD Atmos 等多声道音频下混；内置 `libass` 与蓝光 `PGS` 位图解码，支持内封/外挂 `ASS`、`SSA`、`SRT`、`WebVTT`、`PGS` 字幕实时切换与 SDR/HDR 统一纸白亮度校准。
-- **Emby / Jellyfin / UHDNow 多源接入**：原生内嵌 UHDNow 官方品牌图标与节点识别；支持 [`emby_ext_domains`](https://github.com/uhdnow/emby_ext_domains)（`ServerDomains`）云端节点自动同步、并发延迟测速与在线切线；支持 302 原画直连、播放记录双向同步、默认码率版本偏好预设、剪贴板配置导入与 M3U 播放列表。
+- **Emby / Jellyfin / UHDNow 多源接入**：原生内嵌 UHDNow 官方品牌图标（支持明暗双色自适应）与节点识别；支持 [`emby_ext_domains`](https://github.com/uhdnow/emby_ext_domains)（`ServerDomains`）云端节点自动同步、并发延迟测速与在线切线；支持 302 原画直连、播放记录双向同步、默认码率版本偏好预设、剪贴板配置导入与 M3U 播放列表。
 - **原生 macOS 桌面体验**：跟进 macOS 音乐 App（Apple Music）设计语言，采用羊脂玉润白底座、黑曜石雕塑倒角微高光主体、纯圆点轮播指示器与极简玻璃质感组件，适配亮暗双色主题、触控板双指手势滑动海报与无边框全屏播放。
 
 ## 安装与构建

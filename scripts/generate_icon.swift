@@ -3,58 +3,127 @@ import CoreGraphics
 import Foundation
 
 func createEmblem(s: CGFloat, bodySize: CGFloat, cx: CGFloat, cy: CGFloat) -> CGPath {
+    let scale = bodySize / 824.0
+    let xOffset: CGFloat = 16.0 * scale
+    let rOut: CGFloat = 48.0 * scale
+    let rIn: CGFloat = 14.0 * scale
+
     let totalH = bodySize * 0.62
     let strokeW = bodySize * 0.118
     let dRadius = totalH * 0.5 - strokeW * 0.5
-    let dLeft = cx - bodySize * 0.230
-    let dArcCenterX = cx - bodySize * 0.040
-
-    // cornerR = strokeW * 0.98 ensures the inner corner fillet has radius ~47px,
-    // matching Apple Music's inner cutout corner radius!
-    let cornerR = strokeW * 0.98
+    let dLeft = (cx + xOffset) - bodySize * 0.230
+    let dArcCenterX = (cx + xOffset) - bodySize * 0.040
 
     let openAngle: CGFloat = 0.28 * .pi
 
-    let dTrack = CGMutablePath()
-    let topTermX = dArcCenterX + dRadius * cos(openAngle)
-    let topTermY = cy + dRadius * sin(openAngle)
-    dTrack.move(to: CGPoint(x: topTermX, y: topTermY))
-    dTrack.addArc(
+    let rOuterArc = dRadius + strokeW * 0.5
+    let rInnerArc = dRadius - strokeW * 0.5
+    let capRadius = strokeW * 0.5
+
+    let topCenter = CGPoint(
+        x: dArcCenterX + dRadius * cos(openAngle),
+        y: cy + dRadius * sin(openAngle)
+    )
+    let btmCenter = CGPoint(
+        x: dArcCenterX + dRadius * cos(-openAngle),
+        y: cy + dRadius * sin(-openAngle)
+    )
+
+    let path = CGMutablePath()
+
+    let topOuter = CGPoint(
+        x: dArcCenterX + rOuterArc * cos(openAngle),
+        y: cy + rOuterArc * sin(openAngle)
+    )
+
+    // Outer boundary:
+    path.move(to: topOuter)
+    path.addArc(
         center: CGPoint(x: dArcCenterX, y: cy),
-        radius: dRadius,
+        radius: rOuterArc,
         startAngle: openAngle,
         endAngle: 0.5 * .pi,
         clockwise: false
     )
-    dTrack.addArc(
-        tangent1End: CGPoint(x: dLeft, y: cy + dRadius),
-        tangent2End: CGPoint(x: dLeft, y: cy - dRadius),
-        radius: cornerR
+
+    let outerLeftX = dLeft - strokeW * 0.5
+    let outerTopY = cy + dRadius + strokeW * 0.5
+    let outerBtmY = cy - dRadius - strokeW * 0.5
+
+    path.addArc(
+        tangent1End: CGPoint(x: outerLeftX, y: outerTopY),
+        tangent2End: CGPoint(x: outerLeftX, y: cy),
+        radius: rOut
     )
-    dTrack.addArc(
-        tangent1End: CGPoint(x: dLeft, y: cy - dRadius),
-        tangent2End: CGPoint(x: dArcCenterX, y: cy - dRadius),
-        radius: cornerR
+    path.addArc(
+        tangent1End: CGPoint(x: outerLeftX, y: outerBtmY),
+        tangent2End: CGPoint(x: dArcCenterX, y: outerBtmY),
+        radius: rOut
     )
-    dTrack.addLine(to: CGPoint(x: dArcCenterX, y: cy - dRadius))
-    dTrack.addArc(
+    path.addLine(to: CGPoint(x: dArcCenterX, y: outerBtmY))
+    path.addArc(
         center: CGPoint(x: dArcCenterX, y: cy),
-        radius: dRadius,
+        radius: rOuterArc,
         startAngle: -0.5 * .pi,
         endAngle: -openAngle,
         clockwise: false
     )
 
-    let strokedD = dTrack.copy(
-        strokingWithWidth: strokeW,
-        lineCap: .round,
-        lineJoin: .round,
-        miterLimit: 4.0
+    // Bottom end cap
+    path.addArc(
+        center: btmCenter,
+        radius: capRadius,
+        startAngle: -openAngle,
+        endAngle: -openAngle + .pi,
+        clockwise: false
     )
+
+    // Inner boundary:
+    path.addArc(
+        center: CGPoint(x: dArcCenterX, y: cy),
+        radius: rInnerArc,
+        startAngle: -openAngle,
+        endAngle: -0.5 * .pi,
+        clockwise: true
+    )
+
+    let innerLeftX = dLeft + strokeW * 0.5
+    let innerBtmY = cy - dRadius + strokeW * 0.5
+    let innerTopY = cy + dRadius - strokeW * 0.5
+
+    path.addArc(
+        tangent1End: CGPoint(x: innerLeftX, y: innerBtmY),
+        tangent2End: CGPoint(x: innerLeftX, y: cy),
+        radius: rIn
+    )
+    path.addArc(
+        tangent1End: CGPoint(x: innerLeftX, y: innerTopY),
+        tangent2End: CGPoint(x: dArcCenterX, y: innerTopY),
+        radius: rIn
+    )
+    path.addLine(to: CGPoint(x: dArcCenterX, y: innerTopY))
+    path.addArc(
+        center: CGPoint(x: dArcCenterX, y: cy),
+        radius: rInnerArc,
+        startAngle: 0.5 * .pi,
+        endAngle: openAngle,
+        clockwise: true
+    )
+
+    // Top end cap
+    path.addArc(
+        center: topCenter,
+        radius: capRadius,
+        startAngle: openAngle + .pi,
+        endAngle: openAngle,
+        clockwise: false
+    )
+
+    path.closeSubpath()
 
     // Play triangle nestled inside
     let triLeftX = dLeft + strokeW * 1.35
-    let triRightX = cx + bodySize * 0.290
+    let triRightX = (cx + xOffset) + bodySize * 0.290
     let triHalfH = totalH * 0.35
     let triCorner: CGFloat = bodySize * 0.042
 
@@ -70,10 +139,8 @@ func createEmblem(s: CGFloat, bodySize: CGFloat, cx: CGFloat, cy: CGFloat) -> CG
     playPath.addArc(tangent1End: p1, tangent2End: p2, radius: triCorner)
     playPath.closeSubpath()
 
-    let combined = CGMutablePath()
-    combined.addPath(strokedD)
-    combined.addPath(playPath)
-    return combined
+    path.addPath(playPath)
+    return path
 }
 
 func renderIcon(size: Int) -> Data? {

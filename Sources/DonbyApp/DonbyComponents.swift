@@ -500,49 +500,120 @@ public struct DonbyAppLogoView: View {
             Canvas { context, canvasSize in
                 let w = canvasSize.width
                 let h = canvasSize.height
+                let scale = w / 824.0
+                let xOffset = 16.0 * scale
+                let rOut = 48.0 * scale
+                let rIn = 14.0 * scale
+
                 let totalH = h * 0.62
                 let strokeW = w * 0.118
                 let dRadius = totalH * 0.5 - strokeW * 0.5
-                let dLeft = w * 0.50 - w * 0.230
-                let dArcCenterX = w * 0.50 - w * 0.040
-                let cornerR = strokeW * 0.98
+                let dLeft = (w * 0.50 + xOffset) - w * 0.230
+                let dArcCenterX = (w * 0.50 + xOffset) - w * 0.040
 
                 let openAngle = 0.28 * Double.pi
 
-                var dTrack = Path()
+                let rOuterArc = dRadius + strokeW * 0.5
+                let rInnerArc = dRadius - strokeW * 0.5
+                let capRadius = strokeW * 0.5
+
                 let topTermX = dArcCenterX + dRadius * cos(openAngle)
                 let topTermY = h * 0.50 - dRadius * sin(openAngle)
-                dTrack.move(to: CGPoint(x: topTermX, y: topTermY))
-                dTrack.addArc(
+                let btmTermX = dArcCenterX + dRadius * cos(openAngle)
+                let btmTermY = h * 0.50 + dRadius * sin(openAngle)
+
+                var path = Path()
+
+                let topOuterX = dArcCenterX + rOuterArc * cos(openAngle)
+                let topOuterY = h * 0.50 - rOuterArc * sin(openAngle)
+
+                // Outer boundary
+                path.move(to: CGPoint(x: topOuterX, y: topOuterY))
+                path.addArc(
                     center: CGPoint(x: dArcCenterX, y: h * 0.50),
-                    radius: dRadius,
+                    radius: rOuterArc,
                     startAngle: .radians(-openAngle),
                     endAngle: .radians(-0.5 * .pi),
                     clockwise: true
                 )
-                dTrack.addArc(
-                    tangent1End: CGPoint(x: dLeft, y: h * 0.50 - dRadius),
-                    tangent2End: CGPoint(x: dLeft, y: h * 0.50 + dRadius),
-                    radius: cornerR
+
+                let outerLeftX = dLeft - strokeW * 0.5
+                let outerTopY = h * 0.50 - dRadius - strokeW * 0.5
+                let outerBtmY = h * 0.50 + dRadius + strokeW * 0.5
+
+                path.addArc(
+                    tangent1End: CGPoint(x: outerLeftX, y: outerTopY),
+                    tangent2End: CGPoint(x: outerLeftX, y: h * 0.50),
+                    radius: rOut
                 )
-                dTrack.addArc(
-                    tangent1End: CGPoint(x: dLeft, y: h * 0.50 + dRadius),
-                    tangent2End: CGPoint(x: dArcCenterX, y: h * 0.50 + dRadius),
-                    radius: cornerR
+                path.addArc(
+                    tangent1End: CGPoint(x: outerLeftX, y: outerBtmY),
+                    tangent2End: CGPoint(x: dArcCenterX, y: outerBtmY),
+                    radius: rOut
                 )
-                dTrack.addLine(to: CGPoint(x: dArcCenterX, y: h * 0.50 + dRadius))
-                dTrack.addArc(
+                path.addLine(to: CGPoint(x: dArcCenterX, y: outerBtmY))
+                path.addArc(
                     center: CGPoint(x: dArcCenterX, y: h * 0.50),
-                    radius: dRadius,
+                    radius: rOuterArc,
                     startAngle: .radians(0.5 * .pi),
                     endAngle: .radians(openAngle),
                     clockwise: true
                 )
 
-                let strokedD = dTrack.strokedPath(StrokeStyle(lineWidth: strokeW, lineCap: .round, lineJoin: .round))
+                // Bottom end cap
+                path.addArc(
+                    center: CGPoint(x: btmTermX, y: btmTermY),
+                    radius: capRadius,
+                    startAngle: .radians(openAngle),
+                    endAngle: .radians(openAngle + .pi),
+                    clockwise: true
+                )
+
+                // Inner boundary
+                path.addArc(
+                    center: CGPoint(x: dArcCenterX, y: h * 0.50),
+                    radius: rInnerArc,
+                    startAngle: .radians(openAngle),
+                    endAngle: .radians(0.5 * .pi),
+                    clockwise: false
+                )
+
+                let innerLeftX = dLeft + strokeW * 0.5
+                let innerBtmY = h * 0.50 + dRadius - strokeW * 0.5
+                let innerTopY = h * 0.50 - dRadius + strokeW * 0.5
+
+                path.addArc(
+                    tangent1End: CGPoint(x: innerLeftX, y: innerBtmY),
+                    tangent2End: CGPoint(x: innerLeftX, y: h * 0.50),
+                    radius: rIn
+                )
+                path.addArc(
+                    tangent1End: CGPoint(x: innerLeftX, y: innerTopY),
+                    tangent2End: CGPoint(x: dArcCenterX, y: innerTopY),
+                    radius: rIn
+                )
+                path.addLine(to: CGPoint(x: dArcCenterX, y: innerTopY))
+                path.addArc(
+                    center: CGPoint(x: dArcCenterX, y: h * 0.50),
+                    radius: rInnerArc,
+                    startAngle: .radians(-0.5 * .pi),
+                    endAngle: .radians(-openAngle),
+                    clockwise: false
+                )
+
+                // Top end cap
+                path.addArc(
+                    center: CGPoint(x: topTermX, y: topTermY),
+                    radius: capRadius,
+                    startAngle: .radians(-openAngle + .pi),
+                    endAngle: .radians(-openAngle),
+                    clockwise: true
+                )
+
+                path.closeSubpath()
 
                 let triLeftX = dLeft + strokeW * 1.35
-                let triRightX = w * 0.50 + w * 0.290
+                let triRightX = (w * 0.50 + xOffset) + w * 0.290
                 let triHalfH = totalH * 0.35
                 let triCorner = w * 0.042
 
@@ -559,7 +630,7 @@ public struct DonbyAppLogoView: View {
                 playPath.closeSubpath()
 
                 var emblem = Path()
-                emblem.addPath(strokedD)
+                emblem.addPath(path)
                 emblem.addPath(playPath)
 
                 // Fill solid deep obsidian velvet
@@ -597,18 +668,34 @@ public struct DonbyAppLogoView: View {
 }
 
 /// Official UHDNow brand logo directly referenced from https://www.uhdnow.com/
+/// Automatically adapts to Light Mode (tactile obsidian U) and Dark Mode (luminous platinum U)
 public struct UHDNowVectorLogo: View {
+    @Environment(\.colorScheme) private var colorScheme
     public var size: CGFloat = 30
+    public var isLight: Bool? = nil
 
-    public init(size: CGFloat = 30) {
+    public init(size: CGFloat = 30, isLight: Bool? = nil) {
         self.size = size
+        self.isLight = isLight
     }
 
-    private static var cachedLogoImage: NSImage? = {
+    private var effectiveIsLight: Bool {
+        if let isLight = isLight { return isLight }
+        if let mode = AppState.sharedInstance?.appearanceMode {
+            switch mode {
+            case .light: return true
+            case .dark: return false
+            case .auto: return colorScheme == .light
+            }
+        }
+        return colorScheme == .light
+    }
+
+    private static var cachedDayImage: NSImage? = {
         let possibleUrls = [
-            Bundle.main.url(forResource: "uhdnow_logo", withExtension: "png"),
-            Bundle.main.url(forResource: "uhdnow_logo_128", withExtension: "png"),
-            Bundle.main.resourceURL?.appendingPathComponent("uhdnow_logo.png")
+            Bundle.main.url(forResource: "uhdnow_day", withExtension: "png"),
+            Bundle.main.url(forResource: "uhdnow_official_day", withExtension: "png"),
+            Bundle.main.resourceURL?.appendingPathComponent("uhdnow_day.png")
         ]
         for url in possibleUrls {
             if let url = url, let img = NSImage(contentsOf: url) {
@@ -616,9 +703,34 @@ public struct UHDNowVectorLogo: View {
             }
         }
         let fallbackPaths = [
-            "Resources/uhdnow_logo.png",
-            "../Resources/uhdnow_logo.png",
-            "Donby.app/Contents/Resources/uhdnow_logo.png"
+            "Resources/uhdnow_day.png",
+            "../Resources/uhdnow_day.png",
+            "Donby.app/Contents/Resources/uhdnow_day.png"
+        ]
+        for path in fallbackPaths {
+            if FileManager.default.fileExists(atPath: path),
+               let img = NSImage(contentsOfFile: path) {
+                return img
+            }
+        }
+        return nil
+    }()
+
+    private static var cachedNightImage: NSImage? = {
+        let possibleUrls = [
+            Bundle.main.url(forResource: "uhdnow_night", withExtension: "png"),
+            Bundle.main.url(forResource: "uhdnow_official_night", withExtension: "png"),
+            Bundle.main.resourceURL?.appendingPathComponent("uhdnow_night.png")
+        ]
+        for url in possibleUrls {
+            if let url = url, let img = NSImage(contentsOf: url) {
+                return img
+            }
+        }
+        let fallbackPaths = [
+            "Resources/uhdnow_night.png",
+            "../Resources/uhdnow_night.png",
+            "Donby.app/Contents/Resources/uhdnow_night.png"
         ]
         for path in fallbackPaths {
             if FileManager.default.fileExists(atPath: path),
@@ -630,15 +742,35 @@ public struct UHDNowVectorLogo: View {
     }()
 
     public var body: some View {
-        Group {
-            if let img = Self.cachedLogoImage {
+        let isLight = effectiveIsLight
+        ZStack {
+            RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+                .fill(
+                    isLight
+                    ? LinearGradient(
+                        colors: [Color.white, Color(red: 0.93, green: 0.94, blue: 0.96)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    : LinearGradient(
+                        colors: [Color(red: 0.12, green: 0.14, blue: 0.19), Color(red: 0.07, green: 0.08, blue: 0.12)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+                        .strokeBorder(
+                            isLight ? Color.black.opacity(0.08) : Color.white.opacity(0.12),
+                            lineWidth: max(0.8, size * 0.02)
+                        )
+                )
+
+            if let img = (isLight ? Self.cachedDayImage : Self.cachedNightImage) ?? Self.cachedNightImage ?? Self.cachedDayImage {
                 Image(nsImage: img)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .clipShape(RoundedRectangle(cornerRadius: size * 0.22, style: .continuous))
-            } else {
-                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
-                    .fill(Color(red: 0.12, green: 0.14, blue: 0.22))
+                    .padding(size * 0.10)
             }
         }
         .frame(width: size, height: size)
