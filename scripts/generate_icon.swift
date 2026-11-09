@@ -74,9 +74,9 @@ func renderIcon(size: Int) -> Data? {
         ctx.setShadow(
             offset: CGSize(width: 0, height: -s * 0.018),
             blur: s * 0.038,
-            color: CGColor(srgbRed: 0.35, green: 0.02, blue: 0.08, alpha: 0.58)
+            color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.24)
         )
-        ctx.setFillColor(CGColor(srgbRed: 0.85, green: 0.08, blue: 0.24, alpha: 1.0))
+        ctx.setFillColor(CGColor(srgbRed: 0.94, green: 0.945, blue: 0.955, alpha: 1.0))
         ctx.addPath(squirclePath)
         ctx.fillPath()
         ctx.restoreGState()
@@ -87,27 +87,27 @@ func renderIcon(size: Int) -> Data? {
     ctx.addPath(squirclePath)
     ctx.clip()
 
-    // 2A. Apple Music macOS Pro Luminous Red Gradient Chassis (top -> bottom)
+    // 2A. macOS Music Pro Luminous Porcelain White Gradient Chassis (top -> bottom)
     let bgColors = [
-        CGColor(srgbRed: 0.996, green: 0.235, blue: 0.388, alpha: 1.0), // #FE3C63 Vibrant Coral Red
-        CGColor(srgbRed: 0.960, green: 0.145, blue: 0.315, alpha: 1.0), // #F52550 Pure Apple Music Red
-        CGColor(srgbRed: 0.825, green: 0.055, blue: 0.215, alpha: 1.0)  // #D20E37 Rich Deep Crimson
+        CGColor(srgbRed: 1.000, green: 1.000, blue: 1.000, alpha: 1.0), // #FFFFFF Pure Top White
+        CGColor(srgbRed: 0.980, green: 0.983, blue: 0.990, alpha: 1.0), // #FAFBFC Luminous Pearl
+        CGColor(srgbRed: 0.925, green: 0.932, blue: 0.945, alpha: 1.0)  // #ECEEF2 Soft Porcelain Off-White
     ] as CFArray
-    let bgLocs: [CGFloat] = [0.0, 0.55, 1.0]
+    let bgLocs: [CGFloat] = [0.0, 0.50, 1.0]
     if let bgGrad = CGGradient(colorsSpace: colorSpace, colors: bgColors, locations: bgLocs) {
         ctx.drawLinearGradient(
             bgGrad,
-            start: CGPoint(x: s * 0.38, y: bodyRect.maxY),
-            end: CGPoint(x: s * 0.62, y: bodyRect.minY),
+            start: CGPoint(x: s * 0.50, y: bodyRect.maxY),
+            end: CGPoint(x: s * 0.50, y: bodyRect.minY),
             options: gradAllOptions
         )
     }
 
-    // Top-left Liquid Glass studio refraction wash on Apple Music Red chassis
+    // Top-left studio softbox reflection wash on porcelain white chassis
     let titaniumSheenColors = [
-        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.24),
-        CGColor(srgbRed: 1.00, green: 0.68, blue: 0.78, alpha: 0.09),
-        CGColor(srgbRed: 0.98, green: 0.18, blue: 0.34, alpha: 0.0)
+        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.70),
+        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.20),
+        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.0)
     ] as CFArray
     if let titaniumGrad = CGGradient(colorsSpace: colorSpace, colors: titaniumSheenColors, locations: [0.0, 0.48, 1.0]) {
         let glowCenter = CGPoint(x: bodyRect.minX + bodySize * 0.20, y: bodyRect.maxY - bodySize * 0.16)
@@ -119,11 +119,11 @@ func renderIcon(size: Int) -> Data? {
         )
     }
 
-    // Subtle bottom-right internal bounce reflection inside luminous chassis
+    // Subtle bottom-right internal bounce reflection inside porcelain slab
     let bounceSheenColors = [
-        CGColor(srgbRed: 1.00, green: 0.48, blue: 0.62, alpha: 0.15),
-        CGColor(srgbRed: 0.92, green: 0.12, blue: 0.28, alpha: 0.04),
-        CGColor(srgbRed: 0.80, green: 0.04, blue: 0.20, alpha: 0.0)
+        CGColor(srgbRed: 0.88, green: 0.90, blue: 0.94, alpha: 0.25),
+        CGColor(srgbRed: 0.92, green: 0.94, blue: 0.96, alpha: 0.08),
+        CGColor(srgbRed: 0.95, green: 0.96, blue: 0.98, alpha: 0.0)
     ] as CFArray
     if let bounceGrad = CGGradient(colorsSpace: colorSpace, colors: bounceSheenColors, locations: [0.0, 0.50, 1.0]) {
         let bounceCenter = CGPoint(x: bodyRect.maxX - bodySize * 0.18, y: bodyRect.minY + bodySize * 0.16)
@@ -135,11 +135,11 @@ func renderIcon(size: Int) -> Data? {
         )
     }
 
-    // Luminous center depth halo behind aperture
+    // Soft center depth halo behind aperture
     let depthGlowColors = [
-        CGColor(srgbRed: 1.00, green: 0.48, blue: 0.62, alpha: 0.26),
-        CGColor(srgbRed: 0.96, green: 0.18, blue: 0.34, alpha: 0.09),
-        CGColor(srgbRed: 0.82, green: 0.05, blue: 0.22, alpha: 0.0)
+        CGColor(srgbRed: 0.94, green: 0.95, blue: 0.98, alpha: 0.40),
+        CGColor(srgbRed: 0.96, green: 0.97, blue: 0.99, alpha: 0.15),
+        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.0)
     ] as CFArray
     if let depthGrad = CGGradient(colorsSpace: colorSpace, colors: depthGlowColors, locations: [0.0, 0.46, 1.0]) {
         let glowCenter = CGPoint(x: s * 0.51, y: s * 0.50)
@@ -224,22 +224,22 @@ func renderIcon(size: Int) -> Data? {
         ctx.setShadow(
             offset: CGSize(width: 0, height: -s * 0.004),
             blur: s * 0.012,
-            color: CGColor(srgbRed: 0.35, green: 0.02, blue: 0.08, alpha: 0.50)
+            color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.15)
         )
         ctx.addPath(strokedRingHalo)
-        ctx.setFillColor(CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.08))
+        ctx.setFillColor(CGColor(srgbRed: 0.10, green: 0.11, blue: 0.13, alpha: 0.05))
         ctx.fillPath()
         ctx.restoreGState()
     }
 
-    // Directional Liquid Glass specular fill along concentric ring (bright top-left & bottom-right glints)
+    // Directional obsidian specular fill along concentric optical ring
     ctx.saveGState()
     ctx.addPath(strokedRingHalo)
     ctx.clip()
     let ringColors = [
-        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.42),
-        CGColor(srgbRed: 1.00, green: 0.88, blue: 0.92, alpha: 0.14),
-        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.32)
+        CGColor(srgbRed: 0.22, green: 0.24, blue: 0.28, alpha: 0.32),
+        CGColor(srgbRed: 0.12, green: 0.13, blue: 0.16, alpha: 0.12),
+        CGColor(srgbRed: 0.26, green: 0.28, blue: 0.32, alpha: 0.28)
     ] as CFArray
     if let ringGrad = CGGradient(colorsSpace: colorSpace, colors: ringColors, locations: [0.0, 0.52, 1.0]) {
         ctx.drawLinearGradient(
@@ -257,81 +257,57 @@ func renderIcon(size: Int) -> Data? {
             canvasSize: s,
             offset: CGSize(width: s * 0.002, height: -s * 0.002),
             blur: s * 0.003,
-            color: CGColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.35),
+            color: CGColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.45),
             blendMode: .screen
         )
     }
     ctx.restoreGState() // end outsideDClip for sharp background ring
 
-    // 3. Centerpiece Emblem: Sculpted Liquid Glass "D" Aperture + Solid Radiant Play Prism
-    // 3A. Grounding shadow + transmitted Liquid Glass caustic bloom beneath D-ribbon
-    // (Cast using an exterior clip so the translucent glass interior isn't muddied by solid shadow fill)
+    // 3. Centerpiece Emblem: Sculpted Deep Obsidian "D" Aperture + Solid Obsidian Play Prism (Matching macOS Music Note)
+    // 3A. Grounding elevation shadow beneath D-ribbon onto white porcelain chassis
     if size >= 32 {
-        // Deep elevation shadow onto Apple Music Red chassis
+        // Diffused ambient elevation shadow
         ctx.saveGState()
         ctx.addPath(outsideDClip)
         ctx.clip(using: .evenOdd)
         ctx.setShadow(
-            offset: CGSize(width: 0, height: -s * 0.018),
-            blur: s * 0.038,
-            color: CGColor(srgbRed: 0.36, green: 0.02, blue: 0.09, alpha: 0.74)
+            offset: CGSize(width: 0, height: -s * 0.016),
+            blur: s * 0.034,
+            color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.34)
         )
         ctx.addPath(strokedDRibbon)
-        ctx.setFillColor(CGColor(srgbRed: 0.36, green: 0.02, blue: 0.09, alpha: 1.0))
+        ctx.setFillColor(CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 1.0))
         ctx.fillPath()
         ctx.restoreGState()
 
-        // Transmitted caustic light focus & luminous halo around Liquid Glass D-ribbon
+        // Crisp contact shadow directly beneath base
         ctx.saveGState()
         ctx.addPath(outsideDClip)
         ctx.clip(using: .evenOdd)
         ctx.setShadow(
-            offset: CGSize(width: s * 0.006, height: -s * 0.008),
-            blur: s * 0.030,
-            color: CGColor(srgbRed: 1.00, green: 0.75, blue: 0.84, alpha: 0.30)
+            offset: CGSize(width: 0, height: -s * 0.006),
+            blur: s * 0.014,
+            color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.38)
         )
         ctx.addPath(strokedDRibbon)
-        ctx.setFillColor(CGColor(srgbRed: 1.00, green: 0.96, blue: 0.98, alpha: 1.0))
+        ctx.setFillColor(CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 1.0))
         ctx.fillPath()
         ctx.restoreGState()
     }
 
-    // 3B. Sculpted Translucent Crystal-Silver Liquid Glass Body of D-ribbon
+    // 3B. Sculpted Deep Obsidian Body of D-ribbon
     ctx.saveGState()
     ctx.addPath(strokedDRibbon)
     ctx.clip()
 
-    // Frosted backdrop diffusion of the concentric optical ring underneath the thick D glass lens
-    // (Soft Gaussian bloom rather than an unblurred sharp line, matching real Apple Liquid Glass backdrop blur)
-    ctx.saveGState()
-    let refractedRadius = ringRadius * 1.022
-    let refractedCenter = CGPoint(x: s * 0.505, y: s * 0.495)
-    let refractedRect = CGRect(
-        x: refractedCenter.x - refractedRadius,
-        y: refractedCenter.y - refractedRadius,
-        width: refractedRadius * 2.0,
-        height: refractedRadius * 2.0
-    )
-    ctx.setShadow(
-        offset: .zero,
-        blur: s * 0.038,
-        color: CGColor(srgbRed: 0.90, green: 0.96, blue: 1.00, alpha: 0.42)
-    )
-    ctx.setStrokeColor(CGColor(srgbRed: 0.92, green: 0.97, blue: 1.00, alpha: 0.04))
-    ctx.setLineWidth(max(1.0, s * 0.032))
-    ctx.strokeEllipse(in: refractedRect)
-    ctx.restoreGState()
-
-    // Smooth High-Luminance Translucent Crystal-Silver Glass Body
-    // Luminous pearl-crystal interior (~0.80-0.88) so the 1.00 pure-white liquid meniscus lip
-    // pops crisply all the way around (including top-left shoulder & rounded tips)
+    // Rich Obsidian Gradient (identical to macOS Music Note)
     let ribbonColors = [
-        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.96),
-        CGColor(srgbRed: 0.97, green: 0.98, blue: 1.00, alpha: 0.90),
-        CGColor(srgbRed: 0.92, green: 0.94, blue: 0.98, alpha: 0.86),
-        CGColor(srgbRed: 0.98, green: 0.99, blue: 1.00, alpha: 0.94)
+        CGColor(srgbRed: 0.135, green: 0.142, blue: 0.162, alpha: 1.0), // Top charcoal highlight
+        CGColor(srgbRed: 0.052, green: 0.055, blue: 0.065, alpha: 1.0), // Body obsidian
+        CGColor(srgbRed: 0.016, green: 0.018, blue: 0.022, alpha: 1.0), // Deep space black
+        CGColor(srgbRed: 0.035, green: 0.038, blue: 0.045, alpha: 1.0)
     ] as CFArray
-    if let ribGrad = CGGradient(colorsSpace: colorSpace, colors: ribbonColors, locations: [0.0, 0.38, 0.72, 1.0]) {
+    if let ribGrad = CGGradient(colorsSpace: colorSpace, colors: ribbonColors, locations: [0.0, 0.40, 0.80, 1.0]) {
         ctx.drawLinearGradient(
             ribGrad,
             start: CGPoint(x: dLeft, y: dTop + strokeW * 0.5),
@@ -340,12 +316,12 @@ func renderIcon(size: Int) -> Data? {
         )
     }
 
-    // Feathered studio softbox glow across upper-left shoulder of the D lens (zero hard cutoff edges)
+    // Feathered studio softbox sheen across upper-left shoulder of the obsidian ribbon
     let softboxCenter = CGPoint(x: dLeft + bodySize * 0.06, y: dTop - bodySize * 0.02)
     let dSheenColors = [
-        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.20),
-        CGColor(srgbRed: 0.96, green: 0.98, blue: 1.00, alpha: 0.07),
-        CGColor(srgbRed: 0.94, green: 0.97, blue: 1.00, alpha: 0.0)
+        CGColor(srgbRed: 0.75, green: 0.80, blue: 0.90, alpha: 0.32),
+        CGColor(srgbRed: 0.35, green: 0.40, blue: 0.48, alpha: 0.10),
+        CGColor(srgbRed: 0.10, green: 0.10, blue: 0.12, alpha: 0.0)
     ] as CFArray
     if let dSheenGrad = CGGradient(colorsSpace: colorSpace, colors: dSheenColors, locations: [0.0, 0.50, 1.0]) {
         ctx.drawRadialGradient(
@@ -356,84 +332,51 @@ func renderIcon(size: Int) -> Data? {
         )
     }
 
-    // Radiant white light bounce cast from the solid center Play triangle onto the D aperture jaws
-    let prismBounceCenter = CGPoint(x: cx + bodySize * 0.05, y: cy)
-    let prismBounceColors = [
-        CGColor(srgbRed: 0.94, green: 0.98, blue: 1.00, alpha: 0.28),
-        CGColor(srgbRed: 0.84, green: 0.92, blue: 1.00, alpha: 0.10),
-        CGColor(srgbRed: 0.80, green: 0.90, blue: 1.00, alpha: 0.0)
-    ] as CFArray
-    if let prismBounceGrad = CGGradient(colorsSpace: colorSpace, colors: prismBounceColors, locations: [0.0, 0.52, 1.0]) {
-        ctx.drawRadialGradient(
-            prismBounceGrad,
-            startCenter: prismBounceCenter, startRadius: bodySize * 0.08,
-            endCenter: prismBounceCenter, endRadius: bodySize * 0.34,
-            options: []
-        )
-    }
-
-    ctx.saveGState()
-    // Subtle cool azure refractive dispersion whisper near lower-right curve & upper-right tip
-    let dispersionCenter = CGPoint(x: dArcCenterX + dRadius * 0.65, y: dBot)
-    let dispersionColors = [
-        CGColor(srgbRed: 0.78, green: 0.90, blue: 1.00, alpha: 0.24),
-        CGColor(srgbRed: 0.78, green: 0.90, blue: 1.00, alpha: 0.0)
-    ] as CFArray
-    if let dispGrad = CGGradient(colorsSpace: colorSpace, colors: dispersionColors, locations: [0.0, 1.0]) {
-        ctx.drawRadialGradient(
-            dispGrad,
-            startCenter: dispersionCenter, startRadius: 0,
-            endCenter: dispersionCenter, endRadius: strokeW * 2.1,
-            options: []
-        )
-    }
     ctx.restoreGState()
 
-    ctx.restoreGState()
-
-    // 3C. Smooth Pillowed Liquid Glass Volume & Wet Meniscus Edge Reflections inside D-ribbon
-    // Wide smooth convex glass shading on underside (no harsh bands)
+    // 3C. Smooth Pillowed Tactile Volume & Specular Edge Bevel (matching macOS Music Note)
+    // Underside shading
     drawInnerMeniscus(
         in: ctx,
         path: strokedDRibbon,
         canvasSize: s,
         offset: CGSize(width: -s * 0.008, height: s * 0.010),
         blur: strokeW * 0.44,
-        color: CGColor(srgbRed: 0.16, green: 0.21, blue: 0.32, alpha: 0.25),
+        color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.65),
         blendMode: .multiply
     )
-    // Wide velvety convex highlight cushion from top-left
+    // Convex highlight cushion from top-left
     drawInnerMeniscus(
         in: ctx,
         path: strokedDRibbon,
         canvasSize: s,
         offset: CGSize(width: s * 0.009, height: -s * 0.010),
         blur: strokeW * 0.30,
-        color: CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.44),
+        color: CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.35),
         blendMode: .screen
     )
-    // Tight wet liquid meniscus specular lip along top-left perimeter
+    // Tight razor-sharp specular gleam along top-left perimeter (matching macOS Music Note bevel)
     drawInnerMeniscus(
         in: ctx,
         path: strokedDRibbon,
         canvasSize: s,
         offset: CGSize(width: s * 0.0050, height: -s * 0.0055),
         blur: s * 0.0070,
-        color: CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.98),
+        color: CGColor(srgbRed: 0.95, green: 0.97, blue: 1.00, alpha: 0.88),
         blendMode: .screen
     )
-    // Tight opposite internal refractive bounce lip along bottom-right curvature & rounded tips
+    // Subtle bottom-right curvature bounce lip
     drawInnerMeniscus(
         in: ctx,
         path: strokedDRibbon,
         canvasSize: s,
         offset: CGSize(width: -s * 0.0042, height: s * 0.0046),
         blur: s * 0.0065,
-        color: CGColor(srgbRed: 0.90, green: 0.96, blue: 1.00, alpha: 0.84),
+        color: CGColor(srgbRed: 0.60, green: 0.65, blue: 0.75, alpha: 0.35),
         blendMode: .screen
     )
 
-    // 3D. Crisp Dual-Rim Specular Glass Bevel around D-ribbon
+    // 3D. Crisp Dual-Rim Specular Bevel around D-ribbon
     ctx.saveGState()
     ctx.addPath(strokedDRibbon)
     ctx.clip()
@@ -446,9 +389,9 @@ func renderIcon(size: Int) -> Data? {
     ctx.addPath(dRimBorder)
     ctx.clip()
     let dRimColors = [
-        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.98),
-        CGColor(srgbRed: 0.88, green: 0.93, blue: 1.00, alpha: 0.38),
-        CGColor(srgbRed: 0.94, green: 0.98, blue: 1.00, alpha: 0.88)
+        CGColor(srgbRed: 0.92, green: 0.95, blue: 1.00, alpha: 0.82), // Top-left specular catch
+        CGColor(srgbRed: 0.30, green: 0.32, blue: 0.38, alpha: 0.22),
+        CGColor(srgbRed: 0.68, green: 0.72, blue: 0.80, alpha: 0.50)  // Bottom-right rim
     ] as CFArray
     if let dRimGrad = CGGradient(colorsSpace: colorSpace, colors: dRimColors, locations: [0.0, 0.52, 1.0]) {
         ctx.drawLinearGradient(
@@ -460,7 +403,7 @@ func renderIcon(size: Int) -> Data? {
     }
     ctx.restoreGState()
 
-    // 4. Crisp Rounded Play Prism (▶) nestled and projecting rightwards through the D-aperture!
+    // 4. Crisp Rounded Obsidian Play Prism (▶) nestled and projecting rightwards through the D-aperture!
     let triLeftX = cx - bodySize * 0.055
     let triRightX = cx + bodySize * 0.285
     let triHalfH = bodySize * 0.195
@@ -478,39 +421,40 @@ func renderIcon(size: Int) -> Data? {
     playPath.addArc(tangent1End: p1, tangent2End: p2, radius: triCorner)
     playPath.closeSubpath()
 
-    // Glow & shadow under Play Prism
+    // Ambient elevation shadow under Play Prism
     ctx.saveGState()
     ctx.setShadow(
-        offset: CGSize(width: 0, height: -s * 0.014),
-        blur: s * 0.036,
-        color: CGColor(srgbRed: 0.36, green: 0.02, blue: 0.09, alpha: 0.75)
+        offset: CGSize(width: 0, height: -s * 0.016),
+        blur: s * 0.032,
+        color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.35)
     )
     ctx.addPath(playPath)
-    ctx.setFillColor(CGColor(srgbRed: 0.36, green: 0.02, blue: 0.09, alpha: 1.0))
+    ctx.setFillColor(CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 1.0))
     ctx.fillPath()
     ctx.restoreGState()
 
+    // Contact shadow under Play Prism
     ctx.saveGState()
     ctx.setShadow(
-        offset: .zero,
-        blur: s * 0.028,
-        color: CGColor(srgbRed: 1.00, green: 0.80, blue: 0.88, alpha: 0.35)
+        offset: CGSize(width: 0, height: -s * 0.006),
+        blur: s * 0.014,
+        color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.40)
     )
     ctx.addPath(playPath)
-    ctx.setFillColor(CGColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 1.0))
+    ctx.setFillColor(CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 1.0))
     ctx.fillPath()
     ctx.restoreGState()
 
-    // Specular Diamond White -> Cool Moonlight Silver gradient fill on Play Prism
+    // Obsidian gradient fill on Play Prism matching the D body
     ctx.saveGState()
     ctx.addPath(playPath)
     ctx.clip()
     let playColors = [
-        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 1.0),
-        CGColor(srgbRed: 0.97, green: 0.98, blue: 1.00, alpha: 1.0),
-        CGColor(srgbRed: 0.89, green: 0.92, blue: 0.97, alpha: 1.0)
+        CGColor(srgbRed: 0.145, green: 0.152, blue: 0.175, alpha: 1.0),
+        CGColor(srgbRed: 0.060, green: 0.063, blue: 0.072, alpha: 1.0),
+        CGColor(srgbRed: 0.018, green: 0.020, blue: 0.024, alpha: 1.0)
     ] as CFArray
-    if let playGrad = CGGradient(colorsSpace: colorSpace, colors: playColors, locations: [0.0, 0.6, 1.0]) {
+    if let playGrad = CGGradient(colorsSpace: colorSpace, colors: playColors, locations: [0.0, 0.55, 1.0]) {
         ctx.drawLinearGradient(
             playGrad,
             start: CGPoint(x: triLeftX, y: cy + triHalfH),
@@ -518,14 +462,37 @@ func renderIcon(size: Int) -> Data? {
             options: gradAllOptions
         )
     }
+
+    // Specular highlight rim on Play Prism
+    let playRim = playPath.copy(
+        strokingWithWidth: max(0.8, s * 0.0075),
+        lineCap: .round,
+        lineJoin: .round,
+        miterLimit: 4.0
+    )
+    ctx.addPath(playRim)
+    ctx.clip()
+    let playRimColors = [
+        CGColor(srgbRed: 0.95, green: 0.97, blue: 1.00, alpha: 0.85),
+        CGColor(srgbRed: 0.32, green: 0.34, blue: 0.40, alpha: 0.20),
+        CGColor(srgbRed: 0.65, green: 0.70, blue: 0.80, alpha: 0.45)
+    ] as CFArray
+    if let pRimGrad = CGGradient(colorsSpace: colorSpace, colors: playRimColors, locations: [0.0, 0.50, 1.0]) {
+        ctx.drawLinearGradient(
+            pRimGrad,
+            start: CGPoint(x: triLeftX, y: cy + triHalfH),
+            end: CGPoint(x: triRightX, y: cy - triHalfH),
+            options: gradAllOptions
+        )
+    }
     ctx.restoreGState()
 
-    // 5. Chassis Liquid Glass Surface Sheet & Dual-Rim Meniscus Bevel
+    // 5. Porcelain Chassis Surface Sheen & Dual-Rim Meniscus Bevel
     ctx.saveGState()
     let glossColors = [
-        CGColor(srgbRed: 0.96, green: 0.98, blue: 1.00, alpha: 0.095),
-        CGColor(srgbRed: 0.90, green: 0.95, blue: 1.00, alpha: 0.022),
-        CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.0)
+        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.45),
+        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.12),
+        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.0)
     ] as CFArray
     if let glossGrad = CGGradient(colorsSpace: colorSpace, colors: glossColors, locations: [0.0, 0.48, 1.0]) {
         ctx.drawLinearGradient(
@@ -537,7 +504,7 @@ func renderIcon(size: Int) -> Data? {
     }
     ctx.restoreGState()
 
-    // Soft inner liquid meniscus cushion around the Space Black squircle perimeter
+    // Soft inner liquid meniscus cushion around the Porcelain White squircle perimeter
     if size >= 32 {
         drawInnerMeniscus(
             in: ctx,
@@ -545,7 +512,7 @@ func renderIcon(size: Int) -> Data? {
             canvasSize: s,
             offset: CGSize(width: s * 0.006, height: -s * 0.006),
             blur: s * 0.016,
-            color: CGColor(srgbRed: 0.90, green: 0.95, blue: 1.00, alpha: 0.17),
+            color: CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.60),
             blendMode: .screen
         )
         drawInnerMeniscus(
@@ -554,12 +521,12 @@ func renderIcon(size: Int) -> Data? {
             canvasSize: s,
             offset: CGSize(width: -s * 0.005, height: s * 0.005),
             blur: s * 0.014,
-            color: CGColor(srgbRed: 0.76, green: 0.86, blue: 1.00, alpha: 0.11),
-            blendMode: .screen
+            color: CGColor(srgbRed: 0.70, green: 0.72, blue: 0.78, alpha: 0.25),
+            blendMode: .multiply
         )
     }
 
-    // Directional Liquid Glass specular rim along squircle edge (bright top-left lip + bottom-right bounce)
+    // Directional specular rim along squircle edge (bright top-left lip + bottom-right subtle shadow rim)
     let insetAmt = max(0.4, s * 0.0035)
     let innerRect = bodyRect.insetBy(dx: insetAmt, dy: insetAmt)
     let innerPath = CGPath(
@@ -578,9 +545,9 @@ func renderIcon(size: Int) -> Data? {
     ctx.addPath(strokedSquircleRim)
     ctx.clip()
     let rimColors = [
-        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.48),
-        CGColor(srgbRed: 1.00, green: 0.70, blue: 0.80, alpha: 0.10),
-        CGColor(srgbRed: 1.00, green: 0.88, blue: 0.94, alpha: 0.28)
+        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.90), // Top-left white specular lip
+        CGColor(srgbRed: 0.80, green: 0.82, blue: 0.86, alpha: 0.25),
+        CGColor(srgbRed: 0.72, green: 0.75, blue: 0.80, alpha: 0.50)  // Bottom-right defining hairline
     ] as CFArray
     if let rimGrad = CGGradient(colorsSpace: colorSpace, colors: rimColors, locations: [0.0, 0.52, 1.0]) {
         ctx.drawLinearGradient(

@@ -472,12 +472,12 @@ public struct DonbyAppLogoView: View {
                 .fill(
                     LinearGradient(
                         colors: [
-                            Color(red: 0.996, green: 0.235, blue: 0.388),
-                            Color(red: 0.960, green: 0.145, blue: 0.315),
-                            Color(red: 0.825, green: 0.055, blue: 0.215)
+                            Color.white,
+                            Color(red: 0.980, green: 0.983, blue: 0.990),
+                            Color(red: 0.925, green: 0.932, blue: 0.945)
                         ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+                        startPoint: .top,
+                        endPoint: .bottom
                     )
                 )
                 .overlay(
@@ -485,9 +485,9 @@ public struct DonbyAppLogoView: View {
                         .strokeBorder(
                             LinearGradient(
                                 colors: [
-                                    Color.white.opacity(0.48),
-                                    Color(red: 1.0, green: 0.70, blue: 0.80).opacity(0.12),
-                                    Color(red: 1.0, green: 0.88, blue: 0.94).opacity(0.28)
+                                    Color.white.opacity(0.90),
+                                    Color(red: 0.80, green: 0.82, blue: 0.86).opacity(0.25),
+                                    Color(red: 0.72, green: 0.75, blue: 0.80).opacity(0.50)
                                 ],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
@@ -495,7 +495,7 @@ public struct DonbyAppLogoView: View {
                             lineWidth: max(1, size * 0.018)
                         )
                 )
-                .shadow(color: Color(red: 0.50, green: 0.04, blue: 0.15).opacity(0.45), radius: size * 0.12, y: size * 0.05)
+                .shadow(color: Color.black.opacity(0.18), radius: size * 0.10, y: size * 0.04)
 
             Canvas { context, canvasSize in
                 let w = canvasSize.width
@@ -508,9 +508,9 @@ public struct DonbyAppLogoView: View {
                     Path(ellipseIn: ringRect),
                     with: .linearGradient(
                         Gradient(colors: [
-                            Color.white.opacity(0.42),
-                            Color(red: 1.0, green: 0.85, blue: 0.90).opacity(0.12),
-                            Color.white.opacity(0.32)
+                            Color(red: 0.22, green: 0.24, blue: 0.28).opacity(0.28),
+                            Color(red: 0.12, green: 0.13, blue: 0.16).opacity(0.10),
+                            Color(red: 0.26, green: 0.28, blue: 0.32).opacity(0.24)
                         ]),
                         startPoint: CGPoint(x: w * 0.14, y: h * 0.14),
                         endPoint: CGPoint(x: w * 0.86, y: h * 0.86)
@@ -528,27 +528,27 @@ public struct DonbyAppLogoView: View {
 
                 let strokedD = dPath.strokedPath(StrokeStyle(lineWidth: strokeW, lineCap: .round, lineJoin: .round))
 
-                // Translucent frosted crystal Liquid Glass fill for D
+                // Sculpted Deep Obsidian fill for D
                 context.fill(
                     strokedD,
                     with: .linearGradient(
                         Gradient(colors: [
-                            Color.white.opacity(0.96),
-                            Color(red: 0.96, green: 0.97, blue: 1.0).opacity(0.90),
-                            Color(red: 0.92, green: 0.94, blue: 0.98).opacity(0.86)
+                            Color(red: 0.135, green: 0.142, blue: 0.162),
+                            Color(red: 0.052, green: 0.055, blue: 0.065),
+                            Color(red: 0.018, green: 0.020, blue: 0.025)
                         ]),
                         startPoint: CGPoint(x: w * 0.22, y: h * 0.18),
                         endPoint: CGPoint(x: w * 0.62, y: h * 0.82)
                     )
                 )
-                // Liquid Glass specular meniscus rim around D
+                // Specular micro-bevel rim around D
                 context.stroke(
                     strokedD,
                     with: .linearGradient(
                         Gradient(colors: [
-                            Color.white.opacity(0.98),
-                            Color(red: 1.0, green: 0.90, blue: 0.95).opacity(0.40),
-                            Color.white.opacity(0.88)
+                            Color(red: 0.92, green: 0.95, blue: 1.0).opacity(0.82),
+                            Color(red: 0.30, green: 0.32, blue: 0.38).opacity(0.22),
+                            Color(red: 0.68, green: 0.72, blue: 0.80).opacity(0.50)
                         ]),
                         startPoint: CGPoint(x: w * 0.20, y: h * 0.18),
                         endPoint: CGPoint(x: w * 0.62, y: h * 0.82)
@@ -556,7 +556,7 @@ public struct DonbyAppLogoView: View {
                     lineWidth: max(0.8, w * 0.016)
                 )
 
-                // Solid crisp white Play Prism (▶) — untouched solid white contrast
+                // Sculpted Obsidian Play Prism (▶)
                 var play = Path()
                 play.move(to: CGPoint(x: w * 0.45, y: h * 0.32))
                 play.addLine(to: CGPoint(x: w * 0.78, y: h * 0.50))
@@ -566,10 +566,27 @@ public struct DonbyAppLogoView: View {
                 context.fill(
                     play,
                     with: .linearGradient(
-                        Gradient(colors: [.white, Color(red: 0.95, green: 0.96, blue: 0.98)]),
+                        Gradient(colors: [
+                            Color(red: 0.145, green: 0.152, blue: 0.175),
+                            Color(red: 0.060, green: 0.063, blue: 0.072),
+                            Color(red: 0.018, green: 0.020, blue: 0.024)
+                        ]),
                         startPoint: CGPoint(x: w * 0.45, y: h * 0.32),
                         endPoint: CGPoint(x: w * 0.78, y: h * 0.68)
                     )
+                )
+                context.stroke(
+                    play,
+                    with: .linearGradient(
+                        Gradient(colors: [
+                            Color(red: 0.95, green: 0.97, blue: 1.0).opacity(0.85),
+                            Color(red: 0.32, green: 0.34, blue: 0.40).opacity(0.20),
+                            Color(red: 0.65, green: 0.70, blue: 0.80).opacity(0.45)
+                        ]),
+                        startPoint: CGPoint(x: w * 0.45, y: h * 0.32),
+                        endPoint: CGPoint(x: w * 0.78, y: h * 0.68)
+                    ),
+                    lineWidth: max(0.7, w * 0.014)
                 )
             }
         }
