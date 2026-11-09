@@ -500,31 +500,16 @@ public struct DonbyAppLogoView: View {
             Canvas { context, canvasSize in
                 let w = canvasSize.width
                 let h = canvasSize.height
-                let strokeW = w * 0.115
+                let strokeW = w * 0.138
 
-                // Concentric optical glass ring
-                let ringRect = CGRect(x: w * 0.14, y: h * 0.14, width: w * 0.72, height: h * 0.72)
-                context.stroke(
-                    Path(ellipseIn: ringRect),
-                    with: .linearGradient(
-                        Gradient(colors: [
-                            Color(red: 0.22, green: 0.24, blue: 0.28).opacity(0.28),
-                            Color(red: 0.12, green: 0.13, blue: 0.16).opacity(0.10),
-                            Color(red: 0.26, green: 0.28, blue: 0.32).opacity(0.24)
-                        ]),
-                        startPoint: CGPoint(x: w * 0.14, y: h * 0.14),
-                        endPoint: CGPoint(x: w * 0.86, y: h * 0.86)
-                    ),
-                    lineWidth: max(0.8, w * 0.016)
-                )
-
+                // Bold, empowered centerpiece scale
                 var dPath = Path()
-                dPath.move(to: CGPoint(x: w * 0.56, y: h * 0.27))
-                dPath.addQuadCurve(to: CGPoint(x: w * 0.44, y: h * 0.23), control: CGPoint(x: w * 0.51, y: h * 0.23))
-                dPath.addLine(to: CGPoint(x: w * 0.27, y: h * 0.23))
-                dPath.addLine(to: CGPoint(x: w * 0.27, y: h * 0.77))
-                dPath.addLine(to: CGPoint(x: w * 0.44, y: h * 0.77))
-                dPath.addQuadCurve(to: CGPoint(x: w * 0.56, y: h * 0.73), control: CGPoint(x: w * 0.51, y: h * 0.77))
+                dPath.move(to: CGPoint(x: w * 0.58, y: h * 0.24))
+                dPath.addQuadCurve(to: CGPoint(x: w * 0.42, y: h * 0.19), control: CGPoint(x: w * 0.52, y: h * 0.19))
+                dPath.addLine(to: CGPoint(x: w * 0.22, y: h * 0.19))
+                dPath.addLine(to: CGPoint(x: w * 0.22, y: h * 0.81))
+                dPath.addLine(to: CGPoint(x: w * 0.42, y: h * 0.81))
+                dPath.addQuadCurve(to: CGPoint(x: w * 0.58, y: h * 0.76), control: CGPoint(x: w * 0.52, y: h * 0.81))
 
                 let strokedD = dPath.strokedPath(StrokeStyle(lineWidth: strokeW, lineCap: .round, lineJoin: .round))
 
@@ -537,8 +522,8 @@ public struct DonbyAppLogoView: View {
                             Color(red: 0.052, green: 0.055, blue: 0.065),
                             Color(red: 0.018, green: 0.020, blue: 0.025)
                         ]),
-                        startPoint: CGPoint(x: w * 0.22, y: h * 0.18),
-                        endPoint: CGPoint(x: w * 0.62, y: h * 0.82)
+                        startPoint: CGPoint(x: w * 0.18, y: h * 0.15),
+                        endPoint: CGPoint(x: w * 0.65, y: h * 0.85)
                     )
                 )
                 // Specular micro-bevel rim around D
@@ -550,17 +535,17 @@ public struct DonbyAppLogoView: View {
                             Color(red: 0.30, green: 0.32, blue: 0.38).opacity(0.22),
                             Color(red: 0.68, green: 0.72, blue: 0.80).opacity(0.50)
                         ]),
-                        startPoint: CGPoint(x: w * 0.20, y: h * 0.18),
-                        endPoint: CGPoint(x: w * 0.62, y: h * 0.82)
+                        startPoint: CGPoint(x: w * 0.16, y: h * 0.15),
+                        endPoint: CGPoint(x: w * 0.65, y: h * 0.85)
                     ),
-                    lineWidth: max(0.8, w * 0.016)
+                    lineWidth: max(0.8, w * 0.018)
                 )
 
                 // Sculpted Obsidian Play Prism (▶)
                 var play = Path()
-                play.move(to: CGPoint(x: w * 0.45, y: h * 0.32))
-                play.addLine(to: CGPoint(x: w * 0.78, y: h * 0.50))
-                play.addLine(to: CGPoint(x: w * 0.45, y: h * 0.68))
+                play.move(to: CGPoint(x: w * 0.44, y: h * 0.28))
+                play.addLine(to: CGPoint(x: w * 0.83, y: h * 0.50))
+                play.addLine(to: CGPoint(x: w * 0.44, y: h * 0.72))
                 play.closeSubpath()
 
                 context.fill(
@@ -571,8 +556,8 @@ public struct DonbyAppLogoView: View {
                             Color(red: 0.060, green: 0.063, blue: 0.072),
                             Color(red: 0.018, green: 0.020, blue: 0.024)
                         ]),
-                        startPoint: CGPoint(x: w * 0.45, y: h * 0.32),
-                        endPoint: CGPoint(x: w * 0.78, y: h * 0.68)
+                        startPoint: CGPoint(x: w * 0.44, y: h * 0.28),
+                        endPoint: CGPoint(x: w * 0.83, y: h * 0.72)
                     )
                 )
                 context.stroke(
@@ -583,10 +568,10 @@ public struct DonbyAppLogoView: View {
                             Color(red: 0.32, green: 0.34, blue: 0.40).opacity(0.20),
                             Color(red: 0.65, green: 0.70, blue: 0.80).opacity(0.45)
                         ]),
-                        startPoint: CGPoint(x: w * 0.45, y: h * 0.32),
-                        endPoint: CGPoint(x: w * 0.78, y: h * 0.68)
+                        startPoint: CGPoint(x: w * 0.44, y: h * 0.28),
+                        endPoint: CGPoint(x: w * 0.83, y: h * 0.72)
                     ),
-                    lineWidth: max(0.7, w * 0.014)
+                    lineWidth: max(0.7, w * 0.016)
                 )
             }
         }

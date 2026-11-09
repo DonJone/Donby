@@ -154,12 +154,13 @@ func renderIcon(size: Int) -> Data? {
     // Precompute Centerpiece "D" Aperture geometry so background elements can refract cleanly behind it
     let cx = s * 0.50
     let cy = s * 0.50
-    let dLeft = cx - bodySize * 0.245
-    let dTop = cy + bodySize * 0.255
-    let dBot = cy - bodySize * 0.255
-    let dArcCenterX = cx - bodySize * 0.045
+    // Bold, empowered centerpiece scale (matching macOS Music emblem prominence)
+    let dLeft = cx - bodySize * 0.295
+    let dTop = cy + bodySize * 0.315
+    let dBot = cy - bodySize * 0.315
+    let dArcCenterX = cx - bodySize * 0.055
     let dRadius = (dTop - dBot) * 0.5
-    let strokeW = bodySize * 0.105
+    let strokeW = bodySize * 0.128
     // Corner radius > 0.5 * strokeW guarantees a smooth non-self-intersecting stroked outline
     let dCornerR = strokeW * 0.56
 
@@ -202,67 +203,6 @@ func renderIcon(size: Int) -> Data? {
     outsideDClip.addRect(CGRect(x: -s, y: -s, width: s * 3.0, height: s * 3.0))
     outsideDClip.addPath(strokedDRibbon)
 
-    // 2B. Concentric Liquid Glass Optical Ring (sharp outside D-ribbon, frosted-diffused inside D-ribbon)
-    let ringRadius = bodySize * 0.355
-    let ringRect = CGRect(x: s * 0.5 - ringRadius, y: s * 0.5 - ringRadius, width: ringRadius * 2, height: ringRadius * 2)
-    let ringStrokeWidth = max(0.75, s * 0.014)
-    let ringCirclePath = CGPath(ellipseIn: ringRect, transform: nil)
-    let strokedRingHalo = ringCirclePath.copy(
-        strokingWithWidth: ringStrokeWidth,
-        lineCap: .round,
-        lineJoin: .round,
-        miterLimit: 4.0
-    )
-
-    ctx.saveGState()
-    ctx.addPath(outsideDClip)
-    ctx.clip(using: .evenOdd)
-
-    // Soft ambient glass aura under concentric ring
-    if size >= 32 {
-        ctx.saveGState()
-        ctx.setShadow(
-            offset: CGSize(width: 0, height: -s * 0.004),
-            blur: s * 0.012,
-            color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.15)
-        )
-        ctx.addPath(strokedRingHalo)
-        ctx.setFillColor(CGColor(srgbRed: 0.10, green: 0.11, blue: 0.13, alpha: 0.05))
-        ctx.fillPath()
-        ctx.restoreGState()
-    }
-
-    // Directional obsidian specular fill along concentric optical ring
-    ctx.saveGState()
-    ctx.addPath(strokedRingHalo)
-    ctx.clip()
-    let ringColors = [
-        CGColor(srgbRed: 0.22, green: 0.24, blue: 0.28, alpha: 0.32),
-        CGColor(srgbRed: 0.12, green: 0.13, blue: 0.16, alpha: 0.12),
-        CGColor(srgbRed: 0.26, green: 0.28, blue: 0.32, alpha: 0.28)
-    ] as CFArray
-    if let ringGrad = CGGradient(colorsSpace: colorSpace, colors: ringColors, locations: [0.0, 0.52, 1.0]) {
-        ctx.drawLinearGradient(
-            ringGrad,
-            start: CGPoint(x: ringRect.minX, y: ringRect.maxY),
-            end: CGPoint(x: ringRect.maxX, y: ringRect.minY),
-            options: gradAllOptions
-        )
-    }
-    ctx.restoreGState()
-    if size >= 64 {
-        drawInnerMeniscus(
-            in: ctx,
-            path: strokedRingHalo,
-            canvasSize: s,
-            offset: CGSize(width: s * 0.002, height: -s * 0.002),
-            blur: s * 0.003,
-            color: CGColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.45),
-            blendMode: .screen
-        )
-    }
-    ctx.restoreGState() // end outsideDClip for sharp background ring
-
     // 3. Centerpiece Emblem: Sculpted Deep Obsidian "D" Aperture + Solid Obsidian Play Prism (Matching macOS Music Note)
     // 3A. Grounding elevation shadow beneath D-ribbon onto white porcelain chassis
     if size >= 32 {
@@ -271,9 +211,9 @@ func renderIcon(size: Int) -> Data? {
         ctx.addPath(outsideDClip)
         ctx.clip(using: .evenOdd)
         ctx.setShadow(
-            offset: CGSize(width: 0, height: -s * 0.016),
-            blur: s * 0.034,
-            color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.34)
+            offset: CGSize(width: 0, height: -s * 0.022),
+            blur: s * 0.024,
+            color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.20)
         )
         ctx.addPath(strokedDRibbon)
         ctx.setFillColor(CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 1.0))
@@ -285,9 +225,9 @@ func renderIcon(size: Int) -> Data? {
         ctx.addPath(outsideDClip)
         ctx.clip(using: .evenOdd)
         ctx.setShadow(
-            offset: CGSize(width: 0, height: -s * 0.006),
-            blur: s * 0.014,
-            color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.38)
+            offset: CGSize(width: 0, height: -s * 0.007),
+            blur: s * 0.010,
+            color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.24)
         )
         ctx.addPath(strokedDRibbon)
         ctx.setFillColor(CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 1.0))
@@ -404,10 +344,10 @@ func renderIcon(size: Int) -> Data? {
     ctx.restoreGState()
 
     // 4. Crisp Rounded Obsidian Play Prism (▶) nestled and projecting rightwards through the D-aperture!
-    let triLeftX = cx - bodySize * 0.055
-    let triRightX = cx + bodySize * 0.285
-    let triHalfH = bodySize * 0.195
-    let triCorner = bodySize * 0.036
+    let triLeftX = cx - bodySize * 0.065
+    let triRightX = cx + bodySize * 0.345
+    let triHalfH = bodySize * 0.240
+    let triCorner = bodySize * 0.044
 
     let p1 = CGPoint(x: triLeftX, y: cy + triHalfH)
     let p2 = CGPoint(x: triRightX, y: cy)
@@ -421,29 +361,39 @@ func renderIcon(size: Int) -> Data? {
     playPath.addArc(tangent1End: p1, tangent2End: p2, radius: triCorner)
     playPath.closeSubpath()
 
-    // Ambient elevation shadow under Play Prism
-    ctx.saveGState()
-    ctx.setShadow(
-        offset: CGSize(width: 0, height: -s * 0.016),
-        blur: s * 0.032,
-        color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.35)
-    )
-    ctx.addPath(playPath)
-    ctx.setFillColor(CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 1.0))
-    ctx.fillPath()
-    ctx.restoreGState()
+    let outsidePlayClip = CGMutablePath()
+    outsidePlayClip.addRect(CGRect(x: -s, y: -s, width: s * 3.0, height: s * 3.0))
+    outsidePlayClip.addPath(playPath)
 
-    // Contact shadow under Play Prism
-    ctx.saveGState()
-    ctx.setShadow(
-        offset: CGSize(width: 0, height: -s * 0.006),
-        blur: s * 0.014,
-        color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.40)
-    )
-    ctx.addPath(playPath)
-    ctx.setFillColor(CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 1.0))
-    ctx.fillPath()
-    ctx.restoreGState()
+    // Ambient elevation shadow under Play Prism
+    if size >= 32 {
+        ctx.saveGState()
+        ctx.addPath(outsidePlayClip)
+        ctx.clip(using: .evenOdd)
+        ctx.setShadow(
+            offset: CGSize(width: 0, height: -s * 0.022),
+            blur: s * 0.024,
+            color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.20)
+        )
+        ctx.addPath(playPath)
+        ctx.setFillColor(CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 1.0))
+        ctx.fillPath()
+        ctx.restoreGState()
+
+        // Contact shadow under Play Prism
+        ctx.saveGState()
+        ctx.addPath(outsidePlayClip)
+        ctx.clip(using: .evenOdd)
+        ctx.setShadow(
+            offset: CGSize(width: 0, height: -s * 0.007),
+            blur: s * 0.010,
+            color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.24)
+        )
+        ctx.addPath(playPath)
+        ctx.setFillColor(CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 1.0))
+        ctx.fillPath()
+        ctx.restoreGState()
+    }
 
     // Obsidian gradient fill on Play Prism matching the D body
     ctx.saveGState()
