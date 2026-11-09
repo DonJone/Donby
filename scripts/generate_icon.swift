@@ -2,6 +2,80 @@ import AppKit
 import CoreGraphics
 import Foundation
 
+func createEmblem(s: CGFloat, bodySize: CGFloat, cx: CGFloat, cy: CGFloat) -> CGPath {
+    let totalH = bodySize * 0.62
+    let strokeW = bodySize * 0.118
+    let dRadius = totalH * 0.5 - strokeW * 0.5
+    let dLeft = cx - bodySize * 0.230
+    let dArcCenterX = cx - bodySize * 0.040
+
+    // cornerR = strokeW * 0.98 ensures the inner corner fillet has radius ~47px,
+    // matching Apple Music's inner cutout corner radius!
+    let cornerR = strokeW * 0.98
+
+    let openAngle: CGFloat = 0.28 * .pi
+
+    let dTrack = CGMutablePath()
+    let topTermX = dArcCenterX + dRadius * cos(openAngle)
+    let topTermY = cy + dRadius * sin(openAngle)
+    dTrack.move(to: CGPoint(x: topTermX, y: topTermY))
+    dTrack.addArc(
+        center: CGPoint(x: dArcCenterX, y: cy),
+        radius: dRadius,
+        startAngle: openAngle,
+        endAngle: 0.5 * .pi,
+        clockwise: false
+    )
+    dTrack.addArc(
+        tangent1End: CGPoint(x: dLeft, y: cy + dRadius),
+        tangent2End: CGPoint(x: dLeft, y: cy - dRadius),
+        radius: cornerR
+    )
+    dTrack.addArc(
+        tangent1End: CGPoint(x: dLeft, y: cy - dRadius),
+        tangent2End: CGPoint(x: dArcCenterX, y: cy - dRadius),
+        radius: cornerR
+    )
+    dTrack.addLine(to: CGPoint(x: dArcCenterX, y: cy - dRadius))
+    dTrack.addArc(
+        center: CGPoint(x: dArcCenterX, y: cy),
+        radius: dRadius,
+        startAngle: -0.5 * .pi,
+        endAngle: -openAngle,
+        clockwise: false
+    )
+
+    let strokedD = dTrack.copy(
+        strokingWithWidth: strokeW,
+        lineCap: .round,
+        lineJoin: .round,
+        miterLimit: 4.0
+    )
+
+    // Play triangle nestled inside
+    let triLeftX = dLeft + strokeW * 1.35
+    let triRightX = cx + bodySize * 0.290
+    let triHalfH = totalH * 0.35
+    let triCorner: CGFloat = bodySize * 0.042
+
+    let p1 = CGPoint(x: triLeftX, y: cy + triHalfH)
+    let p2 = CGPoint(x: triRightX, y: cy)
+    let p3 = CGPoint(x: triLeftX, y: cy - triHalfH)
+
+    let playPath = CGMutablePath()
+    let mid12 = CGPoint(x: (p1.x + p2.x) * 0.5, y: (p1.y + p2.y) * 0.5)
+    playPath.move(to: mid12)
+    playPath.addArc(tangent1End: p2, tangent2End: p3, radius: triCorner)
+    playPath.addArc(tangent1End: p3, tangent2End: p1, radius: triCorner)
+    playPath.addArc(tangent1End: p1, tangent2End: p2, radius: triCorner)
+    playPath.closeSubpath()
+
+    let combined = CGMutablePath()
+    combined.addPath(strokedD)
+    combined.addPath(playPath)
+    return combined
+}
+
 func renderIcon(size: Int) -> Data? {
     let s = CGFloat(size)
     guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
@@ -28,7 +102,6 @@ func renderIcon(size: Int) -> Data? {
     defer { NSGraphicsContext.restoreGraphicsState() }
 
     // Standard macOS Big Sur / Sonoma / Tahoe icon metrics:
-    // 824x824 squircle centered inside 1024x1024 canvas (margin = 100/1024 = 0.09765625)
     let margin = s * (100.0 / 1024.0)
     let bodySize = s - margin * 2.0
     let bodyRect = CGRect(x: margin, y: margin, width: bodySize, height: bodySize)
@@ -60,7 +133,7 @@ func renderIcon(size: Int) -> Data? {
     ctx.addPath(squirclePath)
     ctx.clip()
 
-    // 2A. macOS Music Pro Luminous Porcelain White Gradient Chassis (top -> bottom)
+    // 2A. macOS Music Pro Luminous Porcelain White Gradient Chassis (matching Apple Music)
     let bgColors = [
         CGColor(srgbRed: 1.000, green: 1.000, blue: 1.000, alpha: 1.0),
         CGColor(srgbRed: 0.985, green: 0.988, blue: 0.992, alpha: 1.0),
@@ -76,61 +149,10 @@ func renderIcon(size: Int) -> Data? {
         )
     }
 
-    // 3. Centerpiece Emblem: Unified Sculptural Obsidian "D" Monogram with Inverted Play Prism (▶) Cutout
+    // 3. Centerpiece Emblem: Sculpted Obsidian "D" Aperture (with soft organic inner fillets) + Nested Play Prism
     let cx = s * 0.50
     let cy = s * 0.50
-    let totalH = bodySize * 0.63
-    let totalW = bodySize * 0.525
-    let leftX = cx - totalW * 0.515
-    let cornerR = totalH * 0.21
-    let rightArcR = totalH * 0.5
-
-    let emblem = CGMutablePath()
-    let outerD = CGMutablePath()
-    let rightArcCenterX = leftX + totalW - rightArcR
-
-    outerD.move(to: CGPoint(x: leftX + cornerR, y: cy + totalH * 0.5))
-    outerD.addLine(to: CGPoint(x: rightArcCenterX, y: cy + totalH * 0.5))
-    outerD.addArc(
-        center: CGPoint(x: rightArcCenterX, y: cy),
-        radius: rightArcR,
-        startAngle: 0.5 * .pi,
-        endAngle: -0.5 * .pi,
-        clockwise: true
-    )
-    outerD.addLine(to: CGPoint(x: leftX + cornerR, y: cy - totalH * 0.5))
-    outerD.addArc(
-        tangent1End: CGPoint(x: leftX, y: cy - totalH * 0.5),
-        tangent2End: CGPoint(x: leftX, y: cy),
-        radius: cornerR
-    )
-    outerD.addArc(
-        tangent1End: CGPoint(x: leftX, y: cy + totalH * 0.5),
-        tangent2End: CGPoint(x: leftX + cornerR, y: cy + totalH * 0.5),
-        radius: cornerR
-    )
-    outerD.closeSubpath()
-
-    // Inner sculpted Play Triangle (▶) cutout
-    let triLeftX = leftX + totalW * 0.275
-    let triRightX = leftX + totalW * 0.765
-    let triHalfH = totalH * 0.305
-    let triCorner = bodySize * 0.042
-
-    let p1 = CGPoint(x: triLeftX, y: cy + triHalfH)
-    let p2 = CGPoint(x: triRightX, y: cy)
-    let p3 = CGPoint(x: triLeftX, y: cy - triHalfH)
-
-    let playCutout = CGMutablePath()
-    let mid12 = CGPoint(x: (p1.x + p2.x) * 0.5, y: (p1.y + p2.y) * 0.5)
-    playCutout.move(to: mid12)
-    playCutout.addArc(tangent1End: p2, tangent2End: p3, radius: triCorner)
-    playCutout.addArc(tangent1End: p3, tangent2End: p1, radius: triCorner)
-    playCutout.addArc(tangent1End: p1, tangent2End: p2, radius: triCorner)
-    playCutout.closeSubpath()
-
-    emblem.addPath(outerD)
-    emblem.addPath(playCutout)
+    let emblem = createEmblem(s: s, bodySize: bodySize, cx: cx, cy: cy)
 
     // 3A. Grounding elevation drop shadow onto white porcelain chassis & inside cutout
     if size >= 32 {
@@ -148,7 +170,7 @@ func renderIcon(size: Int) -> Data? {
             color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.16)
         )
         ctx.addPath(emblem)
-        ctx.fillPath(using: .evenOdd)
+        ctx.fillPath()
         ctx.restoreGState()
 
         // Crisp contact shadow directly underneath base
@@ -161,14 +183,14 @@ func renderIcon(size: Int) -> Data? {
             color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.22)
         )
         ctx.addPath(emblem)
-        ctx.fillPath(using: .evenOdd)
+        ctx.fillPath()
         ctx.restoreGState()
     }
 
     // 3B. Solid Deep Obsidian Velvet Fill (matching Apple Music)
     ctx.saveGState()
     ctx.addPath(emblem)
-    ctx.clip(using: .evenOdd)
+    ctx.clip()
     let obsidianColors = [
         CGColor(srgbRed: 0.075, green: 0.080, blue: 0.090, alpha: 1.0),
         CGColor(srgbRed: 0.015, green: 0.016, blue: 0.018, alpha: 1.0),
@@ -187,7 +209,7 @@ func renderIcon(size: Int) -> Data? {
     // 3C. Crisp Light-Catching Top Chamfer Bevel
     ctx.saveGState()
     ctx.addPath(emblem)
-    ctx.clip(using: .evenOdd)
+    ctx.clip()
 
     let rimPath = emblem.copy(
         strokingWithWidth: max(1.0, s * 0.0035),

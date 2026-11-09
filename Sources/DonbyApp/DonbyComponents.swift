@@ -500,56 +500,67 @@ public struct DonbyAppLogoView: View {
             Canvas { context, canvasSize in
                 let w = canvasSize.width
                 let h = canvasSize.height
-                let totalH = h * 0.63
-                let totalW = w * 0.525
-                let leftX = w * 0.50 - totalW * 0.515
-                let cornerR = totalH * 0.21
-                let rightArcR = totalH * 0.5
+                let totalH = h * 0.62
+                let strokeW = w * 0.118
+                let dRadius = totalH * 0.5 - strokeW * 0.5
+                let dLeft = w * 0.50 - w * 0.230
+                let dArcCenterX = w * 0.50 - w * 0.040
+                let cornerR = strokeW * 0.98
 
-                var outerD = Path()
-                let rightArcCenterX = leftX + totalW - rightArcR
-                outerD.move(to: CGPoint(x: leftX + cornerR, y: h * 0.50 - totalH * 0.5))
-                outerD.addLine(to: CGPoint(x: rightArcCenterX, y: h * 0.50 - totalH * 0.5))
-                outerD.addArc(
-                    center: CGPoint(x: rightArcCenterX, y: h * 0.50),
-                    radius: rightArcR,
-                    startAngle: .degrees(-90),
-                    endAngle: .degrees(90),
-                    clockwise: false
+                let openAngle = 0.28 * Double.pi
+
+                var dTrack = Path()
+                let topTermX = dArcCenterX + dRadius * cos(openAngle)
+                let topTermY = h * 0.50 - dRadius * sin(openAngle)
+                dTrack.move(to: CGPoint(x: topTermX, y: topTermY))
+                dTrack.addArc(
+                    center: CGPoint(x: dArcCenterX, y: h * 0.50),
+                    radius: dRadius,
+                    startAngle: .radians(-openAngle),
+                    endAngle: .radians(-0.5 * .pi),
+                    clockwise: true
                 )
-                outerD.addLine(to: CGPoint(x: leftX + cornerR, y: h * 0.50 + totalH * 0.5))
-                outerD.addArc(
-                    tangent1End: CGPoint(x: leftX, y: h * 0.50 + totalH * 0.5),
-                    tangent2End: CGPoint(x: leftX, y: h * 0.50),
+                dTrack.addArc(
+                    tangent1End: CGPoint(x: dLeft, y: h * 0.50 - dRadius),
+                    tangent2End: CGPoint(x: dLeft, y: h * 0.50 + dRadius),
                     radius: cornerR
                 )
-                outerD.addArc(
-                    tangent1End: CGPoint(x: leftX, y: h * 0.50 - totalH * 0.5),
-                    tangent2End: CGPoint(x: leftX + cornerR, y: h * 0.50 - totalH * 0.5),
+                dTrack.addArc(
+                    tangent1End: CGPoint(x: dLeft, y: h * 0.50 + dRadius),
+                    tangent2End: CGPoint(x: dArcCenterX, y: h * 0.50 + dRadius),
                     radius: cornerR
                 )
-                outerD.closeSubpath()
+                dTrack.addLine(to: CGPoint(x: dArcCenterX, y: h * 0.50 + dRadius))
+                dTrack.addArc(
+                    center: CGPoint(x: dArcCenterX, y: h * 0.50),
+                    radius: dRadius,
+                    startAngle: .radians(0.5 * .pi),
+                    endAngle: .radians(openAngle),
+                    clockwise: true
+                )
 
-                let triLeftX = leftX + totalW * 0.275
-                let triRightX = leftX + totalW * 0.765
-                let triHalfH = totalH * 0.305
+                let strokedD = dTrack.strokedPath(StrokeStyle(lineWidth: strokeW, lineCap: .round, lineJoin: .round))
+
+                let triLeftX = dLeft + strokeW * 1.35
+                let triRightX = w * 0.50 + w * 0.290
+                let triHalfH = totalH * 0.35
                 let triCorner = w * 0.042
 
                 let p1 = CGPoint(x: triLeftX, y: h * 0.50 - triHalfH)
                 let p2 = CGPoint(x: triRightX, y: h * 0.50)
                 let p3 = CGPoint(x: triLeftX, y: h * 0.50 + triHalfH)
 
-                var playCutout = Path()
+                var playPath = Path()
                 let mid12 = CGPoint(x: (p1.x + p2.x) * 0.5, y: (p1.y + p2.y) * 0.5)
-                playCutout.move(to: mid12)
-                playCutout.addArc(tangent1End: p2, tangent2End: p3, radius: triCorner)
-                playCutout.addArc(tangent1End: p3, tangent2End: p1, radius: triCorner)
-                playCutout.addArc(tangent1End: p1, tangent2End: p2, radius: triCorner)
-                playCutout.closeSubpath()
+                playPath.move(to: mid12)
+                playPath.addArc(tangent1End: p2, tangent2End: p3, radius: triCorner)
+                playPath.addArc(tangent1End: p3, tangent2End: p1, radius: triCorner)
+                playPath.addArc(tangent1End: p1, tangent2End: p2, radius: triCorner)
+                playPath.closeSubpath()
 
                 var emblem = Path()
-                emblem.addPath(outerD)
-                emblem.addPath(playCutout)
+                emblem.addPath(strokedD)
+                emblem.addPath(playPath)
 
                 // Fill solid deep obsidian velvet
                 context.fill(
@@ -562,8 +573,7 @@ public struct DonbyAppLogoView: View {
                         ]),
                         startPoint: CGPoint(x: w * 0.50, y: h * 0.18),
                         endPoint: CGPoint(x: w * 0.50, y: h * 0.82)
-                    ),
-                    style: FillStyle(eoFill: true)
+                    )
                 )
 
                 // Top chamfer bevel specular highlight
@@ -586,7 +596,7 @@ public struct DonbyAppLogoView: View {
     }
 }
 
-/// Renders modern luminous UHDNow mark with electric cyan-blue glow
+/// Official UHDNow brand logo directly referenced from https://www.uhdnow.com/
 public struct UHDNowVectorLogo: View {
     public var size: CGFloat = 30
 
@@ -594,85 +604,41 @@ public struct UHDNowVectorLogo: View {
         self.size = size
     }
 
+    private static var cachedLogoImage: NSImage? = {
+        let possibleUrls = [
+            Bundle.main.url(forResource: "uhdnow_logo", withExtension: "png"),
+            Bundle.main.url(forResource: "uhdnow_logo_128", withExtension: "png"),
+            Bundle.main.resourceURL?.appendingPathComponent("uhdnow_logo.png")
+        ]
+        for url in possibleUrls {
+            if let url = url, let img = NSImage(contentsOf: url) {
+                return img
+            }
+        }
+        let fallbackPaths = [
+            "Resources/uhdnow_logo.png",
+            "../Resources/uhdnow_logo.png",
+            "Donby.app/Contents/Resources/uhdnow_logo.png"
+        ]
+        for path in fallbackPaths {
+            if FileManager.default.fileExists(atPath: path),
+               let img = NSImage(contentsOfFile: path) {
+                return img
+            }
+        }
+        return nil
+    }()
+
     public var body: some View {
-        ZStack {
-            // Subtle frosted squircle chip
-            RoundedRectangle(cornerRadius: size * 0.26, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [Color(red: 0.12, green: 0.16, blue: 0.24), Color(red: 0.07, green: 0.09, blue: 0.14)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: size * 0.26, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.8)
-                )
-
-            Canvas { context, canvasSize in
-                let w = canvasSize.width
-                let h = canvasSize.height
-                let strokeW = w * 0.18
-
-                // Draw modern luminous U-channel
-                var uPath = Path()
-                let leftX = w * 0.26
-                let rightX = w * 0.74
-                let topY = h * 0.22
-                let midRightY = h * 0.52
-                let arcCenter = CGPoint(x: (leftX + rightX) / 2.0, y: h * 0.52)
-                let radius = (rightX - leftX) / 2.0
-
-                uPath.move(to: CGPoint(x: leftX, y: topY))
-                uPath.addLine(to: CGPoint(x: leftX, y: arcCenter.y))
-                uPath.addArc(
-                    center: arcCenter,
-                    radius: radius,
-                    startAngle: .degrees(180),
-                    endAngle: .degrees(0),
-                    clockwise: true
-                )
-                uPath.addLine(to: CGPoint(x: rightX, y: midRightY))
-
-                context.stroke(
-                    uPath,
-                    with: .linearGradient(
-                        Gradient(colors: [
-                            Color(red: 0.32, green: 0.82, blue: 1.0),
-                            Color(red: 0.16, green: 0.52, blue: 0.98),
-                            Color(red: 0.38, green: 0.32, blue: 0.96)
-                        ]),
-                        startPoint: CGPoint(x: leftX, y: topY),
-                        endPoint: CGPoint(x: rightX, y: h * 0.82)
-                    ),
-                    style: StrokeStyle(lineWidth: strokeW, lineCap: .round, lineJoin: .round)
-                )
-
-                // Draw glowing play prism ▶
-                var playPath = Path()
-                let triLeft = w * 0.53
-                let triRight = w * 0.84
-                let triTop = h * 0.18
-                let triBottom = h * 0.48
-                let triMidY = (triTop + triBottom) / 2.0
-
-                playPath.move(to: CGPoint(x: triLeft, y: triTop))
-                playPath.addLine(to: CGPoint(x: triRight, y: triMidY))
-                playPath.addLine(to: CGPoint(x: triLeft, y: triBottom))
-                playPath.closeSubpath()
-
-                context.fill(
-                    playPath,
-                    with: .linearGradient(
-                        Gradient(colors: [
-                            Color.white,
-                            Color(red: 0.72, green: 0.90, blue: 1.0)
-                        ]),
-                        startPoint: CGPoint(x: triLeft, y: triTop),
-                        endPoint: CGPoint(x: triRight, y: triMidY)
-                    )
-                )
+        Group {
+            if let img = Self.cachedLogoImage {
+                Image(nsImage: img)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: size * 0.22, style: .continuous))
+            } else {
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(Color(red: 0.12, green: 0.14, blue: 0.22))
             }
         }
         .frame(width: size, height: size)
