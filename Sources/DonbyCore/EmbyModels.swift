@@ -21,11 +21,11 @@ public enum EmbyClientError: LocalizedError, Sendable {
 }
 
 public struct EmbyExtServerDomainsResponse: Codable, Sendable {
-    public let ok: Bool
+    public let ok: Bool?
     public let data: [EmbyExtDomainItem]?
     public let error: String?
 
-    public init(ok: Bool, data: [EmbyExtDomainItem]? = nil, error: String? = nil) {
+    public init(ok: Bool? = true, data: [EmbyExtDomainItem]? = nil, error: String? = nil) {
         self.ok = ok
         self.data = data
         self.error = error
@@ -37,6 +37,51 @@ public struct EmbyExtDomainItem: Codable, Hashable, Sendable, Identifiable {
     public let name: String
     public let url: String
     public init(name: String, url: String) { self.name = name; self.url = url }
+
+    public init(from decoder: Decoder) throws {
+        if let container = try? decoder.container(keyedBy: DynamicCodingKey.self) {
+            var foundUrl = ""
+            for key in ["url", "domain", "host", "address", "server", "ip", "line"] {
+                if let codingKey = DynamicCodingKey(stringValue: key),
+                   let val = try? container.decode(String.self, forKey: codingKey),
+                   !val.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    foundUrl = val.trimmingCharacters(in: .whitespacesAndNewlines)
+                    break
+                }
+            }
+            if !foundUrl.isEmpty && !foundUrl.contains("://") {
+                foundUrl = "https://\(foundUrl)"
+            }
+            self.url = foundUrl
+
+            var foundName = ""
+            for key in ["name", "label", "title", "remark", "desc", "note"] {
+                if let codingKey = DynamicCodingKey(stringValue: key),
+                   let val = try? container.decode(String.self, forKey: codingKey),
+                   !val.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    foundName = val.trimmingCharacters(in: .whitespacesAndNewlines)
+                    break
+                }
+            }
+            self.name = foundName.isEmpty ? foundUrl : foundName
+            return
+        }
+        if let singleVal = try? decoder.singleValueContainer(), let str = try? singleVal.decode(String.self) {
+            let clean = str.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.url = clean.contains("://") ? clean : "https://\(clean)"
+            self.name = clean
+            return
+        }
+        self.name = ""
+        self.url = ""
+    }
+
+    private struct DynamicCodingKey: CodingKey {
+        var stringValue: String
+        init?(stringValue: String) { self.stringValue = stringValue }
+        var intValue: Int? { nil }
+        init?(intValue: Int) { nil }
+    }
 }
 
 public struct EmbyCountsResponse: Codable, Sendable {

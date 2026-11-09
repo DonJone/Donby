@@ -78,6 +78,7 @@ public final class EmbyClient: Sendable {
         var allQueryItems = queryItems
         if includeTokenInQuery && !token.isEmpty {
             allQueryItems.append(URLQueryItem(name: "X-Emby-Token", value: token))
+            allQueryItems.append(URLQueryItem(name: "api_key", value: token))
         }
         if !allQueryItems.isEmpty {
             components.queryItems = (components.queryItems ?? []) + allQueryItems
@@ -132,29 +133,92 @@ public final class EmbyClient: Sendable {
         token: String,
         userId: String = ""
     ) async -> [EmbyExtDomainItem]? {
-        guard !token.isEmpty else { return nil }
-        do {
-            let req = try makeRequest(
-                baseURL: baseURL,
-                path: "/System/Ext/ServerDomains",
-                method: "GET",
-                token: token,
-                userId: userId,
-                includeTokenInQuery: true,
-                timeout: 5
-            )
-            let (data, response) = try await URLSession.shared.data(for: req)
-            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                return nil
+        let candidatePaths = [
+            "/System/Ext/ServerDomains",
+            "/Ext/ServerDomains",
+            "/System/ServerDomains",
+            "/ServerDomains"
+        ]
+
+        for p in candidatePaths {
+            do {
+                let req = try makeRequest(
+                    baseURL: baseURL,
+                    path: p,
+                    method: "GET",
+                    token: token,
+                    userId: userId,
+                    includeTokenInQuery: true,
+                    timeout: 6
+                )
+                let (data, response) = try await URLSession.shared.data(for: req)
+                guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                    continue
+                }
+
+                // Format A: {"ok": true, "data": [...]}
+                if let decoded = try? JSONDecoder().decode(EmbyExtServerDomainsResponse.self, from: data),
+                   let domains = decoded.data, !domains.isEmpty {
+                    return domains
+                }
+
+                // Format B: Direct array of items [{...}, {...}]
+                if let list = try? JSONDecoder().decode([EmbyExtDomainItem].self, from: data), !list.isEmpty {
+                    return list
+                }
+
+                // Format C: Generic JSON object with nested list under data/domains/lines/items
+                if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    let possibleKeys = ["data", "domains", "lines", "items", "servers", "nodes"]
+                    for key in possibleKeys {
+                        if let arr = obj[key] as? [[String: Any]],
+                           let subData = try? JSONSerialization.data(withJSONObject: arr),
+                           let items = try? JSONDecoder().decode([EmbyExtDomainItem].self, from: subData),
+                           !items.isEmpty {
+                            return items
+                        }
+                    }
+                }
+
+                // Format D: Plain text lines of domains/URLs
+                if let text = String(data: data, encoding: .utf8) {
+                    let lines = text.components(separatedBy: .newlines)
+                    var items: [EmbyExtDomainItem] = []
+                    for rawLine in lines {
+                        let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !line.isEmpty && !line.hasPrefix("#") else { continue }
+                        let urlStr = line.contains("://") ? line : "https://\(line)"
+                        items.append(EmbyExtDomainItem(name: line, url: urlStr))
+                    }
+                    if !items.isEmpty { return items }
+                }
+            } catch {
+                continue
             }
-            let decoded = try JSONDecoder().decode(EmbyExtServerDomainsResponse.self, from: data)
-            guard decoded.ok, let domains = decoded.data, !domains.isEmpty else {
-                return nil
-            }
-            return domains
-        } catch {
-            return nil
         }
+        return nil
+    }
+
+    public func fetchUsersWithToken(
+        baseURL: String,
+        token: String
+    ) async -> [EmbyUser] {
+        guard !token.isEmpty else { return [] }
+        // 1. Try /Users
+        if let req = try? makeRequest(baseURL: baseURL, path: "/Users", token: token, includeTokenInQuery: true, timeout: 8),
+           let (data, response) = try? await URLSession.shared.data(for: req),
+           let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+           let users = try? JSONDecoder().decode([EmbyUser].self, from: data), !users.isEmpty {
+            return users
+        }
+        // 2. Try /Users/Public
+        if let req = try? makeRequest(baseURL: baseURL, path: "/Users/Public", token: token, includeTokenInQuery: true, timeout: 8),
+           let (data, response) = try? await URLSession.shared.data(for: req),
+           let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+           let users = try? JSONDecoder().decode([EmbyUser].self, from: data), !users.isEmpty {
+            return users
+        }
+        return []
     }
 
     public func pingLine(baseURL: String, token: String = "") async -> Int? {
@@ -180,16 +244,31 @@ public final class EmbyClient: Sendable {
     }
 
     public func fetchSystemInfo(server: EmbyServerConfig) async throws -> EmbySystemInfo {
-        let req = try makeRequest(
-            baseURL: server.activeBaseURL,
-            path: "/System/Info",
-            token: server.accessToken,
-            userId: server.userId,
-            timeout: 10
-        )
-        let (data, response) = try await URLSession.shared.data(for: req)
-        try validateResponse(response)
-        return try JSONDecoder().decode(EmbySystemInfo.self, from: data)
+        do {
+            let req = try makeRequest(
+                baseURL: server.activeBaseURL,
+                path: "/System/Info",
+                token: server.accessToken,
+                userId: server.userId,
+                includeTokenInQuery: true,
+                timeout: 10
+            )
+            let (data, response) = try await URLSession.shared.data(for: req)
+            try validateResponse(response)
+            return try JSONDecoder().decode(EmbySystemInfo.self, from: data)
+        } catch {
+            // Fallback for non-admin tokens or public endpoints
+            let fallbackReq = try makeRequest(
+                baseURL: server.activeBaseURL,
+                path: "/System/Info/Public",
+                token: server.accessToken,
+                includeTokenInQuery: true,
+                timeout: 8
+            )
+            let (data, response) = try await URLSession.shared.data(for: fallbackReq)
+            try validateResponse(response)
+            return try JSONDecoder().decode(EmbySystemInfo.self, from: data)
+        }
     }
 
     public func fetchCounts(server: EmbyServerConfig) async throws -> EmbyCountsResponse {
@@ -208,11 +287,21 @@ public final class EmbyClient: Sendable {
     }
 
     public func fetchViews(server: EmbyServerConfig) async throws -> [EmbyItem] {
+        var targetUserId = server.userId
+        if targetUserId.isEmpty && !server.accessToken.isEmpty {
+            let users = await fetchUsersWithToken(baseURL: server.activeBaseURL, token: server.accessToken)
+            if let firstUser = users.first {
+                targetUserId = firstUser.id
+            }
+        }
+
+        let path = targetUserId.isEmpty ? "/Views" : "/Users/\(targetUserId)/Views"
         let req = try makeRequest(
             baseURL: server.activeBaseURL,
-            path: "/Users/\(server.userId)/Views",
+            path: path,
             token: server.accessToken,
-            userId: server.userId
+            userId: targetUserId,
+            includeTokenInQuery: true
         )
         let (data, response) = try await URLSession.shared.data(for: req)
         try validateResponse(response)

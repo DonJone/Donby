@@ -261,7 +261,16 @@ public struct PlayerView: View {
                             .foregroundStyle(.white.opacity(0.6))
                     }
                     .padding(.horizontal, 36).padding(.vertical, 28)
-                    .donbyLiquidGlassRect(cornerRadius: 18, tint: nil, interactive: false, isHovered: false)
+                    .background(
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .fill(.ultraThinMaterial)
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .fill(Color.black.opacity(0.68))
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6)
+                        }
+                    )
                 }
                 .transition(.opacity)
             }
@@ -305,7 +314,16 @@ public struct PlayerView: View {
                         }
                     }
                     .padding(32)
-                    .donbyLiquidGlassRect(cornerRadius: 18, tint: nil, interactive: false, isHovered: false)
+                    .background(
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .fill(.ultraThinMaterial)
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .fill(Color.black.opacity(0.72))
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6)
+                        }
+                    )
                 }
                 .transition(.opacity)
             }
@@ -436,6 +454,8 @@ public struct PlayerView: View {
                 )
             }
         }
+        .environment(\.colorScheme, .dark)
+        .preferredColorScheme(.dark)
     }
 
     private var topOSDBar: some View {
@@ -490,7 +510,12 @@ public struct PlayerView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: false)
+                .background(
+                    Capsule()
+                        .fill(.ultraThinMaterial)
+                        .overlay(Capsule().fill(Color.black.opacity(0.42)))
+                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6))
+                )
             }
             .buttonStyle(.plain)
             .help("切换当前播放线路")
@@ -499,7 +524,12 @@ public struct PlayerView: View {
                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.85))
                 .padding(.horizontal, 11).padding(.vertical, 6)
-                .donbyLiquidGlassCapsule(tint: nil, interactive: false, isHovered: false)
+                .background(
+                    Capsule()
+                        .fill(.ultraThinMaterial)
+                        .overlay(Capsule().fill(Color.black.opacity(0.42)))
+                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6))
+                )
         }
         }
         .padding(.horizontal, 24).padding(.top, 18).padding(.bottom, 24)
@@ -650,7 +680,12 @@ public struct PlayerView: View {
                         Text(String(format: "%.2gx", playbackSpeed))
                             .font(.system(size: 12, weight: .bold, design: .rounded))
                             .foregroundStyle(.white).padding(.horizontal, 9).padding(.vertical, 5)
-                            .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: false)
+                            .background(
+                                Capsule()
+                                    .fill(.ultraThinMaterial)
+                                    .overlay(Capsule().fill(Color.black.opacity(0.42)))
+                                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6))
+                            )
                     }
                     .menuStyle(.borderlessButton).frame(width: 56)
 
@@ -679,7 +714,49 @@ public struct PlayerView: View {
         }
         .padding(.horizontal, 22).padding(.vertical, 14)
         .frame(maxWidth: isFloat ? 900 : .infinity)
-        .donbyLiquidGlassRect(cornerRadius: isFloat ? 22 : 0, tint: nil, interactive: false, isHovered: false)
+        .background(
+            ZStack {
+                if isFloat {
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.black.opacity(0.55), Color.black.opacity(0.68)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .strokeBorder(
+                            LinearGradient(
+                                colors: [Color.white.opacity(0.20), Color.white.opacity(0.06)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            ),
+                            lineWidth: 0.65
+                        )
+                } else {
+                    Rectangle().fill(.ultraThinMaterial)
+                    Rectangle().fill(
+                        LinearGradient(
+                            colors: [Color.black.opacity(0.50), Color.black.opacity(0.65)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    Rectangle().strokeBorder(
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.18), Color.clear],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 0.6
+                    )
+                }
+            }
+        )
+        .clipShape(RoundedRectangle(cornerRadius: isFloat ? 22 : 0, style: .continuous))
         .shadow(color: .black.opacity(0.55), radius: 22, y: 8)
         .padding(.horizontal, isFloat ? 32 : 0)
         .padding(.bottom, isFloat ? 24 : 0)
@@ -838,7 +915,14 @@ public struct PlayerView: View {
                                     Spacer()
                                 }
                                 .padding(10)
-                                .donbyLiquidGlassRect(cornerRadius: 10, tint: isSel ? appState.accentColor : nil, interactive: true, isHovered: false)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(isSel ? appState.accentColor.opacity(0.88) : Color.white.opacity(0.06))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                                .strokeBorder(isSel ? Color.white.opacity(0.25) : Color.white.opacity(0.08), lineWidth: 0.6)
+                                        )
+                                )
                             }
                             .buttonStyle(.plain)
                         }
@@ -854,7 +938,14 @@ public struct PlayerView: View {
                                 Spacer()
                             }
                             .padding(10)
-                            .donbyLiquidGlassRect(cornerRadius: 10, tint: activeSubtitleSelection == .off ? appState.accentColor : nil, interactive: true, isHovered: false)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(activeSubtitleSelection == .off ? appState.accentColor.opacity(0.88) : Color.white.opacity(0.06))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .strokeBorder(activeSubtitleSelection == .off ? Color.white.opacity(0.25) : Color.white.opacity(0.08), lineWidth: 0.6)
+                                    )
+                            )
                         }
                         .buttonStyle(.plain)
 
@@ -881,7 +972,14 @@ public struct PlayerView: View {
                                     }
                                 }
                                 .padding(10)
-                                .donbyLiquidGlassRect(cornerRadius: 10, tint: isSel ? appState.accentColor : nil, interactive: true, isHovered: false)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(isSel ? appState.accentColor.opacity(0.88) : Color.white.opacity(0.06))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                                .strokeBorder(isSel ? Color.white.opacity(0.25) : Color.white.opacity(0.08), lineWidth: 0.6)
+                                        )
+                                )
                             }
                             .buttonStyle(.plain)
                         }
@@ -896,7 +994,14 @@ public struct PlayerView: View {
                             }
                             .foregroundStyle(appState.accentColor)
                             .padding(10)
-                            .donbyLiquidGlassRect(cornerRadius: 10, tint: nil, interactive: true, isHovered: false)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(Color.white.opacity(0.06))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.6)
+                                    )
+                            )
                         }
                         .buttonStyle(.plain)
                     }
@@ -942,7 +1047,13 @@ public struct PlayerView: View {
         .padding(18)
         .frame(width: 320)
         .frame(maxHeight: .infinity)
-        .donbyLiquidGlassRect(cornerRadius: 0, tint: nil, interactive: false, isHovered: false)
+        .background(
+            ZStack {
+                Rectangle().fill(.ultraThinMaterial)
+                Rectangle().fill(Color.black.opacity(0.58))
+                Rectangle().strokeBorder(Color.white.opacity(0.12), lineWidth: 0.6)
+            }
+        )
     }
 
     private func osdInfoRow(_ key: String, _ val: String) -> some View {

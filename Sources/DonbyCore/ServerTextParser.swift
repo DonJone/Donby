@@ -3,21 +3,32 @@ import Foundation
 public enum ServerTextParser {
     public static func parseURLScheme(_ url: URL) -> ParsedServerImportResult? {
         guard let scheme = url.scheme?.lowercased(),
-              scheme == "donby" else {
+              ["donby", "senplayer", "yamby", "infuse", "emby", "jellyfin", "fileball", "http", "https"].contains(scheme) else {
             return nil
         }
-        let hostOrPath = (url.host ?? url.path.replacingOccurrences(of: "/", with: "")).lowercased()
-        guard hostOrPath == "importserver" else { return nil }
 
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let queryItems = components.queryItems else {
+            if scheme == "http" || scheme == "https" {
+                var direct = ParsedServerImportResult()
+                applyAddress(url.absoluteString, to: &direct)
+                return direct.isValid ? direct : nil
+            }
             return nil
         }
 
         var params: [String: String] = [:]
-        for item in queryItems { params[item.name] = item.value ?? "" }
+        for item in queryItems { params[item.name.lowercased()] = item.value ?? "" }
 
-        guard let rawAddress = params["address"], !rawAddress.isEmpty else { return nil }
+        let rawAddress = params["address"] ?? params["host"] ?? params["url"] ?? params["server"] ?? {
+            if scheme == "http" || scheme == "https", let h = components.host, !h.isEmpty {
+                let p = components.port != nil ? ":\(components.port!)" : ""
+                return "\(scheme)://\(h)\(p)"
+            }
+            return ""
+        }()
+
+        guard !rawAddress.isEmpty else { return nil }
 
         var result = ParsedServerImportResult()
         if let typeStr = params["type"]?.lowercased(), typeStr == "jellyfin" {
@@ -28,8 +39,10 @@ public enum ServerTextParser {
 
         result.name = params["name"] ?? ""
         result.note = params["note"] ?? ""
-        result.username = params["username"] ?? ""
-        result.password = params["password"] ?? ""
+        result.username = params["username"] ?? params["user"] ?? params["account"] ?? ""
+        result.password = params["password"] ?? params["pw"] ?? params["pass"] ?? ""
+        result.accessToken = params["api_key"] ?? params["token"] ?? params["apikey"] ?? params["key"] ?? params["x-emby-token"] ?? ""
+        result.userId = params["userid"] ?? params["user_id"] ?? params["userId"] ?? ""
         result.iconURL = params["icon"] ?? ""
 
         applyAddress(rawAddress, to: &result)
@@ -60,6 +73,37 @@ public enum ServerTextParser {
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
+        if trimmed.hasPrefix("{") && trimmed.hasSuffix("}"),
+           let jsonData = trimmed.data(using: .utf8),
+           let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+            var result = ParsedServerImportResult()
+            result.name = (dict["name"] as? String) ?? (dict["title"] as? String) ?? ""
+            result.note = (dict["note"] as? String) ?? ""
+            result.username = (dict["username"] as? String) ?? (dict["user"] as? String) ?? (dict["account"] as? String) ?? ""
+            result.password = (dict["password"] as? String) ?? (dict["pw"] as? String) ?? (dict["pass"] as? String) ?? ""
+            result.accessToken = (dict["accessToken"] as? String) ?? (dict["api_key"] as? String) ?? (dict["token"] as? String) ?? (dict["apiKey"] as? String) ?? ""
+            result.userId = (dict["userId"] as? String) ?? (dict["user_id"] as? String) ?? ""
+            if let typeStr = (dict["type"] as? String)?.lowercased(), typeStr.contains("jellyfin") {
+                result.type = .jellyfin
+            }
+            let rawAddr = (dict["address"] as? String) ?? (dict["host"] as? String) ?? (dict["url"] as? String) ?? (dict["server"] as? String) ?? ""
+            if !rawAddr.isEmpty {
+                applyAddress(rawAddr, to: &result)
+            }
+            if let portVal = dict["port"] as? Int, portVal > 0 {
+                result.port = portVal
+            }
+            if let linesArr = dict["backupLines"] as? [[String: Any]] {
+                for item in linesArr {
+                    if let lUrl = item["url"] as? String, !lUrl.isEmpty {
+                        let lName = (item["name"] as? String) ?? ""
+                        result.backupLines.append(ServerLineInfo(name: lName, url: lUrl, isAutoSynced: false))
+                    }
+                }
+            }
+            if result.isValid { return result }
+        }
+
         if let url = URL(string: trimmed), let schemeResult = parseURLScheme(url) {
             return schemeResult
         }
@@ -77,6 +121,12 @@ public enum ServerTextParser {
             }
             if let val = matchKeyValue(in: line, keys: ["用户名称", "用户名", "账号", "帐号", "用户", "Username", "Account"]) {
                 if result.username.isEmpty { result.username = val }
+            }
+            if let val = matchKeyValue(in: line, keys: ["API Key", "APIKey", "ApiKey", "Token", "token", "令牌", "访问令牌", "密钥", "Key"]) {
+                if result.accessToken.isEmpty { result.accessToken = val }
+            }
+            if let val = matchKeyValue(in: line, keys: ["用户ID", "User ID", "UserId", "userid"]) {
+                if result.userId.isEmpty { result.userId = val }
             }
             if !line.contains("安全密码"), let val = matchKeyValue(in: line, keys: ["用户密码", "密码", "密钥", "Password", "Pass"]) {
                 if result.password.isEmpty { result.password = val }
@@ -122,7 +172,24 @@ public enum ServerTextParser {
     public static func applyAddress(_ rawAddress: String, to result: inout ParsedServerImportResult) {
         var addr = rawAddress.trimmingCharacters(in: .whitespacesAndNewlines)
         if !addr.contains("://") {
-            addr = (addr.hasSuffix(":443") || result.isHttps) ? "https://\(addr)" : "http://\(addr)"
+            if addr.hasPrefix("http:") { addr = addr.replacingOccurrences(of: "http:", with: "http://") }
+            else if addr.hasPrefix("https:") { addr = addr.replacingOccurrences(of: "https:", with: "https://") }
+            else {
+                addr = (addr.hasSuffix(":443") || result.isHttps) ? "https://\(addr)" : "http://\(addr)"
+            }
+        }
+
+        if let queryComps = URLComponents(string: addr), let qItems = queryComps.queryItems {
+            for item in qItems {
+                let k = item.name.lowercased()
+                let v = item.value ?? ""
+                guard !v.isEmpty else { continue }
+                if ["api_key", "token", "apikey", "key", "x-emby-token"].contains(k) && result.accessToken.isEmpty {
+                    result.accessToken = v
+                } else if ["userid", "user_id"].contains(k) && result.userId.isEmpty {
+                    result.userId = v
+                }
+            }
         }
         guard let comps = URLComponents(string: addr), let host = comps.host, !host.isEmpty else {
             result.host = rawAddress
@@ -132,7 +199,11 @@ public enum ServerTextParser {
         result.isHttps = (scheme == "https")
         result.host = host
         result.port = comps.port ?? (result.isHttps ? 443 : 80)
-        let cleanPath = comps.path.replacingOccurrences(of: "/emby", with: "")
+        var cleanPath = comps.path.replacingOccurrences(of: "/emby", with: "")
+        if cleanPath.hasPrefix("/play") || cleanPath.hasPrefix("/video") || cleanPath.hasPrefix("/Items") ||
+           cleanPath.hasPrefix("/web") || cleanPath.hasPrefix("/index") {
+            cleanPath = ""
+        }
         result.path = (cleanPath == "/") ? "" : cleanPath
     }
 
@@ -161,11 +232,13 @@ public struct ParsedServerImportResult: Sendable {
     public var path: String = ""
     public var username: String = ""
     public var password: String = ""
+    public var accessToken: String = ""
+    public var userId: String = ""
     public var iconURL: String = ""
     public var backupLines: [ServerLineInfo] = []
 
-    public init(name: String = "", note: String = "", type: ServerType = .emby, host: String = "", port: Int = 443, isHttps: Bool = true, path: String = "", username: String = "", password: String = "", iconURL: String = "", backupLines: [ServerLineInfo] = []) {
-        self.name = name; self.note = note; self.type = type; self.host = host; self.port = port; self.isHttps = isHttps; self.path = path; self.username = username; self.password = password; self.iconURL = iconURL; self.backupLines = backupLines
+    public init(name: String = "", note: String = "", type: ServerType = .emby, host: String = "", port: Int = 443, isHttps: Bool = true, path: String = "", username: String = "", password: String = "", accessToken: String = "", userId: String = "", iconURL: String = "", backupLines: [ServerLineInfo] = []) {
+        self.name = name; self.note = note; self.type = type; self.host = host; self.port = port; self.isHttps = isHttps; self.path = path; self.username = username; self.password = password; self.accessToken = accessToken; self.userId = userId; self.iconURL = iconURL; self.backupLines = backupLines
     }
 
     public var isValid: Bool { !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }

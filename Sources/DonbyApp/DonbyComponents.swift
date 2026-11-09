@@ -1675,8 +1675,8 @@ private struct DonbyLiquidGlassCapsuleModifier: ViewModifier {
                                 .fill(
                                     LinearGradient(
                                         colors: [
-                                           Color.white.opacity(isHovered ? 0.66 : 0.52),
-                                           Color.white.opacity(isHovered ? 0.52 : 0.38)
+                                           Color.white.opacity(isHovered ? 0.40 : 0.28),
+                                           Color.white.opacity(isHovered ? 0.28 : 0.16)
                                         ],
                                         startPoint: .top,
                                         endPoint: .bottom
@@ -1687,7 +1687,7 @@ private struct DonbyLiquidGlassCapsuleModifier: ViewModifier {
                                .fill(
                                    LinearGradient(
                                        stops: [
-                                           .init(color: Color.white.opacity(isHovered ? 0.52 : 0.36), location: 0.0),
+                                           .init(color: Color.white.opacity(isHovered ? 0.32 : 0.20), location: 0.0),
                                            .init(color: Color.white.opacity(0.0), location: 0.52)
                                        ],
                                        startPoint: .top,
@@ -1717,7 +1717,7 @@ private struct DonbyLiquidGlassCapsuleModifier: ViewModifier {
                     .strokeBorder(
                         LinearGradient(
                             stops: [
-                               .init(color: tint != nil ? Color.white.opacity(0.40) : (isLight ? Color.white.opacity(isHovered ? 0.95 : 0.82) : Color.white.opacity(isHovered ? 0.28 : 0.16)), location: 0.0),
+                               .init(color: tint != nil ? Color.white.opacity(0.40) : (isLight ? Color.white.opacity(isHovered ? 0.75 : 0.55) : Color.white.opacity(isHovered ? 0.28 : 0.16)), location: 0.0),
                                .init(color: tint != nil ? Color.white.opacity(0.12) : (isLight ? Color.black.opacity(0.06) : Color.white.opacity(0.04)), location: 1.0)
                             ],
                             startPoint: .top,
@@ -1772,8 +1772,8 @@ private struct DonbyLiquidGlassRectModifier: ViewModifier {
                                 .fill(
                                     LinearGradient(
                                         colors: [
-                                           Color.white.opacity(isHovered ? 0.66 : 0.52),
-                                           Color.white.opacity(isHovered ? 0.52 : 0.38)
+                                           Color.white.opacity(isHovered ? 0.40 : 0.28),
+                                           Color.white.opacity(isHovered ? 0.28 : 0.16)
                                         ],
                                         startPoint: .top,
                                         endPoint: .bottom
@@ -1784,7 +1784,7 @@ private struct DonbyLiquidGlassRectModifier: ViewModifier {
                                .fill(
                                    LinearGradient(
                                        stops: [
-                                           .init(color: Color.white.opacity(isHovered ? 0.52 : 0.36), location: 0.0),
+                                           .init(color: Color.white.opacity(isHovered ? 0.32 : 0.20), location: 0.0),
                                            .init(color: Color.white.opacity(0.0), location: 0.52)
                                        ],
                                        startPoint: .top,
@@ -1812,7 +1812,7 @@ private struct DonbyLiquidGlassRectModifier: ViewModifier {
                 shape.strokeBorder(
                     LinearGradient(
                         stops: [
-                           .init(color: tint != nil ? Color.white.opacity(0.40) : (isLight ? Color.white.opacity(isHovered ? 0.95 : 0.82) : Color.white.opacity(isHovered ? 0.28 : 0.16)), location: 0.0),
+                           .init(color: tint != nil ? Color.white.opacity(0.40) : (isLight ? Color.white.opacity(isHovered ? 0.75 : 0.55) : Color.white.opacity(isHovered ? 0.28 : 0.16)), location: 0.0),
                            .init(color: tint != nil ? Color.white.opacity(0.12) : (isLight ? Color.black.opacity(0.06) : Color.white.opacity(0.04)), location: 1.0)
                         ],
                         startPoint: .top,

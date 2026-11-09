@@ -409,11 +409,11 @@ public struct EmbyMainView: View {
             VStack(spacing: 8) {
                 Text("尚未配置 UHDNow 服务器")
                     .font(.system(size: 20, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
                 Text("当前为预置 UHDNow 空槽，请填写服务器域名与账号信息，登录成功后将自动同步全部 ServerDomains 加速线路。")
                     .font(.system(size: 13))
-                    .foregroundStyle(Color(white: 0.60))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 450)
             }
@@ -443,15 +443,15 @@ public struct EmbyMainView: View {
                     HStack(spacing: 7) {
                         Image(systemName: "doc.on.clipboard")
                             .font(.system(size: 12.5, weight: .semibold))
-                        Text("从剪贴板一键导入")
+                        Text("从剪贴板一键拉取账户")
                             .font(.system(size: 13, weight: .medium))
                     }
-                    .foregroundStyle(Color(white: 0.90))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     .padding(.horizontal, 16)
                     .padding(.vertical, 9)
-                    .background(Color.white.opacity(0.08))
+                    .background(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.08))
                     .clipShape(Capsule())
-                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.8))
+                    .overlay(Capsule().strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8))
                 }
                 .buttonStyle(.plain)
             }

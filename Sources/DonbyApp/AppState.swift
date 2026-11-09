@@ -539,6 +539,8 @@ public final class AppState: ObservableObject {
         draft.path = parsed.path
         if !parsed.username.isEmpty { draft.username = parsed.username }
         if !parsed.password.isEmpty { draft.password = parsed.password }
+        if !parsed.accessToken.isEmpty { draft.accessToken = parsed.accessToken }
+        if !parsed.userId.isEmpty { draft.userId = parsed.userId }
         if !parsed.iconURL.isEmpty { draft.iconURL = parsed.iconURL }
         if !parsed.backupLines.isEmpty {
             let existingManual = draft.backupLines.filter { !$0.isAutoSynced }
@@ -563,19 +565,42 @@ public final class AppState: ObservableObject {
         if server.note == "待配置服务器地址与账号" {
             server.note = ""
         }
-        if server.accessToken.isEmpty || !server.username.isEmpty {
+
+        let hasToken = !server.accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasPassword = !server.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasUsername = !server.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        if hasUsername && hasPassword {
             let auth = try await EmbyClient.shared.authenticate(
                 baseURL: server.activeBaseURL,
                 username: server.username,
                 password: server.password
             )
-            server.accessToken = auth.accessToken ?? ""
-            server.userId = auth.user?.id ?? ""
-            server.serverId = auth.serverId ?? auth.user?.serverId ?? ""
+            server.accessToken = auth.accessToken ?? server.accessToken
+            if let uid = auth.user?.id, !uid.isEmpty { server.userId = uid }
+            if let sId = auth.serverId ?? auth.user?.serverId, !sId.isEmpty { server.serverId = sId }
+        } else if hasToken {
+            let users = await EmbyClient.shared.fetchUsersWithToken(
+                baseURL: server.activeBaseURL,
+                token: server.accessToken
+            )
+            if let matched = users.first(where: { !server.username.isEmpty && $0.name.lowercased() == server.username.lowercased() }) ?? users.first {
+                server.userId = matched.id
+                if server.username.isEmpty { server.username = matched.name }
+                if let sId = matched.serverId, !sId.isEmpty { server.serverId = sId }
+            }
+        } else if hasUsername && !hasPassword {
+            if let auth = try? await EmbyClient.shared.authenticate(baseURL: server.activeBaseURL, username: server.username, password: "") {
+                server.accessToken = auth.accessToken ?? ""
+                if let uid = auth.user?.id { server.userId = uid }
+                if let sId = auth.serverId ?? auth.user?.serverId { server.serverId = sId }
+            }
         }
+
         if let sysInfo = try? await EmbyClient.shared.fetchSystemInfo(server: server) {
             server.serverName = sysInfo.serverName ?? server.name
             server.serverVersion = sysInfo.version ?? ""
+            if let sId = sysInfo.id, !sId.isEmpty && server.serverId.isEmpty { server.serverId = sId }
             if server.name.isEmpty { server.name = sysInfo.serverName ?? server.host }
         }
         if let domains = await EmbyClient.shared.fetchExtServerDomains(
@@ -612,6 +637,14 @@ public final class AppState: ObservableObject {
         }
         isSyncingDomains = true
         defer { isSyncingDomains = false }
+
+        if server.accessToken.isEmpty && !server.username.isEmpty && !server.password.isEmpty {
+            if let auth = try? await EmbyClient.shared.authenticate(baseURL: server.activeBaseURL, username: server.username, password: server.password) {
+                server.accessToken = auth.accessToken ?? ""
+                if let uid = auth.user?.id { server.userId = uid }
+                servers[idx] = server
+            }
+        }
 
         guard !server.accessToken.isEmpty else {
             if showFeedback { showToast("请先登录服务器后再同步线路", icon: "exclamationmark.triangle.fill", isError: true) }

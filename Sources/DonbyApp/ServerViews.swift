@@ -62,9 +62,10 @@ public struct ServerListView: View {
                         }
                     }
                 ) { hovered in
+                    let iconColor = appState.isLightMode ? (hovered ? Color.black : Color(white: 0.32)) : (hovered ? .white : Color(white: 0.88))
                     RefreshVectorIcon(
                         size: 14.5,
-                        color: hovered ? .white : Color(white: 0.88),
+                        color: iconColor,
                         isSpinning: isRefreshingAllServers || appState.isSyncingDomains
                     )
                 }
@@ -74,13 +75,14 @@ public struct ServerListView: View {
                     isActive: showAddServerPopover,
                     action: { showAddServerPopover.toggle() }
                 ) { hovered in
-                    PlusVectorIcon(size: 14, color: hovered ? .white : Color(white: 0.88))
+                    let iconColor = appState.isLightMode ? (hovered ? Color.black : Color(white: 0.32)) : (hovered ? .white : Color(white: 0.88))
+                    PlusVectorIcon(size: 14, color: iconColor)
                 }
                 .popover(isPresented: $showAddServerPopover, arrowEdge: .bottom) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("选择服务器类型")
                             .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                             .padding(.horizontal, 8)
                             .padding(.bottom, 2)
 
@@ -111,6 +113,7 @@ public struct ServerListView: View {
                                     )
                                     Text(sType.displayName)
                                         .font(.system(size: 12.5, weight: .medium))
+                                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                                     Spacer()
                                 }
                                 .padding(.horizontal, 8)
@@ -131,7 +134,7 @@ public struct ServerListView: View {
                                     .font(.system(size: 13))
                                     .foregroundStyle(appState.accentColor)
                                     .frame(width: 20)
-                                Text("从剪贴板智能导入")
+                                Text("从剪贴板智能拉取")
                                     .font(.system(size: 12.5, weight: .semibold))
                                     .foregroundStyle(appState.accentColor)
                                 Spacer()
@@ -144,6 +147,7 @@ public struct ServerListView: View {
                     }
                     .padding(10)
                     .frame(width: 215)
+                    .preferredColorScheme(appState.colorScheme)
                 }
 
                 ToolbarVectorButton(
@@ -157,9 +161,10 @@ public struct ServerListView: View {
                         )
                     }
                 ) { hovered in
+                    let iconColor = appState.isLightMode ? (hovered ? Color.black : Color(white: 0.32)) : (hovered ? .white : Color(white: 0.88))
                     Image(systemName: appState.hideEncryptedServers ? "lock.fill" : "lock.slash")
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(hovered ? .white : Color(white: 0.88))
+                        .foregroundStyle(iconColor)
                 }
 
                 ToolbarVectorButton(
@@ -167,7 +172,8 @@ public struct ServerListView: View {
                     isActive: showDisplayOptionsPopover,
                     action: { showDisplayOptionsPopover.toggle() }
                 ) { hovered in
-                    MoreDotsVectorIcon(size: 15, color: hovered ? .white : Color(white: 0.88))
+                    let iconColor = appState.isLightMode ? (hovered ? Color.black : Color(white: 0.32)) : (hovered ? .white : Color(white: 0.88))
+                    MoreDotsVectorIcon(size: 15, color: iconColor)
                 }
                 .popover(isPresented: $showDisplayOptionsPopover, arrowEdge: .bottom) {
                     VStack(alignment: .leading, spacing: 10) {
@@ -307,7 +313,7 @@ public struct ServerCardView: View {
                             Text("点击填写服务器与账号")
                                 .font(.system(size: 12, weight: .medium))
                         }
-                        .foregroundStyle(Color(red: 0.38, green: 0.72, blue: 0.98))
+                        .foregroundStyle(appState.accentColor)
                         .lineLimit(1)
                         Spacer()
                     } else {
@@ -619,8 +625,16 @@ public struct ServerConfigSheet: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    GroupBox("登录信息") {
-                        VStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "server.rack")
+                                .foregroundStyle(appState.accentColor)
+                            Text("服务器连接")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        }
+
+                        VStack(spacing: 10) {
                             HStack(spacing: 12) {
                                 Picker("类型", selection: $draft.type) {
                                     ForEach(ServerType.allCases) { t in Text(t.displayName).tag(t) }
@@ -633,21 +647,82 @@ public struct ServerConfigSheet: View {
                                 TextField("主机地址", text: $draft.host).textFieldStyle(.roundedBorder)
                                 TextField("端口", value: $draft.port, format: .number).textFieldStyle(.roundedBorder).frame(width: 85)
                             }
+                        }
+                    }
+                    .padding(14)
+                    .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
+                    )
+
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "person.badge.key.fill")
+                                .foregroundStyle(appState.accentColor)
+                            Text("身份认证")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                            Spacer()
+                            Text("支持账号密码或 API Key 令牌")
+                                .font(.system(size: 11))
+                                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                        }
+
+                        VStack(spacing: 10) {
                             HStack(spacing: 12) {
-                                TextField("用户", text: $draft.username).textFieldStyle(.roundedBorder)
-                                SecureField("密码", text: $draft.password).textFieldStyle(.roundedBorder)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("用户名").font(.system(size: 11.5, weight: .medium)).foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                                    TextField("如 admin 或 UHDNow 账户", text: $draft.username).textFieldStyle(.roundedBorder)
+                                }
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("密码").font(.system(size: 11.5, weight: .medium)).foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                                    SecureField("账号密码 (若有)", text: $draft.password).textFieldStyle(.roundedBorder)
+                                }
+                            }
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text("API Key / 令牌 (可选，UHDNow 免密直连)").font(.system(size: 11.5, weight: .medium)).foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                                    Spacer()
+                                    if !draft.accessToken.isEmpty {
+                                        Text("已就绪").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(.green)
+                                    }
+                                }
+                                TextField("如 a080a78a5355e0093ad18804a6953a6a", text: $draft.accessToken).textFieldStyle(.roundedBorder)
                             }
                         }
-                        .padding(8)
                     }
+                    .padding(14)
+                    .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
+                    )
 
-                    GroupBox("备用线路") {
-                        VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "bolt.horizontal.icloud.fill")
+                                .foregroundStyle(appState.accentColor)
+                            Text("多线路与 ServerDomains")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                            Spacer()
+                            if draft.autoSyncedLineCount > 0 {
+                                Text("已同步 \(draft.autoSyncedLineCount) 条云端线路")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(appState.accentColor)
+                            }
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
                             ForEach(draft.backupLines) { line in
                                 HStack(spacing: 10) {
                                     Image(systemName: line.isAutoSynced ? "cloud.fill" : "network").foregroundStyle(line.isAutoSynced ? appState.accentColor : .secondary)
-                                    Text(line.name).font(.system(size: 12.5, weight: .semibold))
-                                    Text(line.url).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
+                                    Text(line.name).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                                    Text(line.url).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode)).lineLimit(1)
                                     Spacer()
                                     Button { draft.backupLines.removeAll { $0.id == line.id } } label: { Image(systemName: "minus.circle.fill").foregroundStyle(.red.opacity(0.8)) }.buttonStyle(.plain)
                                 }
@@ -665,14 +740,30 @@ public struct ServerConfigSheet: View {
                                 .disabled(newLineURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             }
                         }
-                        .padding(8)
                     }
+                    .padding(14)
+                    .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
+                    )
                 }
             }
-            .frame(maxHeight: 360)
+            .frame(maxHeight: 380)
 
             HStack {
-                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("取消") { dismiss() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 7)
+                    .background(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08))
+                    .clipShape(Capsule())
+                    .overlay(Capsule().strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8))
+                    .keyboardShortcut(.cancelAction)
+
                 Spacer()
                 Button("保存") {
                     if draft.name.isEmpty { draft.name = draft.host }
@@ -687,7 +778,7 @@ public struct ServerConfigSheet: View {
                 } label: {
                     HStack(spacing: 6) {
                         if isConnecting { ProgressView().controlSize(.small) }
-                        Text("连接并同步线路").font(.system(size: 13, weight: .bold))
+                        Text("连接并拉取云端账户").font(.system(size: 13, weight: .bold))
                     }
                     .foregroundStyle(.white).padding(.horizontal, 18).padding(.vertical, 8).background(appState.accentColor).clipShape(Capsule())
                 }
@@ -704,6 +795,7 @@ public struct ServerConfigSheet: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
         )
+        .preferredColorScheme(appState.colorScheme)
     }
 
     private func pasteFromClipboard() {
@@ -723,6 +815,8 @@ public struct ServerConfigSheet: View {
         draft.path = parsed.path
         if !parsed.username.isEmpty { draft.username = parsed.username }
         if !parsed.password.isEmpty { draft.password = parsed.password }
+        if !parsed.accessToken.isEmpty { draft.accessToken = parsed.accessToken }
+        if !parsed.userId.isEmpty { draft.userId = parsed.userId }
         if !parsed.backupLines.isEmpty {
             let existingManual = draft.backupLines.filter { !$0.isAutoSynced }
             draft.backupLines = existingManual + parsed.backupLines

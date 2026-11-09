@@ -15,6 +15,8 @@ public struct MainWindowView: View {
             if let playback = appState.activePlayback {
                 PlayerView(session: playback)
                     .transition(.opacity)
+                    .environment(\.colorScheme, .dark)
+                    .preferredColorScheme(.dark)
             } else {
                 HStack(spacing: 0) {
                     if !appState.isSidebarCollapsed {
@@ -73,14 +75,17 @@ public struct MainWindowView: View {
         .sheet(isPresented: $appState.showAddServerSheet) {
             ServerConfigSheet(existingServer: appState.editingServer)
                 .environmentObject(appState)
+                .preferredColorScheme(appState.colorScheme)
         }
         .sheet(item: $appState.linePickerServer) { server in
             ServerLinePickSheet(serverId: server.id)
                 .environmentObject(appState)
+                .preferredColorScheme(appState.colorScheme)
         }
         .sheet(isPresented: $appState.showLogViewer) {
             LogViewerSheet()
                 .environmentObject(appState)
+                .preferredColorScheme(appState.colorScheme)
         }
     }
 
