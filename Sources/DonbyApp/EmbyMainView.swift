@@ -6,6 +6,8 @@ import DonbyKernelC
 public struct EmbyMainView: View {
     @EnvironmentObject private var appState: AppState
     @State private var inlineSearchText: String = ""
+    @State private var remoteInlineSearchResults: [EmbyItem] = []
+    @State private var isSearchingInline: Bool = false
     @State private var showViewOptionsPopover: Bool = false
     @State private var isLinePillHovered: Bool = false
 
@@ -148,6 +150,26 @@ public struct EmbyMainView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+                .task(id: inlineSearchText) {
+                    let q = inlineSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !q.isEmpty,
+                          let server = appState.activeServer,
+                          !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        remoteInlineSearchResults = []
+                        isSearchingInline = false
+                        return
+                    }
+                    isSearchingInline = true
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    guard !Task.isCancelled else { return }
+                    if let resp = try? await EmbyClient.shared.fetchItems(server: server, searchTerm: q, limit: 60),
+                       !Task.isCancelled {
+                        remoteInlineSearchResults = resp.items
+                    }
+                    if !Task.isCancelled {
+                        isSearchingInline = false
+                    }
+                }
             }
         }
     }
@@ -310,30 +332,56 @@ public struct EmbyMainView: View {
         )
     }
 
-    private var inlineSearchResultsSection: some View {
+    private var inlineSearchResults: [EmbyItem] {
         let q = inlineSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let allItems = appState.latestByLibrary.values.flatMap { $0 }
-        var seen = Set<String>()
-        let uniqueMatches = allItems.filter { item in
-            guard !seen.contains(item.id) else { return false }
-            let hit = item.name.lowercased().contains(q) || (item.originalTitle?.lowercased().contains(q) ?? false)
-            if hit { seen.insert(item.id) }
-            return hit
+        guard !q.isEmpty else { return [] }
+        let localMatches = appState.allLoadedMediaItems.filter { item in
+            item.name.lowercased().contains(q) ||
+            (item.originalTitle?.lowercased().contains(q) ?? false) ||
+            (item.overview?.lowercased().contains(q) ?? false)
         }
+        var seen = Set<String>()
+        var list: [EmbyItem] = []
+        for item in (remoteInlineSearchResults + localMatches) where !seen.contains(item.id) {
+            seen.insert(item.id)
+            list.append(item)
+        }
+        return list
+    }
 
+    private var inlineSearchResultsSection: some View {
+        let results = inlineSearchResults
         return VStack(alignment: .leading, spacing: 14) {
-            SectionHeaderView(title: "搜索结果", subtitle: "一共搜索到 \(uniqueMatches.count) 个")
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 156, maximum: 180), spacing: 16)], alignment: .leading, spacing: 20) {
-                ForEach(uniqueMatches) { item in
-                    PosterCardView(
-                        item: item,
-                        width: 152,
-                        onSelect: { appState.openDetail(for: item) },
-                        onPlay: { Task { await appState.startPlayback(item: item) } }
-                    )
+            HStack(spacing: 8) {
+                SectionHeaderView(title: "搜索结果", subtitle: "共找到 \(results.count) 个")
+                if isSearchingInline {
+                    ProgressView().controlSize(.small)
                 }
             }
-            .padding(.vertical, 4)
+
+            if results.isEmpty && !isSearchingInline {
+                VStack(spacing: 12) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 32, weight: .light))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    Text("未在服务端找到包含 “\(inlineSearchText)” 的影视作品")
+                        .font(.system(size: 13.5, weight: .medium))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                }
+                .frame(maxWidth: .infinity, minHeight: 180)
+            } else {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 156, maximum: 180), spacing: 16)], alignment: .leading, spacing: 20) {
+                    ForEach(results) { item in
+                        PosterCardView(
+                            item: item,
+                            width: 152,
+                            onSelect: { appState.openDetail(for: item) },
+                            onPlay: { Task { await appState.startPlayback(item: item) } }
+                        )
+                    }
+                }
+                .padding(.vertical, 4)
+            }
         }
     }
 
@@ -599,14 +647,16 @@ public struct MLibListView: View {
             }
         }
         .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
-        .task(id: "\(library.id)|\(sortField.rawValue)|\(ascending)|\(filterUnwatchedOnly)|\(filterFavoritesOnly)") {
+        .task(id: "\(library.id)|\(sortField.rawValue)|\(ascending)|\(filterUnwatchedOnly)|\(filterFavoritesOnly)|\(searchQuery)") {
+            if !searchQuery.isEmpty {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard !Task.isCancelled else { return }
+            }
             await loadLibraryItems()
         }
     }
     private var filteredItems: [EmbyItem] {
-        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !q.isEmpty else { return items }
-        return items.filter { $0.name.lowercased().contains(q) || ($0.originalTitle?.lowercased().contains(q) ?? false) }
+        items
     }
 
     private func loadLibraryItems() async {
@@ -614,6 +664,7 @@ public struct MLibListView: View {
         isLoading = true
         defer { isLoading = false }
 
+        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             let resp = try await EmbyClient.shared.fetchItems(
                 server: server,
@@ -622,6 +673,7 @@ public struct MLibListView: View {
                 sortOrder: ascending ? "Ascending" : "Descending",
                 filters: filterUnwatchedOnly ? "IsUnplayed" : nil,
                 isFavorite: filterFavoritesOnly ? true : nil,
+                searchTerm: q.isEmpty ? nil : q,
                 limit: 120
             )
             self.items = resp.items

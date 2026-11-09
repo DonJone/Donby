@@ -17,6 +17,7 @@ public struct DetailView: View {
     @State private var similarItems: [EmbyItem] = []
     @State private var isLoadingDetails: Bool = false
     @State private var focusedEpisodeId: String? = nil
+    @State private var selectedEpisodeForInfo: EmbyItem? = nil
 
     public init(item: EmbyItem) {
         self.initialItem = item
@@ -59,6 +60,9 @@ public struct DetailView: View {
             .padding(.bottom, 48)
         }
         .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+        .sheet(item: $selectedEpisodeForInfo) { ep in
+            EpisodeInfoSheet(episode: ep, isLightMode: appState.isLightMode)
+        }
         .onChange(of: selectedSourceId) { _, _ in
             syncStreamsForSelectedSource()
         }
@@ -206,19 +210,13 @@ public struct DetailView: View {
 
                 // Hero Title + Actions + Metadata Row
                 VStack(alignment: .leading, spacing: 14) {
-                    if item.isEpisode, let series = item.seriesName, !series.isEmpty {
-                        Text(series)
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(appState.accentColor)
-                            .lineLimit(1)
-                    }
-
-                    // Big Cinematic Title
-                    Text(item.name)
-                        .font(.system(size: item.isEpisode ? 32 : 38, weight: .heavy, design: .rounded))
-                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                        .shadow(color: appState.isLightMode ? Color.white.opacity(0.85) : Color.black.opacity(0.50), radius: 3, y: 1)
-                        .lineLimit(2)
+                    ClearLogoHeaderView(
+                        server: appState.activeServer,
+                        item: item,
+                        isLightMode: appState.isLightMode,
+                        showTitle: item.isEpisode ? (item.seriesName ?? item.name) : item.name,
+                        subtitle: heroSubtitle
+                    )
 
                     HStack(alignment: .top, spacing: 28) {
                         // Left Column: Action Buttons (Stacked: 6 Circle Buttons above Wide Play Capsule)
@@ -331,8 +329,9 @@ public struct DetailView: View {
                                 title: mainPlayButtonTitle,
                                 systemImage: "play.fill",
                                 tint: nil,
+                                progressFraction: item.progressFraction,
                                 horizontalPadding: 24,
-                                verticalPadding: 10,
+                                verticalPadding: 11,
                                 fontSize: 13.5
                             ) {
                                 Task {
@@ -397,6 +396,19 @@ public struct DetailView: View {
             return "播放第 1 集"
         } else {
             return "播放"
+        }
+    }
+
+    private var heroSubtitle: String {
+        if item.isEpisode {
+            let code = item.episodeCodeString
+            let epName = item.name
+            if let code, !epName.contains(code) {
+                return "\(code) · \(epName)"
+            }
+            return epName
+        } else {
+            return item.taglines?.first ?? item.originalTitle ?? item.displaySubtitle
         }
     }
 
@@ -619,7 +631,7 @@ public struct DetailView: View {
                             }
                         }
                         .padding(.horizontal, 28)
-                        .padding(.vertical, 8)
+                        .padding(.vertical, 14)
                     }
 
                     // Floating < and > glass buttons on the carousel
@@ -684,55 +696,75 @@ public struct DetailView: View {
     }
 
     private func episodeCardItem(_ ep: EmbyItem, isSelected: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .bottomLeading) {
                 MediaArtworkView(server: appState.activeServer, item: ep, kind: .primary, maxWidth: 560)
                     .frame(width: 256, height: 144)
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
                 LinearGradient(
-                    colors: [.clear, Color.black.opacity(0.65)],
+                    colors: [.clear, Color.black.opacity(0.40)],
                     startPoint: .top,
                     endPoint: .bottom
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-                // Progress Bar at bottom of card
-                if ep.progressFraction > 0 {
-                    GeometryReader { barGeo in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(Color.white.opacity(0.35))
-                            Capsule()
-                                .fill(Color.white)
-                                .frame(width: barGeo.size.width * ep.progressFraction)
+                // Badges overlay
+                VStack {
+                    HStack {
+                        if let code = ep.episodeCodeString {
+                            Text(code)
+                                .font(.system(size: 11.5, weight: .bold, design: .rounded))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(Color.black.opacity(0.70))
+                                .clipShape(Capsule())
+                        }
+                        Spacer()
+                        if let duration = ep.runtimeMinutesString {
+                            Text(duration)
+                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(Color.black.opacity(0.70))
+                                .clipShape(Capsule())
                         }
                     }
-                    .frame(height: 3)
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 8)
-                }
+                    .padding(8)
 
-                // Subtle play icon in center
-                ZStack {
-                    Circle()
-                        .fill(.ultraThinMaterial)
-                        .frame(width: 36, height: 36)
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(.white)
-                        .offset(x: 1)
+                    Spacer()
+
+                    // Red progress line at bottom
+                    if ep.progressFraction > 0 {
+                        GeometryReader { barGeo in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(Color.white.opacity(0.35))
+                                Capsule()
+                                    .fill(Color(red: 0.98, green: 0.18, blue: 0.28))
+                                    .frame(width: barGeo.size.width * ep.progressFraction)
+                            }
+                        }
+                        .frame(height: 3)
+                        .padding(.horizontal, 10)
+                        .padding(.bottom, 8)
+                    }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
             .frame(width: 256, height: 144)
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .strokeBorder(
-                        isSelected ? Color.white : Color.white.opacity(0.12),
-                        lineWidth: isSelected ? 2.5 : 0.65
+                        isSelected ? Color.white : (appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.10)),
+                        lineWidth: isSelected ? 2.0 : 0.65
                     )
             )
-            .shadow(color: Color.black.opacity(isSelected ? 0.32 : 0.16), radius: isSelected ? 8 : 4, y: 2)
+            .shadow(
+                color: Color.black.opacity(isSelected ? 0.28 : (appState.isLightMode ? 0.10 : 0.30)),
+                radius: isSelected ? 10 : 6,
+                y: isSelected ? 4 : 3
+            )
             .contentShape(Rectangle())
             .onTapGesture {
                 focusedEpisodeId = ep.id
@@ -746,25 +778,36 @@ public struct DetailView: View {
                 }
             }
 
-            // Episode Title and Overview
-            VStack(alignment: .leading, spacing: 2) {
-                Text("\(ep.episodeCodeString ?? "E01") · \(ep.name)")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    .lineLimit(1)
+            // Bottom title row: Primary title, subtitle, and (i) info button
+            HStack(alignment: .center, spacing: 6) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(ep.seriesName ?? item.name)
+                        .font(.system(size: 13.5, weight: .bold))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        .lineLimit(1)
 
-                if let overview = ep.overview, !overview.isEmpty {
-                    Text(overview)
-                        .font(.system(size: 11))
+                    Text(ep.name)
+                        .font(.system(size: 12, weight: .regular))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                        .lineLimit(2)
-                        .frame(height: 30, alignment: .topLeading)
-                } else {
-                    Spacer().frame(height: 30)
+                        .lineLimit(1)
                 }
+
+                Spacer()
+
+                Button {
+                    selectedEpisodeForInfo = ep
+                } label: {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 15))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
-            .frame(width: 256, alignment: .leading)
+            .frame(width: 256)
         }
+        .frame(width: 256)
     }
 
     private func castSection(people: [EmbyPerson]) -> some View {
@@ -981,5 +1024,78 @@ public struct DetailView: View {
         } else {
             selectedSubtitleIndex = (subtitleStreams.first(where: { $0.isDefault == true }) ?? subtitleStreams.first)?.index
         }
+    }
+}
+
+// MARK: - Episode Info Sheet
+public struct EpisodeInfoSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    public let episode: EmbyItem
+    public let isLightMode: Bool
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    if let series = episode.seriesName {
+                        Text(series)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(AppState.appleMusicRed)
+                    }
+                    Text(episode.name)
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: isLightMode))
+                }
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 18))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))
+                }
+                .buttonStyle(.plain)
+            }
+
+            HStack(spacing: 10) {
+                if let code = episode.episodeCodeString {
+                    Text(code)
+                        .font(.system(size: 11.5, weight: .bold, design: .rounded))
+                        .foregroundStyle(isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(DonbyGlassPalette.cardBackground(isLight: isLightMode))
+                        .clipShape(Capsule())
+                }
+                if let runtime = episode.runtimeMinutesString {
+                    Text(runtime)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))
+                }
+                if let date = episode.premiereDateString {
+                    Text(date)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))
+                }
+            }
+
+            if let overview = episode.overview, !overview.isEmpty {
+                ScrollView {
+                    Text(overview)
+                        .font(.system(size: 13, weight: .regular))
+                        .lineSpacing(4)
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: isLightMode))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 180)
+            } else {
+                Text("暂无分集简介")
+                    .font(.system(size: 13))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))
+            }
+        }
+        .padding(22)
+        .frame(width: 440)
+        .background(DonbyGlassPalette.canvas(isLight: isLightMode))
     }
 }

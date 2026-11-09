@@ -1597,6 +1597,10 @@ public struct LibraryCardView: View {
 
     @State private var isHovered: Bool = false
 
+    private var hidesTextOverlay: Bool {
+        appState.activeServer?.usesUHDLogo == true
+    }
+
     public var body: some View {
         Button(action: action) {
             ZStack(alignment: .bottomLeading) {
@@ -1604,12 +1608,14 @@ public struct LibraryCardView: View {
                     .frame(width: 205, height: 112)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
-                LinearGradient(
-                    colors: [.black.opacity(0.10), .black.opacity(0.78)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                if !hidesTextOverlay {
+                    LinearGradient(
+                        colors: [.black.opacity(0.10), .black.opacity(0.78)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
 
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
@@ -1627,10 +1633,12 @@ public struct LibraryCardView: View {
 
                     Spacer()
 
-                    Text(library.name)
-                        .font(.system(size: 14.5, weight: .bold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
+                    if !hidesTextOverlay {
+                        Text(library.name)
+                            .font(.system(size: 14.5, weight: .bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                    }
                 }
                 .padding(11)
             }
@@ -1638,15 +1646,17 @@ public struct LibraryCardView: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(
-                        isHovered ? appState.accentColor.opacity(0.85) : Color.white.opacity(0.06),
-                        lineWidth: isHovered ? 1.5 : 0.65
+                        isHovered ? Color.white.opacity(0.40) : (appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08)),
+                        lineWidth: isHovered ? 1.2 : 0.65
                     )
             )
             .shadow(
-                color: isHovered ? Color.black.opacity(0.30) : Color.clear,
-                radius: isHovered ? 6 : 0,
-                y: isHovered ? 3 : 0
+                color: Color.black.opacity(isHovered ? 0.22 : (appState.isLightMode ? 0.04 : 0.12)),
+                radius: isHovered ? 8 : 4,
+                y: isHovered ? 4 : 2
             )
+            .scaleEffect(isHovered ? 1.02 : 1.0)
+            .animation(.easeOut(duration: 0.16), value: isHovered)
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
@@ -1744,6 +1754,7 @@ public struct LatencyBadgeView: View {
 
 // MARK: - Native Toast Banner
 public struct ToastBannerView: View {
+    @Environment(\.colorScheme) private var colorScheme
     public let toast: ToastMessage
 
     private static let classicRed = Color(
@@ -1760,13 +1771,17 @@ public struct ToastBannerView: View {
 
             Text(toast.text)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(colorScheme == .light ? Color(red: 0.10, green: 0.10, blue: 0.12) : .white)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
         .background(DonbyLiquidGlassCapsuleSurface(tint: nil, isHovered: false))
         .clipShape(Capsule())
-        .shadow(color: .black.opacity(0.42), radius: 14, y: 6)
+        .shadow(
+            color: colorScheme == .light ? Color.black.opacity(0.12) : Color.black.opacity(0.42),
+            radius: colorScheme == .light ? 10 : 14,
+            y: colorScheme == .light ? 4 : 6
+        )
     }
 }
 
@@ -2015,6 +2030,7 @@ public struct LiquidGlassCapsuleButton: View {
     public let title: String
     public let systemImage: String
     public var tint: Color? = nil
+    public var progressFraction: Double = 0
     public var horizontalPadding: CGFloat = 22
     public var verticalPadding: CGFloat = 10.5
     public var fontSize: CGFloat = 14
@@ -2026,6 +2042,7 @@ public struct LiquidGlassCapsuleButton: View {
         title: String,
         systemImage: String,
         tint: Color? = nil,
+        progressFraction: Double = 0,
         horizontalPadding: CGFloat = 22,
         verticalPadding: CGFloat = 10.5,
         fontSize: CGFloat = 14,
@@ -2034,6 +2051,7 @@ public struct LiquidGlassCapsuleButton: View {
         self.title = title
         self.systemImage = systemImage
         self.tint = tint
+        self.progressFraction = progressFraction
         self.horizontalPadding = horizontalPadding
         self.verticalPadding = verticalPadding
         self.fontSize = fontSize
@@ -2044,21 +2062,46 @@ public struct LiquidGlassCapsuleButton: View {
         if tint != nil {
             return .white
         }
-        return colorScheme == .light ? Color(red: 0.10, green: 0.10, blue: 0.12) : .white
+        return Color(red: 0.10, green: 0.10, blue: 0.12)
     }
 
     public var body: some View {
         Button(action: action) {
-            HStack(spacing: 7) {
-                Image(systemName: systemImage)
-                    .font(.system(size: fontSize - 1, weight: .bold))
-                Text(title)
-                    .font(.system(size: fontSize, weight: tint != nil ? .bold : .semibold))
+            ZStack {
+                if let tint {
+                    Capsule(style: .continuous).fill(tint)
+                } else {
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule(style: .continuous)
+                                .fill(Color.white.opacity(isHovered ? 1.0 : 0.95))
+
+                            if progressFraction > 0 {
+                                Capsule(style: .continuous)
+                                    .fill(Color.black.opacity(0.08))
+                                    .frame(width: geo.size.width * min(1.0, max(0.0, progressFraction)))
+                            }
+                        }
+                    }
+                    .clipShape(Capsule(style: .continuous))
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .strokeBorder(Color.black.opacity(0.06), lineWidth: 0.65)
+                    )
+                    .shadow(color: Color.black.opacity(isHovered ? 0.22 : 0.13), radius: isHovered ? 8 : 5, y: 3)
+                }
+
+                HStack(spacing: 8) {
+                    Image(systemName: systemImage)
+                        .font(.system(size: fontSize - 0.5, weight: .bold))
+                    Text(title)
+                        .font(.system(size: fontSize, weight: .bold))
+                }
+                .foregroundStyle(textColor)
+                .padding(.horizontal, horizontalPadding)
+                .padding(.vertical, verticalPadding)
             }
-            .foregroundStyle(textColor)
-            .padding(.horizontal, horizontalPadding)
-            .padding(.vertical, verticalPadding)
-            .donbyLiquidGlassCapsule(tint: tint, interactive: true, isHovered: isHovered)
+            .fixedSize()
             .contentShape(Capsule(style: .continuous))
             .scaleEffect(isHovered ? 1.02 : 1.0)
             .animation(.easeOut(duration: 0.16), value: isHovered)
@@ -2094,20 +2137,26 @@ public struct LiquidGlassCircleButton: View {
 
     private var effectiveIconColor: Color {
         if let iconColor { return iconColor }
-        return colorScheme == .light ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white
+        return Color(red: 0.12, green: 0.12, blue: 0.14)
     }
 
     public var body: some View {
         Button(action: action) {
             ZStack {
+                Circle()
+                    .fill(Color.white.opacity(isHovered ? 1.0 : 0.95))
+                    .shadow(color: Color.black.opacity(isHovered ? 0.20 : 0.11), radius: isHovered ? 6 : 4, y: 2)
+
+                Circle()
+                    .strokeBorder(Color.black.opacity(0.06), lineWidth: 0.65)
+
                 Image(systemName: systemImage)
                     .font(.system(size: size * 0.38, weight: .semibold))
                     .foregroundStyle(effectiveIconColor)
             }
             .frame(width: size, height: size)
-            .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: isHovered)
             .contentShape(Circle())
-            .scaleEffect(isHovered ? 1.04 : 1.0)
+            .scaleEffect(isHovered ? 1.05 : 1.0)
             .animation(.easeOut(duration: 0.15), value: isHovered)
         }
         .buttonStyle(.plain)
@@ -2145,21 +2194,26 @@ public struct LiquidGlassCircleMenu<MenuItems: View>: View {
 
     private var effectiveIconColor: Color {
         if let iconColor { return iconColor }
-        return colorScheme == .light ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white
+        return Color(red: 0.12, green: 0.12, blue: 0.14)
     }
 
     public var body: some View {
         ZStack {
-            // Visual presentation identical to LiquidGlassCircleButton
             ZStack {
+                Circle()
+                    .fill(Color.white.opacity(isHovered ? 1.0 : 0.95))
+                    .shadow(color: Color.black.opacity(isHovered ? 0.20 : 0.11), radius: isHovered ? 6 : 4, y: 2)
+
+                Circle()
+                    .strokeBorder(Color.black.opacity(0.06), lineWidth: 0.65)
+
                 Image(systemName: systemImage)
                     .font(.system(size: size * 0.38, weight: .semibold))
                     .foregroundStyle(effectiveIconColor)
             }
             .frame(width: size, height: size)
-            .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: isHovered)
             .contentShape(Circle())
-            .scaleEffect(isHovered ? 1.04 : 1.0)
+            .scaleEffect(isHovered ? 1.05 : 1.0)
             .animation(.easeOut(duration: 0.15), value: isHovered)
 
             // Transparent Menu trigger on top to open menu with zero layout offset
@@ -2553,6 +2607,119 @@ public struct RecordArtworkThumbnailView: View {
             return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
         } catch {
             return nil
+        }
+    }
+}
+
+// MARK: - ClearLogo with Fallback Typography Header
+public struct ClearLogoHeaderView: View {
+    public let server: EmbyServerConfig?
+    public let item: EmbyItem
+    public let isLightMode: Bool
+    public let showTitle: String
+    public let subtitle: String
+
+    @State private var logoImage: NSImage? = nil
+
+    public init(
+        server: EmbyServerConfig?,
+        item: EmbyItem,
+        isLightMode: Bool,
+        showTitle: String,
+        subtitle: String
+    ) {
+        self.server = server
+        self.item = item
+        self.isLightMode = isLightMode
+        self.showTitle = showTitle
+        self.subtitle = subtitle
+    }
+
+    private var candidateLogoURLs: [URL] {
+        guard let server, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+        var urls: [URL] = []
+        if item.isEpisode {
+            if let sId = item.seriesId,
+               let sLogo = EmbyClient.shared.imageURL(server: server, itemId: sId, kind: .logo, maxWidth: 800) {
+                urls.append(sLogo)
+            }
+            if let direct = EmbyClient.shared.imageURL(server: server, item: item, kind: .logo, maxWidth: 800), !urls.contains(direct) {
+                urls.append(direct)
+            }
+            if let directId = EmbyClient.shared.imageURL(server: server, itemId: item.id, kind: .logo, maxWidth: 800), !urls.contains(directId) {
+                urls.append(directId)
+            }
+        } else {
+            if let direct = EmbyClient.shared.imageURL(server: server, item: item, kind: .logo, maxWidth: 800) {
+                urls.append(direct)
+            }
+            if let directId = EmbyClient.shared.imageURL(server: server, itemId: item.id, kind: .logo, maxWidth: 800), !urls.contains(directId) {
+                urls.append(directId)
+            }
+            if let sId = item.seriesId,
+               let sLogo = EmbyClient.shared.imageURL(server: server, itemId: sId, kind: .logo, maxWidth: 800), !urls.contains(sLogo) {
+                urls.append(sLogo)
+            }
+        }
+        return urls
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let img = logoImage {
+                Image(nsImage: img)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 380, maxHeight: 78, alignment: .leading)
+                    .shadow(color: Color.black.opacity(isLightMode ? 0.14 : 0.45), radius: 4, y: 2)
+            } else {
+                Text(showTitle)
+                    .font(.system(size: item.isEpisode ? 32 : 38, weight: .heavy, design: .rounded))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: isLightMode))
+                    .shadow(color: isLightMode ? Color.white.opacity(0.85) : Color.black.opacity(0.50), radius: 3, y: 1)
+                    .lineLimit(2)
+            }
+
+            if !subtitle.isEmpty && subtitle != showTitle {
+                Text(subtitle)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))
+                    .lineLimit(1)
+            }
+        }
+        .task(id: "\(server?.activeBaseURL ?? "")|\(item.id)|\(item.seriesId ?? "")") {
+            let primaryTargetId = item.isEpisode ? (item.seriesId ?? item.id) : item.id
+            let cacheKey = "logo_\(primaryTargetId)"
+            if let cached = ArtworkImageCache.shared.imageFromMemory(for: cacheKey) {
+                self.logoImage = cached
+                return
+            }
+            if let disk = await ArtworkImageCache.shared.imageFromDiskAsync(for: cacheKey, maxPixelSize: 800) {
+                await MainActor.run {
+                    self.logoImage = disk
+                }
+                return
+            }
+
+            guard let server else { return }
+            for url in candidateLogoURLs {
+                if Task.isCancelled { return }
+                do {
+                    let req = EmbyClient.shared.makeImageRequest(url: url, server: server)
+                    let (data, resp) = try await ArtworkDownloadManager.shared.download(for: req)
+                    if Task.isCancelled { return }
+                    if let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
+                       data.count > 100,
+                       let decoded = ArtworkImageCache.shared.storeRawData(data, for: cacheKey, maxPixelSize: 800) {
+                        await MainActor.run {
+                            self.logoImage = decoded
+                        }
+                        return
+                    }
+                } catch {
+                    continue
+                }
+            }
         }
     }
 }
