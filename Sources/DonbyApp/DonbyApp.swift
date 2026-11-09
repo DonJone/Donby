@@ -13,6 +13,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.applicationIconImage = iconImg
         }
         NSApp.activate(ignoringOtherApps: true)
+
+        DispatchQueue.global(qos: .utility).async {
+            let bundlePath = Bundle.main.bundlePath
+            let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+            if FileManager.default.fileExists(atPath: lsregister) {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: lsregister)
+                process.arguments = ["-f", bundlePath]
+                try? process.run()
+            }
+            if bundlePath == "/Applications/Donby.app" {
+                let fileMgr = FileManager.default
+                for extra in ["/Applications/Donby 2.app", "/Applications/Donby 3.app"] {
+                    if fileMgr.fileExists(atPath: extra) {
+                        try? fileMgr.removeItem(atPath: extra)
+                    }
+                }
+            }
+        }
     }
 
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

@@ -33,13 +33,20 @@ public final class ArtworkImageCache: @unchecked Sendable {
     /// Decodes and downsamples compressed image data in the background using hardware-accelerated ImageIO.
     public func decodeThumbnail(from data: Data, maxPixelSize: Int = 500) -> NSImage? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceShouldCacheImmediately: true, // Decode pixels directly in background thread!
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
-        ]
-        guard let cgImg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+        let options: [CFString: Any]
+        if maxPixelSize >= 2400 {
+            options = [
+                kCGImageSourceShouldCacheImmediately: true
+            ]
+        } else {
+            options = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+            ]
+        }
+        guard let cgImg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) ?? CGImageSourceCreateImageAtIndex(source, 0, options as CFDictionary) else {
             return NSImage(data: data)
         }
         return NSImage(cgImage: cgImg, size: NSSize(width: cgImg.width, height: cgImg.height))
@@ -1013,6 +1020,33 @@ public struct MediaArtworkView: View {
     private var candidateURLs: [URL] {
         guard let server, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
         var urls: [URL] = []
+        if kind == .backdrop {
+            // For backdrops, prioritize series fanart for episodes before low-res thumbnails
+            if item.isEpisode {
+                if let sId = item.seriesId,
+                   let sBackdrop = EmbyClient.shared.imageURL(server: server, itemId: sId, kind: .backdrop, maxWidth: maxWidth) {
+                    urls.append(sBackdrop)
+                }
+                if let pId = item.parentBackdropItemId,
+                   let pBackdrop = EmbyClient.shared.imageURL(server: server, itemId: pId, kind: .backdrop, maxWidth: maxWidth),
+                   !urls.contains(pBackdrop) {
+                    urls.append(pBackdrop)
+                }
+            }
+            if let primary = EmbyClient.shared.imageURL(server: server, item: item, kind: .backdrop, maxWidth: maxWidth), !urls.contains(primary) {
+                urls.append(primary)
+            }
+            if let direct = EmbyClient.shared.imageURL(server: server, itemId: item.id, kind: .backdrop, maxWidth: maxWidth), !urls.contains(direct) {
+                urls.append(direct)
+            }
+            if item.isEpisode {
+                if let thumb = EmbyClient.shared.imageURL(server: server, itemId: item.id, kind: .thumb, maxWidth: maxWidth), !urls.contains(thumb) {
+                    urls.append(thumb)
+                }
+            }
+            return urls
+        }
+
         // Prioritize tagged primary URL first because it is CDN-cached and fastest on UHDNow/Emby
         if let primary = EmbyClient.shared.imageURL(server: server, item: item, kind: kind, maxWidth: maxWidth) {
             urls.append(primary)
@@ -1065,10 +1099,28 @@ public struct MediaArtworkView: View {
                 return
             }
             let primaryKey = "item_\(item.id)_\(kind.rawValue)"
-            let targetPixelSize = maxWidth > 0 ? min(maxWidth * 2, 700) : 450
+            let targetPixelSize: Int
+            if kind == .backdrop {
+                targetPixelSize = max(maxWidth * 2, 2880) // Full Retina/4K resolution for hero backdrop
+            } else if maxWidth > 0 {
+                targetPixelSize = min(maxWidth * 2, 1200)
+            } else {
+                targetPixelSize = 600
+            }
 
             // 1. Fast background disk check with hardware downsampling
-            for key in [primaryKey, item.id] {
+            let checkKeys: [String]
+            if kind == .backdrop {
+                if item.isEpisode, let sId = item.seriesId {
+                    checkKeys = [primaryKey, "series_\(sId)_backdrop"]
+                } else {
+                    checkKeys = [primaryKey]
+                }
+            } else {
+                checkKeys = [primaryKey, item.id]
+            }
+
+            for key in checkKeys {
                 if Task.isCancelled { return }
                 if let diskImg = await ArtworkImageCache.shared.imageFromDiskAsync(for: key, maxPixelSize: targetPixelSize) {
                     if !Task.isCancelled {
@@ -1090,7 +1142,14 @@ public struct MediaArtworkView: View {
                     if Task.isCancelled { return }
                     if let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
                        data.count > 128 {
-                        let aliases = [self.item.id, "item_\(self.item.id)", url.absoluteString]
+                        var aliases = [url.absoluteString]
+                        if kind == .backdrop {
+                            if item.isEpisode, let sId = item.seriesId {
+                                aliases.append("series_\(sId)_backdrop")
+                            }
+                        } else {
+                            aliases.append(contentsOf: [self.item.id, "item_\(self.item.id)"])
+                        }
                         if let decoded = ArtworkImageCache.shared.storeRawData(
                             data,
                             for: primaryKey,
@@ -1120,7 +1179,12 @@ public struct MediaArtworkView: View {
         // Fast O(1) direct memory lookup (instant, zero candidate URLs allocations)
         let primaryKey = "item_\(item.id)_\(kind.rawValue)"
         if let cached = ArtworkImageCache.shared.imageFromMemory(for: primaryKey) { return cached }
-        if let cached = ArtworkImageCache.shared.imageFromMemory(for: item.id) { return cached }
+        if kind == .backdrop, item.isEpisode, let sId = item.seriesId {
+            if let sCached = ArtworkImageCache.shared.imageFromMemory(for: "series_\(sId)_backdrop") { return sCached }
+        }
+        if kind != .backdrop {
+            if let cached = ArtworkImageCache.shared.imageFromMemory(for: item.id) { return cached }
+        }
         return nil
     }
 }
@@ -1360,15 +1424,18 @@ public struct LandscapeCardView: View {
 
                 ZStack {
                     Circle()
-                        .fill(Color.black.opacity(isHovered ? 0.68 : 0.45))
-                        .overlay(Circle().strokeBorder(Color.white.opacity(isHovered ? 0.40 : 0.22), lineWidth: 0.8))
+                        .fill(.ultraThinMaterial)
+                        .overlay(Circle().strokeBorder(Color.white.opacity(0.35), lineWidth: 0.75))
                         .frame(width: 36, height: 36)
                     Image(systemName: "play.fill")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(.white)
                         .offset(x: 1)
                 }
-                .opacity(isHovered ? 1.0 : 0.78)
+                .shadow(color: Color.black.opacity(0.35), radius: 6, y: 2)
+                .opacity(isHovered ? 1.0 : 0.0)
+                .scaleEffect(isHovered ? 1.0 : 0.88)
+                .animation(.easeOut(duration: 0.18), value: isHovered)
             }
             .frame(width: width, height: height)
             .overlay(
@@ -1385,7 +1452,7 @@ public struct LandscapeCardView: View {
             )
             .onTapGesture { onPlay() }
 
-            HStack(alignment: .top) {
+            HStack(alignment: .center, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.isEpisode ? (item.seriesName ?? item.name) : item.name)
                         .font(.system(size: 12.5, weight: .medium))
@@ -1397,13 +1464,16 @@ public struct LandscapeCardView: View {
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                         .lineLimit(1)
                 }
-                Spacer()
+                Spacer(minLength: 4)
                 Button(action: onDetail) {
                     Image(systemName: "info.circle")
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(Color(white: 0.55))
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                        .frame(width: 22, height: 22)
+                        .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
+                .help("查看作品详情")
             }
             .frame(width: width)
         }
@@ -1716,96 +1786,36 @@ private struct DonbyLiquidGlassCapsuleModifier: ViewModifier {
         content
             .background(
                 ZStack {
-                    // 1. Native Compositor Optical Translucency
-                    Capsule(style: .continuous)
-                        .fill(.ultraThinMaterial)
-
-                    // 2. Optical Smoked Body or Pure Vibrant Gem
                     if let tint {
                         Capsule(style: .continuous)
-                            .fill(
-                                LinearGradient(
-                                    colors: [
-                                        tint.opacity(0.96),
-                                        tint.opacity(0.85)
-                                    ],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            )
-                        // Smooth internal luminescence (no split meniscus cut)
+                            .fill(tint)
+                    } else if isLight {
                         Capsule(style: .continuous)
-                            .fill(
-                                LinearGradient(
-                                    colors: [
-                                        Color.white.opacity(isHovered ? 0.24 : 0.14),
-                                        Color.clear
-                                    ],
-                                    startPoint: .top,
-                                    endPoint: .center
-                                )
-                            )
+                            .fill(.ultraThinMaterial)
+                        Capsule(style: .continuous)
+                            .fill(Color.white.opacity(isHovered ? 0.94 : 0.88))
                     } else {
-                        if isLight {
-                            Capsule(style: .continuous)
-                                .fill(
-                                    LinearGradient(
-                                        colors: [
-                                           Color.white.opacity(isHovered ? 0.40 : 0.28),
-                                           Color.white.opacity(isHovered ? 0.28 : 0.16)
-                                        ],
-                                        startPoint: .top,
-                                        endPoint: .bottom
-                                    )
-                                )
-                           // Specular lens reflection (top-down internal sheen)
-                           Capsule(style: .continuous)
-                               .fill(
-                                   LinearGradient(
-                                       stops: [
-                                           .init(color: Color.white.opacity(isHovered ? 0.32 : 0.20), location: 0.0),
-                                           .init(color: Color.white.opacity(0.0), location: 0.52)
-                                       ],
-                                       startPoint: .top,
-                                       endPoint: .bottom
-                                   )
-                               )
-                        } else {
-                            Capsule(style: .continuous)
-                                .fill(
-                                    LinearGradient(
-                                        colors: [
-                                            Color.white.opacity(isHovered ? 0.14 : 0.08),
-                                            Color.white.opacity(isHovered ? 0.06 : 0.02)
-                                        ],
-                                        startPoint: .top,
-                                        endPoint: .bottom
-                                    )
-                                )
-                        }
+                        Capsule(style: .continuous)
+                            .fill(.ultraThinMaterial)
+                        Capsule(style: .continuous)
+                            .fill(Color.white.opacity(isHovered ? 0.14 : 0.08))
                     }
                 }
-                .clipShape(Capsule())
+                .clipShape(Capsule(style: .continuous))
             )
             .overlay(
-                // 3. Precision Optical Specular Rim (micro-bevel, no fake cyan)
                 Capsule(style: .continuous)
                     .strokeBorder(
-                        LinearGradient(
-                            stops: [
-                               .init(color: tint != nil ? Color.white.opacity(0.40) : (isLight ? Color.white.opacity(isHovered ? 0.75 : 0.55) : Color.white.opacity(isHovered ? 0.28 : 0.16)), location: 0.0),
-                               .init(color: tint != nil ? Color.white.opacity(0.12) : (isLight ? Color.black.opacity(0.06) : Color.white.opacity(0.04)), location: 1.0)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                       lineWidth: 0.55
+                        tint != nil ? Color.white.opacity(0.18) : (isLight ? Color.black.opacity(0.06) : Color.white.opacity(isHovered ? 0.16 : 0.10)),
+                        lineWidth: 0.65
                     )
             )
             .shadow(
-               color: Color.black.opacity(tint != nil ? (isHovered ? 0.26 : 0.18) : (isLight ? (isHovered ? 0.09 : 0.05) : (isHovered ? 0.32 : 0.20))),
-               radius: isHovered ? 7 : (isLight ? 3.5 : 4),
-               y: isLight ? (isHovered ? 3.5 : 2.0) : (tint != nil ? 2.5 : 2)
+                color: tint != nil
+                    ? tint!.opacity(isHovered ? 0.35 : 0.20)
+                    : (isLight ? Color.black.opacity(isHovered ? 0.08 : 0.04) : Color.black.opacity(isHovered ? 0.25 : 0.15)),
+                radius: isHovered ? 5 : 2.5,
+                y: isHovered ? 2 : 1
             )
     }
 }
@@ -1823,84 +1833,30 @@ private struct DonbyLiquidGlassRectModifier: ViewModifier {
         content
             .background(
                 ZStack {
-                    shape.fill(.ultraThinMaterial)
-
                     if let tint {
-                        shape
-                            .fill(
-                                LinearGradient(
-                                    colors: [tint.opacity(0.96), tint.opacity(0.85)],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            )
-                        shape
-                            .fill(
-                                LinearGradient(
-                                    colors: [Color.white.opacity(isHovered ? 0.24 : 0.14), Color.clear],
-                                    startPoint: .top,
-                                    endPoint: .center
-                                )
-                            )
+                        shape.fill(tint)
+                    } else if isLight {
+                        shape.fill(.ultraThinMaterial)
+                        shape.fill(Color.white.opacity(isHovered ? 0.94 : 0.88))
                     } else {
-                        if isLight {
-                            shape
-                                .fill(
-                                    LinearGradient(
-                                        colors: [
-                                           Color.white.opacity(isHovered ? 0.40 : 0.28),
-                                           Color.white.opacity(isHovered ? 0.28 : 0.16)
-                                        ],
-                                        startPoint: .top,
-                                        endPoint: .bottom
-                                    )
-                                )
-                           // Specular lens reflection
-                           shape
-                               .fill(
-                                   LinearGradient(
-                                       stops: [
-                                           .init(color: Color.white.opacity(isHovered ? 0.32 : 0.20), location: 0.0),
-                                           .init(color: Color.white.opacity(0.0), location: 0.52)
-                                       ],
-                                       startPoint: .top,
-                                       endPoint: .bottom
-                                   )
-                               )
-                        } else {
-                           shape
-                               .fill(
-                                   LinearGradient(
-                                       colors: [
-                                           Color.white.opacity(isHovered ? 0.14 : 0.08),
-                                           Color.white.opacity(isHovered ? 0.06 : 0.02)
-                                       ],
-                                       startPoint: .top,
-                                       endPoint: .bottom
-                                   )
-                               )
-                        }
+                        shape.fill(.ultraThinMaterial)
+                        shape.fill(Color.white.opacity(isHovered ? 0.14 : 0.08))
                     }
                 }
                 .clipShape(shape)
             )
             .overlay(
                 shape.strokeBorder(
-                    LinearGradient(
-                        stops: [
-                           .init(color: tint != nil ? Color.white.opacity(0.40) : (isLight ? Color.white.opacity(isHovered ? 0.75 : 0.55) : Color.white.opacity(isHovered ? 0.28 : 0.16)), location: 0.0),
-                           .init(color: tint != nil ? Color.white.opacity(0.12) : (isLight ? Color.black.opacity(0.06) : Color.white.opacity(0.04)), location: 1.0)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    ),
-                   lineWidth: 0.55
+                    tint != nil ? Color.white.opacity(0.18) : (isLight ? Color.black.opacity(0.06) : Color.white.opacity(isHovered ? 0.16 : 0.10)),
+                    lineWidth: 0.65
                 )
             )
             .shadow(
-               color: Color.black.opacity(tint != nil ? (isHovered ? 0.26 : 0.18) : (isLight ? (isHovered ? 0.09 : 0.05) : (isHovered ? 0.32 : 0.20))),
-               radius: isHovered ? 7 : (isLight ? 3.5 : 4),
-               y: isLight ? (isHovered ? 3.5 : 2.0) : (tint != nil ? 2.5 : 2)
+                color: tint != nil
+                    ? tint!.opacity(isHovered ? 0.35 : 0.20)
+                    : (isLight ? Color.black.opacity(isHovered ? 0.08 : 0.04) : Color.black.opacity(isHovered ? 0.25 : 0.15)),
+                radius: isHovered ? 5 : 2.5,
+                y: isHovered ? 2 : 1
             )
     }
 }
@@ -1993,16 +1949,10 @@ public struct LiquidGlassCapsuleButton: View {
                     .font(.system(size: fontSize, weight: tint != nil ? .bold : .semibold))
             }
             .foregroundStyle(textColor)
-            .shadow(color: tint != nil ? Color.black.opacity(0.35) : (colorScheme == .light ? Color.clear : Color.black.opacity(0.25)), radius: 2, y: 1)
             .padding(.horizontal, horizontalPadding)
             .padding(.vertical, verticalPadding)
             .donbyLiquidGlassCapsule(tint: tint, interactive: true, isHovered: isHovered)
-            .shadow(
-                color: (tint ?? .black).opacity(tint != nil ? (isHovered ? 0.45 : 0.30) : (isHovered ? 0.40 : 0.28)),
-                radius: isHovered ? 14 : 9,
-                y: 4
-            )
-            .contentShape(Capsule())
+            .contentShape(Capsule(style: .continuous))
             .scaleEffect(isHovered ? 1.02 : 1.0)
             .animation(.easeOut(duration: 0.16), value: isHovered)
         }
@@ -2015,7 +1965,7 @@ public struct LiquidGlassCircleButton: View {
     @Environment(\.colorScheme) private var colorScheme
     public let systemImage: String
     public var iconColor: Color? = nil
-    public var size: CGFloat = 39
+    public var size: CGFloat = 38
     public var tooltip: String = ""
     public let action: () -> Void
 
@@ -2024,7 +1974,7 @@ public struct LiquidGlassCircleButton: View {
     public init(
         systemImage: String,
         iconColor: Color? = nil,
-        size: CGFloat = 39,
+        size: CGFloat = 38,
         tooltip: String = "",
         action: @escaping () -> Void
     ) {
@@ -2046,7 +1996,6 @@ public struct LiquidGlassCircleButton: View {
                 Image(systemName: systemImage)
                     .font(.system(size: size * 0.38, weight: .semibold))
                     .foregroundStyle(effectiveIconColor)
-                    .shadow(color: colorScheme == .light ? Color.clear : Color.black.opacity(0.20), radius: 1, y: 0.5)
             }
             .frame(width: size, height: size)
             .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: isHovered)
@@ -2055,6 +2004,8 @@ public struct LiquidGlassCircleButton: View {
             .animation(.easeOut(duration: 0.15), value: isHovered)
         }
         .buttonStyle(.plain)
+        .frame(width: size, height: size)
+        .alignmentGuide(VerticalAlignment.center) { d in d[VerticalAlignment.center] }
         .onHover { isHovered = $0 }
         .help(tooltip)
     }
@@ -2064,6 +2015,7 @@ public struct LiquidGlassCircleButton: View {
 public struct LiquidGlassCircleMenu<MenuItems: View>: View {
     @Environment(\.colorScheme) private var colorScheme
     public let systemImage: String
+    public var iconColor: Color? = nil
     public var size: CGFloat = 38
     public var tooltip: String = ""
     @ViewBuilder public let menuContent: () -> MenuItems
@@ -2072,33 +2024,42 @@ public struct LiquidGlassCircleMenu<MenuItems: View>: View {
 
     public init(
         systemImage: String,
+        iconColor: Color? = nil,
         size: CGFloat = 38,
         tooltip: String = "",
         @ViewBuilder menuContent: @escaping () -> MenuItems
     ) {
         self.systemImage = systemImage
+        self.iconColor = iconColor
         self.size = size
         self.tooltip = tooltip
         self.menuContent = menuContent
     }
 
     private var effectiveIconColor: Color {
-        colorScheme == .light ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white
+        if let iconColor { return iconColor }
+        return colorScheme == .light ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white
     }
 
     public var body: some View {
         ZStack {
-            Circle()
-                .fill(.clear)
-                .frame(width: size, height: size)
-                .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: isHovered)
-
-            Menu {
-                menuContent()
-            } label: {
+            // Visual presentation identical to LiquidGlassCircleButton
+            ZStack {
                 Image(systemName: systemImage)
                     .font(.system(size: size * 0.38, weight: .semibold))
                     .foregroundStyle(effectiveIconColor)
+            }
+            .frame(width: size, height: size)
+            .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: isHovered)
+            .contentShape(Circle())
+            .scaleEffect(isHovered ? 1.04 : 1.0)
+            .animation(.easeOut(duration: 0.15), value: isHovered)
+
+            // Transparent Menu trigger on top to open menu with zero layout offset
+            Menu {
+                menuContent()
+            } label: {
+                Color.white.opacity(0.0001)
                     .frame(width: size, height: size)
                     .contentShape(Circle())
             }
@@ -2108,7 +2069,7 @@ public struct LiquidGlassCircleMenu<MenuItems: View>: View {
             .frame(width: size, height: size)
         }
         .frame(width: size, height: size)
-        .contentShape(Circle())
+        .alignmentGuide(VerticalAlignment.center) { d in d[VerticalAlignment.center] }
         .onHover { isHovered = $0 }
         .help(tooltip)
     }

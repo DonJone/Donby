@@ -31,6 +31,7 @@ if [ -f "Resources/AppIcon.icns" ]; then
 fi
 
 APP_VERSION="${DONBY_VERSION:-1.3.6}"
+BUILD_NUMBER="${DONBY_BUILD_NUMBER:-$(date +%Y%m%d%H%M)}"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -56,7 +57,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key>
     <string>${APP_VERSION}</string>
     <key>CFBundleVersion</key>
-    <string>2</string>
+    <string>${BUILD_NUMBER}</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>

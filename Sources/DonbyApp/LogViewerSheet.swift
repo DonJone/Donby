@@ -7,6 +7,8 @@ public struct LogViewerSheet: View {
     @ObservedObject private var logger = DonbyLogger.shared
     @EnvironmentObject private var appState: AppState
 
+    public let isModal: Bool
+
     @State private var selectedFilter: LogFilter = .all
     @State private var searchText: String = ""
     @State private var autoScroll: Bool = true
@@ -21,7 +23,9 @@ public struct LogViewerSheet: View {
         var id: String { rawValue }
     }
 
-    public init() {}
+    public init(isModal: Bool = true) {
+        self.isModal = isModal
+    }
 
     private var filteredEntries: [DonbyLogEntry] {
         logger.entries.filter { entry in
@@ -73,7 +77,8 @@ public struct LogViewerSheet: View {
                     }
                     .font(.system(size: 12))
                     .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(Color.white.opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 6))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    .background(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 6))
                 }
                 .buttonStyle(.plain)
 
@@ -86,7 +91,8 @@ public struct LogViewerSheet: View {
                     }
                     .font(.system(size: 12))
                     .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(Color.white.opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 6))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    .background(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 6))
                 }
                 .buttonStyle(.plain)
 
@@ -99,10 +105,12 @@ public struct LogViewerSheet: View {
                     }
                     .font(.system(size: 12))
                     .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(Color.white.opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 6))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    .background(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 6))
                 }
                 .buttonStyle(.plain)
 
+                if isModal {
                 Button {
                     dismiss()
                 } label: {
@@ -111,6 +119,7 @@ public struct LogViewerSheet: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                }
             }
             .padding(.horizontal, 18).padding(.vertical, 14)
             .background(.ultraThinMaterial)
@@ -125,7 +134,7 @@ public struct LogViewerSheet: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(maxWidth: 360)
+                .frame(maxWidth: 320)
 
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
@@ -142,8 +151,9 @@ public struct LogViewerSheet: View {
                     }
                 }
                 .padding(.horizontal, 8).padding(.vertical, 5)
-                .background(Color.white.opacity(0.06))
+                .background(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
+                .frame(minWidth: 120, maxWidth: 220)
 
                 Spacer()
 
@@ -151,9 +161,10 @@ public struct LogViewerSheet: View {
                     .toggleStyle(.checkbox)
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
+                    .fixedSize()
             }
             .padding(.horizontal, 18).padding(.vertical, 10)
-            .background(Color.black.opacity(0.3))
+            .background(appState.isLightMode ? Color.black.opacity(0.04) : Color.black.opacity(0.3))
 
             Divider().opacity(0.2)
 

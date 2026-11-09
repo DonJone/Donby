@@ -842,7 +842,15 @@ public final class EmbyClient: Sendable {
             else if let pId = item.parentBackdropItemId, let pTag = item.parentBackdropImageTags?.first {
                 targetItemId = pId
                 tag = pTag
-            } else { tag = item.imageTags?["Primary"] }
+            } else if item.isEpisode, let seriesId = item.seriesId {
+                targetItemId = seriesId
+                tag = nil
+            } else if let pId = item.parentBackdropItemId {
+                targetItemId = pId
+                tag = nil
+            } else {
+                tag = nil
+            }
         case .thumb:
             if let tTag = item.imageTags?["Thumb"] { tag = tTag }
             else if item.backdropImageTags?.first != nil {

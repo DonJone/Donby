@@ -125,8 +125,7 @@ public struct MainWindowView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 3) {
                     ForEach(appState.servers.filter { !appState.hideEncryptedServers || !$0.isEncrypted }) { server in
-                        let isServerOpen = (appState.openedServerId == server.id)
-                        SidebarServerItemButton(server: server, isServerOpen: isServerOpen)
+                        SidebarServerItemButton(server: server)
                     }
                 }
                 .padding(.horizontal, 12)
@@ -1591,7 +1590,7 @@ public struct SettingsView: View {
 
             // Content Area
             if currentTab == .logs {
-                LogViewerSheet()
+                LogViewerSheet(isModal: false)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
@@ -2022,8 +2021,11 @@ private struct SidebarTabItemButton: View {
 private struct SidebarServerItemButton: View {
     @EnvironmentObject private var appState: AppState
     let server: EmbyServerConfig
-    let isServerOpen: Bool
     @State private var isHovered: Bool = false
+
+    private var isServerOpen: Bool {
+        appState.openedServerId == server.id
+    }
 
     var body: some View {
         Button {

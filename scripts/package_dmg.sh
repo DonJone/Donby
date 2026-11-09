@@ -21,6 +21,26 @@ trap 'rm -rf "$STAGING_DIR"' EXIT
 cp -R "$APP_DIR" "${STAGING_DIR}/${APP_NAME}.app"
 ln -s /Applications "${STAGING_DIR}/Applications"
 
+if [ -f "scripts/install_helper.command" ]; then
+    cp "scripts/install_helper.command" "${STAGING_DIR}/一键安装或更新 (免安全验证).command"
+    chmod +x "${STAGING_DIR}/一键安装或更新 (免安全验证).command"
+fi
+
+cat > "${STAGING_DIR}/安装说明.txt" << 'EOF'
+Donby macOS 安装与更新指南
+==============================================
+
+【推荐方式】双击「一键安装或更新 (免安全验证).command」
+  - 自动清理旧版残留与重名副本
+  - 自动解除 Gatekeeper 隔离（免去“安全性与隐私”手动点击验证）
+  - 自动刷新 macOS LaunchServices 注册表
+
+【手动方式】将「Donby.app」拖入「Applications」
+  - 若提示“无法打开，因为无法验证开发者”，在终端执行：
+    xattr -dr com.apple.quarantine /Applications/Donby.app
+  - 即可直接双击打开运行。
+EOF
+
 if [ -f "Resources/AppIcon.icns" ]; then
     cp "Resources/AppIcon.icns" "${STAGING_DIR}/.VolumeIcon.icns"
     if command -v SetFile >/dev/null 2>&1; then

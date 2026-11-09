@@ -71,11 +71,11 @@ public struct DetailView: View {
         ZStack(alignment: .bottomLeading) {
             // 1. Clear High-Resolution Backdrop Fanart (Cinematic bleed)
             GeometryReader { bgGeo in
-                MediaArtworkView(server: appState.activeServer, item: item, kind: .backdrop, maxWidth: 1600)
+                MediaArtworkView(server: appState.activeServer, item: item, kind: .backdrop, maxWidth: 3840)
                     .frame(width: bgGeo.size.width, height: bgGeo.size.height)
                     .clipped()
             }
-            .frame(height: 420)
+            .frame(height: 440)
             .clipped()
 
             // 2. Ambient Gradient Dissolve into Canvas
@@ -89,7 +89,7 @@ public struct DetailView: View {
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .frame(height: 420)
+            .frame(height: 440)
 
             // 3. Floating Navigation Capsules & Hero Metadata Content
             VStack(alignment: .leading, spacing: 0) {
@@ -206,18 +206,25 @@ public struct DetailView: View {
 
                 // Hero Title + Actions + Metadata Row
                 VStack(alignment: .leading, spacing: 14) {
+                    if item.isEpisode, let series = item.seriesName, !series.isEmpty {
+                        Text(series)
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(appState.accentColor)
+                            .lineLimit(1)
+                    }
+
                     // Big Cinematic Title
                     Text(item.name)
-                        .font(.system(size: 38, weight: .heavy, design: .rounded))
+                        .font(.system(size: item.isEpisode ? 32 : 38, weight: .heavy, design: .rounded))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                         .shadow(color: appState.isLightMode ? Color.white.opacity(0.85) : Color.black.opacity(0.50), radius: 3, y: 1)
                         .lineLimit(2)
 
                     HStack(alignment: .top, spacing: 28) {
-                        // Left Column: Action Buttons
+                        // Left Column: Action Buttons (Stacked: 6 Circle Buttons above Wide Play Capsule)
                         VStack(alignment: .leading, spacing: 12) {
                             // Circular action buttons row
-                            HStack(spacing: 11) {
+                            HStack(alignment: .center, spacing: 11) {
                                 LiquidGlassCircleButton(
                                     systemImage: "arrow.counterclockwise",
                                     size: 38,
@@ -319,7 +326,7 @@ public struct DetailView: View {
                                 }
                             }
 
-                            // Main Wide Frosted Capsule Play Button
+                            // Main Wide Frosted Capsule Play Button (as in better1.png)
                             LiquidGlassCapsuleButton(
                                 title: mainPlayButtonTitle,
                                 systemImage: "play.fill",
@@ -359,7 +366,7 @@ public struct DetailView: View {
                                 }
                             }
 
-                            // Specs Line (e.g. 29分钟 2026年7月16日 4K HDR10 24FPS 3.85G)
+                            // Specs Line (e.g. 45 分钟 · 2026年11月2日 · 4K · 25FPS · 1.11 GB)
                             Text(specsSummaryLine)
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
