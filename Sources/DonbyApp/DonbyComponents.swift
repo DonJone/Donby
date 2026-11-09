@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import AVFoundation
+import ImageIO
 import DonbyCore
 import DonbyNetwork
 
@@ -29,13 +30,28 @@ public final class ArtworkImageCache: @unchecked Sendable {
         return "\(cleanPrefix)_\(abs(hash)).img"
     }
 
+    /// Decodes and downsamples compressed image data in the background using hardware-accelerated ImageIO.
+    public func decodeThumbnail(from data: Data, maxPixelSize: Int = 500) -> NSImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true, // Decode pixels directly in background thread!
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ]
+        guard let cgImg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return NSImage(data: data)
+        }
+        return NSImage(cgImage: cgImg, size: NSSize(width: cgImg.width, height: cgImg.height))
+    }
+
     /// Instantaneous O(1) in-memory lookup. Completely safe to call on Main Thread in body or computed properties.
     public func imageFromMemory(for key: String) -> NSImage? {
         memoryCache.object(forKey: key as NSString)
     }
 
     /// Asynchronous disk lookup that never blocks the Main Thread or scroll animations.
-    public func imageFromDiskAsync(for key: String) async -> NSImage? {
+    public func imageFromDiskAsync(for key: String, maxPixelSize: Int = 500) async -> NSImage? {
         if let mem = memoryCache.object(forKey: key as NSString) {
             return mem
         }
@@ -43,10 +59,13 @@ public final class ArtworkImageCache: @unchecked Sendable {
         return await withCheckedContinuation { continuation in
             diskQueue.async { [weak self] in
                 guard let self else { continuation.resume(returning: nil); return }
-                if let data = try? Data(contentsOf: fileURL),
-                   let img = NSImage(data: data) {
-                    self.memoryCache.setObject(img, forKey: key as NSString, cost: data.count)
-                    continuation.resume(returning: img)
+                guard let data = try? Data(contentsOf: fileURL) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                if let thumb = self.decodeThumbnail(from: data, maxPixelSize: maxPixelSize) {
+                    self.memoryCache.setObject(thumb, forKey: key as NSString, cost: data.count / 4)
+                    continuation.resume(returning: thumb)
                 } else {
                     continuation.resume(returning: nil)
                 }
@@ -90,11 +109,13 @@ public final class ArtworkImageCache: @unchecked Sendable {
         }
     }
 
-    public func storeRawData(_ data: Data, for key: String, aliases: [String] = []) {
-        if let img = NSImage(data: data) {
-            memoryCache.setObject(img, forKey: key as NSString, cost: data.count)
+    @discardableResult
+    public func storeRawData(_ data: Data, for key: String, maxPixelSize: Int = 500, aliases: [String] = []) -> NSImage? {
+        let decoded = decodeThumbnail(from: data, maxPixelSize: maxPixelSize) ?? NSImage(data: data)
+        if let decoded {
+            memoryCache.setObject(decoded, forKey: key as NSString, cost: data.count / 4)
             for alias in aliases where !alias.isEmpty {
-                memoryCache.setObject(img, forKey: alias as NSString, cost: data.count)
+                memoryCache.setObject(decoded, forKey: alias as NSString, cost: data.count / 4)
             }
         }
         diskQueue.async { [cacheDirectoryURL] in
@@ -102,9 +123,12 @@ public final class ArtworkImageCache: @unchecked Sendable {
             try? data.write(to: fileURL, options: .atomic)
             for alias in aliases where !alias.isEmpty {
                 let aliasURL = cacheDirectoryURL.appendingPathComponent(self.diskFileName(for: alias))
-                try? data.write(to: aliasURL, options: .atomic)
+                if !FileManager.default.fileExists(atPath: aliasURL.path) {
+                    try? FileManager.default.linkItem(at: fileURL, to: aliasURL)
+                }
             }
         }
+        return decoded
     }
 
     public func systemAsset(_ name: String) -> NSImage? {
@@ -138,6 +162,35 @@ public final class ArtworkImageCache: @unchecked Sendable {
                 }
             }
         }
+    }
+}
+
+// MARK: - Concurrency-Controlled Artwork Downloader
+public final class ArtworkDownloadManager: @unchecked Sendable {
+    public static let shared = ArtworkDownloadManager()
+    private let semaphore = DispatchSemaphore(value: 6)
+    private let session: URLSession
+
+    private init() {
+        let config = URLSessionConfiguration.default
+        config.httpMaximumConnectionsPerHost = 8
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 30
+        config.requestCachePolicy = .returnCacheDataElseLoad
+        self.session = URLSession(configuration: config)
+    }
+
+    public func download(for request: URLRequest) async throws -> (Data, URLResponse) {
+        try Task.checkCancellation()
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                self.semaphore.wait()
+                continuation.resume()
+            }
+        }
+        defer { semaphore.signal() }
+        try Task.checkCancellation()
+        return try await session.data(for: request)
     }
 }
 
@@ -960,11 +1013,12 @@ public struct MediaArtworkView: View {
     private var candidateURLs: [URL] {
         guard let server, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
         var urls: [URL] = []
-        if let direct = EmbyClient.shared.imageURL(server: server, itemId: item.id, kind: kind, maxWidth: maxWidth) {
-            urls.append(direct)
-        }
-        if let primary = EmbyClient.shared.imageURL(server: server, item: item, kind: kind, maxWidth: maxWidth), !urls.contains(primary) {
+        // Prioritize tagged primary URL first because it is CDN-cached and fastest on UHDNow/Emby
+        if let primary = EmbyClient.shared.imageURL(server: server, item: item, kind: kind, maxWidth: maxWidth) {
             urls.append(primary)
+        }
+        if let direct = EmbyClient.shared.imageURL(server: server, itemId: item.id, kind: kind, maxWidth: maxWidth), !urls.contains(direct) {
+            urls.append(direct)
         }
         if item.isEpisode {
             if let thumb = EmbyClient.shared.imageURL(server: server, itemId: item.id, kind: .thumb, maxWidth: maxWidth), !urls.contains(thumb) {
@@ -1008,13 +1062,15 @@ public struct MediaArtworkView: View {
                 return
             }
             if resolvedImage != nil {
-                // Already resolved from in-memory cache; avoid mutating @State which triggers extra render passes
                 return
             }
-            // Fast disk check via direct IDs first in background
-            for key in ["item_\(item.id)_\(kind.rawValue)", "item_\(item.id)", item.id, "emby_\(item.id)"] {
+            let primaryKey = "item_\(item.id)_\(kind.rawValue)"
+            let targetPixelSize = maxWidth > 0 ? min(maxWidth * 2, 700) : 450
+
+            // 1. Fast background disk check with hardware downsampling
+            for key in [primaryKey, item.id] {
                 if Task.isCancelled { return }
-                if let diskImg = await ArtworkImageCache.shared.imageFromDiskAsync(for: key) {
+                if let diskImg = await ArtworkImageCache.shared.imageFromDiskAsync(for: key, maxPixelSize: targetPixelSize) {
                     if !Task.isCancelled {
                         await MainActor.run {
                             self.loadedImage = diskImg
@@ -1023,34 +1079,31 @@ public struct MediaArtworkView: View {
                     return
                 }
             }
+
+            guard let server, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             let urls = candidateURLs
-            guard let server else { return }
             for url in urls {
                 if Task.isCancelled { return }
-                if let cached = ArtworkImageCache.shared.image(for: url.absoluteString) {
-                    self.loadedImage = cached
-                    return
-                }
                 do {
                     let req = EmbyClient.shared.makeImageRequest(url: url, server: server)
-                    let (data, resp) = try await URLSession.shared.data(for: req)
+                    let (data, resp) = try await ArtworkDownloadManager.shared.download(for: req)
+                    if Task.isCancelled { return }
                     if let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
-                       data.count > 128,
-                       let img = NSImage(data: data),
-                       img.size.width > 1 {
-                        let aliases = [
-                            self.item.id,
-                            "item_\(self.item.id)",
-                            "item_\(self.item.id)_\(self.kind.rawValue)",
-                            "emby_\(self.item.id)"
-                        ]
-                        ArtworkImageCache.shared.storeRawData(data, for: url.absoluteString, aliases: aliases)
-                        if !Task.isCancelled {
-                            await MainActor.run {
-                                self.loadedImage = img
+                       data.count > 128 {
+                        let aliases = [self.item.id, "item_\(self.item.id)", url.absoluteString]
+                        if let decoded = ArtworkImageCache.shared.storeRawData(
+                            data,
+                            for: primaryKey,
+                            maxPixelSize: targetPixelSize,
+                            aliases: aliases
+                        ) {
+                            if !Task.isCancelled {
+                                await MainActor.run {
+                                    self.loadedImage = decoded
+                                }
                             }
+                            return
                         }
-                        return
                     }
                 } catch {
                     continue
@@ -1064,19 +1117,10 @@ public struct MediaArtworkView: View {
         if let key = localPosterKey {
             if let local = ArtworkImageCache.shared.localPoster(key) { return local }
         }
-        // Fast O(1) in-memory alias lookups before building candidate URLs
+        // Fast O(1) direct memory lookup (instant, zero candidate URLs allocations)
         let primaryKey = "item_\(item.id)_\(kind.rawValue)"
         if let cached = ArtworkImageCache.shared.imageFromMemory(for: primaryKey) { return cached }
         if let cached = ArtworkImageCache.shared.imageFromMemory(for: item.id) { return cached }
-        if let cached = ArtworkImageCache.shared.imageFromMemory(for: "item_\(item.id)") { return cached }
-        if let cached = ArtworkImageCache.shared.imageFromMemory(for: "emby_\(item.id)") { return cached }
-
-        // Only build and check URLs if direct item key missed in memory
-        for url in candidateURLs {
-            if let cached = ArtworkImageCache.shared.imageFromMemory(for: url.absoluteString) {
-                return cached
-            }
-        }
         return nil
     }
 }
@@ -1219,17 +1263,15 @@ public struct PosterCardView: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(
-                        isHovered ? Color.white.opacity(0.24) : Color.white.opacity(0.06),
-                        lineWidth: 0.65
+                        isHovered ? appState.accentColor.opacity(0.85) : Color.white.opacity(0.06),
+                        lineWidth: isHovered ? 1.5 : 0.65
                     )
             )
             .shadow(
-                color: isHovered ? Color.black.opacity(0.35) : Color.clear,
-                radius: isHovered ? 8 : 0,
-                y: isHovered ? 4 : 0
+                color: isHovered ? Color.black.opacity(0.30) : Color.clear,
+                radius: isHovered ? 6 : 0,
+                y: isHovered ? 3 : 0
             )
-            .scaleEffect(isHovered ? 1.02 : 1.0)
-            .animation(.easeOut(duration: 0.18), value: isHovered)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.name)
@@ -1332,17 +1374,15 @@ public struct LandscapeCardView: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(
-                        isHovered ? Color.white.opacity(0.24) : Color.white.opacity(0.06),
-                        lineWidth: 0.65
+                        isHovered ? appState.accentColor.opacity(0.85) : Color.white.opacity(0.06),
+                        lineWidth: isHovered ? 1.5 : 0.65
                     )
             )
             .shadow(
-                color: isHovered ? Color.black.opacity(0.35) : Color.clear,
-                radius: isHovered ? 8 : 0,
-                y: isHovered ? 4 : 0
+                color: isHovered ? Color.black.opacity(0.30) : Color.clear,
+                radius: isHovered ? 6 : 0,
+                y: isHovered ? 3 : 0
             )
-            .scaleEffect(isHovered ? 1.02 : 1.0)
-            .animation(.easeOut(duration: 0.18), value: isHovered)
             .onTapGesture { onPlay() }
 
             HStack(alignment: .top) {
@@ -1421,17 +1461,15 @@ public struct LibraryCardView: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(
-                        isHovered ? Color.white.opacity(0.24) : Color.white.opacity(0.06),
-                        lineWidth: 0.65
+                        isHovered ? appState.accentColor.opacity(0.85) : Color.white.opacity(0.06),
+                        lineWidth: isHovered ? 1.5 : 0.65
                     )
             )
             .shadow(
-                color: isHovered ? Color.black.opacity(0.35) : Color.clear,
-                radius: isHovered ? 8 : 0,
-                y: isHovered ? 4 : 0
+                color: isHovered ? Color.black.opacity(0.30) : Color.clear,
+                radius: isHovered ? 6 : 0,
+                y: isHovered ? 3 : 0
             )
-            .scaleEffect(isHovered ? 1.02 : 1.0)
-            .animation(.easeOut(duration: 0.18), value: isHovered)
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }

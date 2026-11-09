@@ -511,19 +511,20 @@ public struct MLibListView: View {
                     tooltip: "返回媒体库首页",
                     action: { withAnimation(.easeOut(duration: 0.18)) { appState.selectedLibrary = nil } }
                 ) { hovered in
+                    let iconColor = appState.isLightMode ? (hovered ? Color.black : Color(white: 0.32)) : (hovered ? .white : Color(white: 0.88))
                     Image(systemName: "chevron.left")
                         .font(.system(size: 13.5, weight: .semibold))
-                        .foregroundStyle(hovered ? .white : Color(white: 0.88))
+                        .foregroundStyle(iconColor)
                 }
                 .padding(.leading, appState.isSidebarCollapsed ? 58 : 0)
 
                 Text(library.name)
                     .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     .lineLimit(1)
                 Text("\(totalCount)")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Color(white: 0.56))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
 
                 Spacer()
 
@@ -531,7 +532,8 @@ public struct MLibListView: View {
                     tooltip: "刷新列表",
                     action: { Task { await loadLibraryItems() } }
                 ) { hovered in
-                    RefreshVectorIcon(size: 14.5, color: hovered ? .white : Color(white: 0.88), isSpinning: isLoading)
+                    let iconColor = appState.isLightMode ? (hovered ? Color.black : Color(white: 0.32)) : (hovered ? .white : Color(white: 0.88))
+                    RefreshVectorIcon(size: 14.5, color: iconColor, isSpinning: isLoading)
                 }
 
                 ToolbarVectorButton(
@@ -539,9 +541,10 @@ public struct MLibListView: View {
                     isActive: showSortPopover,
                     action: { showSortPopover.toggle() }
                 ) { hovered in
+                    let iconColor = appState.isLightMode ? (hovered ? Color.black : Color(white: 0.32)) : (hovered ? .white : Color(white: 0.88))
                     Image(systemName: "arrow.up.arrow.down")
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(hovered ? .white : Color(white: 0.88))
+                        .foregroundStyle(iconColor)
                 }
                 .popover(isPresented: $showSortPopover, arrowEdge: .bottom) {
                     VStack(alignment: .leading, spacing: 10) {
@@ -567,6 +570,13 @@ public struct MLibListView: View {
             }
             .padding(.horizontal, 24)
             .frame(height: 54)
+            .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+            .overlay(
+                Rectangle()
+                    .fill(DonbyGlassPalette.separator(isLight: appState.isLightMode))
+                    .frame(height: 0.6),
+                alignment: .bottom
+            )
 
             if isLoading && items.isEmpty {
                 VStack { Spacer(); ProgressView(); Spacer() }.frame(maxWidth: .infinity, maxHeight: .infinity)
