@@ -500,78 +500,85 @@ public struct DonbyAppLogoView: View {
             Canvas { context, canvasSize in
                 let w = canvasSize.width
                 let h = canvasSize.height
-                let strokeW = w * 0.138
+                let totalH = h * 0.63
+                let totalW = w * 0.525
+                let leftX = w * 0.50 - totalW * 0.515
+                let cornerR = totalH * 0.21
+                let rightArcR = totalH * 0.5
 
-                // Bold, empowered centerpiece scale
-                var dPath = Path()
-                dPath.move(to: CGPoint(x: w * 0.58, y: h * 0.24))
-                dPath.addQuadCurve(to: CGPoint(x: w * 0.42, y: h * 0.19), control: CGPoint(x: w * 0.52, y: h * 0.19))
-                dPath.addLine(to: CGPoint(x: w * 0.22, y: h * 0.19))
-                dPath.addLine(to: CGPoint(x: w * 0.22, y: h * 0.81))
-                dPath.addLine(to: CGPoint(x: w * 0.42, y: h * 0.81))
-                dPath.addQuadCurve(to: CGPoint(x: w * 0.58, y: h * 0.76), control: CGPoint(x: w * 0.52, y: h * 0.81))
+                var outerD = Path()
+                let rightArcCenterX = leftX + totalW - rightArcR
+                outerD.move(to: CGPoint(x: leftX + cornerR, y: h * 0.50 - totalH * 0.5))
+                outerD.addLine(to: CGPoint(x: rightArcCenterX, y: h * 0.50 - totalH * 0.5))
+                outerD.addArc(
+                    center: CGPoint(x: rightArcCenterX, y: h * 0.50),
+                    radius: rightArcR,
+                    startAngle: .degrees(-90),
+                    endAngle: .degrees(90),
+                    clockwise: false
+                )
+                outerD.addLine(to: CGPoint(x: leftX + cornerR, y: h * 0.50 + totalH * 0.5))
+                outerD.addArc(
+                    tangent1End: CGPoint(x: leftX, y: h * 0.50 + totalH * 0.5),
+                    tangent2End: CGPoint(x: leftX, y: h * 0.50),
+                    radius: cornerR
+                )
+                outerD.addArc(
+                    tangent1End: CGPoint(x: leftX, y: h * 0.50 - totalH * 0.5),
+                    tangent2End: CGPoint(x: leftX + cornerR, y: h * 0.50 - totalH * 0.5),
+                    radius: cornerR
+                )
+                outerD.closeSubpath()
 
-                let strokedD = dPath.strokedPath(StrokeStyle(lineWidth: strokeW, lineCap: .round, lineJoin: .round))
+                let triLeftX = leftX + totalW * 0.275
+                let triRightX = leftX + totalW * 0.765
+                let triHalfH = totalH * 0.305
+                let triCorner = w * 0.042
 
-                // Sculpted Deep Obsidian fill for D
+                let p1 = CGPoint(x: triLeftX, y: h * 0.50 - triHalfH)
+                let p2 = CGPoint(x: triRightX, y: h * 0.50)
+                let p3 = CGPoint(x: triLeftX, y: h * 0.50 + triHalfH)
+
+                var playCutout = Path()
+                let mid12 = CGPoint(x: (p1.x + p2.x) * 0.5, y: (p1.y + p2.y) * 0.5)
+                playCutout.move(to: mid12)
+                playCutout.addArc(tangent1End: p2, tangent2End: p3, radius: triCorner)
+                playCutout.addArc(tangent1End: p3, tangent2End: p1, radius: triCorner)
+                playCutout.addArc(tangent1End: p1, tangent2End: p2, radius: triCorner)
+                playCutout.closeSubpath()
+
+                var emblem = Path()
+                emblem.addPath(outerD)
+                emblem.addPath(playCutout)
+
+                // Fill solid deep obsidian velvet
                 context.fill(
-                    strokedD,
+                    emblem,
                     with: .linearGradient(
                         Gradient(colors: [
-                            Color(red: 0.135, green: 0.142, blue: 0.162),
-                            Color(red: 0.052, green: 0.055, blue: 0.065),
-                            Color(red: 0.018, green: 0.020, blue: 0.025)
+                            Color(red: 0.075, green: 0.080, blue: 0.090),
+                            Color(red: 0.015, green: 0.016, blue: 0.018),
+                            Color.black
                         ]),
-                        startPoint: CGPoint(x: w * 0.18, y: h * 0.15),
-                        endPoint: CGPoint(x: w * 0.65, y: h * 0.85)
-                    )
-                )
-                // Specular micro-bevel rim around D
-                context.stroke(
-                    strokedD,
-                    with: .linearGradient(
-                        Gradient(colors: [
-                            Color(red: 0.92, green: 0.95, blue: 1.0).opacity(0.82),
-                            Color(red: 0.30, green: 0.32, blue: 0.38).opacity(0.22),
-                            Color(red: 0.68, green: 0.72, blue: 0.80).opacity(0.50)
-                        ]),
-                        startPoint: CGPoint(x: w * 0.16, y: h * 0.15),
-                        endPoint: CGPoint(x: w * 0.65, y: h * 0.85)
+                        startPoint: CGPoint(x: w * 0.50, y: h * 0.18),
+                        endPoint: CGPoint(x: w * 0.50, y: h * 0.82)
                     ),
-                    lineWidth: max(0.8, w * 0.018)
+                    style: FillStyle(eoFill: true)
                 )
 
-                // Sculpted Obsidian Play Prism (▶)
-                var play = Path()
-                play.move(to: CGPoint(x: w * 0.44, y: h * 0.28))
-                play.addLine(to: CGPoint(x: w * 0.83, y: h * 0.50))
-                play.addLine(to: CGPoint(x: w * 0.44, y: h * 0.72))
-                play.closeSubpath()
-
-                context.fill(
-                    play,
-                    with: .linearGradient(
-                        Gradient(colors: [
-                            Color(red: 0.145, green: 0.152, blue: 0.175),
-                            Color(red: 0.060, green: 0.063, blue: 0.072),
-                            Color(red: 0.018, green: 0.020, blue: 0.024)
-                        ]),
-                        startPoint: CGPoint(x: w * 0.44, y: h * 0.28),
-                        endPoint: CGPoint(x: w * 0.83, y: h * 0.72)
-                    )
-                )
+                // Top chamfer bevel specular highlight
                 context.stroke(
-                    play,
+                    emblem,
                     with: .linearGradient(
                         Gradient(colors: [
-                            Color(red: 0.95, green: 0.97, blue: 1.0).opacity(0.85),
-                            Color(red: 0.32, green: 0.34, blue: 0.40).opacity(0.20),
-                            Color(red: 0.65, green: 0.70, blue: 0.80).opacity(0.45)
+                            Color.white.opacity(0.85),
+                            Color(red: 0.50, green: 0.52, blue: 0.58).opacity(0.30),
+                            Color.clear
                         ]),
-                        startPoint: CGPoint(x: w * 0.44, y: h * 0.28),
-                        endPoint: CGPoint(x: w * 0.83, y: h * 0.72)
+                        startPoint: CGPoint(x: w * 0.25, y: h * 0.18),
+                        endPoint: CGPoint(x: w * 0.75, y: h * 0.82)
                     ),
-                    lineWidth: max(0.7, w * 0.016)
+                    lineWidth: max(0.8, w * 0.012)
                 )
             }
         }
