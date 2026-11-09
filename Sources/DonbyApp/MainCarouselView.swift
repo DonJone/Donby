@@ -359,11 +359,13 @@ public struct MainCarouselView: View {
                 }
             }
             .overlay(
-                HStack(spacing: 6) {
+                HStack(spacing: 7.5) {
                     ForEach(Array(items.enumerated()), id: \.element.id) { idx, _ in
-                        Capsule()
-                            .fill(idx == currentIndex ? appState.accentColor : Color.white.opacity(0.34))
-                            .frame(width: idx == currentIndex ? 22 : 7, height: 7)
+                        Circle()
+                            .fill(idx == currentIndex ? Color.white : Color.white.opacity(0.36))
+                            .frame(width: 7, height: 7)
+                            .shadow(color: Color.black.opacity(0.45), radius: 2, y: 1)
+                            .contentShape(Circle())
                             .onTapGesture {
                                 slideDirection = idx >= currentIndex ? 1 : -1
                                 lastManualInteraction = Date()
@@ -371,10 +373,8 @@ public struct MainCarouselView: View {
                             }
                     }
                 }
-                .padding(.horizontal, 11).padding(.vertical, 7)
-                .donbyLiquidGlassCapsule(tint: nil, interactive: false, isHovered: false)
-                .padding(.trailing, 24)
-                .padding(.bottom, 24),
+                .padding(.trailing, 26)
+                .padding(.bottom, 26),
                 alignment: .bottomTrailing
             )
             .overlay(

@@ -472,9 +472,9 @@ public struct DonbyAppLogoView: View {
                 .fill(
                     LinearGradient(
                         colors: [
-                            Color(red: 0.115, green: 0.122, blue: 0.138),
-                            Color(red: 0.045, green: 0.048, blue: 0.056),
-                            Color(red: 0.016, green: 0.018, blue: 0.024)
+                            Color(red: 0.996, green: 0.235, blue: 0.388),
+                            Color(red: 0.960, green: 0.145, blue: 0.315),
+                            Color(red: 0.825, green: 0.055, blue: 0.215)
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
@@ -485,9 +485,9 @@ public struct DonbyAppLogoView: View {
                         .strokeBorder(
                             LinearGradient(
                                 colors: [
-                                    Color.white.opacity(0.52),
-                                    Color(red: 0.82, green: 0.86, blue: 0.94).opacity(0.12),
-                                    Color(red: 0.88, green: 0.93, blue: 1.0).opacity(0.32)
+                                    Color.white.opacity(0.48),
+                                    Color(red: 1.0, green: 0.70, blue: 0.80).opacity(0.12),
+                                    Color(red: 1.0, green: 0.88, blue: 0.94).opacity(0.28)
                                 ],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
@@ -495,7 +495,7 @@ public struct DonbyAppLogoView: View {
                             lineWidth: max(1, size * 0.018)
                         )
                 )
-                .shadow(color: .black.opacity(0.48), radius: size * 0.12, y: size * 0.05)
+                .shadow(color: Color(red: 0.50, green: 0.04, blue: 0.15).opacity(0.45), radius: size * 0.12, y: size * 0.05)
 
             Canvas { context, canvasSize in
                 let w = canvasSize.width
@@ -508,9 +508,9 @@ public struct DonbyAppLogoView: View {
                     Path(ellipseIn: ringRect),
                     with: .linearGradient(
                         Gradient(colors: [
-                            Color.white.opacity(0.34),
-                            Color(red: 0.78, green: 0.84, blue: 0.95).opacity(0.10),
-                            Color(red: 0.88, green: 0.94, blue: 1.0).opacity(0.26)
+                            Color.white.opacity(0.42),
+                            Color(red: 1.0, green: 0.85, blue: 0.90).opacity(0.12),
+                            Color.white.opacity(0.32)
                         ]),
                         startPoint: CGPoint(x: w * 0.14, y: h * 0.14),
                         endPoint: CGPoint(x: w * 0.86, y: h * 0.86)
@@ -533,9 +533,9 @@ public struct DonbyAppLogoView: View {
                     strokedD,
                     with: .linearGradient(
                         Gradient(colors: [
-                            Color(red: 0.96, green: 0.98, blue: 1.0).opacity(0.84),
-                            Color(red: 0.80, green: 0.86, blue: 0.96).opacity(0.68),
-                            Color(red: 0.88, green: 0.94, blue: 1.0).opacity(0.80)
+                            Color.white.opacity(0.96),
+                            Color(red: 0.96, green: 0.97, blue: 1.0).opacity(0.90),
+                            Color(red: 0.92, green: 0.94, blue: 0.98).opacity(0.86)
                         ]),
                         startPoint: CGPoint(x: w * 0.22, y: h * 0.18),
                         endPoint: CGPoint(x: w * 0.62, y: h * 0.82)
@@ -546,9 +546,9 @@ public struct DonbyAppLogoView: View {
                     strokedD,
                     with: .linearGradient(
                         Gradient(colors: [
-                            Color.white.opacity(0.96),
-                            Color(red: 0.86, green: 0.92, blue: 1.0).opacity(0.32),
-                            Color(red: 0.92, green: 0.97, blue: 1.0).opacity(0.82)
+                            Color.white.opacity(0.98),
+                            Color(red: 1.0, green: 0.90, blue: 0.95).opacity(0.40),
+                            Color.white.opacity(0.88)
                         ]),
                         startPoint: CGPoint(x: w * 0.20, y: h * 0.18),
                         endPoint: CGPoint(x: w * 0.62, y: h * 0.82)
@@ -566,7 +566,7 @@ public struct DonbyAppLogoView: View {
                 context.fill(
                     play,
                     with: .linearGradient(
-                        Gradient(colors: [.white, Color(red: 0.90, green: 0.93, blue: 0.98)]),
+                        Gradient(colors: [.white, Color(red: 0.95, green: 0.96, blue: 0.98)]),
                         startPoint: CGPoint(x: w * 0.45, y: h * 0.32),
                         endPoint: CGPoint(x: w * 0.78, y: h * 0.68)
                     )

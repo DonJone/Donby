@@ -74,9 +74,9 @@ func renderIcon(size: Int) -> Data? {
         ctx.setShadow(
             offset: CGSize(width: 0, height: -s * 0.018),
             blur: s * 0.038,
-            color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.56)
+            color: CGColor(srgbRed: 0.35, green: 0.02, blue: 0.08, alpha: 0.58)
         )
-        ctx.setFillColor(CGColor(srgbRed: 0.04, green: 0.042, blue: 0.048, alpha: 1.0))
+        ctx.setFillColor(CGColor(srgbRed: 0.85, green: 0.08, blue: 0.24, alpha: 1.0))
         ctx.addPath(squirclePath)
         ctx.fillPath()
         ctx.restoreGState()
@@ -87,27 +87,27 @@ func renderIcon(size: Int) -> Data? {
     ctx.addPath(squirclePath)
     ctx.clip()
 
-    // 2A. Base Apple Pro Space Black / Obsidian Liquid Glass chassis (top -> bottom)
+    // 2A. Apple Music macOS Pro Luminous Red Gradient Chassis (top -> bottom)
     let bgColors = [
-        CGColor(srgbRed: 0.112, green: 0.118, blue: 0.134, alpha: 1.0),
-        CGColor(srgbRed: 0.045, green: 0.048, blue: 0.056, alpha: 1.0),
-        CGColor(srgbRed: 0.016, green: 0.018, blue: 0.023, alpha: 1.0)
+        CGColor(srgbRed: 0.996, green: 0.235, blue: 0.388, alpha: 1.0), // #FE3C63 Vibrant Coral Red
+        CGColor(srgbRed: 0.960, green: 0.145, blue: 0.315, alpha: 1.0), // #F52550 Pure Apple Music Red
+        CGColor(srgbRed: 0.825, green: 0.055, blue: 0.215, alpha: 1.0)  // #D20E37 Rich Deep Crimson
     ] as CFArray
     let bgLocs: [CGFloat] = [0.0, 0.55, 1.0]
     if let bgGrad = CGGradient(colorsSpace: colorSpace, colors: bgColors, locations: bgLocs) {
         ctx.drawLinearGradient(
             bgGrad,
-            start: CGPoint(x: s * 0.42, y: bodyRect.maxY),
-            end: CGPoint(x: s * 0.58, y: bodyRect.minY),
+            start: CGPoint(x: s * 0.38, y: bodyRect.maxY),
+            end: CGPoint(x: s * 0.62, y: bodyRect.minY),
             options: gradAllOptions
         )
     }
 
-    // Top-left Liquid Glass studio refraction wash on Space Black chassis
+    // Top-left Liquid Glass studio refraction wash on Apple Music Red chassis
     let titaniumSheenColors = [
-        CGColor(srgbRed: 0.78, green: 0.84, blue: 0.94, alpha: 0.16),
-        CGColor(srgbRed: 0.36, green: 0.41, blue: 0.50, alpha: 0.05),
-        CGColor(srgbRed: 0.05, green: 0.05, blue: 0.06, alpha: 0.0)
+        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.24),
+        CGColor(srgbRed: 1.00, green: 0.68, blue: 0.78, alpha: 0.09),
+        CGColor(srgbRed: 0.98, green: 0.18, blue: 0.34, alpha: 0.0)
     ] as CFArray
     if let titaniumGrad = CGGradient(colorsSpace: colorSpace, colors: titaniumSheenColors, locations: [0.0, 0.48, 1.0]) {
         let glowCenter = CGPoint(x: bodyRect.minX + bodySize * 0.20, y: bodyRect.maxY - bodySize * 0.16)
@@ -119,11 +119,11 @@ func renderIcon(size: Int) -> Data? {
         )
     }
 
-    // Subtle bottom-right internal bounce reflection inside dark glass slab
+    // Subtle bottom-right internal bounce reflection inside luminous chassis
     let bounceSheenColors = [
-        CGColor(srgbRed: 0.68, green: 0.78, blue: 0.95, alpha: 0.085),
-        CGColor(srgbRed: 0.24, green: 0.30, blue: 0.40, alpha: 0.025),
-        CGColor(srgbRed: 0.02, green: 0.02, blue: 0.03, alpha: 0.0)
+        CGColor(srgbRed: 1.00, green: 0.48, blue: 0.62, alpha: 0.15),
+        CGColor(srgbRed: 0.92, green: 0.12, blue: 0.28, alpha: 0.04),
+        CGColor(srgbRed: 0.80, green: 0.04, blue: 0.20, alpha: 0.0)
     ] as CFArray
     if let bounceGrad = CGGradient(colorsSpace: colorSpace, colors: bounceSheenColors, locations: [0.0, 0.50, 1.0]) {
         let bounceCenter = CGPoint(x: bodyRect.maxX - bodySize * 0.18, y: bodyRect.minY + bodySize * 0.16)
@@ -135,11 +135,11 @@ func renderIcon(size: Int) -> Data? {
         )
     }
 
-    // Restrained deep-graphite center depth halo behind aperture
+    // Luminous center depth halo behind aperture
     let depthGlowColors = [
-        CGColor(srgbRed: 0.84, green: 0.90, blue: 0.99, alpha: 0.18),
-        CGColor(srgbRed: 0.44, green: 0.50, blue: 0.62, alpha: 0.065),
-        CGColor(srgbRed: 0.08, green: 0.09, blue: 0.11, alpha: 0.0)
+        CGColor(srgbRed: 1.00, green: 0.48, blue: 0.62, alpha: 0.26),
+        CGColor(srgbRed: 0.96, green: 0.18, blue: 0.34, alpha: 0.09),
+        CGColor(srgbRed: 0.82, green: 0.05, blue: 0.22, alpha: 0.0)
     ] as CFArray
     if let depthGrad = CGGradient(colorsSpace: colorSpace, colors: depthGlowColors, locations: [0.0, 0.46, 1.0]) {
         let glowCenter = CGPoint(x: s * 0.51, y: s * 0.50)
@@ -224,10 +224,10 @@ func renderIcon(size: Int) -> Data? {
         ctx.setShadow(
             offset: CGSize(width: 0, height: -s * 0.004),
             blur: s * 0.012,
-            color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.55)
+            color: CGColor(srgbRed: 0.35, green: 0.02, blue: 0.08, alpha: 0.50)
         )
         ctx.addPath(strokedRingHalo)
-        ctx.setFillColor(CGColor(srgbRed: 0.78, green: 0.85, blue: 0.96, alpha: 0.06))
+        ctx.setFillColor(CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.08))
         ctx.fillPath()
         ctx.restoreGState()
     }
@@ -237,9 +237,9 @@ func renderIcon(size: Int) -> Data? {
     ctx.addPath(strokedRingHalo)
     ctx.clip()
     let ringColors = [
-        CGColor(srgbRed: 0.96, green: 0.98, blue: 1.00, alpha: 0.38),
-        CGColor(srgbRed: 0.76, green: 0.83, blue: 0.94, alpha: 0.10),
-        CGColor(srgbRed: 0.88, green: 0.94, blue: 1.00, alpha: 0.28)
+        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.42),
+        CGColor(srgbRed: 1.00, green: 0.88, blue: 0.92, alpha: 0.14),
+        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.32)
     ] as CFArray
     if let ringGrad = CGGradient(colorsSpace: colorSpace, colors: ringColors, locations: [0.0, 0.52, 1.0]) {
         ctx.drawLinearGradient(
@@ -267,17 +267,17 @@ func renderIcon(size: Int) -> Data? {
     // 3A. Grounding shadow + transmitted Liquid Glass caustic bloom beneath D-ribbon
     // (Cast using an exterior clip so the translucent glass interior isn't muddied by solid shadow fill)
     if size >= 32 {
-        // Deep elevation shadow onto Space Black slab
+        // Deep elevation shadow onto Apple Music Red chassis
         ctx.saveGState()
         ctx.addPath(outsideDClip)
         ctx.clip(using: .evenOdd)
         ctx.setShadow(
             offset: CGSize(width: 0, height: -s * 0.018),
             blur: s * 0.038,
-            color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.82)
+            color: CGColor(srgbRed: 0.36, green: 0.02, blue: 0.09, alpha: 0.74)
         )
         ctx.addPath(strokedDRibbon)
-        ctx.setFillColor(CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 1.0))
+        ctx.setFillColor(CGColor(srgbRed: 0.36, green: 0.02, blue: 0.09, alpha: 1.0))
         ctx.fillPath()
         ctx.restoreGState()
 
@@ -288,10 +288,10 @@ func renderIcon(size: Int) -> Data? {
         ctx.setShadow(
             offset: CGSize(width: s * 0.006, height: -s * 0.008),
             blur: s * 0.030,
-            color: CGColor(srgbRed: 0.86, green: 0.93, blue: 1.00, alpha: 0.26)
+            color: CGColor(srgbRed: 1.00, green: 0.75, blue: 0.84, alpha: 0.30)
         )
         ctx.addPath(strokedDRibbon)
-        ctx.setFillColor(CGColor(srgbRed: 0.92, green: 0.96, blue: 1.00, alpha: 1.0))
+        ctx.setFillColor(CGColor(srgbRed: 1.00, green: 0.96, blue: 0.98, alpha: 1.0))
         ctx.fillPath()
         ctx.restoreGState()
     }
@@ -326,10 +326,10 @@ func renderIcon(size: Int) -> Data? {
     // Luminous pearl-crystal interior (~0.80-0.88) so the 1.00 pure-white liquid meniscus lip
     // pops crisply all the way around (including top-left shoulder & rounded tips)
     let ribbonColors = [
-        CGColor(srgbRed: 0.93, green: 0.96, blue: 1.00, alpha: 0.80),
-        CGColor(srgbRed: 0.85, green: 0.90, blue: 0.98, alpha: 0.72),
-        CGColor(srgbRed: 0.79, green: 0.85, blue: 0.95, alpha: 0.68),
-        CGColor(srgbRed: 0.88, green: 0.94, blue: 1.00, alpha: 0.78)
+        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.96),
+        CGColor(srgbRed: 0.97, green: 0.98, blue: 1.00, alpha: 0.90),
+        CGColor(srgbRed: 0.92, green: 0.94, blue: 0.98, alpha: 0.86),
+        CGColor(srgbRed: 0.98, green: 0.99, blue: 1.00, alpha: 0.94)
     ] as CFArray
     if let ribGrad = CGGradient(colorsSpace: colorSpace, colors: ribbonColors, locations: [0.0, 0.38, 0.72, 1.0]) {
         ctx.drawLinearGradient(
@@ -483,10 +483,10 @@ func renderIcon(size: Int) -> Data? {
     ctx.setShadow(
         offset: CGSize(width: 0, height: -s * 0.014),
         blur: s * 0.036,
-        color: CGColor(srgbRed: 0.0, green: 0.0, blue: 0.0, alpha: 0.82)
+        color: CGColor(srgbRed: 0.36, green: 0.02, blue: 0.09, alpha: 0.75)
     )
     ctx.addPath(playPath)
-    ctx.setFillColor(CGColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 1.0))
+    ctx.setFillColor(CGColor(srgbRed: 0.36, green: 0.02, blue: 0.09, alpha: 1.0))
     ctx.fillPath()
     ctx.restoreGState()
 
@@ -494,7 +494,7 @@ func renderIcon(size: Int) -> Data? {
     ctx.setShadow(
         offset: .zero,
         blur: s * 0.028,
-        color: CGColor(srgbRed: 0.92, green: 0.96, blue: 1.00, alpha: 0.32)
+        color: CGColor(srgbRed: 1.00, green: 0.80, blue: 0.88, alpha: 0.35)
     )
     ctx.addPath(playPath)
     ctx.setFillColor(CGColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 1.0))
@@ -578,9 +578,9 @@ func renderIcon(size: Int) -> Data? {
     ctx.addPath(strokedSquircleRim)
     ctx.clip()
     let rimColors = [
-        CGColor(srgbRed: 0.98, green: 0.99, blue: 1.00, alpha: 0.56),
-        CGColor(srgbRed: 0.80, green: 0.85, blue: 0.94, alpha: 0.12),
-        CGColor(srgbRed: 0.86, green: 0.92, blue: 1.00, alpha: 0.34)
+        CGColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.48),
+        CGColor(srgbRed: 1.00, green: 0.70, blue: 0.80, alpha: 0.10),
+        CGColor(srgbRed: 1.00, green: 0.88, blue: 0.94, alpha: 0.28)
     ] as CFArray
     if let rimGrad = CGGradient(colorsSpace: colorSpace, colors: rimColors, locations: [0.0, 0.52, 1.0]) {
         ctx.drawLinearGradient(
