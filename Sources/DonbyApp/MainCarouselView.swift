@@ -7,6 +7,7 @@ import DonbyNetwork
 /// Captures macOS two-finger trackpad horizontal swipes over its host bounds without
 /// intercepting vertical scrolling or button hit-testing.
 private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
+    let isEnabled: Bool
     let onSwipeNext: () -> Void
     let onSwipePrev: () -> Void
 
@@ -16,13 +17,22 @@ private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
 
     func makeNSView(context: Context) -> AnchorNSView {
         let view = AnchorNSView()
-        context.coordinator.attach(to: view)
+        context.coordinator.anchorView = view
+        if isEnabled {
+            context.coordinator.attach(to: view)
+        }
         return view
     }
 
     func updateNSView(_ nsView: AnchorNSView, context: Context) {
         context.coordinator.onSwipeNext = onSwipeNext
         context.coordinator.onSwipePrev = onSwipePrev
+        context.coordinator.anchorView = nsView
+        if isEnabled {
+            context.coordinator.attach(to: nsView)
+        } else {
+            context.coordinator.detach()
+        }
     }
 
     static func dismantleNSView(_ nsView: AnchorNSView, coordinator: Coordinator) {
@@ -36,7 +46,7 @@ private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
     final class Coordinator {
         var onSwipeNext: () -> Void
         var onSwipePrev: () -> Void
-        private weak var anchorView: NSView?
+        weak var anchorView: NSView?
         private var monitor: Any?
         private var accumulatedDeltaX: CGFloat = 0
         private var didFireForCurrentSwipe: Bool = false
@@ -48,6 +58,7 @@ private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
         }
 
         func attach(to view: NSView) {
+            guard monitor == nil else { return }
             detach()
             self.anchorView = view
             monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
@@ -64,6 +75,14 @@ private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
         }
 
         private func handleScrollWheel(_ event: NSEvent) -> NSEvent? {
+            let dx = event.scrollingDeltaX
+            let dy = event.scrollingDeltaY
+
+            // Early fast-path exit: let vertical page scrolling pass through instantly without coordinate math
+            guard abs(dx) > abs(dy) * 1.25 && abs(dx) > 1.0 else {
+                return event
+            }
+
             guard let view = anchorView,
                   let win = view.window,
                   event.window === win,
@@ -76,9 +95,6 @@ private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
                 return event
             }
 
-            let dx = event.scrollingDeltaX
-            let dy = event.scrollingDeltaY
-
             // Reset state at gesture start / completion
             if event.phase == .began {
                 accumulatedDeltaX = 0
@@ -86,11 +102,6 @@ private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
             } else if event.phase == .ended || event.phase == .cancelled {
                 accumulatedDeltaX = 0
                 didFireForCurrentSwipe = false
-            }
-
-            // Let vertical page scrolling pass through untouched
-            guard abs(dx) > abs(dy) * 1.15, abs(dx) > 0.4 else {
-                return event
             }
 
             // Ignore post-lift trackpad inertia so one flick advances exactly one poster
@@ -306,10 +317,12 @@ public struct MainCarouselView: View {
             .frame(height: 365)
             .background(
                 TrackpadHorizontalSwipeDetector(
+                    isEnabled: isHovering,
                     onSwipeNext: { stepSlide(1) },
                     onSwipePrev: { stepSlide(-1) }
                 )
             )
+            .onHover { isHovering = $0 }
             .gesture(
                 DragGesture(minimumDistance: 28)
                     .onEnded { val in

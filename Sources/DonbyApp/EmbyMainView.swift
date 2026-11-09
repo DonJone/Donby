@@ -16,8 +16,11 @@ public struct EmbyMainView: View {
             if let library = appState.selectedLibrary {
                 MLibListView(library: library)
             } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 22) {
+                VStack(spacing: 0) {
+                    embyTopToolbar
+
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 22) {
                             if let server = appState.activeServer, server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                 unconfiguredServerHero(server: server)
                                     .padding(.horizontal, 24)
@@ -64,6 +67,7 @@ public struct EmbyMainView: View {
                                             .padding(.horizontal, 24)
                                             .padding(.vertical, 8)
                                         }
+                                        .frame(height: 128)
                                     }
                                 }
 
@@ -85,6 +89,7 @@ public struct EmbyMainView: View {
                                             .padding(.horizontal, 24)
                                             .padding(.vertical, 8)
                                         }
+                                        .frame(height: 198)
                                     }
                                 }
 
@@ -106,6 +111,7 @@ public struct EmbyMainView: View {
                                             .padding(.horizontal, 24)
                                             .padding(.vertical, 8)
                                         }
+                                        .frame(height: 198)
                                     }
                                 }
 
@@ -130,24 +136,23 @@ public struct EmbyMainView: View {
                                                 .padding(.horizontal, 24)
                                                 .padding(.vertical, 8)
                                             }
+                                            .frame(height: 285)
                                         }
                                     }
                                 }
                             }
                         }
-                        .padding(.top, 6)
+                        .padding(.top, 12)
                         .padding(.bottom, 36)
                     }
-                    .safeAreaInset(edge: .top, spacing: 0) {
-                        embyTopToolbar
-                    }
-                    .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
             }
+        }
     }
 
     private var embyTopToolbar: some View {
-        DonbyGlassContainer(spacing: 9) {
         HStack(spacing: 9) {
             if appState.isSidebarCollapsed {
                 Button {
@@ -294,19 +299,14 @@ public struct EmbyMainView: View {
                 width: 185
             )
         }
-        }
         .padding(.horizontal, 24)
         .frame(height: 54)
-        .background(
-            LinearGradient(
-                colors: [
-                    DonbyGlassPalette.canvas(isLight: appState.isLightMode).opacity(0.92),
-                    DonbyGlassPalette.canvas(isLight: appState.isLightMode).opacity(0.40),
-                    Color.clear
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
+        .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+        .overlay(
+            Rectangle()
+                .fill(DonbyGlassPalette.separator(isLight: appState.isLightMode))
+                .frame(height: 0.6),
+            alignment: .bottom
         )
     }
 

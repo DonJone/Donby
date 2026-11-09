@@ -5,7 +5,7 @@ import DonbyCore
 import DonbyNetwork
 
 // MARK: - Native Artwork & Local Poster Cache
-public final class ArtworkImageCache {
+public final class ArtworkImageCache: @unchecked Sendable {
     public static let shared = ArtworkImageCache()
     private let memoryCache = NSCache<NSString, NSImage>()
     private let diskQueue = DispatchQueue(label: "com.don.ArtworkDiskCache", qos: .utility)
@@ -25,21 +25,47 @@ public final class ArtworkImageCache {
 
     private func diskFileName(for key: String) -> String {
         let hash = key.utf8.reduce(5381) { ($0 << 5) &+ $0 &+ Int($1) }
-        let cleanPrefix = key.components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .joined()
-            .prefix(24)
+        let cleanPrefix = String(key.filter { $0.isLetter || $0.isNumber }.prefix(24))
         return "\(cleanPrefix)_\(abs(hash)).img"
+    }
+
+    /// Instantaneous O(1) in-memory lookup. Completely safe to call on Main Thread in body or computed properties.
+    public func imageFromMemory(for key: String) -> NSImage? {
+        memoryCache.object(forKey: key as NSString)
+    }
+
+    /// Asynchronous disk lookup that never blocks the Main Thread or scroll animations.
+    public func imageFromDiskAsync(for key: String) async -> NSImage? {
+        if let mem = memoryCache.object(forKey: key as NSString) {
+            return mem
+        }
+        let fileURL = cacheDirectoryURL.appendingPathComponent(diskFileName(for: key))
+        return await withCheckedContinuation { continuation in
+            diskQueue.async { [weak self] in
+                guard let self else { continuation.resume(returning: nil); return }
+                if let data = try? Data(contentsOf: fileURL),
+                   let img = NSImage(data: data) {
+                    self.memoryCache.setObject(img, forKey: key as NSString, cost: data.count)
+                    continuation.resume(returning: img)
+                } else {
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
     }
 
     public func image(for key: String) -> NSImage? {
         if let mem = memoryCache.object(forKey: key as NSString) {
             return mem
         }
-        let fileURL = cacheDirectoryURL.appendingPathComponent(diskFileName(for: key))
-        if let data = try? Data(contentsOf: fileURL),
-           let img = NSImage(data: data) {
-            memoryCache.setObject(img, forKey: key as NSString, cost: data.count)
-            return img
+        // Restrict synchronous disk I/O to background threads so main-thread UI never blocks
+        if !Thread.isMainThread {
+            let fileURL = cacheDirectoryURL.appendingPathComponent(diskFileName(for: key))
+            if let data = try? Data(contentsOf: fileURL),
+               let img = NSImage(data: data) {
+                memoryCache.setObject(img, forKey: key as NSString, cost: data.count)
+                return img
+            }
         }
         return nil
     }
@@ -957,49 +983,45 @@ public struct MediaArtworkView: View {
     }
 
     public var body: some View {
-        GeometryReader { geo in
-            ZStack {
-                if let img = resolvedImage {
-                    if kind == .primary || img.size.width >= img.size.height * 1.02 {
-                        Image(nsImage: img)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: geo.size.width, height: geo.size.height)
-                            .clipped()
-                    } else {
-                        // Fallback Widescreen Composition when only a portrait poster exists
-                        ZStack(alignment: .center) {
-                            Image(nsImage: img)
-                                .resizable()
-                                .scaledToFill()
-                                .frame(width: geo.size.width, height: geo.size.height)
-                                .blur(radius: 22)
-                                .scaleEffect(1.18)
-                                .overlay(Color.black.opacity(0.24))
-                                .clipped()
-
-                            Image(nsImage: img)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(height: geo.size.height)
-                        }
-                        .frame(width: geo.size.width, height: geo.size.height)
-                        .clipped()
-                    }
-                } else {
-                    ZStack {
-                        Color(red: 0.88, green: 0.89, blue: 0.92)
-                        Image(systemName: "film")
-                            .font(.system(size: 24, weight: .light))
-                            .foregroundStyle(Color.black.opacity(0.18))
-                    }
+        ZStack {
+            if let img = resolvedImage {
+                Image(nsImage: img)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+            } else {
+                ZStack {
+                    Color(red: 0.88, green: 0.89, blue: 0.92).opacity(0.35)
+                    Image(systemName: "film")
+                        .font(.system(size: 22, weight: .light))
+                        .foregroundStyle(Color.black.opacity(0.18))
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
         .task(id: "\(server?.activeBaseURL ?? "")|\(item.id)|\(kind.rawValue)") {
             if let key = localPosterKey, let localImg = ArtworkImageCache.shared.localPoster(key) {
-                self.loadedImage = localImg
+                if self.loadedImage == nil { self.loadedImage = localImg }
                 return
+            }
+            if resolvedImage != nil {
+                // Already resolved from in-memory cache; avoid mutating @State which triggers extra render passes
+                return
+            }
+            // Fast disk check via direct IDs first in background
+            for key in ["item_\(item.id)_\(kind.rawValue)", "item_\(item.id)", item.id, "emby_\(item.id)"] {
+                if Task.isCancelled { return }
+                if let diskImg = await ArtworkImageCache.shared.imageFromDiskAsync(for: key) {
+                    if !Task.isCancelled {
+                        await MainActor.run {
+                            self.loadedImage = diskImg
+                        }
+                    }
+                    return
+                }
             }
             let urls = candidateURLs
             guard let server else { return }
@@ -1023,7 +1045,11 @@ public struct MediaArtworkView: View {
                             "emby_\(self.item.id)"
                         ]
                         ArtworkImageCache.shared.storeRawData(data, for: url.absoluteString, aliases: aliases)
-                        self.loadedImage = img
+                        if !Task.isCancelled {
+                            await MainActor.run {
+                                self.loadedImage = img
+                            }
+                        }
                         return
                     }
                 } catch {
@@ -1035,20 +1061,47 @@ public struct MediaArtworkView: View {
 
     private var resolvedImage: NSImage? {
         if let loadedImage { return loadedImage }
-        for url in candidateURLs {
-            if let cached = ArtworkImageCache.shared.image(for: url.absoluteString) {
-                return cached
-            }
-        }
-        for key in ["item_\(item.id)_\(kind.rawValue)", "item_\(item.id)", item.id, "emby_\(item.id)"] {
-            if let cached = ArtworkImageCache.shared.image(for: key) {
-                return cached
-            }
-        }
         if let key = localPosterKey {
-            return ArtworkImageCache.shared.localPoster(key)
+            if let local = ArtworkImageCache.shared.localPoster(key) { return local }
+        }
+        // Fast O(1) in-memory alias lookups before building candidate URLs
+        let primaryKey = "item_\(item.id)_\(kind.rawValue)"
+        if let cached = ArtworkImageCache.shared.imageFromMemory(for: primaryKey) { return cached }
+        if let cached = ArtworkImageCache.shared.imageFromMemory(for: item.id) { return cached }
+        if let cached = ArtworkImageCache.shared.imageFromMemory(for: "item_\(item.id)") { return cached }
+        if let cached = ArtworkImageCache.shared.imageFromMemory(for: "emby_\(item.id)") { return cached }
+
+        // Only build and check URLs if direct item key missed in memory
+        for url in candidateURLs {
+            if let cached = ArtworkImageCache.shared.imageFromMemory(for: url.absoluteString) {
+                return cached
+            }
         }
         return nil
+    }
+}
+
+// MARK: - High-Performance Fractional Progress Bar (Zero GeometryReader Layout Invalidation)
+public struct FractionalProgressBar: View {
+    public var fraction: Double
+    public var color: Color
+    public var height: CGFloat = 3.0
+
+    public init(fraction: Double, color: Color, height: CGFloat = 3.0) {
+        self.fraction = fraction
+        self.color = color
+        self.height = height
+    }
+
+    public var body: some View {
+        Capsule()
+            .fill(Color.white.opacity(0.28))
+            .overlay(
+                Capsule()
+                    .fill(color)
+                    .scaleEffect(x: CGFloat(max(0.0, min(1.0, fraction))), y: 1.0, anchor: .leading)
+            )
+            .frame(height: height)
     }
 }
 
@@ -1138,15 +1191,7 @@ public struct PosterCardView: View {
                         }
 
                         if item.progressFraction > 0 && item.progressFraction < 0.99 {
-                            GeometryReader { barGeo in
-                                ZStack(alignment: .leading) {
-                                    Capsule().fill(Color.white.opacity(0.28))
-                                    Capsule()
-                                        .fill(appState.accentColor)
-                                        .frame(width: barGeo.size.width * item.progressFraction)
-                                }
-                            }
-                            .frame(height: 3)
+                            FractionalProgressBar(fraction: item.progressFraction, color: appState.accentColor, height: 3)
                         }
                     }
                     .padding(7)
@@ -1179,9 +1224,9 @@ public struct PosterCardView: View {
                     )
             )
             .shadow(
-                color: Color.black.opacity(isHovered ? 0.35 : 0.20),
-                radius: isHovered ? 10 : 4,
-                y: isHovered ? 4 : 2
+                color: isHovered ? Color.black.opacity(0.35) : Color.clear,
+                radius: isHovered ? 8 : 0,
+                y: isHovered ? 4 : 0
             )
             .scaleEffect(isHovered ? 1.02 : 1.0)
             .animation(.easeOut(duration: 0.18), value: isHovered)
@@ -1266,29 +1311,22 @@ public struct LandscapeCardView: View {
                     Spacer()
 
                     if item.progressFraction > 0 {
-                        GeometryReader { geo in
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(Color.white.opacity(0.28))
-                                Capsule()
-                                    .fill(appState.accentColor)
-                                    .frame(width: geo.size.width * item.progressFraction)
-                            }
-                        }
-                        .frame(height: 3.5)
-                        .padding(8)
+                        FractionalProgressBar(fraction: item.progressFraction, color: appState.accentColor, height: 3.5)
+                            .padding(8)
                     }
                 }
 
                 ZStack {
                     Circle()
-                        .fill(.ultraThinMaterial)
+                        .fill(Color.black.opacity(isHovered ? 0.68 : 0.45))
+                        .overlay(Circle().strokeBorder(Color.white.opacity(isHovered ? 0.40 : 0.22), lineWidth: 0.8))
                         .frame(width: 36, height: 36)
                     Image(systemName: "play.fill")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(.white)
                         .offset(x: 1)
                 }
-                .opacity(isHovered ? 1.0 : 0.72)
+                .opacity(isHovered ? 1.0 : 0.78)
             }
             .frame(width: width, height: height)
             .overlay(
@@ -1299,9 +1337,9 @@ public struct LandscapeCardView: View {
                     )
             )
             .shadow(
-                color: Color.black.opacity(isHovered ? 0.35 : 0.20),
-                radius: isHovered ? 10 : 4,
-                y: isHovered ? 4 : 2
+                color: isHovered ? Color.black.opacity(0.35) : Color.clear,
+                radius: isHovered ? 8 : 0,
+                y: isHovered ? 4 : 0
             )
             .scaleEffect(isHovered ? 1.02 : 1.0)
             .animation(.easeOut(duration: 0.18), value: isHovered)
@@ -1388,9 +1426,9 @@ public struct LibraryCardView: View {
                     )
             )
             .shadow(
-                color: Color.black.opacity(isHovered ? 0.35 : 0.20),
-                radius: isHovered ? 10 : 4,
-                y: isHovered ? 4 : 2
+                color: isHovered ? Color.black.opacity(0.35) : Color.clear,
+                radius: isHovered ? 8 : 0,
+                y: isHovered ? 4 : 0
             )
             .scaleEffect(isHovered ? 1.02 : 1.0)
             .animation(.easeOut(duration: 0.18), value: isHovered)
