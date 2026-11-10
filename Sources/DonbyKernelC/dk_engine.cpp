@@ -2864,3 +2864,131 @@ int64_t dk_player_get_total_bytes_read(DKPlayer* player) {
     }
     return cur_bytes;
 }
+
+CGImageRef dk_extract_video_thumbnail(const char* file_path_or_url, double target_sec) {
+    if (!file_path_or_url) return nullptr;
+    std::string path = dk_normalize_path_or_url(file_path_or_url);
+    if (path.empty()) return nullptr;
+
+    AVFormatContext* fmt_ctx = nullptr;
+    AVDictionary* opts = nullptr;
+    av_dict_set(&opts, "scan_all_pmts", "1", 0);
+    if (avformat_open_input(&fmt_ctx, path.c_str(), nullptr, &opts) < 0) {
+        if (opts) av_dict_free(&opts);
+        return nullptr;
+    }
+    if (opts) av_dict_free(&opts);
+
+    if (avformat_find_stream_info(fmt_ctx, nullptr) < 0) {
+        avformat_close_input(&fmt_ctx);
+        return nullptr;
+    }
+
+    int video_stream_idx = av_find_best_stream(fmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    if (video_stream_idx < 0) {
+        avformat_close_input(&fmt_ctx);
+        return nullptr;
+    }
+
+    AVStream* st = fmt_ctx->streams[video_stream_idx];
+    const AVCodec* decoder = avcodec_find_decoder(st->codecpar->codec_id);
+    if (!decoder) {
+        avformat_close_input(&fmt_ctx);
+        return nullptr;
+    }
+
+    AVCodecContext* codec_ctx = avcodec_alloc_context3(decoder);
+    if (!codec_ctx) {
+        avformat_close_input(&fmt_ctx);
+        return nullptr;
+    }
+    if (avcodec_parameters_to_context(codec_ctx, st->codecpar) < 0 ||
+        avcodec_open2(codec_ctx, decoder, nullptr) < 0) {
+        avcodec_free_context(&codec_ctx);
+        avformat_close_input(&fmt_ctx);
+        return nullptr;
+    }
+
+    if (target_sec > 0.05) {
+        int64_t ts = static_cast<int64_t>(target_sec * AV_TIME_BASE);
+        av_seek_frame(fmt_ctx, -1, ts, AVSEEK_FLAG_BACKWARD);
+        avcodec_flush_buffers(codec_ctx);
+    }
+
+    AVPacket* pkt = av_packet_alloc();
+    AVFrame* frame = av_frame_alloc();
+    bool got_frame = false;
+
+    int max_pkts = 200;
+    while (max_pkts-- > 0 && av_read_frame(fmt_ctx, pkt) >= 0) {
+        if (pkt->stream_index == video_stream_idx) {
+            if (avcodec_send_packet(codec_ctx, pkt) == 0) {
+                if (avcodec_receive_frame(codec_ctx, frame) == 0) {
+                    got_frame = true;
+                    av_packet_unref(pkt);
+                    break;
+                }
+            }
+        }
+        av_packet_unref(pkt);
+    }
+
+    if (!got_frame) {
+        avcodec_send_packet(codec_ctx, nullptr);
+        if (avcodec_receive_frame(codec_ctx, frame) == 0) {
+            got_frame = true;
+        }
+    }
+
+    CGImageRef result_cg = nullptr;
+    if (got_frame && frame->width > 0 && frame->height > 0) {
+        int src_w = frame->width;
+        int src_h = frame->height;
+        int dst_w = src_w;
+        int dst_h = src_h;
+        if (dst_w > 640) {
+            dst_h = (dst_h * 640) / dst_w;
+            dst_w = 640;
+        }
+        dst_w = (dst_w / 2) * 2;
+        dst_h = (dst_h / 2) * 2;
+        if (dst_w < 16) dst_w = 16;
+        if (dst_h < 16) dst_h = 16;
+
+        struct SwsContext* sws = sws_getContext(
+            src_w, src_h, (AVPixelFormat)frame->format,
+            dst_w, dst_h, AV_PIX_FMT_RGBA,
+            SWS_FAST_BILINEAR, nullptr, nullptr, nullptr
+        );
+
+        if (sws) {
+            std::vector<uint8_t> rgba_data(dst_w * dst_h * 4);
+            uint8_t* dst_data[4] = { rgba_data.data(), nullptr, nullptr, nullptr };
+            int dst_linesize[4] = { dst_w * 4, 0, 0, 0 };
+
+            sws_scale(sws, frame->data, frame->linesize, 0, src_h, dst_data, dst_linesize);
+            sws_freeContext(sws);
+
+            CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+            CFDataRef cf_data = CFDataCreate(kCFAllocatorDefault, rgba_data.data(), rgba_data.size());
+            CGDataProviderRef provider = CGDataProviderCreateWithCFData(cf_data);
+
+            result_cg = CGImageCreate(
+                dst_w, dst_h, 8, 32, dst_w * 4, cs,
+                static_cast<CGBitmapInfo>(kCGImageAlphaNoneSkipLast) | kCGBitmapByteOrderDefault,
+                provider, nullptr, true, kCGRenderingIntentDefault
+            );
+
+            CGDataProviderRelease(provider);
+            CFRelease(cf_data);
+            CGColorSpaceRelease(cs);
+        }
+    }
+
+    av_frame_free(&frame);
+    av_packet_free(&pkt);
+    avcodec_free_context(&codec_ctx);
+    avformat_close_input(&fmt_ctx);
+
+    return result_cg;
+}

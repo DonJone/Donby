@@ -429,6 +429,54 @@ public struct EmbyItem: Codable, Identifiable, Hashable, Sendable {
     public var isEpisode: Bool { type?.lowercased() == "episode" }
     public var isMovie: Bool { type?.lowercased() == "movie" }
 
+    public func withSeriesName(_ newSeriesName: String) -> EmbyItem {
+        EmbyItem(
+            id: id,
+            name: name,
+            originalTitle: originalTitle,
+            serverId: serverId,
+            type: type,
+            collectionType: collectionType,
+            overview: overview,
+            taglines: taglines,
+            genres: genres,
+            communityRating: communityRating,
+            criticRating: criticRating,
+            officialRating: officialRating,
+            productionYear: productionYear,
+            premiereDate: premiereDate,
+            endDate: endDate,
+            status: status,
+            runTimeTicks: runTimeTicks,
+            container: container,
+            path: path,
+            isFolder: isFolder,
+            parentId: parentId,
+            seriesId: seriesId,
+            seriesName: (seriesName != nil && !seriesName!.isEmpty) ? seriesName : newSeriesName,
+            seasonId: seasonId,
+            seasonName: seasonName,
+            indexNumber: indexNumber,
+            parentIndexNumber: parentIndexNumber,
+            childCount: childCount,
+            recursiveItemCount: recursiveItemCount,
+            imageTags: imageTags,
+            backdropImageTags: backdropImageTags,
+            parentBackdropItemId: parentBackdropItemId,
+            parentBackdropImageTags: parentBackdropImageTags,
+            seriesPrimaryImageTag: seriesPrimaryImageTag,
+            primaryImageAspectRatio: primaryImageAspectRatio,
+            userData: userData,
+            mediaSources: mediaSources,
+            mediaStreams: mediaStreams,
+            people: people,
+            studios: studios,
+            providerIds: providerIds,
+            chapters: chapters,
+            dateCreated: dateCreated
+        )
+    }
+
     public var episodeCodeString: String? {
         if let s = parentIndexNumber, let e = indexNumber { return String(format: "S%02dE%02d", s, e) }
         else if let e = indexNumber, isEpisode { return "第\(e)集" }

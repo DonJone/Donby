@@ -4,6 +4,7 @@ import AVFoundation
 import ImageIO
 import DonbyCore
 import DonbyNetwork
+import DonbyKernelC
 
 // MARK: - Native Artwork & Local Poster Cache
 public final class ArtworkImageCache: @unchecked Sendable {
@@ -2543,6 +2544,14 @@ public struct RecordArtworkThumbnailView: View {
         if let cached = ArtworkImageCache.shared.image(for: cacheKey) {
             return cached
         }
+        if let pKey = record.posterKey, let cached = ArtworkImageCache.shared.image(for: pKey) {
+            return cached
+        }
+        if let stream = record.streamURLString {
+            if let cached = ArtworkImageCache.shared.image(for: "local_frame_\(stream)") {
+                return cached
+            }
+        }
         if let urlStr = record.posterURL, let cached = ArtworkImageCache.shared.image(for: urlStr) {
             return cached
         }
@@ -2623,12 +2632,24 @@ public struct RecordArtworkThumbnailView: View {
     }
 
     private func extractLocalThumbnail(fileURL: URL) async -> NSImage? {
+        let path = fileURL.path
+        let pos = record.positionSeconds > 0 ? record.positionSeconds : 0.0
+
+        // 1. Native FFmpeg video frame extractor: supports MKV, MP4, MOV, TS, WebM etc.
+        // First tries stop frame (record.positionSeconds), then first keyframe (0.0s)
+        let unmanaged = dk_extract_video_thumbnail(path, pos) ?? (pos > 0.1 ? dk_extract_video_thumbnail(path, 0.0) : nil)
+        if let unmanaged {
+            let cgImg = unmanaged.takeRetainedValue()
+            return NSImage(cgImage: cgImg, size: NSSize(width: cgImg.width, height: cgImg.height))
+        }
+
+        // 2. Fallback to AVAssetImageGenerator for native Apple formats
         let asset = AVURLAsset(url: fileURL)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: 320, height: 480)
-        let pos = max(1.0, min(record.positionSeconds, 120.0))
-        let time = CMTime(seconds: pos, preferredTimescale: 600)
+        let fallbackPos = max(1.0, min(record.positionSeconds, 120.0))
+        let time = CMTime(seconds: fallbackPos, preferredTimescale: 600)
         do {
             let (cgImage, _) = try await generator.image(at: time)
             return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))

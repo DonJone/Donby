@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <CoreVideo/CoreVideo.h>
+#include <CoreGraphics/CoreGraphics.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -129,6 +130,8 @@ double        dk_player_get_buffered_duration(DKPlayer* player);
 double        dk_player_get_download_speed_mbs(DKPlayer* player);
 int64_t       dk_player_get_total_bytes_read(DKPlayer* player);
 void          dk_player_get_stats(DKPlayer* player, DKRuntimeStats* out_stats);
+
+CGImageRef    dk_extract_video_thumbnail(const char* file_path_or_url, double target_sec);
 
 #ifdef __cplusplus
 }

@@ -768,9 +768,10 @@ public struct DetailView: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 focusedEpisodeId = ep.id
+                let targetEp = (ep.seriesName == nil || ep.seriesName!.isEmpty) ? ep.withSeriesName(item.name) : ep
                 Task {
                     await appState.startPlayback(
-                        item: ep,
+                        item: targetEp,
                         episodesQueue: episodes,
                         audioStreamIndex: selectedAudioIndex,
                         subtitleStreamIndex: selectedSubtitleIndex

@@ -325,23 +325,66 @@ public final class AppState: ObservableObject {
     private func loadWatchHistoryFromDisk() {
         if let data = UserDefaults.standard.data(forKey: watchHistoryStorageKey),
            let decoded = try? JSONDecoder().decode([WatchRecordItem].self, from: data) {
-            var sanitized: [WatchRecordItem] = []
+            var sanitizedMap: [String: WatchRecordItem] = [:]
+            var order: [String] = []
+
             for var item in decoded {
-                if item.sourceType == "本地文件" || (item.streamURLString?.hasPrefix("/") == true) || item.title.contains(".mkv") || item.title.contains(".mp4") {
+                let isLocal = item.sourceType == "本地文件" ||
+                              item.sourceType == "Local" ||
+                              (item.streamURLString?.hasPrefix("/") == true) ||
+                              (item.streamURLString?.hasPrefix("file://") == true) ||
+                              (item.sourceType == "原画直链" && item.embyItemId == nil && (item.title.contains(".mkv") || item.title.contains(".mp4")))
+
+                if isLocal {
+                    item.sourceType = "本地文件"
+                    item.embyItemId = nil
+                    if let s = item.streamURLString, s.hasPrefix("file://") {
+                        item.streamURLString = URL(string: s)?.path ?? s
+                    }
                     let parsed = MediaTitleParser.parse(rawName: item.title)
                     if parsed.mainTitle != item.title {
                         item.title = parsed.mainTitle
                         item.subtitle = parsed.subTitle
                     }
+                } else if item.sourceType == "原画直链" || item.embyItemId != nil {
+                    item.sourceType = "Emby"
+                    if item.title.hasPrefix("第") && (item.title.hasSuffix("集") || item.title.contains("集")),
+                       let itemId = item.embyItemId, let sName = cachedSeriesNames[itemId], !sName.isEmpty {
+                        let epSub = (item.subtitle != nil && !item.subtitle!.isEmpty) ? "\(item.subtitle!) · \(item.title)" : item.title
+                        item.title = sName
+                        item.subtitle = epSub
+                    }
                 }
-                if item.sourceType == "Emby", item.title.hasPrefix("第"), let itemId = item.embyItemId, let sName = cachedSeriesNames[itemId], !sName.isEmpty {
-                    let epSub = (item.subtitle != nil && !item.subtitle!.isEmpty) ? "\(item.subtitle!) · \(item.title)" : item.title
-                    item.title = sName
-                    item.subtitle = epSub
+
+                let dedupKey: String
+                if item.sourceType == "本地文件" {
+                    let normPath = item.streamURLString ?? item.title
+                    dedupKey = "local:\(normPath)"
+                } else if let embyId = item.embyItemId, !embyId.isEmpty {
+                    dedupKey = "emby:\(embyId)"
+                } else {
+                    dedupKey = "url:\(item.streamURLString ?? item.title)"
                 }
-                sanitized.append(item)
+                item.id = dedupKey
+
+                if let existing = sanitizedMap[dedupKey] {
+                    var merged = existing
+                    if item.positionSeconds > existing.positionSeconds {
+                        merged.positionSeconds = item.positionSeconds
+                    }
+                    if item.lastWatchedAt > existing.lastWatchedAt {
+                        merged.lastWatchedAt = item.lastWatchedAt
+                    }
+                    if merged.subtitle == nil || merged.subtitle?.isEmpty == true {
+                        merged.subtitle = item.subtitle
+                    }
+                    sanitizedMap[dedupKey] = merged
+                } else {
+                    sanitizedMap[dedupKey] = item
+                    order.append(dedupKey)
+                }
             }
-            self.watchHistory = sanitized
+            self.watchHistory = order.compactMap { sanitizedMap[$0] }
         } else {
             self.watchHistory = []
         }
@@ -500,10 +543,31 @@ public final class AppState: ObservableObject {
         embyItemId: String? = nil,
         resolutionTag: String? = "4K UHD"
     ) {
-        guard duration > 0 else { return }
-        let recId = embyItemId ?? streamURLString ?? title
-        let now = Date()
+        guard duration > 0 || position > 0 else { return }
 
+        let isLocal = (sourceType == "本地文件" || sourceType == "Local") ||
+                      (streamURLString?.hasPrefix("/") == true) ||
+                      (streamURLString?.hasPrefix("file://") == true)
+
+        let normStreamPath: String? = {
+            guard let s = streamURLString else { return nil }
+            if s.hasPrefix("file://") { return URL(string: s)?.path ?? s }
+            return s
+        }()
+
+        let cleanSourceType = isLocal ? "本地文件" : (sourceType == "原画直链" ? "Emby" : sourceType)
+        let cleanEmbyId = isLocal ? nil : embyItemId
+
+        let recId: String
+        if isLocal {
+            recId = "local:\(normStreamPath ?? title)"
+        } else if let eId = cleanEmbyId, !eId.isEmpty {
+            recId = "emby:\(eId)"
+        } else {
+            recId = "url:\(normStreamPath ?? title)"
+        }
+
+        let now = Date()
         if lastRecordedWatchItemId == recId,
            abs(position - lastRecordedWatchPosition) < 3.0,
            now.timeIntervalSince(lastRecordedWatchDate) < 4.0 {
@@ -513,7 +577,25 @@ public final class AppState: ObservableObject {
         lastRecordedWatchPosition = position
         lastRecordedWatchDate = now
 
-        watchHistory.removeAll { $0.id == recId }
+        watchHistory.removeAll { existing in
+            if existing.id == recId { return true }
+            if isLocal {
+                if let exStream = existing.streamURLString {
+                    let exNorm = exStream.hasPrefix("file://") ? (URL(string: exStream)?.path ?? exStream) : exStream
+                    if exNorm == normStreamPath { return true }
+                }
+                if existing.sourceType == "本地文件" && existing.title == title {
+                    return true
+                }
+                if (existing.sourceType == "原画直链" || existing.sourceType == "本地文件") && (existing.title == title || existing.title.contains(title)) {
+                    return true
+                }
+            } else if let eId = cleanEmbyId {
+                if existing.embyItemId == eId { return true }
+            }
+            return false
+        }
+
         let record = WatchRecordItem(
             id: recId,
             title: title,
@@ -523,9 +605,9 @@ public final class AppState: ObservableObject {
             positionSeconds: position,
             durationSeconds: duration,
             lastWatchedAt: now,
-            sourceType: sourceType,
-            streamURLString: streamURLString,
-            embyItemId: embyItemId,
+            sourceType: cleanSourceType,
+            streamURLString: normStreamPath,
+            embyItemId: cleanEmbyId,
             resolutionTag: resolutionTag
         )
         watchHistory.insert(record, at: 0)
@@ -1117,18 +1199,26 @@ public final class AppState: ObservableObject {
             let recTitle: String
             let recSubtitle: String?
             if targetItem.isEpisode {
-                if let s = targetItem.seriesName, !s.isEmpty {
+                var sName = targetItem.seriesName?.trimmingCharacters(in: .whitespacesAndNewlines)
+                if sName == nil || sName!.isEmpty {
+                    sName = cachedSeriesNames[targetItem.id] ?? cachedSeriesNames[targetItem.seriesId ?? ""]
+                }
+                if (sName == nil || sName!.isEmpty), let sid = targetItem.seriesId, !sid.isEmpty {
+                    if let seriesDetail = try? await EmbyClient.shared.fetchItemDetail(server: server, itemId: sid) {
+                        sName = seriesDetail.name
+                    }
+                }
+                if let s = sName, !s.isEmpty {
                     cachedSeriesNames[targetItem.id] = s
+                    if let sid = targetItem.seriesId { cachedSeriesNames[sid] = s }
                     saveCachedSeriesNamesToDisk()
                 }
-                recTitle = targetItem.seriesName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                    ? targetItem.seriesName!
-                    : targetItem.name
+                recTitle = (sName != nil && !sName!.isEmpty) ? sName! : targetItem.name
                 var subParts: [String] = []
                 if let code = targetItem.episodeCodeString, !code.isEmpty {
                     subParts.append(code)
                 }
-                if !targetItem.name.isEmpty && !subParts.contains(targetItem.name) {
+                if !targetItem.name.isEmpty && !subParts.contains(targetItem.name) && targetItem.name != recTitle {
                     subParts.append(targetItem.name)
                 }
                 recSubtitle = subParts.isEmpty ? targetItem.resolutionBadge : subParts.joined(separator: " · ")

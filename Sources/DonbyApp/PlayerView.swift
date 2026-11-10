@@ -505,37 +505,7 @@ public struct PlayerView: View {
             // Update watch history periodically (every 5s) to avoid UI frame drops
             if abs(currentTime - lastRecordedPosition) >= 5.0 {
                 lastRecordedPosition = currentTime
-                let recTitle: String
-                let recSubtitle: String?
-                if currentItem.isEpisode {
-                    recTitle = currentItem.seriesName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                        ? currentItem.seriesName!
-                        : currentItem.name
-                    var subParts: [String] = []
-                    if let code = currentItem.episodeCodeString, !code.isEmpty {
-                        subParts.append(code)
-                    }
-                    if !currentItem.name.isEmpty && !subParts.contains(currentItem.name) {
-                        subParts.append(currentItem.name)
-                    }
-                    recSubtitle = subParts.isEmpty ? currentItem.resolutionBadge : subParts.joined(separator: " · ")
-                } else {
-                    recTitle = currentItem.name
-                    recSubtitle = currentItem.displaySubtitle.isEmpty ? currentItem.resolutionBadge : currentItem.displaySubtitle
-                }
-
-                appState.recordWatch(
-                    title: recTitle,
-                    subtitle: recSubtitle,
-                    posterKey: nil,
-                    posterURL: EmbyClient.shared.imageURL(server: session.server, item: currentItem, kind: .primary, maxWidth: 320)?.absoluteString,
-                    position: currentTime,
-                    duration: duration,
-                    sourceType: currentResource.isDirectStream ? "原画直链" : "Emby",
-                    streamURLString: currentResource.streamURL.absoluteString,
-                    embyItemId: currentItem.id,
-                    resolutionTag: kernelStats.is_hw_accelerated ? "HW 4K" : "4K UHD"
-                )
+                saveCurrentWatchProgress(isFinal: false)
             }
         }
         .onReceive(embySyncTimer) { _ in
@@ -1560,6 +1530,7 @@ public struct PlayerView: View {
         if isPlaying {
             dk_player_pause(handle)
             isPlaying = false
+            saveCurrentWatchProgress(isFinal: false)
             appState.flushWatchHistory()
         } else {
             dk_player_play(handle)
@@ -1799,38 +1770,7 @@ public struct PlayerView: View {
         if let mm = mouseMonitor { NSEvent.removeMonitor(mm); mouseMonitor = nil }
         if let km = keyMonitor { NSEvent.removeMonitor(km); keyMonitor = nil }
 
-        let recTitle: String
-        let recSubtitle: String?
-        if currentItem.isEpisode {
-            recTitle = currentItem.seriesName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                ? currentItem.seriesName!
-                : currentItem.name
-            var subParts: [String] = []
-            if let code = currentItem.episodeCodeString, !code.isEmpty {
-                subParts.append(code)
-            }
-            if !currentItem.name.isEmpty && !subParts.contains(currentItem.name) {
-                subParts.append(currentItem.name)
-            }
-            recSubtitle = subParts.isEmpty ? currentItem.resolutionBadge : subParts.joined(separator: " · ")
-        } else {
-            recTitle = currentItem.name
-            recSubtitle = currentItem.displaySubtitle.isEmpty ? currentItem.resolutionBadge : currentItem.displaySubtitle
-        }
-
-        appState.recordWatch(
-            title: recTitle,
-            subtitle: recSubtitle,
-            posterKey: nil,
-            posterURL: EmbyClient.shared.imageURL(server: session.server, item: currentItem, kind: .primary, maxWidth: 320)?.absoluteString,
-            position: currentTime,
-            duration: duration,
-            sourceType: currentResource.isDirectStream ? "原画直链" : "Emby",
-            streamURLString: currentResource.streamURL.absoluteString,
-            embyItemId: currentItem.id,
-            resolutionTag: kernelStats.is_hw_accelerated ? "HW 4K" : "4K UHD"
-        )
-        appState.flushWatchHistory()
+        saveCurrentWatchProgress(isFinal: true)
 
         if !session.server.host.isEmpty && !session.server.accessToken.isEmpty {
             let srv = session.server
@@ -1851,6 +1791,79 @@ public struct PlayerView: View {
 
         stopNativeKernel()
         appState.activePlayback = nil
+    }
+
+    private func saveCurrentWatchProgress(isFinal: Bool = false) {
+        guard duration > 0 || currentTime > 0 else { return }
+
+        let isLocal = currentResource.streamURL.isFileURL ||
+                      currentResource.streamURL.scheme == "file" ||
+                      currentResource.streamURL.path.hasPrefix("/")
+        let isEmby = !isLocal && !session.server.host.isEmpty && session.server.host != "127.0.0.1" && session.server.host != "local"
+
+        // Capture stop frame / current video snapshot for local files
+        if isLocal {
+            let localPath = currentResource.streamURL.path
+            if let snapshot = DKMetalLayerView.activeInstance?.captureSnapshotImage() {
+                ArtworkImageCache.shared.store(snapshot, for: "local_frame_\(localPath)", aliases: ["record_thumb_local:\(localPath)_", "local:\(localPath)"])
+            }
+        }
+
+        let recTitle: String
+        let recSubtitle: String?
+
+        if isLocal {
+            let localPath = currentResource.streamURL.path
+            let parsed = MediaTitleParser.parse(rawName: localPath.components(separatedBy: "/").last ?? currentItem.name)
+            recTitle = parsed.mainTitle
+            recSubtitle = parsed.subTitle
+        } else if currentItem.isEpisode {
+            let sName: String? = {
+                if let s = currentItem.seriesName, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return s
+                }
+                if let s = appState.cachedSeriesNames[currentItem.id], !s.isEmpty {
+                    return s
+                }
+                if let sid = currentItem.seriesId, let s = appState.cachedSeriesNames[sid], !s.isEmpty {
+                    return s
+                }
+                return nil
+            }()
+            recTitle = sName ?? currentItem.name
+            var subParts: [String] = []
+            if let code = currentItem.episodeCodeString, !code.isEmpty {
+                subParts.append(code)
+            }
+            if !currentItem.name.isEmpty && !subParts.contains(currentItem.name) && currentItem.name != recTitle {
+                subParts.append(currentItem.name)
+            }
+            recSubtitle = subParts.isEmpty ? currentItem.resolutionBadge : subParts.joined(separator: " · ")
+        } else {
+            recTitle = currentItem.name
+            recSubtitle = currentItem.displaySubtitle.isEmpty ? currentItem.resolutionBadge : currentItem.displaySubtitle
+        }
+
+        let resolvedSourceType = isLocal ? "本地文件" : (isEmby ? "Emby" : "网络直链")
+        let streamStr = isLocal ? currentResource.streamURL.path : currentResource.streamURL.absoluteString
+        let embyId = isLocal ? nil : (isEmby ? currentItem.id : nil)
+
+        appState.recordWatch(
+            title: recTitle,
+            subtitle: recSubtitle,
+            posterKey: isLocal ? "local_frame_\(streamStr)" : nil,
+            posterURL: isEmby ? EmbyClient.shared.imageURL(server: session.server, item: currentItem, kind: .primary, maxWidth: 320)?.absoluteString : nil,
+            position: currentTime,
+            duration: duration > 0 ? duration : 3600,
+            sourceType: resolvedSourceType,
+            streamURLString: streamStr,
+            embyItemId: embyId,
+            resolutionTag: isLocal ? (kernelStats.is_hw_accelerated ? "本地 4K" : "本地文件") : (kernelStats.is_hw_accelerated ? "HW 4K" : "4K UHD")
+        )
+
+        if isFinal {
+            appState.flushWatchHistory()
+        }
     }
 
     private var playerStreamMetaSubtitle: String {

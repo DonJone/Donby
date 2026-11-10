@@ -1394,9 +1394,9 @@ public struct RecordsView: View {
     private var filteredRecords: [WatchRecordItem] {
         var list = appState.watchHistory
         if filterMode == "Emby" {
-            list = list.filter { $0.sourceType == "Emby" }
+            list = list.filter { $0.sourceType == "Emby" || $0.sourceType == "UHDNow" || $0.embyItemId != nil }
         } else if filterMode == "本地与直链" {
-            list = list.filter { $0.sourceType != "Emby" }
+            list = list.filter { $0.embyItemId == nil && ($0.sourceType == "本地文件" || $0.sourceType == "网络直链" || $0.sourceType == "Local") }
         }
         return list
     }
