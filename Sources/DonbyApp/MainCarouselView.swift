@@ -17,6 +17,10 @@ private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
 
     func makeNSView(context: Context) -> AnchorNSView {
         let view = AnchorNSView()
+       view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+       view.setContentHuggingPriority(.defaultLow, for: .vertical)
+       view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+       view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
         context.coordinator.anchorView = view
         if isEnabled {
             context.coordinator.attach(to: view)
@@ -75,11 +79,17 @@ private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
         }
 
         private func handleScrollWheel(_ event: NSEvent) -> NSEvent? {
+           // Reset state unconditionally at gesture start / completion
+           if event.phase == .began || event.phase == .ended || event.phase == .cancelled {
+               accumulatedDeltaX = 0
+               didFireForCurrentSwipe = false
+           }
+
             let dx = event.scrollingDeltaX
             let dy = event.scrollingDeltaY
 
             // Early fast-path exit: let vertical page scrolling pass through instantly without coordinate math
-            guard abs(dx) > abs(dy) * 1.25 && abs(dx) > 1.0 else {
+           if abs(dy) > abs(dx) * 1.25 && abs(dy) > 1.0 {
                 return event
             }
 
@@ -95,15 +105,6 @@ private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
                 return event
             }
 
-            // Reset state at gesture start / completion
-            if event.phase == .began {
-                accumulatedDeltaX = 0
-                didFireForCurrentSwipe = false
-            } else if event.phase == .ended || event.phase == .cancelled {
-                accumulatedDeltaX = 0
-                didFireForCurrentSwipe = false
-            }
-
             // Ignore post-lift trackpad inertia so one flick advances exactly one poster
             if !event.momentumPhase.isEmpty {
                 return nil
@@ -114,7 +115,7 @@ private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
                 // Normalize finger motion: swiping two fingers LEFT advances to next poster
                 let fingerDeltaX = event.isDirectionInvertedFromDevice ? dx : -dx
                 accumulatedDeltaX += fingerDeltaX
-                let threshold: CGFloat = 28.0
+               let threshold: CGFloat = 20.0
                 if accumulatedDeltaX <= -threshold {
                     didFireForCurrentSwipe = true
                     accumulatedDeltaX = 0
@@ -317,7 +318,7 @@ public struct MainCarouselView: View {
             .frame(height: 365)
             .background(
                 TrackpadHorizontalSwipeDetector(
-                    isEnabled: isHovering,
+                   isEnabled: true,
                     onSwipeNext: { stepSlide(1) },
                     onSwipePrev: { stepSlide(-1) }
                 )
@@ -335,29 +336,6 @@ public struct MainCarouselView: View {
                     }
             )
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay {
-                if isHovering && items.count > 1 {
-                    HStack {
-                        LiquidGlassCircleButton(
-                            systemImage: "chevron.left",
-                            size: 36,
-                            tooltip: "上一部 (支持触控板双指左右滑动)"
-                        ) {
-                            stepSlide(-1)
-                        }
-                        Spacer()
-                        LiquidGlassCircleButton(
-                            systemImage: "chevron.right",
-                            size: 36,
-                            tooltip: "下一部 (支持触控板双指左右滑动)"
-                        ) {
-                            stepSlide(1)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .transition(.opacity)
-                }
-            }
             .overlay(
                 HStack(spacing: 7.5) {
                     ForEach(Array(items.enumerated()), id: \.element.id) { idx, _ in

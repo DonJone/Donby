@@ -111,6 +111,7 @@ public final class DKMetalLayerView: NSView {
     private var hasActiveSubtitle: Bool = false
 
     public private(set) var lastPixelBuffer: CVPixelBuffer?
+    public static weak var activeInstance: DKMetalLayerView?
     public private(set) var lastColorUniforms = DKGpuColorUniforms()
     public var needsRedrawOnSameFrame: Bool = false
     public var onDetachFromWindow: (() -> Void)?
@@ -183,6 +184,9 @@ public final class DKMetalLayerView: NSView {
 
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if window != nil {
+            Self.activeInstance = self
+        }
         updateDrawableSize()
         updateScreenHeadroom()
     }
@@ -190,6 +194,9 @@ public final class DKMetalLayerView: NSView {
     public override func viewWillMove(toWindow newWindow: NSWindow?) {
         super.viewWillMove(toWindow: newWindow)
         if newWindow == nil {
+            if Self.activeInstance === self {
+                Self.activeInstance = nil
+            }
             onDetachFromWindow?()
         }
     }
@@ -198,6 +205,20 @@ public final class DKMetalLayerView: NSView {
         super.viewDidChangeBackingProperties()
         updateDrawableSize()
         updateScreenHeadroom()
+    }
+
+    public func captureSnapshotImage() -> NSImage? {
+        renderLock.lock()
+        defer { renderLock.unlock() }
+        if let pb = lastPixelBuffer,
+           let cgImg = Self.renderOffscreenCGImage(
+               pixelBuffer: pb,
+               colorUniforms: lastColorUniforms,
+               edrHeadroom: currentEDRHeadroom
+           ) {
+            return NSImage(cgImage: cgImg, size: NSSize(width: cgImg.width, height: cgImg.height))
+        }
+        return nil
     }
 
     private func updateDrawableSize() {

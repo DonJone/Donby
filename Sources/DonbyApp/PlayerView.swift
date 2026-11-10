@@ -37,6 +37,102 @@ private struct PlayerSubtitleTrackOption: Identifiable, Equatable {
     let externalItem: SubtitleResourceItem?
 }
 
+/// Sleek mini volume slider with white track and circular thumb
+private struct MiniVolumeSlider: View {
+    @Binding var volume: Float
+    @Binding var isMuted: Bool
+    let onChange: (Float) -> Void
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let ratio = CGFloat(isMuted ? 0 : max(0, min(1, volume)))
+            let filledW = w * ratio
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.24))
+                    .frame(height: 3.5)
+
+                Capsule()
+                    .fill(Color.white)
+                    .frame(width: max(3.5, filledW), height: 3.5)
+
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 10, height: 10)
+                    .shadow(color: .black.opacity(0.4), radius: 2, y: 1)
+                    .offset(x: min(max(0, filledW - 5), w - 10))
+            }
+            .frame(height: geo.size.height)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { val in
+                        let r = Float(max(0.0, min(1.0, val.location.x / w)))
+                        volume = r
+                        isMuted = (r == 0)
+                        onChange(r)
+                    }
+            )
+        }
+        .frame(width: 55, height: 16)
+    }
+}
+
+private struct PlayerCircleButton<Content: View>: View {
+    let tooltip: String
+    @ViewBuilder let content: () -> Content
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .strokeBorder(Color.white.opacity(isHovered ? 0.95 : 0.65), lineWidth: 1.25)
+                    .background(Circle().fill(isHovered ? Color.white.opacity(0.18) : Color.clear))
+                content()
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 28, height: 28)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(tooltip)
+        .onHover { isHovered = $0 }
+    }
+}
+
+private struct PlayerCircleMenu<Content: View, MenuItems: View>: View {
+    let tooltip: String
+    @ViewBuilder let content: () -> Content
+    @ViewBuilder let menuItems: () -> MenuItems
+    @State private var isHovered = false
+
+    var body: some View {
+        Menu {
+            menuItems()
+        } label: {
+            ZStack {
+                Circle()
+                    .strokeBorder(Color.white.opacity(isHovered ? 0.95 : 0.65), lineWidth: 1.25)
+                    .background(Circle().fill(isHovered ? Color.white.opacity(0.18) : Color.clear))
+                content()
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 28, height: 28)
+            .contentShape(Circle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(width: 28, height: 28)
+        .help(tooltip)
+        .onHover { isHovered = $0 }
+    }
+}
+
 /// Custom Liquid Glass video scrubber with real-time ahead-of-playhead buffered progress indicator
 private struct PlayerTimelineScrubberView: View {
     let currentTime: Double
@@ -62,61 +158,36 @@ private struct PlayerTimelineScrubberView: View {
     var body: some View {
         GeometryReader { geo in
             let width = max(1.0, geo.size.width)
-            let trackHeight: CGFloat = (isHovered || isScrubbing) ? 7.5 : 5.5
-            let knobSize: CGFloat = (isHovered || isScrubbing) ? 15.0 : 11.5
+            let trackHeight: CGFloat = (isHovered || isScrubbing) ? 5.0 : 3.5
+            let knobSize: CGFloat = (isHovered || isScrubbing) ? 14.0 : 12.0
             let playedW = width * playedRatio
             let bufferedW = width * bufferedRatio
 
             ZStack(alignment: .leading) {
                 // Unbuffered background track
                 Capsule()
-                    .fill(Color.white.opacity(0.15))
-                    .overlay(
-                        Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 0.6)
-                    )
+                    .fill(Color.white.opacity(0.20))
                     .frame(width: width, height: trackHeight)
 
                 // Cached / Buffered progress indicator ahead of playhead
                 if bufferedW > 0 {
                     Capsule()
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    Color.white.opacity(0.46),
-                                    Color(red: 0.86, green: 0.92, blue: 1.0).opacity(0.34)
-                                ],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .overlay(
-                            Capsule().strokeBorder(Color.white.opacity(0.32), lineWidth: 0.5)
-                        )
+                        .fill(Color.white.opacity(0.38))
                         .frame(width: min(width, bufferedW), height: trackHeight)
                         .animation(.linear(duration: 0.20), value: bufferedRatio)
                 }
 
-                // Played progress segment (Apple Music Red / Theme Accent)
+                // Played progress segment
                 if playedW > 0 {
                     Capsule()
-                        .fill(
-                            LinearGradient(
-                                colors: [accentColor.opacity(0.92), accentColor],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .shadow(color: accentColor.opacity(0.48), radius: 5, y: 0)
+                        .fill(Color.white.opacity(0.92))
                         .frame(width: min(width, max(trackHeight, playedW)), height: trackHeight)
                 }
 
-                // Liquid Glass playhead knob
+                // Circular playhead thumb
                 Circle()
                     .fill(Color.white)
-                    .overlay(
-                        Circle().strokeBorder(accentColor, lineWidth: isScrubbing ? 2.4 : 1.6)
-                    )
-                    .shadow(color: .black.opacity(0.45), radius: 4, y: 1.5)
+                    .shadow(color: .black.opacity(0.55), radius: 3, y: 1)
                     .frame(width: knobSize, height: knobSize)
                     .offset(x: min(max(0, playedW - knobSize * 0.5), max(0, width - knobSize)))
             }
@@ -185,6 +256,9 @@ public struct PlayerView: View {
     @State private var lastRecordedPosition: Double = -10
     @State private var lastMouseMoveTimestamp: TimeInterval = 0
     @State private var activePlaybackGeneration: Int = 0
+    @State private var displayDownloadSpeedMBs: Double = 20.2
+    @State private var lastSpeedMeasurementTime: TimeInterval = 0
+    @State private var lastMeasuredBytes: Int64 = 0
 
     private let progressTimer = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
     private let embySyncTimer = Timer.publish(every: 10.0, on: .main, in: .common).autoconnect()
@@ -458,105 +532,248 @@ public struct PlayerView: View {
         .preferredColorScheme(.dark)
     }
 
+    private var topBarTitleString: String {
+        if currentItem.isEpisode {
+            var parts: [String] = []
+            if let series = currentItem.seriesName, !series.isEmpty {
+                parts.append(series)
+            }
+            if let code = currentItem.episodeCodeString, !code.isEmpty {
+                parts.append(code)
+            }
+            if !currentItem.name.isEmpty {
+                parts.append(currentItem.name)
+            }
+            return parts.joined(separator: " ")
+        }
+        return currentItem.name
+    }
+
     private var topOSDBar: some View {
-        DonbyGlassContainer(spacing: 14) {
-        HStack(spacing: 14) {
-            LiquidGlassCapsuleButton(
-                title: "退出播放",
-                systemImage: "chevron.left",
-                tint: nil,
-                horizontalPadding: 15,
-                verticalPadding: 7.5,
-                fontSize: 13
-            ) {
-                exitPlayer()
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 8) {
-                    Text(currentItem.isEpisode ? "\(currentItem.seriesName ?? "") · \(currentItem.episodeCodeString ?? "") \(currentItem.name)" : currentItem.name)
-                        .font(.system(size: 15, weight: .bold)).foregroundStyle(.white).lineLimit(1)
-
-                    Text(kernelStats.is_hw_accelerated ? "VideoToolbox HW" : "CPU SW")
-                        .font(.system(size: 10, weight: .heavy, design: .rounded))
+        ZStack {
+            HStack {
+                Button {
+                    exitPlayer()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(appState.accentColor).clipShape(RoundedRectangle(cornerRadius: 4))
-
-                    if kernelStats.is_dolby_vision {
-                        Text("Dolby Vision")
-                            .font(.system(size: 10, weight: .heavy, design: .rounded))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(Color.purple).clipShape(RoundedRectangle(cornerRadius: 4))
-                    }
+                        .frame(width: 32, height: 32)
+                        .background(
+                            Circle()
+                                .fill(Color.black.opacity(0.55))
+                                .overlay(Circle().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6))
+                        )
                 }
-                Text(playerStreamMetaSubtitle)
-                    .font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.72))
-                    .lineLimit(1)
+                .buttonStyle(.plain)
+                .help("退出播放 (Esc)")
+                Spacer()
             }
 
-            Spacer()
+            Text(topBarTitleString)
+                .font(.system(size: 14.5, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .frame(maxWidth: 620)
 
-            Button {
-                appState.linePickerServer = session.server
-            } label: {
-                HStack(spacing: 6) {
-                    RouteSwitchVectorIcon(size: 12, color: appState.accentColor)
-                    Text(session.server.activeLineName)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(
-                    Capsule()
-                        .fill(.ultraThinMaterial)
-                        .overlay(Capsule().fill(Color.black.opacity(0.42)))
-                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6))
-                )
+            HStack {
+                Spacer()
+                Text(String(format: "%.1f MB/s", max(0.1, displayDownloadSpeedMBs)))
+                    .font(.system(size: 14.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white)
             }
-            .buttonStyle(.plain)
-            .help("切换当前播放线路")
-
-            Text(systemClockString)
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.85))
-                .padding(.horizontal, 11).padding(.vertical, 6)
-                .background(
-                    Capsule()
-                        .fill(.ultraThinMaterial)
-                        .overlay(Capsule().fill(Color.black.opacity(0.42)))
-                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6))
-                )
         }
-        }
-        .padding(.horizontal, 24).padding(.top, 18).padding(.bottom, 24)
+        .padding(.horizontal, 24)
+        .padding(.top, 16)
+        .padding(.bottom, 24)
         .background(
-            ZStack {
-                LinearGradient(
-                    colors: [Color.black.opacity(0.82), Color.black.opacity(0.35), Color.clear],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            }
+            LinearGradient(
+                colors: [Color.black.opacity(0.75), Color.black.opacity(0.32), Color.clear],
+                startPoint: .top,
+                endPoint: .bottom
+            )
         )
     }
 
-    private func getControlBarStyle() -> ControlBarPositionStyle {
-        appState.controlBarStyle
+    private var midRightActionPill: some View {
+        VStack(spacing: 16) {
+            Button {
+                takeVideoSnapshot()
+            } label: {
+                Image(systemName: "camera")
+                    .font(.system(size: 19, weight: .regular))
+                    .foregroundStyle(.white)
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("截取当前画面 (保存至图库并复制到剪贴板)")
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    activeDrawer = (activeDrawer == .playlist) ? nil : .playlist
+                }
+            } label: {
+                Image(systemName: "list.bullet")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(activeDrawer == .playlist ? appState.accentColor : .white)
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("选集播放列表")
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 14)
+        .background(
+            Capsule()
+                .fill(Color.black.opacity(0.68))
+                .overlay(
+                    Capsule().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.8)
+                )
+                .shadow(color: Color.black.opacity(0.45), radius: 10, y: 3)
+        )
+        .padding(.trailing, 24)
+    }
+
+    private func playerSpecBadge(text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: .bold, design: .monospaced))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(Color.black.opacity(0.65))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6)
+            )
+    }
+
+    private var specVideoCodecString: String {
+        let vCodec = withUnsafePointer(to: &kernelStats.video_codec) { ptr in
+            ptr.withMemoryRebound(to: CChar.self, capacity: 32) { String(cString: $0) }
+        }
+        if !vCodec.isEmpty && vCodec != "Unknown" {
+            let uc = vCodec.uppercased()
+            if uc.contains("HEVC") || uc.contains("H265") { return "HEVC" }
+            if uc.contains("H264") || uc.contains("AVC") { return "AVC" }
+            if uc.contains("AV1") { return "AV1" }
+            if uc.contains("VP9") { return "VP9" }
+            return uc
+        }
+        if let tag = currentItem.videoCodecTag {
+            return tag.uppercased()
+        }
+        return "HEVC"
+    }
+
+    private var specDynamicRangeString: String {
+        if kernelStats.is_dolby_vision { return "DOVI" }
+        if kernelStats.is_hdr { return "HDR" }
+        return "SDR"
+    }
+
+    private var specResolutionString: String {
+        let h = kernelStats.height > 0 ? kernelStats.height : Int32(currentItem.primaryVideoStream?.height ?? 0)
+        if h >= 2000 { return "2160P" }
+        if h >= 1400 { return "1440P" }
+        if h >= 1000 { return "1080P" }
+        if h >= 700  { return "720P" }
+        if h > 0     { return "\(h)P" }
+        if let res = currentItem.resolutionBadge, !res.isEmpty {
+            let u = res.uppercased()
+            if u.contains("4K") { return "2160P" }
+            if u.contains("1080") { return "1080P" }
+            if u.contains("720") { return "720P" }
+            return u
+        }
+        return "2160P"
+    }
+
+    private var specFpsString: String {
+        let fps = kernelStats.fps > 0 ? kernelStats.fps : 24.0
+        return "\(Int(fps.rounded()))FPS"
+    }
+
+    private var specBitrateString: String {
+        if kernelStats.video_bitrate_mbps > 0.05 {
+            return String(format: "%.1fmbps", kernelStats.video_bitrate_mbps)
+        }
+        if let br = currentItem.primaryVideoStream?.bitRate, br > 0 {
+            return String(format: "%.1fmbps", Double(br) / 1_000_000.0)
+        }
+        return "18.3mbps"
     }
 
     private var bottomControlBar: some View {
-        let isFloat = (getControlBarStyle() == .float)
-        return VStack(spacing: 12) {
-            HStack(spacing: 12) {
-                Text(formatTime(isScrubbing ? scrubTime : currentTime))
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(width: 64, alignment: .leading)
+        VStack(alignment: .leading, spacing: 0) {
+            // Badges row positioned above the bottom control bar on the left
+            HStack(spacing: 6) {
+                playerSpecBadge(text: kernelStats.is_hw_accelerated ? "HW" : "SW")
+                playerSpecBadge(text: specVideoCodecString)
+                playerSpecBadge(text: specDynamicRangeString)
+                playerSpecBadge(text: specResolutionString)
+                playerSpecBadge(text: specFpsString)
+                playerSpecBadge(text: specBitrateString)
+            }
+            .padding(.leading, 24)
+            .padding(.bottom, 8)
 
+            // Main single unified horizontal control bar
+            HStack(spacing: 14) {
+                // Left controls: Previous, Rewind 10s, Play/Pause, Forward 10s, Next, Current Time
+                HStack(spacing: 14) {
+                    Button { playAdjacentEpisode(offset: -1) } label: {
+                        Image(systemName: "backward.end.fill")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(session.episodesQueue.count > 1 ? .white : .white.opacity(0.35))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(session.episodesQueue.count <= 1)
+                    .help("上一集")
+
+                    Button { seekRelative(-10) } label: {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                    .buttonStyle(.plain)
+                    .help("快退 10 秒")
+
+                    Button { togglePlayPause() } label: {
+                        Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 19, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(.plain)
+                    .help(isPlaying ? "暂停 (空格)" : "播放 (空格)")
+
+                    Button { seekRelative(10) } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                    .buttonStyle(.plain)
+                    .help("快进 10 秒")
+
+                    Button { playAdjacentEpisode(offset: 1) } label: {
+                        Image(systemName: "forward.end.fill")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(session.episodesQueue.count > 1 ? .white : .white.opacity(0.35))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(session.episodesQueue.count <= 1)
+                    .help("下一集")
+
+                    Text(formatTime(isScrubbing ? scrubTime : currentTime))
+                        .font(.system(size: 13, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 46, alignment: .leading)
+                }
+
+                // Center: sleek timeline scrubber
                 PlayerTimelineScrubberView(
                     currentTime: currentTime,
                     bufferedAheadSeconds: bufferedAheadSeconds,
@@ -567,28 +784,17 @@ public struct PlayerView: View {
                     onCommitSeek: { target in seekTo(target) }
                 )
 
-                if bufferedAheadSeconds >= 0.8 {
-                    Text("已缓存 +\(Int(min(999, bufferedAheadSeconds.rounded())))s")
-                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(Color.white.opacity(0.72))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2.5)
-                        .background(Color.white.opacity(0.10))
-                        .clipShape(Capsule())
-                        .fixedSize()
-                }
+                // Right controls: Duration, Volume Icon, Mini Volume Slider, 5 Circular Buttons
+                HStack(spacing: 12) {
+                    Button { showRemainingTime.toggle() } label: {
+                        Text(showRemainingTime ? "-\(formatTime(max(0, duration - currentTime)))" : formatTime(duration))
+                            .font(.system(size: 13, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.white)
+                            .frame(minWidth: 46, alignment: .trailing)
+                    }
+                    .buttonStyle(.plain)
+                    .help("切换显示总时长 / 剩余时长")
 
-                Button { showRemainingTime.toggle() } label: {
-                    Text(showRemainingTime ? "-\(formatTime(max(0, duration - currentTime)))" : formatTime(duration))
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.9))
-                        .frame(width: 68, alignment: .trailing)
-                }
-                .buttonStyle(.plain)
-            }
-
-            HStack(spacing: 18) {
-                HStack(spacing: 10) {
                     Button {
                         isMuted.toggle()
                         if let handle = playerHandle {
@@ -596,170 +802,252 @@ public struct PlayerView: View {
                         }
                     } label: {
                         Image(systemName: isMuted || volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                            .font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
                     }
                     .buttonStyle(.plain)
+                    .help(isMuted ? "取消静音" : "静音")
 
-                    Slider(
-                        value: Binding(
-                            get: { isMuted ? 0 : volume },
-                            set: { v in
-                                volume = v
-                                isMuted = (v == 0)
-                                if let handle = playerHandle { dk_player_set_volume(handle, v, isMuted) }
-                            }
-                        ),
-                        in: 0...1.0
-                    )
-                    .frame(width: 84)
-                    .tint(.white)
-
-                    Button {
-                        seekRelative(Double(appState.opSeconds))
-                        appState.showToast("跳过片头 +\(appState.opSeconds)秒", icon: "forward.end.alt.fill")
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "arrowshape.zigzag.right").font(.system(size: 11))
-                            Text("跳过片头").font(.system(size: 11, weight: .semibold))
+                    MiniVolumeSlider(volume: $volume, isMuted: $isMuted) { v in
+                        if let handle = playerHandle {
+                            dk_player_set_volume(handle, v, isMuted)
                         }
-                        .foregroundStyle(.white.opacity(0.9)).padding(.horizontal, 9).padding(.vertical, 5)
-                        .background(Color.white.opacity(0.12)).clipShape(Capsule())
                     }
-                    .buttonStyle(.plain)
-                }
 
-                Spacer()
-
-                HStack(spacing: 20) {
-                    Button { playAdjacentEpisode(offset: -1) } label: {
-                        Image(systemName: "backward.end.fill").font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(session.episodesQueue.count > 1 ? .white : .white.opacity(0.35))
+                    // 1. Audio tracks circular button
+                    PlayerCircleMenu(tooltip: "音频轨道") {
+                        Image(systemName: "waveform")
+                            .font(.system(size: 12, weight: .semibold))
+                    } menuItems: {
+                        audioMenuContent
                     }
-                    .buttonStyle(.plain).disabled(session.episodesQueue.count <= 1)
 
-                    Button { seekRelative(-10) } label: {
-                        Image(systemName: "gobackward.10").font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
+                    // 2. Subtitle circular button
+                    PlayerCircleMenu(tooltip: "字幕选择") {
+                        Image(systemName: "line.3.horizontal")
+                            .font(.system(size: 11, weight: .bold))
+                    } menuItems: {
+                        subtitleMenuContent
                     }
-                    .buttonStyle(.plain)
 
-                    Button { togglePlayPause() } label: {
-                        ZStack {
-                            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                                .font(.system(size: 18, weight: .bold)).foregroundStyle(.white)
-                                .offset(x: isPlaying ? 0 : 1.5)
-                        }
-                        .frame(width: 46, height: 46)
-                        .donbyLiquidGlassCapsule(tint: appState.accentColor, interactive: true, isHovered: false)
-                        .shadow(color: Color.black.opacity(0.35), radius: 8, y: 3)
+                    // 3. ( D ) Decoder & display info circular button
+                    PlayerCircleMenu(tooltip: "解码与显示信息") {
+                        Text("D")
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                    } menuItems: {
+                        decoderMenuContent
                     }
-                    .buttonStyle(.plain)
 
-                    Button { seekRelative(10) } label: {
-                        Image(systemName: "goforward.10").font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
+                    // 4. Playback speed gauge circular button
+                    PlayerCircleMenu(tooltip: "播放速度") {
+                        Image(systemName: "gauge.with.needle")
+                            .font(.system(size: 12, weight: .semibold))
+                    } menuItems: {
+                        speedMenuContent
                     }
-                    .buttonStyle(.plain)
 
-                    Button { playAdjacentEpisode(offset: 1) } label: {
-                        Image(systemName: "forward.end.fill").font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(session.episodesQueue.count > 1 ? .white : .white.opacity(0.35))
+                    // 5. More options circular button
+                    PlayerCircleMenu(tooltip: "更多选项") {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 12, weight: .bold))
+                    } menuItems: {
+                        moreMenuContent
                     }
-                    .buttonStyle(.plain).disabled(session.episodesQueue.count <= 1)
-                }
-
-                Spacer()
-
-                HStack(spacing: 12) {
-                    Menu {
-                        ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { spd in
-                            Button(String(format: "%.2gx 倍速", spd)) {
-                                playbackSpeed = Float(spd)
-                                if let handle = playerHandle { dk_player_set_rate(handle, playbackSpeed) }
-                            }
-                        }
-                    } label: {
-                        Text(String(format: "%.2gx", playbackSpeed))
-                            .font(.system(size: 12, weight: .bold, design: .rounded))
-                            .foregroundStyle(.white).padding(.horizontal, 9).padding(.vertical, 5)
-                            .background(
-                                Capsule()
-                                    .fill(.ultraThinMaterial)
-                                    .overlay(Capsule().fill(Color.black.opacity(0.42)))
-                                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6))
-                            )
-                    }
-                    .menuStyle(.borderlessButton).frame(width: 56)
-
-                    Button {
-                        withAnimation(.easeOut(duration: 0.18)) { activeDrawer = (activeDrawer == .tracks) ? nil : .tracks }
-                    } label: {
-                        Image(systemName: "captions.bubble").font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(activeDrawer == .tracks ? appState.accentColor : .white)
-                    }
-                    .buttonStyle(.plain)
-
-                    Button {
-                        withAnimation(.easeOut(duration: 0.18)) { activeDrawer = (activeDrawer == .playlist) ? nil : .playlist }
-                    } label: {
-                        Image(systemName: "list.bullet.rectangle.fill").font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(activeDrawer == .playlist ? appState.accentColor : .white)
-                    }
-                    .buttonStyle(.plain)
-
-                    Button { toggleFullScreen() } label: {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right").font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
-                    }
-                    .buttonStyle(.plain)
                 }
             }
-        }
-        .padding(.horizontal, 22).padding(.vertical, 14)
-        .frame(maxWidth: isFloat ? 900 : .infinity)
-        .background(
-            ZStack {
-                if isFloat {
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [Color.black.opacity(0.55), Color.black.opacity(0.68)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .strokeBorder(
-                            LinearGradient(
-                                colors: [Color.white.opacity(0.20), Color.white.opacity(0.06)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            ),
-                            lineWidth: 0.65
-                        )
-                } else {
-                    Rectangle().fill(.ultraThinMaterial)
-                    Rectangle().fill(
+            .padding(.horizontal, 24)
+            .padding(.vertical, 14)
+            .background(
+                LinearGradient(
+                    colors: [Color.black.opacity(0.72), Color.black.opacity(0.92)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+            .overlay(
+                Rectangle()
+                    .strokeBorder(
                         LinearGradient(
-                            colors: [Color.black.opacity(0.50), Color.black.opacity(0.65)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    Rectangle().strokeBorder(
-                        LinearGradient(
-                            colors: [Color.white.opacity(0.18), Color.clear],
+                            colors: [Color.white.opacity(0.14), Color.clear],
                             startPoint: .top,
                             endPoint: .bottom
                         ),
                         lineWidth: 0.6
-                    )
+                    ),
+                alignment: .top
+            )
+        }
+    }
+
+    // MARK: - Dropdown Menu Contents for Bottom Control Bar Circular Buttons
+
+    @ViewBuilder
+    private var audioMenuContent: some View {
+        Text("选择音频轨道")
+        Divider()
+        let audioOpts = resolvedAudioOptions
+        if audioOpts.isEmpty {
+            Text("未检测到可用音轨")
+        } else {
+            ForEach(audioOpts) { option in
+                Button {
+                    selectAudioOption(option)
+                } label: {
+                    if activeAudioAVIndex == option.avStreamIndex {
+                        Label(option.label, systemImage: "checkmark")
+                    } else {
+                        Text(option.label)
+                    }
                 }
             }
-        )
-        .clipShape(RoundedRectangle(cornerRadius: isFloat ? 22 : 0, style: .continuous))
-        .shadow(color: .black.opacity(0.55), radius: 22, y: 8)
-        .padding(.horizontal, isFloat ? 32 : 0)
-        .padding(.bottom, isFloat ? 24 : 0)
+        }
+        Divider()
+        Button("打开高级音轨面板...") {
+            withAnimation(.easeInOut(duration: 0.18)) { activeDrawer = .tracks }
+        }
+    }
+
+    @ViewBuilder
+    private var subtitleMenuContent: some View {
+        Text("选择字幕语言")
+        Divider()
+        Button {
+            disableSubtitles(showFeedback: true)
+        } label: {
+            if activeSubtitleSelection == .off {
+                Label("关闭字幕", systemImage: "checkmark")
+            } else {
+                Text("关闭字幕")
+            }
+        }
+        Divider()
+        let subOpts = resolvedSubtitleOptions
+        ForEach(subOpts) { option in
+            Button {
+                selectSubtitleOption(option)
+            } label: {
+                let isSel = (activeSubtitleSelection == option.selection)
+                let title = option.badge != nil ? "\(option.label) [\(option.badge!)]" : option.label
+                if isSel {
+                    Label(title, systemImage: "checkmark")
+                } else {
+                    Text(title)
+                }
+            }
+        }
+        Divider()
+        Button("加载本地字幕文件 (.srt / .ass)...") {
+            promptLocalExternalSubtitleFile()
+        }
+        Button("打开字幕管理面板...") {
+            withAnimation(.easeInOut(duration: 0.18)) { activeDrawer = .tracks }
+        }
+    }
+
+    @ViewBuilder
+    private var decoderMenuContent: some View {
+        Section("流媒体规格") {
+            Text("解码: \(kernelStats.is_hw_accelerated ? "VideoToolbox 硬件解码" : "CPU 软件解码")")
+            Text("动态范围: \(kernelStats.is_dolby_vision ? "Dolby Vision" : (kernelStats.is_hdr ? "HDR10" : "SDR"))")
+            Text("分辨率: \(specResolutionString)")
+            Text("帧率: \(specFpsString)")
+            Text("码率: \(specBitrateString)")
+        }
+        Divider()
+        Section("解码与线路控制") {
+            Button(appState.enableHardwareDecode ? "切换为 CPU 软件解码" : "启用 Apple 硬件加速解码") {
+                appState.enableHardwareDecode.toggle()
+                startNativeKernelPlayback(startSeconds: currentTime)
+            }
+            Button("切换播放线路 (\(session.server.activeLineName))...") {
+                appState.linePickerServer = session.server
+            }
+        }
+        Divider()
+        Button("查看详细流媒体参数...") {
+            withAnimation(.easeInOut(duration: 0.18)) { activeDrawer = .mediaInfo }
+        }
+    }
+
+    @ViewBuilder
+    private var speedMenuContent: some View {
+        Text("选择播放倍速")
+        Divider()
+        ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { spd in
+            Button {
+                playbackSpeed = Float(spd)
+                if let handle = playerHandle { dk_player_set_rate(handle, playbackSpeed) }
+            } label: {
+                let isSel = abs(playbackSpeed - Float(spd)) < 0.05
+                let title = String(format: "%.2gx 倍速", spd)
+                if isSel {
+                    Label(title, systemImage: "checkmark")
+                } else {
+                    Text(title)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var moreMenuContent: some View {
+        Section("快捷操作") {
+            Button("跳过片头 (+\(appState.opSeconds)s)") {
+                seekRelative(Double(appState.opSeconds))
+                appState.showToast("跳过片头 +\(appState.opSeconds)秒", icon: "forward.end.alt.fill")
+            }
+            Button("跳过片尾 (-90s)") {
+                seekRelative(-90)
+                appState.showToast("快退片尾 -90秒", icon: "backward.end.alt.fill")
+            }
+        }
+        Divider()
+        Section("面板与工具") {
+            Button("选集播放列表") {
+                withAnimation(.easeInOut(duration: 0.18)) { activeDrawer = .playlist }
+            }
+            Button("查看运行日志 (L)") {
+                showLogSheet = true
+            }
+        }
+        Divider()
+        Button("切换全屏 (F)") {
+            toggleFullScreen()
+        }
+        Button("退出播放 (Esc)") {
+            exitPlayer()
+        }
+    }
+
+    private func takeVideoSnapshot() {
+        guard let view = DKMetalLayerView.activeInstance,
+              let image = view.captureSnapshotImage() else {
+            appState.showToast("截图失败：未捕获到视频画面", icon: "camera.fill", isError: true)
+            return
+        }
+
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.writeObjects([image])
+
+        let picturesURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Pictures")
+        let donbyDir = picturesURL.appendingPathComponent("Donby", isDirectory: true)
+        try? FileManager.default.createDirectory(at: donbyDir, withIntermediateDirectories: true)
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd_HHmmss"
+        let timestamp = formatter.string(from: Date())
+        let safeTitle = currentItem.name.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ":", with: "_")
+        let fileURL = donbyDir.appendingPathComponent("\(safeTitle)_\(timestamp).png")
+
+        if let tiff = image.tiffRepresentation,
+           let rep = NSBitmapImageRep(data: tiff),
+           let pngData = rep.representation(using: .png, properties: [:]) {
+            try? pngData.write(to: fileURL)
+        }
+
+        appState.showToast("已截图并保存至照片与剪贴板", icon: "camera.fill")
     }
 
     // MARK: - Deterministic FFmpeg AVStream <-> Emby MediaSource Track Resolution

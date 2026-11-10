@@ -31,7 +31,7 @@ if [ -f "Resources/AppIcon.icns" ]; then
 fi
 cp Resources/uhdnow_*.png "$APP_DIR/Contents/Resources/" 2>/dev/null || true
 
-APP_VERSION="${DONBY_VERSION:-1.3.10}"
+APP_VERSION="${DONBY_VERSION:-1.3.11}"
 BUILD_NUMBER="${DONBY_BUILD_NUMBER:-$(date +%Y%m%d%H%M)}"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
