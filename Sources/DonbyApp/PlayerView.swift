@@ -160,36 +160,41 @@ private struct PlayerTimelineScrubberView: View {
             let width = max(1.0, geo.size.width)
             let trackHeight: CGFloat = (isHovered || isScrubbing) ? 5.0 : 3.5
             let knobSize: CGFloat = (isHovered || isScrubbing) ? 14.0 : 12.0
-            let playedW = width * playedRatio
-            let bufferedW = width * bufferedRatio
+            let knobRadius = knobSize * 0.5
+            let travelWidth = max(1.0, width - knobSize)
+
+            let knobCenter = knobRadius + playedRatio * travelWidth
+            let knobOffset = knobCenter - knobRadius
+            let playedTrackWidth = min(width, max(trackHeight, knobCenter))
+            let bufferedTrackWidth = min(width, max(playedTrackWidth, knobRadius + bufferedRatio * travelWidth))
 
             ZStack(alignment: .leading) {
-                // Unbuffered background track
+                // 1. Unbuffered dark background track
                 Capsule()
-                    .fill(Color.white.opacity(0.20))
+                    .fill(Color.white.opacity(0.18))
                     .frame(width: width, height: trackHeight)
 
-                // Cached / Buffered progress indicator ahead of playhead
-                if bufferedW > 0 {
+                // 2. Cached / Buffered progress indicator ahead of playhead (matching Image #1)
+                if bufferedTrackWidth > trackHeight {
                     Capsule()
-                        .fill(Color.white.opacity(0.38))
-                        .frame(width: min(width, bufferedW), height: trackHeight)
-                        .animation(.linear(duration: 0.20), value: bufferedRatio)
+                        .fill(Color(white: 0.48))
+                        .frame(width: bufferedTrackWidth, height: trackHeight)
+                        .animation(.easeOut(duration: 0.20), value: bufferedRatio)
                 }
 
-                // Played progress segment
-                if playedW > 0 {
+                // 3. Played progress segment (solid white)
+                if playedTrackWidth > 0 {
                     Capsule()
-                        .fill(Color.white.opacity(0.92))
-                        .frame(width: min(width, max(trackHeight, playedW)), height: trackHeight)
+                        .fill(Color.white)
+                        .frame(width: playedTrackWidth, height: trackHeight)
                 }
 
-                // Circular playhead thumb
+                // 4. Circular playhead thumb (solid white circle with shadow)
                 Circle()
                     .fill(Color.white)
-                    .shadow(color: .black.opacity(0.55), radius: 3, y: 1)
+                    .shadow(color: Color.black.opacity(0.55), radius: 3, y: 1)
                     .frame(width: knobSize, height: knobSize)
-                    .offset(x: min(max(0, playedW - knobSize * 0.5), max(0, width - knobSize)))
+                    .offset(x: knobOffset)
             }
             .frame(width: width, height: geo.size.height)
             .contentShape(Rectangle())
@@ -201,12 +206,12 @@ private struct PlayerTimelineScrubberView: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
-                        let ratio = max(0.0, min(1.0, Double(value.location.x / width)))
+                        let ratio = travelWidth > 0 ? max(0.0, min(1.0, Double((value.location.x - knobRadius) / travelWidth))) : 0.0
                         isScrubbing = true
                         scrubTime = ratio * safeDuration
                     }
                     .onEnded { value in
-                        let ratio = max(0.0, min(1.0, Double(value.location.x / width)))
+                        let ratio = travelWidth > 0 ? max(0.0, min(1.0, Double((value.location.x - knobRadius) / travelWidth))) : 0.0
                         let target = ratio * safeDuration
                         scrubTime = target
                         isScrubbing = false
@@ -256,9 +261,7 @@ public struct PlayerView: View {
     @State private var lastRecordedPosition: Double = -10
     @State private var lastMouseMoveTimestamp: TimeInterval = 0
     @State private var activePlaybackGeneration: Int = 0
-    @State private var displayDownloadSpeedMBs: Double = 20.2
-    @State private var lastSpeedMeasurementTime: TimeInterval = 0
-    @State private var lastMeasuredBytes: Int64 = 0
+    @State private var displayDownloadSpeedMBs: Double = 0.0
 
     private let progressTimer = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
     private let embySyncTimer = Timer.publish(every: 10.0, on: .main, in: .common).autoconnect()
@@ -480,6 +483,7 @@ public struct PlayerView: View {
             guard let handle = playerHandle, !isScrubbing else { return }
             currentTime = dk_player_get_position(handle)
             bufferedAheadSeconds = dk_player_get_buffered_duration(handle)
+            displayDownloadSpeedMBs = dk_player_get_download_speed_mbs(handle)
             let dur = dk_player_get_duration(handle)
             if dur > 0 { duration = dur }
             else if currentItem.durationSeconds > 0 { duration = currentItem.durationSeconds }
@@ -578,7 +582,7 @@ public struct PlayerView: View {
 
             HStack {
                 Spacer()
-                Text(String(format: "%.1f MB/s", max(0.1, displayDownloadSpeedMBs)))
+                Text(String(format: "%.1f MB/s", max(0.0, displayDownloadSpeedMBs)))
                     .font(.system(size: 14.5, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white)
             }
@@ -696,14 +700,14 @@ public struct PlayerView: View {
         return "\(Int(fps.rounded()))FPS"
     }
 
-    private var specBitrateString: String {
+    private var specBitrateString: String? {
         if kernelStats.video_bitrate_mbps > 0.05 {
             return String(format: "%.1fmbps", kernelStats.video_bitrate_mbps)
         }
         if let br = currentItem.primaryVideoStream?.bitRate, br > 0 {
             return String(format: "%.1fmbps", Double(br) / 1_000_000.0)
         }
-        return "18.3mbps"
+        return nil
     }
 
     private var bottomControlBar: some View {
@@ -715,7 +719,9 @@ public struct PlayerView: View {
                 playerSpecBadge(text: specDynamicRangeString)
                 playerSpecBadge(text: specResolutionString)
                 playerSpecBadge(text: specFpsString)
-                playerSpecBadge(text: specBitrateString)
+                if let br = specBitrateString {
+                    playerSpecBadge(text: br)
+                }
             }
             .padding(.leading, 24)
             .padding(.bottom, 8)
@@ -951,7 +957,9 @@ public struct PlayerView: View {
             Text("动态范围: \(kernelStats.is_dolby_vision ? "Dolby Vision" : (kernelStats.is_hdr ? "HDR10" : "SDR"))")
             Text("分辨率: \(specResolutionString)")
             Text("帧率: \(specFpsString)")
-            Text("码率: \(specBitrateString)")
+            if let br = specBitrateString {
+                Text("码率: \(br)")
+            }
         }
         Divider()
         Section("解码与线路控制") {
@@ -1298,6 +1306,7 @@ public struct PlayerView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         osdInfoRow("解码方式", kernelStats.is_hw_accelerated ? "Apple VideoToolbox 硬件解码" : "CPU 软件解码")
                         osdInfoRow("动态范围", kernelStats.is_dolby_vision ? "Dolby Vision" : (kernelStats.is_hdr ? "HDR10" : "SDR"))
+                        osdInfoRow("实时下载速率", String(format: "%.1f MB/s", max(0.0, displayDownloadSpeedMBs)))
                         osdInfoRow("超前缓冲时长", String(format: "+%.1f 秒", bufferedAheadSeconds))
                         osdInfoRow("流预读缓存", "\(kernelStats.cached_bytes / 1024 / 1024) MB")
                         osdInfoRow("分辨率", "\(kernelStats.width) × \(kernelStats.height)")
@@ -1393,6 +1402,7 @@ public struct PlayerView: View {
         openingErrorMessage = nil
         didHandlePlaybackEnded = false
         bufferedAheadSeconds = 0
+        displayDownloadSpeedMBs = 0.0
         localExternalSubtitleName = nil
 
         let urlStr = currentResource.streamURL.absoluteString
@@ -1497,6 +1507,8 @@ public struct PlayerView: View {
 
     private func stopNativeKernel() {
         activePlaybackGeneration &+= 1
+        displayDownloadSpeedMBs = 0.0
+        bufferedAheadSeconds = 0
         guard let handle = playerHandle else { return }
         self.playerHandle = nil
         Task.detached(priority: .userInitiated) {

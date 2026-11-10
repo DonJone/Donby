@@ -225,6 +225,13 @@ struct DKPlayer {
     // Runtime Stats
     std::mutex stats_mtx;
     DKRuntimeStats stats{};
+
+    // Download / Throughput Tracking
+    std::mutex speed_mtx;
+    std::atomic<int64_t> total_bytes_read{0};
+    std::atomic<double> instant_download_speed_mbs{0.0};
+    int64_t last_speed_bytes{0};
+    std::chrono::steady_clock::time_point last_speed_time{std::chrono::steady_clock::now()};
 };
 
 static std::mutex& dk_registry_mutex() {
@@ -1590,6 +1597,13 @@ static void dk_demux_worker(DKPlayer* player) {
                 dk_rs_cache_clear(player->rs_cache);
             }
 
+            {
+                std::lock_guard<std::mutex> sl(player->speed_mtx);
+                player->last_speed_bytes = player->total_bytes_read.load(std::memory_order_relaxed);
+                player->last_speed_time = std::chrono::steady_clock::now();
+                player->instant_download_speed_mbs.store(0.0, std::memory_order_relaxed);
+            }
+
             dk_log(0, "DKEngine: Seek completed to %.2fs (accurate=%d)", target_sec, accurate ? 1 : 0);
             player->seek_requested.store(false);
             player->video_decode_cv.notify_all();
@@ -1609,10 +1623,16 @@ static void dk_demux_worker(DKPlayer* player) {
             std::lock_guard<std::mutex> al(player->audio_pkt_mtx);
             a_pkts = player->audio_pkt_queue.size();
         }
-        const bool v_enough = (player->video_stream_idx < 0) || (v_pkts >= 140);
-        const bool a_enough = (player->audio_stream_idx.load(std::memory_order_relaxed) < 0) || (a_pkts >= 360) || (player->buffered_audio_samples.load(std::memory_order_relaxed) >= 240000);
+
+        const double cur_pts = std::max(0.0, dk_get_master_clock(player));
+        const double ahead_sec = std::max(0.0, player->last_demuxed_pts.load(std::memory_order_relaxed) - cur_pts);
         const int64_t total_pkt_bytes = player->queued_pkt_bytes.load(std::memory_order_relaxed);
-        if ((v_enough && a_enough) || total_pkt_bytes >= (64LL * 1024LL * 1024LL)) {
+
+        const bool time_enough = (player->video_stream_idx < 0) ? (a_pkts >= 1500) : (ahead_sec >= 90.0 && v_pkts >= 60);
+        const bool pkts_enough = (v_pkts >= 2500);
+        const bool mem_enough = (total_pkt_bytes >= (128LL * 1024LL * 1024LL));
+
+        if (time_enough || pkts_enough || mem_enough) {
             std::unique_lock<std::mutex> lock(player->demux_mtx);
             player->demux_cv.wait_for(lock, std::chrono::milliseconds(15));
             continue;
@@ -1643,6 +1663,17 @@ static void dk_demux_worker(DKPlayer* player) {
 
         if (player->rs_cache && pkt->data && pkt->size > 0 && pkt->pos >= 0) {
             dk_rs_cache_write(player->rs_cache, pkt->pos, pkt->data, pkt->size);
+        }
+
+        if (player->format_ctx && player->format_ctx->pb) {
+            int64_t pb_bytes = player->format_ctx->pb->bytes_read;
+            if (pb_bytes > 0) {
+                player->total_bytes_read.store(pb_bytes, std::memory_order_relaxed);
+            } else if (pkt->size > 0) {
+                player->total_bytes_read.fetch_add(pkt->size, std::memory_order_relaxed);
+            }
+        } else if (pkt->size > 0) {
+            player->total_bytes_read.fetch_add(pkt->size, std::memory_order_relaxed);
         }
 
         if (pkt->stream_index == player->video_stream_idx ||
@@ -2741,5 +2772,57 @@ void dk_player_get_stats(DKPlayer* player, DKRuntimeStats* out_stats) {
         std::lock_guard<std::mutex> lock(player->stats_mtx);
         *out_stats = player->stats;
         out_stats->cached_bytes = dk_rs_cache_get_bytes(player->rs_cache);
+        out_stats->total_bytes_read = dk_player_get_total_bytes_read(player);
+        out_stats->download_speed_mbs = dk_player_get_download_speed_mbs(player);
     }
+}
+
+double dk_player_get_download_speed_mbs(DKPlayer* player) {
+    DKReaderGuard guard(player);
+    if (!guard) return 0.0;
+
+    auto now = std::chrono::steady_clock::now();
+    int64_t cur_bytes = player->total_bytes_read.load(std::memory_order_relaxed);
+    if (player->format_ctx && player->format_ctx->pb) {
+        int64_t pb_bytes = player->format_ctx->pb->bytes_read;
+        if (pb_bytes > cur_bytes) {
+            cur_bytes = pb_bytes;
+            player->total_bytes_read.store(cur_bytes, std::memory_order_relaxed);
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(player->speed_mtx);
+    double dt = std::chrono::duration<double>(now - player->last_speed_time).count();
+    if (dt >= 0.25) {
+        int64_t delta = cur_bytes - player->last_speed_bytes;
+        if (delta < 0) delta = 0;
+        double current_mbs = (static_cast<double>(delta) / (1024.0 * 1024.0)) / dt;
+
+        double prev_mbs = player->instant_download_speed_mbs.load(std::memory_order_relaxed);
+        double smoothed = 0.0;
+        if (delta > 0) {
+            smoothed = (prev_mbs > 0.0) ? ((prev_mbs * 0.35) + (current_mbs * 0.65)) : current_mbs;
+        } else {
+            smoothed = (dt > 0.6) ? 0.0 : (prev_mbs * 0.25);
+        }
+        player->instant_download_speed_mbs.store(smoothed, std::memory_order_relaxed);
+        player->last_speed_bytes = cur_bytes;
+        player->last_speed_time = now;
+    }
+
+    return std::max(0.0, player->instant_download_speed_mbs.load(std::memory_order_relaxed));
+}
+
+int64_t dk_player_get_total_bytes_read(DKPlayer* player) {
+    DKReaderGuard guard(player);
+    if (!guard) return 0;
+    int64_t cur_bytes = player->total_bytes_read.load(std::memory_order_relaxed);
+    if (player->format_ctx && player->format_ctx->pb) {
+        int64_t pb_bytes = player->format_ctx->pb->bytes_read;
+        if (pb_bytes > cur_bytes) {
+            cur_bytes = pb_bytes;
+            player->total_bytes_read.store(cur_bytes, std::memory_order_relaxed);
+        }
+    }
+    return cur_bytes;
 }

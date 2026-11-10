@@ -32,6 +32,8 @@ typedef struct {
     char    audio_codec[32];
     char    color_space[32];
     int64_t cached_bytes;
+    int64_t total_bytes_read;
+    double  download_speed_mbs;
 } DKRuntimeStats;
 
 typedef struct {
@@ -124,6 +126,8 @@ DKPlayerState dk_player_get_state(DKPlayer* player);
 double        dk_player_get_position(DKPlayer* player);
 double        dk_player_get_duration(DKPlayer* player);
 double        dk_player_get_buffered_duration(DKPlayer* player);
+double        dk_player_get_download_speed_mbs(DKPlayer* player);
+int64_t       dk_player_get_total_bytes_read(DKPlayer* player);
 void          dk_player_get_stats(DKPlayer* player, DKRuntimeStats* out_stats);
 
 #ifdef __cplusplus
