@@ -2048,6 +2048,7 @@ public struct LiquidGlassCapsuleButton: View {
     public let title: String
     public let systemImage: String
     public var tint: Color? = nil
+    public var textColorOverride: Color? = nil
     public var progressFraction: Double = 0
     public var horizontalPadding: CGFloat = 22
     public var verticalPadding: CGFloat = 10.5
@@ -2060,6 +2061,7 @@ public struct LiquidGlassCapsuleButton: View {
         title: String,
         systemImage: String,
         tint: Color? = nil,
+        textColorOverride: Color? = nil,
         progressFraction: Double = 0,
         horizontalPadding: CGFloat = 22,
         verticalPadding: CGFloat = 10.5,
@@ -2069,6 +2071,7 @@ public struct LiquidGlassCapsuleButton: View {
         self.title = title
         self.systemImage = systemImage
         self.tint = tint
+        self.textColorOverride = textColorOverride
         self.progressFraction = progressFraction
         self.horizontalPadding = horizontalPadding
         self.verticalPadding = verticalPadding
@@ -2077,7 +2080,13 @@ public struct LiquidGlassCapsuleButton: View {
     }
 
     private var textColor: Color {
+        if let textColorOverride {
+            return textColorOverride
+        }
         if tint != nil {
+            if tint == .white {
+                return Color(red: 0.10, green: 0.10, blue: 0.12)
+            }
             return .white
         }
         return Color(red: 0.10, green: 0.10, blue: 0.12)

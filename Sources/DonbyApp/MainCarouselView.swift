@@ -290,7 +290,8 @@ public struct MainCarouselView: View {
                             LiquidGlassCapsuleButton(
                                 title: item.resumePositionSeconds > 0 ? "继续播放" : "立即播放",
                                 systemImage: "play.fill",
-                                tint: appState.accentColor,
+                                tint: appState.isMonochromeTheme ? (appState.isLightMode ? Color(white: 0.12) : Color.white) : appState.accentColor,
+                                textColorOverride: appState.isMonochromeTheme ? (appState.isLightMode ? .white : Color(red: 0.10, green: 0.10, blue: 0.12)) : appState.accentTextColor,
                                 horizontalPadding: 24,
                                 verticalPadding: 11,
                                 fontSize: 14

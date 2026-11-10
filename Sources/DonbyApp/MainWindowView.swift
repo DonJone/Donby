@@ -1487,6 +1487,15 @@ public struct RecordsView: View {
 
     private func watchRecordRow(_ record: WatchRecordItem) -> some View {
         let (displayTitle, displaySubtitle): (String, String?) = {
+            if record.sourceType == "本地文件" || (record.streamURLString?.hasPrefix("/") == true) || record.title.contains(".mkv") || record.title.contains(".mp4") {
+                let parsed = MediaTitleParser.parse(rawName: record.title)
+                return (parsed.mainTitle, parsed.subTitle)
+            }
+            if record.title.hasPrefix("第") && (record.title.hasSuffix("集") || record.title.contains("集")),
+               let sName = appState.cachedSeriesNames[record.embyItemId ?? ""], !sName.isEmpty {
+                let epSub = (record.subtitle != nil && !record.subtitle!.isEmpty) ? "\(record.subtitle!) · \(record.title)" : record.title
+                return (sName, epSub)
+            }
             if record.title.hasPrefix("第") && (record.title.hasSuffix("集") || record.title.contains("集")),
                let sub = record.subtitle, sub.contains(" · ") {
                 let parts = sub.components(separatedBy: " · ")
@@ -1629,6 +1638,20 @@ public struct RecordsView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
         )
+        .task(id: "\(record.id)|\(record.embyItemId ?? "")") {
+            if record.sourceType == "本地文件" || (record.streamURLString?.hasPrefix("/") == true) || record.title.contains(".mkv") || record.title.contains(".mp4") {
+                let parsed = MediaTitleParser.parse(rawName: record.title)
+                if parsed.mainTitle != record.title {
+                    appState.updateRecordTitles(id: record.id, newTitle: parsed.mainTitle, newSubtitle: parsed.subTitle)
+                }
+            } else if record.title.hasPrefix("第") && (record.title.hasSuffix("集") || record.title.contains("集")),
+                      let embyItemId = record.embyItemId {
+                if let sName = await appState.resolveSeriesName(for: embyItemId) {
+                    let epSub = (record.subtitle != nil && !record.subtitle!.isEmpty) ? "\(record.subtitle!) · \(record.title)" : record.title
+                    appState.updateRecordTitles(id: record.id, newTitle: sName, newSubtitle: epSub)
+                }
+            }
+        }
     }
 
     private var emptyRecordsPlaceholder: some View {
@@ -2399,7 +2422,7 @@ public struct SettingsView: View {
                     Text("Donby")
                         .font(.system(size: 20, weight: .heavy, design: .rounded))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    let currentVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.14"
+                    let currentVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.15"
                     Text("版本 \(currentVer) (Build 2026.11) · macOS Apple Silicon")
                         .font(.system(size: 12))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
@@ -2521,12 +2544,12 @@ private struct SidebarTabItemButton: View {
             HStack(spacing: 11) {
                 Image(systemName: tab.icon)
                     .font(.system(size: 14.5, weight: isSelected ? .semibold : .medium))
-                    .foregroundStyle(isSelected ? Color.white : (isHovered ? DonbyGlassPalette.primaryText(isLight: appState.isLightMode) : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode)))
+                    .foregroundStyle(isSelected ? (appState.isMonochromeTheme ? .white : appState.accentTextColor) : (isHovered ? DonbyGlassPalette.primaryText(isLight: appState.isLightMode) : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode)))
                     .frame(width: 20, alignment: .center)
 
                 Text(tab.title)
                     .font(.system(size: 13.5, weight: isSelected ? .semibold : .regular))
-                    .foregroundStyle(isSelected ? Color.white : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    .foregroundStyle(isSelected ? (appState.isMonochromeTheme ? .white : appState.accentTextColor) : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
                 Spacer()
             }
@@ -2536,8 +2559,10 @@ private struct SidebarTabItemButton: View {
                 Group {
                     if isSelected {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(appState.accentColor)
-                            .shadow(color: appState.accentColor.opacity(0.35), radius: 4, y: 1.5)
+                            .fill(appState.isMonochromeTheme
+                                  ? (appState.isLightMode ? Color(white: 0.12) : Color.white.opacity(0.20))
+                                  : appState.accentColor)
+                            .shadow(color: appState.isMonochromeTheme ? Color.black.opacity(0.12) : appState.accentColor.opacity(0.35), radius: 4, y: 1.5)
                     } else if isHovered {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .fill(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.07))
@@ -2571,7 +2596,7 @@ private struct SidebarServerItemButton: View {
 
                 Text(server.name)
                     .font(.system(size: 13, weight: isServerOpen ? .semibold : .regular))
-                    .foregroundStyle(isServerOpen ? Color.white : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    .foregroundStyle(isServerOpen ? (appState.isMonochromeTheme ? .white : appState.accentTextColor) : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     .lineLimit(1)
 
                 Spacer()
@@ -2582,8 +2607,10 @@ private struct SidebarServerItemButton: View {
                 Group {
                     if isServerOpen {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(appState.accentColor)
-                            .shadow(color: appState.accentColor.opacity(0.35), radius: 4, y: 1.5)
+                            .fill(appState.isMonochromeTheme
+                                  ? (appState.isLightMode ? Color(white: 0.12) : Color.white.opacity(0.20))
+                                  : appState.accentColor)
+                            .shadow(color: appState.isMonochromeTheme ? Color.black.opacity(0.12) : appState.accentColor.opacity(0.35), radius: 4, y: 1.5)
                     } else if isHovered {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .fill(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.07))

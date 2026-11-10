@@ -313,3 +313,89 @@ public enum EmbySortField: String, CaseIterable, Identifiable, Sendable {
         }
     }
 }
+
+public struct MediaTitleParser: Sendable {
+    public struct Result: Sendable {
+        public let mainTitle: String
+        public let subTitle: String
+        public let episodeCode: String?
+
+        public init(mainTitle: String, subTitle: String, episodeCode: String? = nil) {
+            self.mainTitle = mainTitle
+            self.subTitle = subTitle
+            self.episodeCode = episodeCode
+        }
+    }
+
+    public static func parse(rawName: String) -> Result {
+        var clean = rawName
+        let exts = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".ts", ".flv", ".m4v", ".iso", ".rmvb"]
+        for ext in exts {
+            if clean.lowercased().hasSuffix(ext) {
+                clean = String(clean.dropLast(ext.count))
+                break
+            }
+        }
+        clean = clean.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 1. Check for SxxExx pattern (e.g., S01E05, s01e05)
+        let sPattern = try? NSRegularExpression(pattern: #"(?i)[\s._-]*[Ss](\d{1,2})[Ee](\d{1,2})[\s._-]*"#)
+        if let match = sPattern?.firstMatch(in: clean, range: NSRange(clean.startIndex..., in: clean)),
+           let r = Range(match.range, in: clean),
+           let sRange = Range(match.range(at: 1), in: clean),
+           let eRange = Range(match.range(at: 2), in: clean) {
+            let sNum = Int(clean[sRange]) ?? 1
+            let eNum = Int(clean[eRange]) ?? 1
+            let code = String(format: "S%02dE%02d", sNum, eNum)
+
+            var showName = String(clean[..<r.lowerBound]).replacingOccurrences(of: ".", with: " ").trimmingCharacters(in: CharacterSet(charactersIn: " ._-"))
+            if showName.isEmpty { showName = "剧集" }
+
+            var after = String(clean[r.upperBound...]).trimmingCharacters(in: CharacterSet(charactersIn: " ._-"))
+            let techPattern = try? NSRegularExpression(pattern: #"(?i)\b(2160p|1080p|720p|4k|uhd|web-dl|webrip|bluray|hdrip|hevc|h\.?265|x265|h\.?264|x264|aac|dts|remux|hdr10\+?|dovi)\b"#, options: [])
+            if let techPattern {
+                after = techPattern.stringByReplacingMatches(in: after, range: NSRange(after.startIndex..., in: after), withTemplate: "")
+                after = after.trimmingCharacters(in: CharacterSet(charactersIn: " ._-"))
+            }
+
+            let sub = after.isEmpty ? "\(code) · 第 \(eNum) 集" : "\(code) · \(after)"
+            return Result(mainTitle: showName, subTitle: sub, episodeCode: code)
+        }
+
+        // 2. Check for EPxx or Exx pattern (e.g. EP12, E05)
+        let epPattern = try? NSRegularExpression(pattern: #"(?i)[\s._-]+(?:EP|E)(\d{1,3})[\s._-]*"#)
+        if let match = epPattern?.firstMatch(in: clean, range: NSRange(clean.startIndex..., in: clean)),
+           let r = Range(match.range, in: clean),
+           let eRange = Range(match.range(at: 1), in: clean) {
+            let eNum = Int(clean[eRange]) ?? 1
+            var showName = String(clean[..<r.lowerBound]).replacingOccurrences(of: ".", with: " ").trimmingCharacters(in: CharacterSet(charactersIn: " ._-"))
+            if showName.isEmpty { showName = "剧集" }
+            return Result(mainTitle: showName, subTitle: "第 \(eNum) 集", episodeCode: String(format: "E%02d", eNum))
+        }
+
+        // 3. Check for Chinese episode pattern (e.g. 第05集, 第5集)
+        let chPattern = try? NSRegularExpression(pattern: #"[\s._-]*第\s*(\d{1,3})\s*集[\s._-]*"#)
+        if let match = chPattern?.firstMatch(in: clean, range: NSRange(clean.startIndex..., in: clean)),
+           let r = Range(match.range, in: clean),
+           let eRange = Range(match.range(at: 1), in: clean) {
+            let eNum = Int(clean[eRange]) ?? 1
+            var showName = String(clean[..<r.lowerBound]).replacingOccurrences(of: ".", with: " ").trimmingCharacters(in: CharacterSet(charactersIn: " ._-"))
+            if showName.isEmpty { showName = "剧集" }
+            return Result(mainTitle: showName, subTitle: "第 \(eNum) 集", episodeCode: "第\(eNum)集")
+        }
+
+        // 4. Check for Year (Movie pattern, e.g. 2024, 2023)
+        let yearPattern = try? NSRegularExpression(pattern: #"[\s._-]+(19\d\d|20\d\d)[\s._-]*"#)
+        if let match = yearPattern?.firstMatch(in: clean, range: NSRange(clean.startIndex..., in: clean)),
+           let r = Range(match.range, in: clean),
+           let yRange = Range(match.range(at: 1), in: clean) {
+            let year = String(clean[yRange])
+            var movieTitle = String(clean[..<r.lowerBound]).replacingOccurrences(of: ".", with: " ").trimmingCharacters(in: CharacterSet(charactersIn: " ._-"))
+            if movieTitle.isEmpty { movieTitle = clean }
+            return Result(mainTitle: movieTitle, subTitle: "\(year) · 电影原画", episodeCode: nil)
+        }
+
+        let formatted = clean.replacingOccurrences(of: ".", with: " ").trimmingCharacters(in: CharacterSet(charactersIn: " ._-"))
+        return Result(mainTitle: formatted.isEmpty ? rawName : formatted, subTitle: "本地媒体文件", episodeCode: nil)
+    }
+}

@@ -188,6 +188,8 @@ public final class AppState: ObservableObject {
     private let urlMediaStorageKey = "donby.urlMedia.v3"
     private let iptvChannelsStorageKey = "donby.iptvChannels.v3"
     private let watchHistoryStorageKey = "donby.watchHistory.v3"
+    private let cachedSeriesNamesStorageKey = "donby.cachedSeriesNames.v1"
+    @Published public var cachedSeriesNames: [String: String] = [:]
 
     public init() {
         AppState.sharedInstance = self
@@ -195,6 +197,7 @@ public final class AppState: ObservableObject {
         loadServersFromDisk()
         loadURLMediaFromDisk()
         loadLocalFoldersFromDisk()
+        loadCachedSeriesNamesFromDisk()
         loadIPTVChannelsFromDisk()
         loadWatchHistoryFromDisk()
 
@@ -322,7 +325,23 @@ public final class AppState: ObservableObject {
     private func loadWatchHistoryFromDisk() {
         if let data = UserDefaults.standard.data(forKey: watchHistoryStorageKey),
            let decoded = try? JSONDecoder().decode([WatchRecordItem].self, from: data) {
-            self.watchHistory = decoded
+            var sanitized: [WatchRecordItem] = []
+            for var item in decoded {
+                if item.sourceType == "本地文件" || (item.streamURLString?.hasPrefix("/") == true) || item.title.contains(".mkv") || item.title.contains(".mp4") {
+                    let parsed = MediaTitleParser.parse(rawName: item.title)
+                    if parsed.mainTitle != item.title {
+                        item.title = parsed.mainTitle
+                        item.subtitle = parsed.subTitle
+                    }
+                }
+                if item.sourceType == "Emby", item.title.hasPrefix("第"), let itemId = item.embyItemId, let sName = cachedSeriesNames[itemId], !sName.isEmpty {
+                    let epSub = (item.subtitle != nil && !item.subtitle!.isEmpty) ? "\(item.subtitle!) · \(item.title)" : item.title
+                    item.title = sName
+                    item.subtitle = epSub
+                }
+                sanitized.append(item)
+            }
+            self.watchHistory = sanitized
         } else {
             self.watchHistory = []
         }
@@ -332,6 +351,57 @@ public final class AppState: ObservableObject {
         if let data = try? JSONEncoder().encode(watchHistory) {
             UserDefaults.standard.set(data, forKey: watchHistoryStorageKey)
         }
+    }
+
+    private func loadCachedSeriesNamesFromDisk() {
+        if let dict = UserDefaults.standard.dictionary(forKey: cachedSeriesNamesStorageKey) as? [String: String] {
+            self.cachedSeriesNames = dict
+        } else {
+            self.cachedSeriesNames = [:]
+        }
+    }
+
+    private func saveCachedSeriesNamesToDisk() {
+        UserDefaults.standard.set(cachedSeriesNames, forKey: cachedSeriesNamesStorageKey)
+    }
+
+    public func resolveSeriesName(for itemId: String) async -> String? {
+        if let cached = cachedSeriesNames[itemId], !cached.isEmpty {
+            return cached
+        }
+        if let found = allLoadedMediaItems.first(where: { $0.id == itemId })?.seriesName, !found.isEmpty {
+            cachedSeriesNames[itemId] = found
+            saveCachedSeriesNamesToDisk()
+            return found
+        }
+        if let found = resumeItems.first(where: { $0.id == itemId })?.seriesName, !found.isEmpty {
+            cachedSeriesNames[itemId] = found
+            saveCachedSeriesNamesToDisk()
+            return found
+        }
+        if let found = nextUpItems.first(where: { $0.id == itemId })?.seriesName, !found.isEmpty {
+            cachedSeriesNames[itemId] = found
+            saveCachedSeriesNamesToDisk()
+            return found
+        }
+        guard let server = activeServer, !server.host.isEmpty else { return nil }
+        if let fetched = try? await EmbyClient.shared.fetchItemDetail(server: server, itemId: itemId) {
+            if let s = fetched.seriesName, !s.isEmpty {
+                cachedSeriesNames[itemId] = s
+                saveCachedSeriesNamesToDisk()
+                return s
+            }
+        }
+        return nil
+    }
+
+    public func updateRecordTitles(id: String, newTitle: String, newSubtitle: String?) {
+        guard let idx = watchHistory.firstIndex(where: { $0.id == id }) else { return }
+        watchHistory[idx].title = newTitle
+        if let newSubtitle {
+            watchHistory[idx].subtitle = newSubtitle
+        }
+        scheduleSaveWatchHistory(immediate: true)
     }
 
     public func flushWatchHistory() {
@@ -1047,6 +1117,10 @@ public final class AppState: ObservableObject {
             let recTitle: String
             let recSubtitle: String?
             if targetItem.isEpisode {
+                if let s = targetItem.seriesName, !s.isEmpty {
+                    cachedSeriesNames[targetItem.id] = s
+                    saveCachedSeriesNamesToDisk()
+                }
                 recTitle = targetItem.seriesName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
                     ? targetItem.seriesName!
                     : targetItem.name
@@ -1092,6 +1166,10 @@ public final class AppState: ObservableObject {
 
     public func playDirectURL(url: URL, title: String, startSeconds: Double = 0) {
         let isLocal = url.isFileURL || url.scheme == "file" || url.path.hasPrefix("/")
+        let parsed = MediaTitleParser.parse(rawName: title)
+        let resolvedTitle = isLocal ? parsed.mainTitle : title
+        let resolvedSubtitle = isLocal ? parsed.subTitle : (url.isFileURL ? "本地文件直解" : "网络直链播放")
+
         let server = activeServer ?? DemoServerData.makeDefaultUHDServer()
         let dummySource = MediaSourceInfo(
             id: UUID().uuidString,
@@ -1101,7 +1179,7 @@ public final class AppState: ObservableObject {
         )
         let dummyItem = EmbyItem(
             id: UUID().uuidString,
-            name: title,
+            name: resolvedTitle,
             type: "Video",
             container: dummySource.container,
             mediaSources: [dummySource]
@@ -1115,10 +1193,10 @@ public final class AppState: ObservableObject {
             isDirectStream: true,
             routeNote: isLocal ? "本地文件直解" : "网络直链播放"
         )
-        addRecentMedia(name: title, urlString: isLocal ? url.path : url.absoluteString, isLocal: isLocal)
+        addRecentMedia(name: resolvedTitle, urlString: isLocal ? url.path : url.absoluteString, isLocal: isLocal)
         recordWatch(
-            title: title,
-            subtitle: isLocal ? "本地文件直解 (\(dummySource.container?.uppercased() ?? "FILE"))" : "网络直链播放 (\(dummySource.container?.uppercased() ?? "STREAM"))",
+            title: resolvedTitle,
+            subtitle: resolvedSubtitle,
             posterKey: nil,
             position: startSeconds,
             duration: 3600,
