@@ -199,6 +199,7 @@ public struct IconLibraryEntry: Codable, Identifiable, Hashable, Sendable {
 
 public enum AppThemeColor: String, Codable, CaseIterable, Identifiable, Sendable {
     case appleMusicRed = "appleMusicRed"
+    case monochrome = "monochrome"
     case blue = "blue"
     case cyan = "cyan"
     case green = "green"
@@ -211,6 +212,7 @@ public enum AppThemeColor: String, Codable, CaseIterable, Identifiable, Sendable
     public var title: String {
         switch self {
         case .appleMusicRed: return "经典音乐红"
+        case .monochrome: return "纯黑白极简"
         case .blue: return "经典蓝"
         case .cyan: return "极光青"
         case .green: return "翡翠绿"
@@ -244,6 +246,7 @@ public struct ThemeColorPalette {
     public static func color(for theme: AppThemeColor) -> (r: Double, g: Double, b: Double) {
         switch theme {
         case .appleMusicRed: return appleMusicRedRGB
+        case .monochrome: return (0.12, 0.12, 0.14)
         case .blue: return (0.16, 0.49, 0.96)
         case .cyan: return (0.12, 0.78, 0.92)
         case .green: return (0.18, 0.80, 0.45)

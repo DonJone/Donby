@@ -223,9 +223,9 @@ public struct EmbyMainView: View {
                             HStack(spacing: 6) {
                                 RouteSwitchVectorIcon(
                                     size: 12,
-                                    color: isLinePillHovered
-                                        ? DonbyGlassPalette.primaryText(isLight: appState.isLightMode)
-                                        : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode)
+                                    color: appState.isMonochromeTheme
+                                        ? (isLinePillHovered ? DonbyGlassPalette.primaryText(isLight: appState.isLightMode) : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                                        : appState.accentColor
                                 )
 
                                 Text(server.activeLineName)

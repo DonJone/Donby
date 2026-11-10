@@ -1780,16 +1780,48 @@ void dk_player_destroy(DKPlayer* player) {
     delete player;
 }
 
+static std::string dk_normalize_path_or_url(const char* in_url) {
+    if (!in_url) return "";
+    std::string s = in_url;
+    if (s.rfind("file://", 0) == 0) {
+        s = s.substr(7);
+    }
+    if (s.find('%') != std::string::npos) {
+        std::string decoded;
+        decoded.reserve(s.size());
+        for (size_t i = 0; i < s.size(); ++i) {
+            if (s[i] == '%' && i + 2 < s.size()) {
+                char hex[3] = { s[i+1], s[i+2], '\0' };
+                char* endptr = nullptr;
+                long val = std::strtol(hex, &endptr, 16);
+                if (endptr == hex + 2) {
+                    decoded.push_back(static_cast<char>(val));
+                    i += 2;
+                    continue;
+                }
+            }
+            decoded.push_back(s[i]);
+        }
+        s = decoded;
+    }
+    return s;
+}
+
 int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, double start_sec, bool hw_decode) {
     if (!player || !url) return -1;
     dk_player_close(player);
 
-    dk_log(0, "DKEngine: Opening URL: %s (hw_decode=%d, start=%.2fs)", url, hw_decode ? 1 : 0, start_sec);
+    std::string normalized_url = dk_normalize_path_or_url(url);
+    const char* open_target = normalized_url.c_str();
+    bool is_local_file = (!normalized_url.empty() && normalized_url[0] == '/');
+
+    dk_log(0, "DKEngine: Opening URL: %s (target=%s, local=%d, hw_decode=%d, start=%.2fs)",
+           url, open_target, is_local_file ? 1 : 0, hw_decode ? 1 : 0, start_sec);
     auto start_time = std::chrono::steady_clock::now();
 
     player->state.store(DK_STATE_OPENING);
     player->is_closing.store(false);
-    player->current_url = url;
+    player->current_url = open_target;
     player->hw_decode_enabled = hw_decode;
     player->vt_failed.store(false);
     player->stream_dovi_profile = 0;
@@ -1811,20 +1843,26 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
     }
 
     AVDictionary* opts = nullptr;
-    av_dict_set(&opts, "reconnect", "1", 0);
-    av_dict_set(&opts, "reconnect_streamed", "1", 0);
-    av_dict_set(&opts, "reconnect_at_eof", "0", 0);
-    av_dict_set(&opts, "reconnect_on_network_error", "1", 0);
-    av_dict_set(&opts, "reconnect_delay_max", "3", 0);
-    av_dict_set(&opts, "multiple_requests", "1", 0);
-    av_dict_set(&opts, "rw_timeout", "10000000", 0);
-    av_dict_set(&opts, "timeout", "10000000", 0);
-    av_dict_set(&opts, "probesize", "10485760", 0);
-    av_dict_set(&opts, "analyzeduration", "5000000", 0);
-    av_dict_set(&opts, "tcp_nodelay", "1", 0);
-    av_dict_set(&opts, "buffer_size", "2097152", 0);
-    if (headers_crlf && std::strlen(headers_crlf) > 0) {
-        av_dict_set(&opts, "headers", headers_crlf, 0);
+    if (is_local_file) {
+        av_dict_set(&opts, "probesize", "10485760", 0);
+        av_dict_set(&opts, "analyzeduration", "5000000", 0);
+        av_dict_set(&opts, "buffer_size", "2097152", 0);
+    } else {
+        av_dict_set(&opts, "reconnect", "1", 0);
+        av_dict_set(&opts, "reconnect_streamed", "1", 0);
+        av_dict_set(&opts, "reconnect_at_eof", "0", 0);
+        av_dict_set(&opts, "reconnect_on_network_error", "1", 0);
+        av_dict_set(&opts, "reconnect_delay_max", "3", 0);
+        av_dict_set(&opts, "multiple_requests", "1", 0);
+        av_dict_set(&opts, "rw_timeout", "10000000", 0);
+        av_dict_set(&opts, "timeout", "10000000", 0);
+        av_dict_set(&opts, "probesize", "10485760", 0);
+        av_dict_set(&opts, "analyzeduration", "5000000", 0);
+        av_dict_set(&opts, "tcp_nodelay", "1", 0);
+        av_dict_set(&opts, "buffer_size", "2097152", 0);
+        if (headers_crlf && std::strlen(headers_crlf) > 0) {
+            av_dict_set(&opts, "headers", headers_crlf, 0);
+        }
     }
 
     player->format_ctx = avformat_alloc_context();
@@ -1839,7 +1877,7 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
     player->format_ctx->interrupt_callback.callback = dk_interrupt_callback;
     player->format_ctx->interrupt_callback.opaque = player;
 
-    int open_ret = avformat_open_input(&player->format_ctx, url, nullptr, &opts);
+    int open_ret = avformat_open_input(&player->format_ctx, open_target, nullptr, &opts);
     av_dict_free(&opts);
     if (open_ret < 0) {
         char errbuf[256];

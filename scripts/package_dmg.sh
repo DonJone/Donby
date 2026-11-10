@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-VERSION="${DONBY_VERSION:-1.3.13}"
+VERSION="${DONBY_VERSION:-1.3.14}"
 ARCH="$(uname -m)"
 APP_NAME="Donby"
 APP_DIR="${APP_NAME}.app"

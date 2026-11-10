@@ -399,20 +399,20 @@ public struct ServerLinePickSheet: View {
                                 .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                             if server.autoSyncedLineCount > 0 {
                                 HStack(spacing: 4) {
-                                    RouteSwitchVectorIcon(size: 9.5, color: DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                                    RouteSwitchVectorIcon(size: 9.5, color: appState.accentColor)
                                     Text("云端 \(server.autoSyncedLineCount) 条线路")
                                         .font(.system(size: 10.5, weight: .medium))
                                 }
-                                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                                .foregroundStyle(appState.accentColor)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 2.5)
                                 .background(
                                     Capsule()
-                                        .fill(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.08))
+                                        .fill(appState.accentColor.opacity(appState.isLightMode ? 0.10 : 0.15))
                                 )
                                 .overlay(
                                     Capsule()
-                                        .strokeBorder(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.07), lineWidth: 0.5)
+                                        .strokeBorder(appState.accentColor.opacity(0.20), lineWidth: 0.5)
                                 )
                             }
                         }
@@ -502,10 +502,10 @@ public struct ServerLinePickSheet: View {
                             Text("完成")
                         }
                         .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(appState.accentTextColor)
                         .padding(.horizontal, 18)
                         .padding(.vertical, 7.5)
-                        .background(appState.isLightMode ? Color(white: 0.12) : Color.white.opacity(0.22))
+                        .background(appState.accentColor)
                         .clipShape(Capsule())
                     }
                     .buttonStyle(.plain)
@@ -536,7 +536,7 @@ private struct ServerLineOptionRow: View {
 
     private var rowBackground: Color {
         if isSelected {
-            return appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.12)
+            return appState.accentColor.opacity(appState.isLightMode ? 0.08 : 0.14)
         } else if isHovered {
             return appState.isLightMode ? Color.black.opacity(0.035) : Color.white.opacity(0.07)
         } else {
@@ -546,7 +546,7 @@ private struct ServerLineOptionRow: View {
 
     private var rowBorderColor: Color {
         if isSelected {
-            return appState.isLightMode ? Color.black.opacity(0.20) : Color.white.opacity(0.30)
+            return appState.accentColor.opacity(0.40)
         } else if isHovered {
             return DonbyGlassPalette.separator(isLight: appState.isLightMode).opacity(1.3)
         } else {
@@ -558,12 +558,12 @@ private struct ServerLineOptionRow: View {
     private var selectionIndicator: some View {
         if isSelected {
             Circle()
-                .fill(appState.isLightMode ? Color(white: 0.16) : Color.white)
+                .fill(appState.accentColor)
                 .frame(width: 16, height: 16)
                 .overlay(
                     Image(systemName: "checkmark")
                         .font(.system(size: 8.5, weight: .heavy))
-                        .foregroundStyle(appState.isLightMode ? Color.white : Color.black)
+                        .foregroundStyle(appState.accentTextColor)
                 )
         } else {
             Circle()

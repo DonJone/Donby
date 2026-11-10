@@ -136,8 +136,22 @@ public final class AppState: ObservableObject {
 
     public var accentColor: Color {
         let theme = AppThemeColor(rawValue: themeColorRaw) ?? .appleMusicRed
+        if theme == .monochrome {
+            return isLightMode ? Color(white: 0.12) : Color.white
+        }
         let rgb = ThemeColorPalette.color(for: theme)
         return Color(red: rgb.r, green: rgb.g, blue: rgb.b)
+    }
+
+    public var isMonochromeTheme: Bool {
+        themeColorRaw == AppThemeColor.monochrome.rawValue
+    }
+
+    public var accentTextColor: Color {
+        if isMonochromeTheme && !isLightMode {
+            return .black
+        }
+        return .white
     }
 
     public var preferredVersionPreset: PreferredVersionPreset {
@@ -476,13 +490,15 @@ public final class AppState: ObservableObject {
                     uData.playbackPositionTicks = Int64(record.positionSeconds * 10_000_000.0)
                     fetched.userData = uData
                     await startPlayback(item: fetched)
-                } else if let urlStr = record.streamURLString, let url = URL(string: urlStr) {
+                } else if let urlStr = record.streamURLString {
+                    let url = Self.resolveMediaURL(from: urlStr)
                     playDirectURL(url: url, title: record.title, startSeconds: record.positionSeconds)
                 }
             }
             return
         }
-        if let urlStr = record.streamURLString, let url = URL(string: urlStr) {
+        if let urlStr = record.streamURLString {
+            let url = Self.resolveMediaURL(from: urlStr)
             playDirectURL(url: url, title: record.title, startSeconds: record.positionSeconds)
             return
         }
@@ -497,15 +513,32 @@ public final class AppState: ObservableObject {
             Task {
                 if let fetched = try? await EmbyClient.shared.fetchItemDetail(server: server, itemId: itemId) {
                     await startPlayback(item: fetched, fromBeginning: true)
-                } else if let urlStr = record.streamURLString, let url = URL(string: urlStr) {
+                } else if let urlStr = record.streamURLString {
+                    let url = Self.resolveMediaURL(from: urlStr)
                     playDirectURL(url: url, title: record.title, startSeconds: 0)
                 }
             }
             return
         }
-        if let urlStr = record.streamURLString, let url = URL(string: urlStr) {
+        if let urlStr = record.streamURLString {
+            let url = Self.resolveMediaURL(from: urlStr)
             playDirectURL(url: url, title: record.title, startSeconds: 0)
             return
+        }
+    }
+
+    public static func resolveMediaURL(from string: String) -> URL {
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("file://") {
+            let withoutScheme = String(trimmed.dropFirst(7))
+            let path = withoutScheme.removingPercentEncoding ?? withoutScheme
+            return URL(fileURLWithPath: path)
+        } else if trimmed.hasPrefix("/") {
+            return URL(fileURLWithPath: trimmed)
+        } else if let parsed = URL(string: trimmed), parsed.scheme != nil {
+            return parsed
+        } else {
+            return URL(fileURLWithPath: trimmed)
         }
     }
 
@@ -1010,9 +1043,29 @@ public final class AppState: ObservableObject {
 
             let startSec = fromBeginning ? 0 : targetItem.resumePositionSeconds
             let remotePoster = EmbyClient.shared.imageURL(server: server, item: targetItem, kind: .primary, maxWidth: 320)?.absoluteString
+
+            let recTitle: String
+            let recSubtitle: String?
+            if targetItem.isEpisode {
+                recTitle = targetItem.seriesName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                    ? targetItem.seriesName!
+                    : targetItem.name
+                var subParts: [String] = []
+                if let code = targetItem.episodeCodeString, !code.isEmpty {
+                    subParts.append(code)
+                }
+                if !targetItem.name.isEmpty && !subParts.contains(targetItem.name) {
+                    subParts.append(targetItem.name)
+                }
+                recSubtitle = subParts.isEmpty ? targetItem.resolutionBadge : subParts.joined(separator: " · ")
+            } else {
+                recTitle = targetItem.name
+                recSubtitle = targetItem.displaySubtitle.isEmpty ? targetItem.resolutionBadge : targetItem.displaySubtitle
+            }
+
             recordWatch(
-                title: targetItem.name,
-                subtitle: targetItem.isEpisode ? "\(targetItem.seriesName ?? "") · \(targetItem.episodeCodeString ?? "")" : targetItem.resolutionBadge,
+                title: recTitle,
+                subtitle: recSubtitle,
                 posterKey: nil,
                 posterURL: remotePoster,
                 position: startSec,
@@ -1038,11 +1091,12 @@ public final class AppState: ObservableObject {
     }
 
     public func playDirectURL(url: URL, title: String, startSeconds: Double = 0) {
+        let isLocal = url.isFileURL || url.scheme == "file" || url.path.hasPrefix("/")
         let server = activeServer ?? DemoServerData.makeDefaultUHDServer()
         let dummySource = MediaSourceInfo(
             id: UUID().uuidString,
             name: url.pathExtension.isEmpty ? "Direct Stream" : url.pathExtension.uppercased(),
-            path: url.absoluteString,
+            path: isLocal ? url.path : url.absoluteString,
             container: url.pathExtension.isEmpty ? "mp4" : url.pathExtension
         )
         let dummyItem = EmbyItem(
@@ -1059,18 +1113,18 @@ public final class AppState: ObservableObject {
             mediaSource: dummySource,
             subtitleURLs: [],
             isDirectStream: true,
-            routeNote: url.isFileURL ? "本地文件直解" : "网络直链播放"
+            routeNote: isLocal ? "本地文件直解" : "网络直链播放"
         )
-        addRecentMedia(name: title, urlString: url.absoluteString, isLocal: url.isFileURL)
+        addRecentMedia(name: title, urlString: isLocal ? url.path : url.absoluteString, isLocal: isLocal)
         recordWatch(
             title: title,
-            subtitle: url.isFileURL ? "本地文件直解 (\(dummySource.container?.uppercased() ?? "FILE"))" : "网络直链播放 (\(dummySource.container?.uppercased() ?? "STREAM"))",
+            subtitle: isLocal ? "本地文件直解 (\(dummySource.container?.uppercased() ?? "FILE"))" : "网络直链播放 (\(dummySource.container?.uppercased() ?? "STREAM"))",
             posterKey: nil,
             position: startSeconds,
             duration: 3600,
-            sourceType: url.isFileURL ? "本地文件" : "网络直链",
-            streamURLString: url.absoluteString,
-            resolutionTag: url.isFileURL ? "本地 4K" : "在线原画"
+            sourceType: isLocal ? "本地文件" : "网络直链",
+            streamURLString: isLocal ? url.path : url.absoluteString,
+            resolutionTag: isLocal ? "本地 4K" : "在线原画"
         )
         self.activePlayback = ActivePlaybackSession(
             server: server,

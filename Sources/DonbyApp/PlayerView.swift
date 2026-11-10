@@ -505,9 +505,28 @@ public struct PlayerView: View {
             // Update watch history periodically (every 5s) to avoid UI frame drops
             if abs(currentTime - lastRecordedPosition) >= 5.0 {
                 lastRecordedPosition = currentTime
+                let recTitle: String
+                let recSubtitle: String?
+                if currentItem.isEpisode {
+                    recTitle = currentItem.seriesName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                        ? currentItem.seriesName!
+                        : currentItem.name
+                    var subParts: [String] = []
+                    if let code = currentItem.episodeCodeString, !code.isEmpty {
+                        subParts.append(code)
+                    }
+                    if !currentItem.name.isEmpty && !subParts.contains(currentItem.name) {
+                        subParts.append(currentItem.name)
+                    }
+                    recSubtitle = subParts.isEmpty ? currentItem.resolutionBadge : subParts.joined(separator: " · ")
+                } else {
+                    recTitle = currentItem.name
+                    recSubtitle = currentItem.displaySubtitle.isEmpty ? currentItem.resolutionBadge : currentItem.displaySubtitle
+                }
+
                 appState.recordWatch(
-                    title: currentItem.name,
-                    subtitle: currentItem.isEpisode ? currentItem.episodeCodeString : currentItem.resolutionBadge,
+                    title: recTitle,
+                    subtitle: recSubtitle,
                     posterKey: nil,
                     posterURL: EmbyClient.shared.imageURL(server: session.server, item: currentItem, kind: .primary, maxWidth: 320)?.absoluteString,
                     position: currentTime,
@@ -1405,7 +1424,18 @@ public struct PlayerView: View {
         displayDownloadSpeedMBs = 0.0
         localExternalSubtitleName = nil
 
-        let urlStr = currentResource.streamURL.absoluteString
+        let urlStr: String
+        if currentResource.streamURL.isFileURL {
+            urlStr = currentResource.streamURL.path
+        } else if currentResource.streamURL.scheme == "file" {
+            urlStr = currentResource.streamURL.path
+        } else if let unescaped = currentResource.streamURL.absoluteString.removingPercentEncoding, unescaped.hasPrefix("file://") {
+            urlStr = String(unescaped.dropFirst("file://".count))
+        } else if currentResource.streamURL.absoluteString.hasPrefix("/") {
+            urlStr = currentResource.streamURL.absoluteString
+        } else {
+            urlStr = currentResource.streamURL.absoluteString
+        }
         let headersStr = currentResource.headers.map { "\($0.key): \($0.value)\r\n" }.joined()
         let hwDecode = appState.enableHardwareDecode
         let speed = playbackSpeed
@@ -1769,9 +1799,28 @@ public struct PlayerView: View {
         if let mm = mouseMonitor { NSEvent.removeMonitor(mm); mouseMonitor = nil }
         if let km = keyMonitor { NSEvent.removeMonitor(km); keyMonitor = nil }
 
+        let recTitle: String
+        let recSubtitle: String?
+        if currentItem.isEpisode {
+            recTitle = currentItem.seriesName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                ? currentItem.seriesName!
+                : currentItem.name
+            var subParts: [String] = []
+            if let code = currentItem.episodeCodeString, !code.isEmpty {
+                subParts.append(code)
+            }
+            if !currentItem.name.isEmpty && !subParts.contains(currentItem.name) {
+                subParts.append(currentItem.name)
+            }
+            recSubtitle = subParts.isEmpty ? currentItem.resolutionBadge : subParts.joined(separator: " · ")
+        } else {
+            recTitle = currentItem.name
+            recSubtitle = currentItem.displaySubtitle.isEmpty ? currentItem.resolutionBadge : currentItem.displaySubtitle
+        }
+
         appState.recordWatch(
-            title: currentItem.name,
-            subtitle: currentItem.isEpisode ? currentItem.episodeCodeString : currentItem.resolutionBadge,
+            title: recTitle,
+            subtitle: recSubtitle,
             posterKey: nil,
             posterURL: EmbyClient.shared.imageURL(server: session.server, item: currentItem, kind: .primary, maxWidth: 320)?.absoluteString,
             position: currentTime,
