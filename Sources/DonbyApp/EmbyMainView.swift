@@ -221,20 +221,33 @@ public struct EmbyMainView: View {
                             appState.linePickerServer = server
                         } label: {
                             HStack(spacing: 6) {
-                                RouteSwitchVectorIcon(size: 12.5, color: appState.accentColor)
+                                RouteSwitchVectorIcon(
+                                    size: 12,
+                                    color: isLinePillHovered
+                                        ? DonbyGlassPalette.primaryText(isLight: appState.isLightMode)
+                                        : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode)
+                                )
 
                                 Text(server.activeLineName)
-                                    .font(.system(size: 12, weight: .medium))
+                                    .font(.system(size: 12.5, weight: .medium))
                                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                                     .lineLimit(1)
 
                                 Image(systemName: "chevron.down")
-                                    .font(.system(size: 8, weight: .bold))
+                                    .font(.system(size: 8.5, weight: .semibold))
                                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                             }
-                            .padding(.horizontal, 11)
+                            .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: isLinePillHovered)
+                            .background(
+                                Capsule()
+                                    .fill(appState.isLightMode ? Color.white : Color(white: 0.16))
+                                    .shadow(color: Color.black.opacity(appState.isLightMode ? 0.05 : 0.22), radius: isLinePillHovered ? 4 : 2, y: 1)
+                            )
+                            .overlay(
+                                Capsule()
+                                    .strokeBorder(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08), lineWidth: 0.5)
+                            )
                         }
                         .buttonStyle(.plain)
                         .fixedSize(horizontal: true, vertical: false)

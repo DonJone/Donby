@@ -915,6 +915,7 @@ public struct PlusVectorIcon: View {
 
 /// Pure SwiftUI Toolbar Button accepting any custom vector icon content (0 native bezel, 0 Menu chevron)
 public struct ToolbarVectorButton<Icon: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
     public var tooltip: String = ""
     public var isActive: Bool = false
     public let action: () -> Void
@@ -939,8 +940,16 @@ public struct ToolbarVectorButton<Icon: View>: View {
             ZStack {
                 icon(isHovered)
             }
-            .frame(width: 34, height: 34)
-            .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: isHovered || isActive)
+            .frame(width: 32, height: 32)
+            .background(
+                Circle()
+                    .fill(colorScheme == .light ? Color.white : Color(white: 0.16))
+                    .shadow(color: Color.black.opacity(colorScheme == .light ? 0.06 : 0.22), radius: (isHovered || isActive) ? 4 : 2, y: 1)
+            )
+            .overlay(
+                Circle()
+                    .strokeBorder(colorScheme == .light ? Color.black.opacity(0.06) : Color.white.opacity(0.08), lineWidth: 0.5)
+            )
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -1038,8 +1047,17 @@ public struct DonbyToolbarCircleView: View {
                     .foregroundStyle(colorScheme == .light ? Color(red: 0.40, green: 0.40, blue: 0.44) : Color(white: 0.65))
             }
         }
-        .frame(width: showChevron ? 42 : 36, height: 34)
-        .donbyLiquidGlassCapsule(tint: nil, interactive: true, isHovered: false)
+        .frame(width: showChevron ? 42 : 32, height: 32)
+        .background(
+            Capsule()
+                .fill(colorScheme == .light ? Color.white : Color(white: 0.16))
+                .shadow(color: Color.black.opacity(colorScheme == .light ? 0.05 : 0.22), radius: 2, y: 1)
+        )
+        .overlay(
+            Capsule()
+                .strokeBorder(colorScheme == .light ? Color.black.opacity(0.06) : Color.white.opacity(0.08), lineWidth: 0.5)
+        )
+        .contentShape(Capsule())
     }
 }
 

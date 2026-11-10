@@ -52,6 +52,16 @@ public final class AppState: ObservableObject {
         didSet { saveURLMediaToDisk() }
     }
 
+    private let localFoldersStorageKey = "donby.localFolders.v1"
+    @Published public var localFolders: [LocalMediaFolder] = [] {
+        didSet { saveLocalFoldersToDisk() }
+    }
+    @Published public var browsingFolder: LocalMediaFolder? = nil
+
+    @AppStorage("donby.defaultStartupModule") public var defaultStartupModule: String = "servers"
+    @AppStorage("donby.defaultStartupServerId") public var defaultStartupServerId: String = ""
+    @AppStorage("donby.defaultFilesFolderId") public var defaultFilesFolderId: String = ""
+
     @Published public var iptvChannels: [IPTVChannelItem] = [] {
         didSet { saveIPTVChannelsToDisk() }
     }
@@ -170,6 +180,7 @@ public final class AppState: ObservableObject {
         self.isSidebarCollapsed = UserDefaults.standard.bool(forKey: "donby.defaultSidebarCollapsed")
         loadServersFromDisk()
         loadURLMediaFromDisk()
+        loadLocalFoldersFromDisk()
         loadIPTVChannelsFromDisk()
         loadWatchHistoryFromDisk()
 
@@ -188,13 +199,35 @@ public final class AppState: ObservableObject {
             activeServerId = (servers.first(where: \.isDefaultHome) ?? servers.first)?.id
         }
 
-        if let defaultHome = servers.first(where: { $0.isDefaultHome && !$0.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
-            openedServerId = defaultHome.id
-        } else if let first = servers.first(where: { !$0.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
-            openedServerId = first.id
-        } else {
-            openedServerId = nil
+        // Apply default startup navigation preference
+        switch defaultStartupModule {
+        case "servers":
             selectedTab = .servers
+            if !defaultStartupServerId.isEmpty, let target = servers.first(where: { $0.id.uuidString == defaultStartupServerId && !$0.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+                openedServerId = target.id
+            } else if defaultStartupServerId.isEmpty {
+                // Default to server selection overview when user chose "全部服务器列表"
+                openedServerId = nil
+            } else if let defaultHome = servers.first(where: { $0.isDefaultHome && !$0.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+                openedServerId = defaultHome.id
+            } else {
+                openedServerId = nil
+            }
+        case "files":
+            selectedTab = .files
+            openedServerId = nil
+            if !defaultFilesFolderId.isEmpty, let folder = localFolders.first(where: { $0.id.uuidString == defaultFilesFolderId }) {
+                browsingFolder = folder
+            }
+        case "iptv":
+            selectedTab = .iptv
+            openedServerId = nil
+        case "records":
+            selectedTab = .records
+            openedServerId = nil
+        default:
+            selectedTab = .servers
+            openedServerId = nil
         }
 
         if openedServerId != nil {
@@ -239,6 +272,21 @@ public final class AppState: ObservableObject {
     private func saveURLMediaToDisk() {
         if let data = try? JSONEncoder().encode(urlMediaItems) {
             UserDefaults.standard.set(data, forKey: urlMediaStorageKey)
+        }
+    }
+
+    private func loadLocalFoldersFromDisk() {
+        if let data = UserDefaults.standard.data(forKey: localFoldersStorageKey),
+           let decoded = try? JSONDecoder().decode([LocalMediaFolder].self, from: data) {
+            self.localFolders = decoded
+        } else {
+            self.localFolders = []
+        }
+    }
+
+    private func saveLocalFoldersToDisk() {
+        if let data = try? JSONEncoder().encode(localFolders) {
+            UserDefaults.standard.set(data, forKey: localFoldersStorageKey)
         }
     }
 
@@ -499,6 +547,78 @@ public final class AppState: ObservableObject {
         selectedLibrary = nil
         detailStack.removeAll()
         selectedTab = tab
+
+        if tab == .files {
+            if !defaultFilesFolderId.isEmpty, let folder = localFolders.first(where: { $0.id.uuidString == defaultFilesFolderId }) {
+                browsingFolder = folder
+            } else {
+                browsingFolder = nil
+            }
+        }
+    }
+
+    public func addLocalFolder(url: URL) {
+        let path = url.path
+        if localFolders.contains(where: { $0.path == path }) {
+            showToast("该文件夹已在列表中", icon: "folder")
+            return
+        }
+        let bookmark = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+        let name = url.lastPathComponent
+        let isFirst = localFolders.isEmpty
+        let folder = LocalMediaFolder(name: name, path: path, bookmarkData: bookmark, isPresetDefault: isFirst)
+        localFolders.append(folder)
+        if isFirst && defaultFilesFolderId.isEmpty {
+            defaultFilesFolderId = folder.id.uuidString
+        }
+        showToast("已添加本地文件夹: \(name)", icon: "folder.badge.plus")
+    }
+
+    public func removeLocalFolder(id: UUID) {
+        if browsingFolder?.id == id {
+            browsingFolder = nil
+        }
+        if defaultFilesFolderId == id.uuidString {
+            defaultFilesFolderId = ""
+        }
+        localFolders.removeAll { $0.id == id }
+        showToast("已移除该文件夹", icon: "trash")
+    }
+
+    public func setPresetDefaultFolder(id: UUID) {
+        if defaultFilesFolderId == id.uuidString {
+            defaultFilesFolderId = ""
+            for i in 0..<localFolders.count {
+                localFolders[i].isPresetDefault = false
+            }
+            showToast("已取消默认打开文件夹", icon: "folder")
+        } else {
+            defaultFilesFolderId = id.uuidString
+            for i in 0..<localFolders.count {
+                localFolders[i].isPresetDefault = (localFolders[i].id == id)
+            }
+            showToast("已设为默认打开文件夹", icon: "star.fill")
+        }
+    }
+
+    public static func scanFolderVideos(path: String) -> [LocalVideoFileInfo] {
+        let fm = FileManager.default
+        let url = URL(fileURLWithPath: path)
+        guard let items = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey], options: [.skipsHiddenFiles]) else {
+            return []
+        }
+        let exts: Set<String> = ["mp4", "mkv", "mov", "webm", "avi", "m4v", "flv", "ts", "m2ts", "wmv", "iso", "rmvb"]
+        var list: [LocalVideoFileInfo] = []
+        for fileURL in items {
+            let ext = fileURL.pathExtension.lowercased()
+            if exts.contains(ext) {
+                let res = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                let size = Int64(res?.fileSize ?? 0)
+                let date = res?.contentModificationDate ?? Date()
+                list.append(LocalVideoFileInfo(name: fileURL.lastPathComponent, path: fileURL.path, fileSizeBytes: size, fileExtension: ext.uppercased(), modifiedDate: date))
+            }
+        }
+        return list.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
     public func updateServerInList(_ updated: EmbyServerConfig) {

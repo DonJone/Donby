@@ -72,6 +72,41 @@ public struct LocalOrURLMediaItem: Codable, Identifiable, Hashable, Sendable {
     }
 }
 
+public struct LocalMediaFolder: Codable, Identifiable, Hashable, Sendable {
+    public var id: UUID = UUID()
+    public var name: String
+    public var path: String
+    public var bookmarkData: Data?
+    public var isPresetDefault: Bool = false
+    public var addedAt: Date = Date()
+
+    public init(id: UUID = UUID(), name: String, path: String, bookmarkData: Data? = nil, isPresetDefault: Bool = false, addedAt: Date = Date()) {
+        self.id = id
+        self.name = name
+        self.path = path
+        self.bookmarkData = bookmarkData
+        self.isPresetDefault = isPresetDefault
+        self.addedAt = addedAt
+    }
+}
+
+public struct LocalVideoFileInfo: Identifiable, Hashable, Sendable {
+    public var id: String { path }
+    public var name: String
+    public var path: String
+    public var fileSizeBytes: Int64
+    public var fileExtension: String
+    public var modifiedDate: Date
+
+    public init(name: String, path: String, fileSizeBytes: Int64, fileExtension: String, modifiedDate: Date) {
+        self.name = name
+        self.path = path
+        self.fileSizeBytes = fileSizeBytes
+        self.fileExtension = fileExtension
+        self.modifiedDate = modifiedDate
+    }
+}
+
 public struct IPTVChannelItem: Codable, Identifiable, Hashable, Sendable {
     public var id: UUID = UUID()
     public var name: String

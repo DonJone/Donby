@@ -399,15 +399,21 @@ public struct ServerLinePickSheet: View {
                                 .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                             if server.autoSyncedLineCount > 0 {
                                 HStack(spacing: 4) {
-                                    RouteSwitchVectorIcon(size: 10.5, color: appState.accentColor)
+                                    RouteSwitchVectorIcon(size: 9.5, color: DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                                     Text("云端 \(server.autoSyncedLineCount) 条线路")
-                                        .font(.system(size: 10.5, weight: .semibold))
+                                        .font(.system(size: 10.5, weight: .medium))
                                 }
-                                .foregroundStyle(appState.accentColor)
+                                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 2.5)
-                                .background(appState.accentColor.opacity(0.14))
-                                .clipShape(Capsule())
+                                .background(
+                                    Capsule()
+                                        .fill(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.08))
+                                )
+                                .overlay(
+                                    Capsule()
+                                        .strokeBorder(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.07), lineWidth: 0.5)
+                                )
                             }
                         }
                         Text("当前使用：\(server.activeLineName) · 点击即时切换")
@@ -495,11 +501,11 @@ public struct ServerLinePickSheet: View {
                                 .font(.system(size: 12, weight: .bold))
                             Text("完成")
                         }
-                        .font(.system(size: 12.5, weight: .bold))
+                        .font(.system(size: 12.5, weight: .semibold))
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .background(appState.accentColor)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 7.5)
+                        .background(appState.isLightMode ? Color(white: 0.12) : Color.white.opacity(0.22))
                         .clipShape(Capsule())
                     }
                     .buttonStyle(.plain)
@@ -528,14 +534,48 @@ private struct ServerLineOptionRow: View {
 
     @State private var isHovered: Bool = false
 
+    private var rowBackground: Color {
+        if isSelected {
+            return appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.12)
+        } else if isHovered {
+            return appState.isLightMode ? Color.black.opacity(0.035) : Color.white.opacity(0.07)
+        } else {
+            return DonbyGlassPalette.cardBackground(isLight: appState.isLightMode)
+        }
+    }
+
+    private var rowBorderColor: Color {
+        if isSelected {
+            return appState.isLightMode ? Color.black.opacity(0.20) : Color.white.opacity(0.30)
+        } else if isHovered {
+            return DonbyGlassPalette.separator(isLight: appState.isLightMode).opacity(1.3)
+        } else {
+            return DonbyGlassPalette.separator(isLight: appState.isLightMode)
+        }
+    }
+
+    @ViewBuilder
+    private var selectionIndicator: some View {
+        if isSelected {
+            Circle()
+                .fill(appState.isLightMode ? Color(white: 0.16) : Color.white)
+                .frame(width: 16, height: 16)
+                .overlay(
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 8.5, weight: .heavy))
+                        .foregroundStyle(appState.isLightMode ? Color.white : Color.black)
+                )
+        } else {
+            Circle()
+                .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 1.2)
+                .frame(width: 16, height: 16)
+        }
+    }
+
     var body: some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                ZStack {
-                    Circle()
-                        .strokeBorder(isSelected ? accentColor : DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: isSelected ? 5.5 : 1.5)
-                        .frame(width: 17, height: 17)
-                }
+                selectionIndicator
 
                 VStack(alignment: .leading, spacing: 2.5) {
                     HStack(spacing: 6) {
@@ -545,11 +585,11 @@ private struct ServerLineOptionRow: View {
                             .lineLimit(1)
                         if isAutoSynced {
                             Text("云端同步")
-                                .font(.system(size: 9.5, weight: .semibold))
-                                .foregroundStyle(accentColor)
-                                .padding(.horizontal, 5.5)
-                                .padding(.vertical, 1.5)
-                                .background(accentColor.opacity(0.14))
+                                .font(.system(size: 9.5, weight: .medium))
+                                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(appState.isLightMode ? Color.black.opacity(0.04) : Color.white.opacity(0.08))
                                 .clipShape(Capsule())
                         }
                     }
@@ -562,18 +602,11 @@ private struct ServerLineOptionRow: View {
             }
             .padding(.horizontal, 13)
             .padding(.vertical, 10)
-            .background(
-                isSelected
-                    ? accentColor.opacity(appState.isLightMode ? 0.12 : 0.16)
-                    : (isHovered ? (appState.isLightMode ? Color.black.opacity(0.04) : Color.white.opacity(0.075)) : DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
-            )
+            .background(rowBackground)
             .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .strokeBorder(
-                        isSelected ? accentColor.opacity(0.85) : (isHovered ? DonbyGlassPalette.separator(isLight: appState.isLightMode).opacity(1.5) : DonbyGlassPalette.separator(isLight: appState.isLightMode)),
-                        lineWidth: isSelected ? 1.3 : 0.6
-                    )
+                    .strokeBorder(rowBorderColor, lineWidth: isSelected ? 1.0 : 0.6)
             )
             .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         }
