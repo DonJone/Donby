@@ -44,11 +44,13 @@ public final class EmbyClient: Sendable {
 
     public let clientName = "Donby"
     public var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.17"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.18"
     }
     public let deviceName: String
     public let deviceId: String
+    private let apiSession: URLSession
     private let noRedirectSession: URLSession
+    private let deviceProfilePayloadData: Data?
 
     private init() {
         let host = ProcessInfo.processInfo.hostName
@@ -56,9 +58,38 @@ public final class EmbyClient: Sendable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         self.deviceName = host.isEmpty ? "Mac" : host
 
+        let apiConfig = URLSessionConfiguration.default
+        apiConfig.httpMaximumConnectionsPerHost = 12
+        apiConfig.timeoutIntervalForRequest = 15
+        apiConfig.timeoutIntervalForResource = 30
+        self.apiSession = URLSession(configuration: apiConfig)
+
         let redirectConfig = URLSessionConfiguration.ephemeral
         redirectConfig.timeoutIntervalForRequest = 4.0
         self.noRedirectSession = URLSession(configuration: redirectConfig, delegate: NoRedirectDelegate(), delegateQueue: nil)
+
+        let profilePayload: [String: Any] = [
+            "DeviceProfile": [
+                "Name": "Donby-Mac-DirectPlay",
+                "MaxStreamingBitrate": 200_000_000,
+                "MaxStaticBitrate": 200_000_000,
+                "DirectPlayProfiles": [
+                    [
+                        "Container": "mkv,mp4,mov,m4v,webm,avi,ts,m2ts,flv,wmv,iso",
+                        "Type": "Video",
+                        "VideoCodec": "hevc,h264,dvhe,dvh1,hev1,av1,vp9,mpeg4",
+                        "AudioCodec": "eac3,ac3,aac,flac,truehd,dts,dca,opus,mp3,pcm,alac"
+                    ]
+                ],
+                "SubtitleProfiles": [
+                    ["Format": "srt", "Method": "External"],
+                    ["Format": "ass", "Method": "External"],
+                    ["Format": "subrip", "Method": "Embed"],
+                    ["Format": "pgssub", "Method": "Embed"]
+                ]
+            ]
+        ]
+        self.deviceProfilePayloadData = try? JSONSerialization.data(withJSONObject: profilePayload)
 
         if let saved = UserDefaults.standard.string(forKey: "donby.deviceId"), !saved.isEmpty {
             self.deviceId = saved
@@ -128,6 +159,12 @@ public final class EmbyClient: Sendable {
         return req
     }
 
+    private func requestJSON<T: Decodable>(_ type: T.Type, for req: URLRequest) async throws -> T {
+        let (data, response) = try await apiSession.data(for: req)
+        try validateResponse(response)
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+
     public func authenticate(
         baseURL: String,
         username: String,
@@ -142,7 +179,7 @@ public final class EmbyClient: Sendable {
             bodyData: body,
             timeout: 12
         )
-        let (data, response) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await apiSession.data(for: req)
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
             if http.statusCode == 401 { throw EmbyClientError.unauthorized }
             throw EmbyClientError.httpStatus(http.statusCode, "认证失败")
@@ -177,7 +214,7 @@ public final class EmbyClient: Sendable {
                     includeTokenInQuery: true,
                     timeout: 6
                 )
-                let (data, response) = try await URLSession.shared.data(for: req)
+                let (data, response) = try await apiSession.data(for: req)
                 guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                     continue
                 }
@@ -232,14 +269,14 @@ public final class EmbyClient: Sendable {
         guard !token.isEmpty else { return [] }
         // 1. Try /Users
         if let req = try? makeRequest(baseURL: baseURL, path: "/Users", token: token, includeTokenInQuery: true, timeout: 8),
-           let (data, response) = try? await URLSession.shared.data(for: req),
+           let (data, response) = try? await apiSession.data(for: req),
            let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
            let users = try? JSONDecoder().decode([EmbyUser].self, from: data), !users.isEmpty {
             return users
         }
         // 2. Try /Users/Public
         if let req = try? makeRequest(baseURL: baseURL, path: "/Users/Public", token: token, includeTokenInQuery: true, timeout: 8),
-           let (data, response) = try? await URLSession.shared.data(for: req),
+           let (data, response) = try? await apiSession.data(for: req),
            let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
            let users = try? JSONDecoder().decode([EmbyUser].self, from: data), !users.isEmpty {
             return users
@@ -258,7 +295,7 @@ public final class EmbyClient: Sendable {
                 token: token,
                 timeout: max(1.0, timeout)
             )
-            let (_, response) = try await URLSession.shared.data(for: req)
+            let (_, response) = try await apiSession.data(for: req)
             guard let http = response as? HTTPURLResponse, (200...404).contains(http.statusCode) else {
                 return nil
             }
@@ -279,9 +316,7 @@ public final class EmbyClient: Sendable {
                 includeTokenInQuery: true,
                 timeout: 10
             )
-            let (data, response) = try await URLSession.shared.data(for: req)
-            try validateResponse(response)
-            return try JSONDecoder().decode(EmbySystemInfo.self, from: data)
+            return try await requestJSON(EmbySystemInfo.self, for: req)
         } catch {
             // Fallback for non-admin tokens or public endpoints
             let fallbackReq = try makeRequest(
@@ -291,9 +326,7 @@ public final class EmbyClient: Sendable {
                 includeTokenInQuery: true,
                 timeout: 8
             )
-            let (data, response) = try await URLSession.shared.data(for: fallbackReq)
-            try validateResponse(response)
-            return try JSONDecoder().decode(EmbySystemInfo.self, from: data)
+            return try await requestJSON(EmbySystemInfo.self, for: fallbackReq)
         }
     }
 
@@ -307,9 +340,7 @@ public final class EmbyClient: Sendable {
             userId: server.userId,
             timeout: 10
         )
-        let (data, response) = try await URLSession.shared.data(for: req)
-        try validateResponse(response)
-        return try JSONDecoder().decode(EmbyCountsResponse.self, from: data)
+        return try await requestJSON(EmbyCountsResponse.self, for: req)
     }
 
     public func fetchViews(server: EmbyServerConfig) async throws -> [EmbyItem] {
@@ -329,9 +360,7 @@ public final class EmbyClient: Sendable {
             userId: targetUserId,
             includeTokenInQuery: true
         )
-        let (data, response) = try await URLSession.shared.data(for: req)
-        try validateResponse(response)
-        return try JSONDecoder().decode(EmbyItemsResponse.self, from: data).items
+        return try await requestJSON(EmbyItemsResponse.self, for: req).items
     }
 
     public func fetchResumeItems(server: EmbyServerConfig, limit: Int = 16) async throws -> [EmbyItem] {
@@ -350,9 +379,7 @@ public final class EmbyClient: Sendable {
             token: server.accessToken,
             userId: server.userId
         )
-        let (data, response) = try await URLSession.shared.data(for: req)
-        try validateResponse(response)
-        return try JSONDecoder().decode(EmbyItemsResponse.self, from: data).items
+        return try await requestJSON(EmbyItemsResponse.self, for: req).items
     }
 
     public func fetchNextUp(server: EmbyServerConfig, limit: Int = 16) async throws -> [EmbyItem] {
@@ -370,9 +397,7 @@ public final class EmbyClient: Sendable {
             token: server.accessToken,
             userId: server.userId
         )
-        let (data, response) = try await URLSession.shared.data(for: req)
-        try validateResponse(response)
-        return try JSONDecoder().decode(EmbyItemsResponse.self, from: data).items
+        return try await requestJSON(EmbyItemsResponse.self, for: req).items
     }
 
     public func fetchLatestItems(
@@ -397,9 +422,7 @@ public final class EmbyClient: Sendable {
             token: server.accessToken,
             userId: server.userId
         )
-        let (data, response) = try await URLSession.shared.data(for: req)
-        try validateResponse(response)
-        return try JSONDecoder().decode([EmbyItem].self, from: data)
+        return try await requestJSON([EmbyItem].self, for: req)
     }
 
     public func fetchItems(
@@ -438,9 +461,7 @@ public final class EmbyClient: Sendable {
             token: server.accessToken,
             userId: server.userId
         )
-        let (data, response) = try await URLSession.shared.data(for: req)
-        try validateResponse(response)
-        return try JSONDecoder().decode(EmbyItemsResponse.self, from: data)
+        return try await requestJSON(EmbyItemsResponse.self, for: req)
     }
 
     public func fetchItemDetail(server: EmbyServerConfig, itemId: String) async throws -> EmbyItem {
@@ -452,9 +473,7 @@ public final class EmbyClient: Sendable {
             token: server.accessToken,
             userId: server.userId
         )
-        let (data, response) = try await URLSession.shared.data(for: req)
-        try validateResponse(response)
-        return try JSONDecoder().decode(EmbyItem.self, from: data)
+        return try await requestJSON(EmbyItem.self, for: req)
     }
 
     public func fetchSeasons(server: EmbyServerConfig, seriesId: String) async throws -> [EmbyItem] {
@@ -469,9 +488,7 @@ public final class EmbyClient: Sendable {
             token: server.accessToken,
             userId: server.userId
         )
-        let (data, response) = try await URLSession.shared.data(for: req)
-        try validateResponse(response)
-        return try JSONDecoder().decode(EmbyItemsResponse.self, from: data).items
+        return try await requestJSON(EmbyItemsResponse.self, for: req).items
     }
 
     public func fetchEpisodes(server: EmbyServerConfig, seriesId: String, seasonId: String? = nil) async throws -> [EmbyItem] {
@@ -487,9 +504,7 @@ public final class EmbyClient: Sendable {
             token: server.accessToken,
             userId: server.userId
         )
-        let (data, response) = try await URLSession.shared.data(for: req)
-        try validateResponse(response)
-        return try JSONDecoder().decode(EmbyItemsResponse.self, from: data).items
+        return try await requestJSON(EmbyItemsResponse.self, for: req).items
     }
 
     public func fetchSimilarItems(server: EmbyServerConfig, itemId: String, limit: Int = 12) async throws -> [EmbyItem] {
@@ -505,9 +520,7 @@ public final class EmbyClient: Sendable {
             token: server.accessToken,
             userId: server.userId
         )
-        let (data, response) = try await URLSession.shared.data(for: req)
-        try validateResponse(response)
-        return try JSONDecoder().decode(EmbyItemsResponse.self, from: data).items
+        return try await requestJSON(EmbyItemsResponse.self, for: req).items
     }
 
     public func fetchPlaybackInfo(
@@ -526,28 +539,6 @@ public final class EmbyClient: Sendable {
         if let audioStreamIndex { query.append(URLQueryItem(name: "AudioStreamIndex", value: "\(audioStreamIndex)")) }
         if let subtitleStreamIndex { query.append(URLQueryItem(name: "SubtitleStreamIndex", value: "\(subtitleStreamIndex)")) }
 
-        let profilePayload: [String: Any] = [
-            "DeviceProfile": [
-                "Name": "Donby-Mac-DirectPlay",
-                "MaxStreamingBitrate": 200_000_000,
-                "MaxStaticBitrate": 200_000_000,
-                "DirectPlayProfiles": [
-                    [
-                        "Container": "mkv,mp4,mov,m4v,webm,avi,ts,m2ts,flv,wmv,iso",
-                        "Type": "Video",
-                        "VideoCodec": "hevc,h264,dvhe,dvh1,hev1,av1,vp9,mpeg4",
-                        "AudioCodec": "eac3,ac3,aac,flac,truehd,dts,dca,opus,mp3,pcm,alac"
-                    ]
-                ],
-                "SubtitleProfiles": [
-                    ["Format": "srt", "Method": "External"],
-                    ["Format": "ass", "Method": "External"],
-                    ["Format": "subrip", "Method": "Embed"],
-                    ["Format": "pgssub", "Method": "Embed"]
-                ]
-            ]
-        ]
-        let body = try JSONSerialization.data(withJSONObject: profilePayload)
         let req = try makeRequest(
             baseURL: server.activeBaseURL,
             path: "/Items/\(itemId)/PlaybackInfo",
@@ -555,12 +546,10 @@ public final class EmbyClient: Sendable {
             queryItems: query,
             token: server.accessToken,
             userId: server.userId,
-            bodyData: body,
+            bodyData: deviceProfilePayloadData,
             timeout: 15
         )
-        let (data, response) = try await URLSession.shared.data(for: req)
-        try validateResponse(response)
-        return try JSONDecoder().decode(EmbyPlaybackInfoResponse.self, from: data)
+        return try await requestJSON(EmbyPlaybackInfoResponse.self, for: req)
     }
 
     public func resolvePlaybackResource(
@@ -811,7 +800,7 @@ public final class EmbyClient: Sendable {
                 bodyData: body,
                 timeout: 8
               ) else { return }
-        _ = try? await URLSession.shared.data(for: req)
+        _ = try? await apiSession.data(for: req)
     }
 
     public func setFavorite(server: EmbyServerConfig, itemId: String, isFavorite: Bool) async throws {
@@ -823,7 +812,7 @@ public final class EmbyClient: Sendable {
             token: server.accessToken,
             userId: server.userId
         )
-        let (_, response) = try await URLSession.shared.data(for: req)
+        let (_, response) = try await apiSession.data(for: req)
         try validateResponse(response)
     }
 
@@ -836,7 +825,7 @@ public final class EmbyClient: Sendable {
             token: server.accessToken,
             userId: server.userId
         )
-        let (_, response) = try await URLSession.shared.data(for: req)
+        let (_, response) = try await apiSession.data(for: req)
         try validateResponse(response)
     }
 

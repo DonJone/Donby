@@ -255,6 +255,8 @@ public struct GlobalSearchView: View {
             if let resp = try? await EmbyClient.shared.fetchItems(server: server, searchTerm: q, limit: 48),
                !Task.isCancelled {
                 remoteResults = resp.items
+            } else if !Task.isCancelled {
+                remoteResults = []
             }
             if !Task.isCancelled {
                 isSearchingRemote = false

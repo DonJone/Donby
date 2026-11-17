@@ -813,21 +813,14 @@ public final class DKMetalLayerView: NSView {
         sizeLock.unlock()
         guard drawableSize.width > 0, drawableSize.height > 0 else { return false }
 
-        self.lastPixelBuffer = pixelBuffer
         var uniforms = colorUniforms ?? self.lastColorUniforms
         uniforms.edr_headroom = currentEDRHeadroom
-        self.lastColorUniforms = uniforms
 
         guard let queue = commandQueue,
               let cache = textureCache,
               let drawable = metalLayer.nextDrawable() else {
             return false
         }
-        sizeLock.lock()
-        if layoutGeneration == gen {
-            _needsRedrawOnSameFrame = false
-        }
-        sizeLock.unlock()
 
         let cleanWidth = CVPixelBufferGetWidth(pixelBuffer)
         let cleanHeight = CVPixelBufferGetHeight(pixelBuffer)
@@ -837,20 +830,21 @@ public final class DKMetalLayerView: NSView {
         var scale = calculateScale(videoWidth: videoWidth, videoHeight: videoHeight)
 
         let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
+        let rendered: Bool
 
         switch pixelFormat {
         case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
              kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:
             guard let pipeline = pipelineVideoMaster else { return false }
             uniforms.bit_depth = 8
-            return renderBiPlanar(pixelBuffer: pixelBuffer,
-                                  pipeline: pipeline,
-                                  scale: &scale,
-                                  uniforms: &uniforms,
-                                  drawable: drawable,
-                                  queue: queue,
-                                  cache: cache,
-                                  is10Bit: false)
+            rendered = renderBiPlanar(pixelBuffer: pixelBuffer,
+                                      pipeline: pipeline,
+                                      scale: &scale,
+                                      uniforms: &uniforms,
+                                      drawable: drawable,
+                                      queue: queue,
+                                      cache: cache,
+                                      is10Bit: false)
 
         case kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
              kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
@@ -860,47 +854,58 @@ public final class DKMetalLayerView: NSView {
              0x73343230: // 's420'
             guard let pipeline = pipelineVideoMaster else { return false }
             if uniforms.bit_depth < 10 { uniforms.bit_depth = 10 }
-            return renderBiPlanar(pixelBuffer: pixelBuffer,
-                                  pipeline: pipeline,
-                                  scale: &scale,
-                                  uniforms: &uniforms,
-                                  drawable: drawable,
-                                  queue: queue,
-                                  cache: cache,
-                                  is10Bit: true)
-
-        case kCVPixelFormatType_32BGRA,
-             0x42475241: // 'BGRA'
-            guard let pipeline = pipelineBGRA else { return false }
-            return renderBGRA(pixelBuffer: pixelBuffer,
-                              pipeline: pipeline,
-                              scale: &scale,
-                              drawable: drawable,
-                              queue: queue,
-                              cache: cache)
-
-        default:
-            let planeCount = CVPixelBufferGetPlaneCount(pixelBuffer)
-            if planeCount == 2 {
-                guard let pipeline = pipelineVideoMaster else { return false }
-                return renderBiPlanar(pixelBuffer: pixelBuffer,
+            rendered = renderBiPlanar(pixelBuffer: pixelBuffer,
                                       pipeline: pipeline,
                                       scale: &scale,
                                       uniforms: &uniforms,
                                       drawable: drawable,
                                       queue: queue,
                                       cache: cache,
-                                      is10Bit: false)
-            } else {
-                guard let pipeline = pipelineBGRA else { return false }
-                return renderBGRA(pixelBuffer: pixelBuffer,
+                                      is10Bit: true)
+
+        case kCVPixelFormatType_32BGRA,
+             0x42475241: // 'BGRA'
+            guard let pipeline = pipelineBGRA else { return false }
+            rendered = renderBGRA(pixelBuffer: pixelBuffer,
                                   pipeline: pipeline,
                                   scale: &scale,
                                   drawable: drawable,
                                   queue: queue,
                                   cache: cache)
+
+        default:
+            let planeCount = CVPixelBufferGetPlaneCount(pixelBuffer)
+            if planeCount == 2 {
+                guard let pipeline = pipelineVideoMaster else { return false }
+                rendered = renderBiPlanar(pixelBuffer: pixelBuffer,
+                                          pipeline: pipeline,
+                                          scale: &scale,
+                                          uniforms: &uniforms,
+                                          drawable: drawable,
+                                          queue: queue,
+                                          cache: cache,
+                                          is10Bit: false)
+            } else {
+                guard let pipeline = pipelineBGRA else { return false }
+                rendered = renderBGRA(pixelBuffer: pixelBuffer,
+                                      pipeline: pipeline,
+                                      scale: &scale,
+                                      drawable: drawable,
+                                      queue: queue,
+                                      cache: cache)
             }
         }
+
+        if rendered {
+            self.lastPixelBuffer = pixelBuffer
+            self.lastColorUniforms = uniforms
+            sizeLock.lock()
+            if layoutGeneration == gen {
+                _needsRedrawOnSameFrame = false
+            }
+            sizeLock.unlock()
+        }
+        return rendered
     }
 
     private func encodeSubtitleOverlayIfNeeded(
@@ -1045,6 +1050,8 @@ public final class DKMetalLayerView: NSView {
         let videoPipeline: MTLRenderPipelineState?
         let bgraPipeline: MTLRenderPipelineState?
         let subPipeline: MTLRenderPipelineState?
+        var stagingTexture: MTLTexture?
+        var stagingSize: (width: Int, height: Int) = (0, 0)
 
         private init() {
             guard let dev = MTLCreateSystemDefaultDevice(),
@@ -1104,15 +1111,19 @@ public final class DKMetalLayerView: NSView {
         }
         guard outW > 0, outH > 0 else { return nil }
 
-        let outDesc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba8Unorm_srgb,
-            width: outW,
-            height: outH,
-            mipmapped: false
-        )
-        outDesc.usage = [.renderTarget, .shaderRead]
-        outDesc.storageMode = .shared
-        guard let outTex = dev.makeTexture(descriptor: outDesc) else { return nil }
+        if ctx.stagingTexture == nil || ctx.stagingSize.width != outW || ctx.stagingSize.height != outH {
+            let outDesc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba8Unorm_srgb,
+                width: outW,
+                height: outH,
+                mipmapped: false
+            )
+            outDesc.usage = [.renderTarget, .shaderRead]
+            outDesc.storageMode = .shared
+            ctx.stagingTexture = dev.makeTexture(descriptor: outDesc)
+            ctx.stagingSize = (outW, outH)
+        }
+        guard let outTex = ctx.stagingTexture else { return nil }
 
         let pf = CVPixelBufferGetPixelFormatType(pixelBuffer)
         var uniforms = colorUniforms
@@ -1328,9 +1339,10 @@ public struct DKMetalVideoView: NSViewRepresentable {
             guard let p = p, let v = v else { return }
 
             let needsRedraw = v.needsRedrawOnSameFrame
-            if !needsRedraw && lastBufferPtr != nil && dk_player_get_state(p) == DK_STATE_PAUSED {
+            let state = dk_player_get_state(p)
+            if !needsRedraw && lastBufferPtr != nil && (state == DK_STATE_PAUSED || state == DK_STATE_ENDED) {
                 let now = ProcessInfo.processInfo.systemUptime
-                if now - lastPausedCheckTime < 0.08 {
+                if now - lastPausedCheckTime < 0.05 {
                     return
                 }
                 lastPausedCheckTime = now
@@ -1361,7 +1373,6 @@ public struct DKMetalVideoView: NSViewRepresentable {
                     box.view.updateSubtitleOverlay(rgbaPtr: nil, width: 0, height: 0)
                 }
             }, boxPtr)
-            lastSubSerial = syncBox.updatedSerial
             let subtitleChanged = syncBox.changed
 
             // Deduplication: if PTS and pointer match the last displayed frame and the view
@@ -1373,6 +1384,9 @@ public struct DKMetalVideoView: NSViewRepresentable {
             if v.renderPixelBuffer(pixbuf, colorUniforms: colorUniforms) {
                 lastPts = pts
                 lastBufferPtr = bufPtr
+                lastSubSerial = syncBox.updatedSerial
+            } else if subtitleChanged {
+                v.needsRedrawOnSameFrame = true
             }
         }
 

@@ -165,6 +165,8 @@ public struct EmbyMainView: View {
                     if let resp = try? await EmbyClient.shared.fetchItems(server: server, searchTerm: q, limit: 60),
                        !Task.isCancelled {
                         remoteInlineSearchResults = resp.items
+                    } else if !Task.isCancelled {
+                        remoteInlineSearchResults = []
                     }
                     if !Task.isCancelled {
                         isSearchingInline = false

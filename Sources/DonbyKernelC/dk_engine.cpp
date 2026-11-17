@@ -156,7 +156,8 @@ struct DKPlayer {
     std::atomic<bool> seek_requested{false};
     std::atomic<double> seek_target_sec{0.0};
     std::atomic<bool> seek_accurate{false};
-    std::atomic<double> seek_drop_until_pts{-1.0};
+    std::atomic<double> video_seek_drop_until_pts{-1.0};
+    std::atomic<double> audio_seek_drop_until_pts{-1.0};
     std::atomic<bool> seek_preview_pending{false};
     std::atomic<bool> force_present_next_frame{false};
     std::atomic<bool> demux_eof{false};
@@ -767,7 +768,8 @@ static void dk_fill_audio_buffer(DKPlayer* player, AudioQueueBufferRef inBuffer)
 
     if (filled_floats < needed_floats) {
         std::memset(dst + filled_floats, 0, (needed_floats - filled_floats) * sizeof(float));
-        if (player->audio_clock_calibrated.load(std::memory_order_relaxed)) {
+        if (player->audio_clock_calibrated.load(std::memory_order_relaxed) &&
+            !player->audio_eof.load(std::memory_order_relaxed)) {
             player->audio_underrun_samples.fetch_add(static_cast<int64_t>((needed_floats - filled_floats) / 2), std::memory_order_relaxed);
         }
     }
@@ -1081,10 +1083,13 @@ static void dk_audio_decode_worker(DKPlayer* player) {
                 pts = frame->pts * av_q2d(player->format_ctx->streams[player->audio_stream_idx]->time_base);
             }
 
-            double drop_target = player->seek_drop_until_pts.load(std::memory_order_relaxed);
-            if (drop_target > 0.0 && pts + (static_cast<double>(frame->nb_samples) / f_rate) < drop_target - 0.03) {
-                av_frame_unref(frame);
-                continue;
+            double drop_target = player->audio_seek_drop_until_pts.load(std::memory_order_relaxed);
+            if (drop_target > 0.0) {
+                if (pts + (static_cast<double>(frame->nb_samples) / f_rate) < drop_target - 0.03) {
+                    av_frame_unref(frame);
+                    continue;
+                }
+                player->audio_seek_drop_until_pts.store(-1.0, std::memory_order_relaxed);
             }
 
             int in_rate = frame->sample_rate > 0 ? frame->sample_rate : 48000;
@@ -1267,13 +1272,13 @@ static void dk_video_decode_worker(DKPlayer* player) {
             }
             player->last_decoded_video_pts = pts;
 
-            double drop_target = player->seek_drop_until_pts.load(std::memory_order_relaxed);
+            double drop_target = player->video_seek_drop_until_pts.load(std::memory_order_relaxed);
             if (drop_target > 0.0) {
                 if (pts < drop_target - 0.04) {
                     av_frame_unref(frame);
                     continue;
                 }
-                player->seek_drop_until_pts.store(-1.0, std::memory_order_relaxed);
+                player->video_seek_drop_until_pts.store(-1.0, std::memory_order_relaxed);
             }
 
             CVPixelBufferRef pixbuf = nullptr;
@@ -1579,7 +1584,9 @@ static void dk_demux_worker(DKPlayer* player) {
             player->demux_eof.store(false);
             player->video_eof.store(false);
             player->audio_eof.store(false);
-            player->seek_drop_until_pts.store(accurate ? target_sec : -1.0);
+            const double drop_until = accurate ? target_sec : -1.0;
+            player->video_seek_drop_until_pts.store(drop_until, std::memory_order_relaxed);
+            player->audio_seek_drop_until_pts.store(drop_until, std::memory_order_relaxed);
             consecutive_io_errors = 0;
 
             // Flush packet queues
@@ -1949,7 +1956,8 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
     player->demux_eof.store(false);
     player->video_eof.store(false);
     player->audio_eof.store(false);
-    player->seek_drop_until_pts.store(-1.0);
+    player->video_seek_drop_until_pts.store(-1.0);
+    player->audio_seek_drop_until_pts.store(-1.0);
     player->queued_pkt_bytes.store(0);
     player->last_demuxed_pts.store(std::max(0.0, start_sec));
     player->last_decoded_video_pts = -1.0;
@@ -2208,7 +2216,8 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
     if (start_sec > 0.5) {
         int64_t target_ts = static_cast<int64_t>(start_sec * AV_TIME_BASE);
         avformat_seek_file(player->format_ctx, -1, INT64_MIN, target_ts, target_ts, AVSEEK_FLAG_BACKWARD);
-        player->seek_drop_until_pts.store(start_sec);
+        player->video_seek_drop_until_pts.store(start_sec);
+        player->audio_seek_drop_until_pts.store(start_sec);
         player->current_pos_sec.store(start_sec);
         player->audio_clock_base_pts.store(start_sec);
         player->ext_clock_base_pts.store(start_sec);
@@ -2463,7 +2472,7 @@ void dk_player_select_track(DKPlayer* player, int track_type, int stream_index) 
         if (player->format_ctx->streams[stream_index]->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) return;
         if (player->audio_stream_idx.load() == stream_index) return;
 
-        double cur_pts = dk_get_master_clock(player);
+        double cur_pts = std::max(0.0, dk_get_master_clock(player));
         std::lock_guard<std::mutex> codec_lk(player->audio_codec_mtx);
 
         if (player->audio_queue) {
@@ -2487,7 +2496,14 @@ void dk_player_select_track(DKPlayer* player, int track_type, int stream_index) 
             std::lock_guard<std::mutex> aq_lock(player->audio_queue_mtx);
             player->audio_chunks.clear();
             player->buffered_audio_samples.store(0);
+            player->audio_clock_base_pts.store(cur_pts);
+            player->audio_clock_calibrated.store(false);
+            player->audio_clock_base_sample_time.store(0);
+            player->audio_underrun_samples.store(0);
+            player->fallback_audio_clock.store(cur_pts);
         }
+        player->ext_clock_base_pts.store(cur_pts);
+        player->current_pos_sec.store(cur_pts);
 
         if (player->audio_codec_ctx) {
             avcodec_free_context(&player->audio_codec_ctx);
@@ -3183,8 +3199,13 @@ CGImageRef dk_extract_video_thumbnail(const char* file_path_or_url, double targe
         avformat_close_input(&fmt_ctx);
         return nullptr;
     }
-    if (avcodec_parameters_to_context(codec_ctx, st->codecpar) < 0 ||
-        avcodec_open2(codec_ctx, decoder, nullptr) < 0) {
+    if (avcodec_parameters_to_context(codec_ctx, st->codecpar) < 0) {
+        avcodec_free_context(&codec_ctx);
+        avformat_close_input(&fmt_ctx);
+        return nullptr;
+    }
+    codec_ctx->thread_count = 2;
+    if (avcodec_open2(codec_ctx, decoder, nullptr) < 0) {
         avcodec_free_context(&codec_ctx);
         avformat_close_input(&fmt_ctx);
         return nullptr;
@@ -3200,9 +3221,11 @@ CGImageRef dk_extract_video_thumbnail(const char* file_path_or_url, double targe
     AVFrame* frame = av_frame_alloc();
     bool got_frame = false;
 
-    int max_pkts = 200;
-    while (max_pkts-- > 0 && av_read_frame(fmt_ctx, pkt) >= 0) {
+    int max_total_pkts = 1500;
+    int max_video_pkts = 120;
+    while (max_total_pkts-- > 0 && max_video_pkts > 0 && av_read_frame(fmt_ctx, pkt) >= 0) {
         if (pkt->stream_index == video_stream_idx) {
+            max_video_pkts--;
             if (avcodec_send_packet(codec_ctx, pkt) == 0) {
                 if (avcodec_receive_frame(codec_ctx, frame) == 0) {
                     got_frame = true;

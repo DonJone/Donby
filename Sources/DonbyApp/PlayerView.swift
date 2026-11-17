@@ -227,7 +227,10 @@ public struct PlayerView: View {
             showControlsAndResetTimer()
 
             // Setup global window monitors for mouse activity and keyboard shortcuts
+            if let mm = mouseMonitor { NSEvent.removeMonitor(mm); mouseMonitor = nil }
+            if let km = keyMonitor { NSEvent.removeMonitor(km); keyMonitor = nil }
             mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDown, .rightMouseDown]) { event in
+                guard NSApp.modalWindow == nil else { return event }
                 let now = ProcessInfo.processInfo.systemUptime
                 if event.type != .mouseMoved || now - lastMouseMoveTimestamp > 0.08 {
                     lastMouseMoveTimestamp = now
@@ -237,7 +240,12 @@ public struct PlayerView: View {
             }
 
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                if showLogSheet || (NSApp.keyWindow?.firstResponder is NSTextView) {
+                let hasSheet = showLogSheet || appState.showLogViewer || appState.showAddServerSheet || appState.linePickerServer != nil
+                if hasSheet || NSApp.modalWindow != nil || event.window?.attachedSheet != nil || (NSApp.keyWindow?.firstResponder is NSTextView) {
+                    return event
+                }
+                let mods = event.modifierFlags.intersection([.command, .control, .option])
+                if !mods.isEmpty {
                     return event
                 }
                 showControlsAndResetTimer()
@@ -283,16 +291,37 @@ public struct PlayerView: View {
         .onReceive(progressTimer) { _ in
             updateClock()
             guard let handle = playerHandle, !isScrubbing else { return }
-            currentTime = dk_player_get_position(handle)
-            bufferedAheadSeconds = dk_player_get_buffered_duration(handle)
+            let newPos = dk_player_get_position(handle)
+            if abs(currentTime - newPos) > 0.05 {
+                currentTime = newPos
+            }
+            let newBuffered = dk_player_get_buffered_duration(handle)
+            if abs(bufferedAheadSeconds - newBuffered) > 0.25 {
+                bufferedAheadSeconds = newBuffered
+            }
             let dur = dk_player_get_duration(handle)
             if dur > 0 {
                 if abs(duration - dur) > 0.01 { duration = dur }
             } else if currentItem.durationSeconds > 0 && abs(duration - currentItem.durationSeconds) > 0.01 {
                 duration = currentItem.durationSeconds
             }
-            dk_player_get_stats(handle, &kernelStats)
-            displayDownloadSpeedMBs = kernelStats.download_speed_mbs
+            if showControls || activeDrawer == .mediaInfo || kernelStats.width == 0 {
+                var freshStats = DKRuntimeStats()
+                dk_player_get_stats(handle, &freshStats)
+                if activeDrawer == .mediaInfo ||
+                    kernelStats.width != freshStats.width ||
+                    kernelStats.height != freshStats.height ||
+                    kernelStats.is_hw_accelerated != freshStats.is_hw_accelerated ||
+                    kernelStats.is_hdr != freshStats.is_hdr ||
+                    kernelStats.is_dolby_vision != freshStats.is_dolby_vision ||
+                    abs(kernelStats.fps - freshStats.fps) > 0.05 ||
+                    abs(kernelStats.video_bitrate_mbps - freshStats.video_bitrate_mbps) > 0.1 {
+                    kernelStats = freshStats
+                }
+                if abs(displayDownloadSpeedMBs - freshStats.download_speed_mbs) > 0.05 {
+                    displayDownloadSpeedMBs = freshStats.download_speed_mbs
+                }
+            }
 
             let pState = dk_player_get_state(handle)
             if pState == DK_STATE_ENDED && !didHandlePlaybackEnded {
@@ -1683,21 +1712,25 @@ public struct PlayerView: View {
         let isEmby = !isLocal && !session.server.host.isEmpty && session.server.host != "127.0.0.1" && session.server.host != "local"
 
         // Capture stop frame / current video snapshot for local files
-        if isLocal, let input = DKMetalLayerView.activeInstance?.currentFrameSnapshotInput() {
+        if isLocal {
             let localPath = currentResource.streamURL.path
-            Task.detached(priority: .utility) {
-                if let cgImg = DKMetalLayerView.renderOffscreenCGImage(
-                    pixelBuffer: input.pixelBuffer,
-                    colorUniforms: input.colorUniforms,
-                    edrHeadroom: input.edrHeadroom,
-                    maxDimension: 480
-                ) {
-                    let snapshot = NSImage(cgImage: cgImg, size: NSSize(width: cgImg.width, height: cgImg.height))
-                    ArtworkImageCache.shared.store(
-                        snapshot,
-                        for: "local_frame_\(localPath)",
-                        aliases: ["record_thumb_local:\(localPath)_", "local:\(localPath)"]
-                    )
+            let thumbKey = "local_frame_\(localPath)"
+            let shouldCapture = isFinal || ArtworkImageCache.shared.imageFromMemory(for: thumbKey) == nil
+            if shouldCapture, let input = DKMetalLayerView.activeInstance?.currentFrameSnapshotInput() {
+                Task.detached(priority: .utility) {
+                    if let cgImg = DKMetalLayerView.renderOffscreenCGImage(
+                        pixelBuffer: input.pixelBuffer,
+                        colorUniforms: input.colorUniforms,
+                        edrHeadroom: input.edrHeadroom,
+                        maxDimension: 480
+                    ) {
+                        let snapshot = NSImage(cgImage: cgImg, size: NSSize(width: cgImg.width, height: cgImg.height))
+                        ArtworkImageCache.shared.store(
+                            snapshot,
+                            for: thumbKey,
+                            aliases: ["record_thumb_local:\(localPath)_", "local:\(localPath)"]
+                        )
+                    }
                 }
             }
         }

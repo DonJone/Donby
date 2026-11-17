@@ -329,10 +329,102 @@ private actor DownloadConcurrencyGate {
     }
 }
 
-public final class ArtworkDownloadManager: @unchecked Sendable {
-    public static let shared = ArtworkDownloadManager()
+private actor ArtworkDownloadCoordinator {
+    private struct InFlightEntry {
+        let id: UUID
+        let task: Task<Void, Never>
+        var waiters: [(id: UUID, continuation: CheckedContinuation<(Data, URLResponse), Error>)] = []
+    }
+
     private let gate = DownloadConcurrencyGate(limit: 6)
     private let session: URLSession
+    private var inFlight: [String: InFlightEntry] = [:]
+
+    init(session: URLSession) {
+        self.session = session
+    }
+
+    func download(for request: URLRequest) async throws -> (Data, URLResponse) {
+        try Task.checkCancellation()
+        let key = request.url?.absoluteString ?? UUID().uuidString
+        let entryId: UUID
+        if let existing = inFlight[key] {
+            entryId = existing.id
+        } else {
+            let newId = UUID()
+            let session = self.session
+            let gate = self.gate
+            let task = Task {
+                let result: Result<(Data, URLResponse), Error>
+                do {
+                    try await gate.acquire()
+                    do {
+                        try Task.checkCancellation()
+                        let response = try await session.data(for: request)
+                        await gate.release()
+                        result = .success(response)
+                    } catch {
+                        await gate.release()
+                        result = .failure(error)
+                    }
+                } catch {
+                    result = .failure(error)
+                }
+                self.complete(key: key, entryId: newId, result: result)
+            }
+            inFlight[key] = InFlightEntry(id: newId, task: task)
+            entryId = newId
+        }
+
+        let waiterId = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<(Data, URLResponse), Error>) in
+                if Task.isCancelled {
+                    cont.resume(throwing: CancellationError())
+                    if let entry = inFlight[key], entry.id == entryId, entry.waiters.isEmpty {
+                        entry.task.cancel()
+                        inFlight.removeValue(forKey: key)
+                    }
+                    return
+                }
+                guard var entry = inFlight[key], entry.id == entryId else {
+                    cont.resume(throwing: CancellationError())
+                    return
+                }
+                entry.waiters.append((waiterId, cont))
+                inFlight[key] = entry
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(key: key, entryId: entryId, waiterId: waiterId) }
+        }
+    }
+
+    private func cancelWaiter(key: String, entryId: UUID, waiterId: UUID) {
+        guard var entry = inFlight[key], entry.id == entryId else { return }
+        if let idx = entry.waiters.firstIndex(where: { $0.id == waiterId }) {
+            let removed = entry.waiters.remove(at: idx)
+            removed.continuation.resume(throwing: CancellationError())
+        }
+        if entry.waiters.isEmpty {
+            entry.task.cancel()
+            inFlight.removeValue(forKey: key)
+        } else {
+            inFlight[key] = entry
+        }
+    }
+
+    private func complete(key: String, entryId: UUID, result: Result<(Data, URLResponse), Error>) {
+        guard let entry = inFlight[key], entry.id == entryId else { return }
+        inFlight.removeValue(forKey: key)
+        for waiter in entry.waiters {
+            waiter.continuation.resume(with: result)
+        }
+    }
+}
+
+public final class ArtworkDownloadManager: @unchecked Sendable {
+    public static let shared = ArtworkDownloadManager()
+    private let coordinator: ArtworkDownloadCoordinator
 
     private init() {
         let config = URLSessionConfiguration.default
@@ -340,14 +432,11 @@ public final class ArtworkDownloadManager: @unchecked Sendable {
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 30
         config.requestCachePolicy = .returnCacheDataElseLoad
-        self.session = URLSession(configuration: config)
+        self.coordinator = ArtworkDownloadCoordinator(session: URLSession(configuration: config))
     }
 
     public func download(for request: URLRequest) async throws -> (Data, URLResponse) {
-        try await gate.acquire()
-        defer { Task { await gate.release() } }
-        try Task.checkCancellation()
-        return try await session.data(for: request)
+        try await coordinator.download(for: request)
     }
 }
 
@@ -752,7 +841,7 @@ public struct RecordArtworkThumbnailView: View {
         if let stream = record.streamURLString { keys.append("local_frame_\(stream)") }
         if let urlStr = record.posterURL { keys.append(urlStr) }
         if let embyId = record.embyItemId {
-            keys.append(contentsOf: ["item_\(embyId)_Primary", "item_\(embyId)_Thumb", "item_\(embyId)", embyId, "emby_\(embyId)"])
+            keys.append(contentsOf: ["item_\(embyId)_primary", "item_\(embyId)_thumb", "item_\(embyId)", embyId, "emby_\(embyId)"])
         }
         return keys
     }
@@ -779,7 +868,7 @@ public struct RecordArtworkThumbnailView: View {
             if let img = await fetchImage(url: url) {
                 var aliases = [cacheKey, "record_\(record.id)"]
                 if let embyId = record.embyItemId {
-                    aliases.append(contentsOf: ["item_\(embyId)", "item_\(embyId)_Primary", embyId])
+                    aliases.append(contentsOf: ["item_\(embyId)", "item_\(embyId)_primary", embyId])
                 }
                 ArtworkImageCache.shared.store(img, for: cacheKey, aliases: aliases)
                 self.thumbnail = img
@@ -791,7 +880,7 @@ public struct RecordArtworkThumbnailView: View {
         if let itemId = record.embyItemId, let server, !server.host.isEmpty {
             if let url = EmbyClient.shared.imageURL(server: server, itemId: itemId, kind: .primary, maxWidth: 300) {
                 if let img = await fetchImage(url: url) {
-                    ArtworkImageCache.shared.store(img, for: cacheKey, aliases: ["item_\(itemId)", "item_\(itemId)_Primary", itemId])
+                    ArtworkImageCache.shared.store(img, for: cacheKey, aliases: ["item_\(itemId)", "item_\(itemId)_primary", itemId])
                     self.thumbnail = img
                     return
                 }

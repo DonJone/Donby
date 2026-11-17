@@ -18,6 +18,7 @@ public struct DetailView: View {
     @State private var isLoadingDetails: Bool = false
     @State private var focusedEpisodeId: String? = nil
     @State private var selectedEpisodeForInfo: EmbyItem? = nil
+    @State private var didUserDisableSubtitle: Bool = false
 
     public init(item: EmbyItem) {
         self.initialItem = item
@@ -299,6 +300,7 @@ public struct DetailView: View {
                                     tooltip: "选择字幕语言"
                                 ) {
                                     Button {
+                                        didUserDisableSubtitle = true
                                         selectedSubtitleIndex = nil
                                     } label: {
                                         if selectedSubtitleIndex == nil {
@@ -311,6 +313,7 @@ public struct DetailView: View {
                                         Divider()
                                         ForEach(subtitleStreams) { stream in
                                             Button {
+                                                didUserDisableSubtitle = false
                                                 selectedSubtitleIndex = stream.index
                                             } label: {
                                                 if stream.index == selectedSubtitleIndex {
@@ -946,15 +949,26 @@ public struct DetailView: View {
         isLoadingDetails = true
         defer { isLoadingDetails = false }
 
-        if let detailed = try? await EmbyClient.shared.fetchItemDetail(server: server, itemId: initialItem.id) {
+        let targetSeriesId: String? = initialItem.isSeries ? initialItem.id : (initialItem.isEpisode ? initialItem.seriesId : nil)
+        async let detailTask = try? EmbyClient.shared.fetchItemDetail(server: server, itemId: initialItem.id)
+        async let similarTask = try? EmbyClient.shared.fetchSimilarItems(server: server, itemId: initialItem.id)
+        async let seasonsTask: [EmbyItem]? = {
+            guard let sid = targetSeriesId, !sid.isEmpty else { return nil }
+            return try? await EmbyClient.shared.fetchSeasons(server: server, seriesId: sid)
+        }()
+
+        if let detailed = await detailTask {
+            guard !Task.isCancelled else { return }
             self.item = detailed
         }
+        guard !Task.isCancelled else { return }
         syncDefaultTracks()
 
-        async let similarTask: [EmbyItem]? = try? EmbyClient.shared.fetchSimilarItems(server: server, itemId: item.id)
+        let preloadedSeasons = await seasonsTask
+        guard !Task.isCancelled else { return }
 
         if item.isSeries {
-            if let loadedSeasons = try? await EmbyClient.shared.fetchSeasons(server: server, seriesId: item.id), !loadedSeasons.isEmpty {
+            if let loadedSeasons = preloadedSeasons, !loadedSeasons.isEmpty {
                 self.seasons = loadedSeasons
                 if let firstSeason = loadedSeasons.first {
                     let sNum = firstSeason.indexNumber ?? 1
@@ -962,6 +976,7 @@ public struct DetailView: View {
                     await loadEpisodesForSeason(firstSeason, seasonNumber: sNum)
                 }
             } else if let allEps = try? await EmbyClient.shared.fetchEpisodes(server: server, seriesId: item.id) {
+                guard !Task.isCancelled else { return }
                 self.episodes = allEps
                 let sNums = Set(allEps.compactMap { $0.parentIndexNumber }).sorted()
                 if !sNums.isEmpty {
@@ -973,7 +988,14 @@ public struct DetailView: View {
                 }
             }
         } else if item.isEpisode, let sId = item.seriesId {
-            if let loadedSeasons = try? await EmbyClient.shared.fetchSeasons(server: server, seriesId: sId), !loadedSeasons.isEmpty {
+            let loadedSeasons: [EmbyItem]?
+            if let preloadedSeasons, !preloadedSeasons.isEmpty {
+                loadedSeasons = preloadedSeasons
+            } else {
+                loadedSeasons = try? await EmbyClient.shared.fetchSeasons(server: server, seriesId: sId)
+            }
+            guard !Task.isCancelled else { return }
+            if let loadedSeasons, !loadedSeasons.isEmpty {
                 self.seasons = loadedSeasons
                 let sNum = item.parentIndexNumber ?? 1
                 selectedSeasonIndex = sNum
@@ -983,6 +1005,7 @@ public struct DetailView: View {
             }
         }
 
+        guard !Task.isCancelled else { return }
         if let sims = await similarTask {
             self.similarItems = sims
         }
@@ -1025,7 +1048,7 @@ public struct DetailView: View {
 
         if let selSub = selectedSubtitleIndex, subtitleStreams.contains(where: { $0.index == selSub }) {
             // keep valid subtitle selection
-        } else {
+        } else if !didUserDisableSubtitle {
             selectedSubtitleIndex = (subtitleStreams.first(where: { $0.isDefault == true }) ?? subtitleStreams.first)?.index
         }
     }

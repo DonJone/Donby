@@ -37,6 +37,7 @@ public final class AppState: ObservableObject {
     @Published public var isSyncingDomains: Bool = false
     @Published public var isPingingLines: Bool = false
     private var homeLoadGeneration: UInt64 = 0
+    private var playbackStartGeneration: UInt64 = 0
 
     @Published public var isLoadingHome: Bool = false
     @Published public var homeErrorMessage: String? = nil
@@ -636,16 +637,13 @@ public final class AppState: ObservableObject {
             if isLocal {
                 if let exStream = existing.streamURLString {
                     let exNorm = exStream.hasPrefix("file://") ? (URL(string: exStream)?.path ?? exStream) : exStream
-                    if exNorm == normStreamPath { return true }
+                    return exNorm == normStreamPath
                 }
-                if existing.sourceType == "本地文件" && existing.title == title {
-                    return true
-                }
-                if (existing.sourceType == "原画直链" || existing.sourceType == "本地文件") && (existing.title == title || existing.title.contains(title)) {
-                    return true
-                }
+                return existing.sourceType == "本地文件" && existing.title == title && existing.subtitle == subtitle
             } else if let eId = cleanEmbyId {
                 if existing.embyItemId == eId { return true }
+            } else if let normStreamPath, !normStreamPath.isEmpty, let exStream = existing.streamURLString {
+                if exStream == normStreamPath { return true }
             }
             return false
         }
@@ -669,11 +667,13 @@ public final class AppState: ObservableObject {
             watchHistory.removeLast(watchHistory.count - Self.maxWatchHistoryCount)
         }
         scheduleSaveWatchHistory(immediate: false)
-        if let posterURL, !posterURL.isEmpty {
-            ArtworkImageCache.shared.aliasKeys(["record_thumb_\(recId)_\(posterURL)"], to: posterURL)
-        }
-        if let embyItemId, !embyItemId.isEmpty {
-            ArtworkImageCache.shared.aliasKeys(["record_thumb_\(recId)_\(posterURL ?? "")"], to: "item_\(embyItemId)_Primary")
+        let thumbKey = "record_thumb_\(recId)_\(posterURL ?? "")"
+        if ArtworkImageCache.shared.imageFromMemory(for: thumbKey) == nil {
+            if let posterURL, !posterURL.isEmpty {
+                ArtworkImageCache.shared.aliasKeys([thumbKey], to: posterURL)
+            } else if let embyItemId, !embyItemId.isEmpty {
+                ArtworkImageCache.shared.aliasKeys([thumbKey], to: "item_\(embyItemId)_primary")
+            }
         }
     }
 
@@ -1175,16 +1175,18 @@ public final class AppState: ObservableObject {
 
             let views = try await viewsTask
             guard currentGen == homeLoadGeneration else { return }
-            self.libraryViews = views
+            if self.libraryViews != views {
+                self.libraryViews = views
+            }
 
             let resumes = (try? await resumeTask) ?? []
             let nextUps = (try? await nextUpTask) ?? []
             let favs = (try? await favTask)?.items ?? []
 
             guard currentGen == homeLoadGeneration else { return }
-            self.resumeItems = resumes
-            self.nextUpItems = nextUps
-            self.favoriteItems = favs
+            if self.resumeItems != resumes { self.resumeItems = resumes }
+            if self.nextUpItems != nextUps { self.nextUpItems = nextUps }
+            if self.favoriteItems != favs { self.favoriteItems = favs }
 
             var latestMap: [String: [EmbyItem]] = [:]
             var heroCandidates: [EmbyItem] = []
@@ -1204,7 +1206,9 @@ public final class AppState: ObservableObject {
                 for await (viewId, items) in group {
                     guard currentGen == self.homeLoadGeneration else { return }
                     latestMap[viewId] = items
-                    self.latestByLibrary[viewId] = items
+                    if self.latestByLibrary[viewId] != items {
+                        self.latestByLibrary[viewId] = items
+                    }
                     for item in items.prefix(3) where !heroCandidates.contains(where: { $0.id == item.id }) {
                         heroCandidates.append(item)
                     }
@@ -1215,7 +1219,10 @@ public final class AppState: ObservableObject {
             if self.latestByLibrary != latestMap {
                 self.latestByLibrary = latestMap
             }
-            self.carouselItems = Array((heroCandidates.isEmpty ? resumes : heroCandidates).prefix(8))
+            let nextCarousel = Array((heroCandidates.isEmpty ? resumes : heroCandidates).prefix(8))
+            if self.carouselItems != nextCarousel {
+                self.carouselItems = nextCarousel
+            }
 
             let snapshot = ServerHomeCacheStore.ServerHomeSnapshot(
                 libraryViews: views,
@@ -1256,18 +1263,29 @@ public final class AppState: ObservableObject {
             showToast("请先配置服务器信息", icon: "exclamationmark.triangle.fill", isError: true)
             return
         }
+        playbackStartGeneration &+= 1
+        let currentStartGen = playbackStartGeneration
         server.lastWatchedDate = Date()
         updateServerInList(server)
 
         isStartingPlayback = true
-        defer { isStartingPlayback = false }
+        defer {
+            if currentStartGen == playbackStartGeneration {
+                isStartingPlayback = false
+            }
+        }
 
         DonbyLogger.shared.log("准备播放媒体: \(item.name) (ID: \(item.id))", level: .info, subsystem: "Playback")
 
         do {
             var targetItem = item
+            var resolvedQueue = episodesQueue
             if item.isSeries {
                 let eps = try await EmbyClient.shared.fetchEpisodes(server: server, seriesId: item.id)
+                guard currentStartGen == playbackStartGeneration else { return }
+                if resolvedQueue.isEmpty && !eps.isEmpty {
+                    resolvedQueue = eps
+                }
                 if let firstUnwatched = eps.first(where: { $0.userData?.played != true }) ?? eps.first {
                     targetItem = firstUnwatched
                 }
@@ -1283,6 +1301,7 @@ public final class AppState: ObservableObject {
                 subtitleStreamIndex: subtitleStreamIndex,
                 enable302Cache: enable302Cache
             )
+            guard currentStartGen == playbackStartGeneration else { return }
 
             let startSec = fromBeginning ? 0 : targetItem.resumePositionSeconds
             let remotePoster = EmbyClient.shared.imageURL(server: server, item: targetItem, kind: .primary, maxWidth: 320)?.absoluteString
@@ -1298,6 +1317,7 @@ public final class AppState: ObservableObject {
                     if let seriesDetail = try? await EmbyClient.shared.fetchItemDetail(server: server, itemId: sid) {
                         sName = seriesDetail.name
                     }
+                    guard currentStartGen == playbackStartGeneration else { return }
                 }
                 if let s = sName, !s.isEmpty {
                     cachedSeriesNames[targetItem.id] = s
@@ -1328,19 +1348,21 @@ public final class AppState: ObservableObject {
             self.activePlayback = ActivePlaybackSession(
                 server: server,
                 item: targetItem,
-                episodesQueue: episodesQueue.isEmpty ? [targetItem] : episodesQueue,
+                episodesQueue: resolvedQueue.isEmpty ? [targetItem] : resolvedQueue,
                 resource: resource,
                 startPositionSeconds: startSec,
                 selectedAudioIndex: audioStreamIndex,
                 selectedSubtitleIndex: subtitleStreamIndex
             )
         } catch {
+            guard currentStartGen == playbackStartGeneration else { return }
             DonbyLogger.shared.log("获取播放流失败: \(error.localizedDescription)", level: .error, subsystem: "Playback")
             showToast("获取播放流失败: \(error.localizedDescription)", icon: "exclamationmark.triangle.fill", isError: true)
         }
     }
 
     public func playDirectURL(url: URL, title: String, startSeconds: Double = 0) {
+        playbackStartGeneration &+= 1
         let isLocal = url.isFileURL || url.scheme == "file" || url.path.hasPrefix("/")
         let parsed = MediaTitleParser.parse(rawName: title)
         let resolvedTitle = isLocal ? parsed.mainTitle : title

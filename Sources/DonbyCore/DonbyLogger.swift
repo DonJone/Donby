@@ -73,6 +73,13 @@ public final class DonbyLogger: ObservableObject {
 
         if !fileManager.fileExists(atPath: logFileURL.path) {
             fileManager.createFile(atPath: logFileURL.path, contents: nil)
+        } else if let attrs = try? fileManager.attributesOfItem(atPath: logFileURL.path),
+                  let size = attrs[.size] as? NSNumber,
+                  size.int64Value > 8 * 1024 * 1024 {
+            let rotatedURL = logsDir.appendingPathComponent("donby.log.1")
+            try? fileManager.removeItem(at: rotatedURL)
+            try? fileManager.moveItem(at: logFileURL, to: rotatedURL)
+            fileManager.createFile(atPath: logFileURL.path, contents: nil)
         }
 
         self.fileHandle = try? FileHandle(forWritingTo: logFileURL)
