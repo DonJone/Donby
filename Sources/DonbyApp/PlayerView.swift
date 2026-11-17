@@ -1,233 +1,20 @@
 import SwiftUI
 import Combine
 import AppKit
+import ImageIO
 import UniformTypeIdentifiers
 import DonbyCore
 import DonbyNetwork
 import DonbyKernelC
 import DonbyMetalRenderer
 
-public enum PlayerDrawerTab: String, CaseIterable, Identifiable {
-    case playlist = "播放列表"
-    case tracks = "音轨与字幕"
-    case mediaInfo = "流媒体信息"
-    public var id: String { rawValue }
-}
-
-private enum PlayerSubtitleSelection: Equatable {
-    case off
-    case embedded(avStreamIndex: Int)
-    case remoteExternal(url: URL)
-    case localExternal(url: URL)
-}
-
-private struct PlayerAudioTrackOption: Identifiable, Equatable {
-    var id: String { "audio-\(avStreamIndex)" }
-    let avStreamIndex: Int
-    let embyIndex: Int?
-    let label: String
-}
-
-private struct PlayerSubtitleTrackOption: Identifiable, Equatable {
-    let id: String
-    let selection: PlayerSubtitleSelection
-    let embyIndex: Int?
-    let label: String
-    let badge: String?
-    let externalItem: SubtitleResourceItem?
-}
-
-/// Sleek mini volume slider with white track and circular thumb
-private struct MiniVolumeSlider: View {
-    @Binding var volume: Float
-    @Binding var isMuted: Bool
-    let onChange: (Float) -> Void
-
-    var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            let ratio = CGFloat(isMuted ? 0 : max(0, min(1, volume)))
-            let filledW = w * ratio
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(Color.white.opacity(0.24))
-                    .frame(height: 3.5)
-
-                Capsule()
-                    .fill(Color.white)
-                    .frame(width: max(3.5, filledW), height: 3.5)
-
-                Circle()
-                    .fill(Color.white)
-                    .frame(width: 10, height: 10)
-                    .shadow(color: .black.opacity(0.4), radius: 2, y: 1)
-                    .offset(x: min(max(0, filledW - 5), w - 10))
-            }
-            .frame(height: geo.size.height)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { val in
-                        let r = Float(max(0.0, min(1.0, val.location.x / w)))
-                        volume = r
-                        isMuted = (r == 0)
-                        onChange(r)
-                    }
-            )
-        }
-        .frame(width: 55, height: 16)
-    }
-}
-
-private struct PlayerCircleButton<Content: View>: View {
-    let tooltip: String
-    @ViewBuilder let content: () -> Content
-    let action: () -> Void
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: action) {
-            ZStack {
-                Circle()
-                    .strokeBorder(Color.white.opacity(isHovered ? 0.95 : 0.65), lineWidth: 1.25)
-                    .background(Circle().fill(isHovered ? Color.white.opacity(0.18) : Color.clear))
-                content()
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
-            }
-            .frame(width: 28, height: 28)
-            .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .help(tooltip)
-        .onHover { isHovered = $0 }
-    }
-}
-
-private struct PlayerCircleMenu<Content: View, MenuItems: View>: View {
-    let tooltip: String
-    @ViewBuilder let content: () -> Content
-    @ViewBuilder let menuItems: () -> MenuItems
-    @State private var isHovered = false
-
-    var body: some View {
-        Menu {
-            menuItems()
-        } label: {
-            ZStack {
-                Circle()
-                    .strokeBorder(Color.white.opacity(isHovered ? 0.95 : 0.65), lineWidth: 1.25)
-                    .background(Circle().fill(isHovered ? Color.white.opacity(0.18) : Color.clear))
-                content()
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
-            }
-            .frame(width: 28, height: 28)
-            .contentShape(Circle())
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .frame(width: 28, height: 28)
-        .help(tooltip)
-        .onHover { isHovered = $0 }
-    }
-}
-
-/// Custom Liquid Glass video scrubber with real-time ahead-of-playhead buffered progress indicator
-private struct PlayerTimelineScrubberView: View {
-    let currentTime: Double
-    let bufferedAheadSeconds: Double
-    let duration: Double
-    let accentColor: Color
-    @Binding var isScrubbing: Bool
-    @Binding var scrubTime: Double
-    let onCommitSeek: (Double) -> Void
-
-    @State private var isHovered: Bool = false
-
-    private var safeDuration: Double { max(1.0, duration) }
-    private var displayedTime: Double { isScrubbing ? scrubTime : currentTime }
-    private var playedRatio: CGFloat {
-        CGFloat(max(0.0, min(1.0, displayedTime / safeDuration)))
-    }
-    private var bufferedRatio: CGFloat {
-        let target = max(displayedTime, currentTime + max(0.0, bufferedAheadSeconds))
-        return CGFloat(max(Double(playedRatio), min(1.0, target / safeDuration)))
-    }
-
-    var body: some View {
-        GeometryReader { geo in
-            let width = max(1.0, geo.size.width)
-            let trackHeight: CGFloat = (isHovered || isScrubbing) ? 5.0 : 3.5
-            let knobSize: CGFloat = (isHovered || isScrubbing) ? 14.0 : 12.0
-            let knobRadius = knobSize * 0.5
-            let travelWidth = max(1.0, width - knobSize)
-
-            let knobCenter = knobRadius + playedRatio * travelWidth
-            let knobOffset = knobCenter - knobRadius
-            let playedTrackWidth = min(width, max(trackHeight, knobCenter))
-            let bufferedTrackWidth = min(width, max(playedTrackWidth, knobRadius + bufferedRatio * travelWidth))
-
-            ZStack(alignment: .leading) {
-                // 1. Unbuffered dark background track
-                Capsule()
-                    .fill(Color.white.opacity(0.18))
-                    .frame(width: width, height: trackHeight)
-
-                // 2. Cached / Buffered progress indicator ahead of playhead (matching Image #1)
-                if bufferedTrackWidth > trackHeight {
-                    Capsule()
-                        .fill(Color(white: 0.48))
-                        .frame(width: bufferedTrackWidth, height: trackHeight)
-                        .animation(.easeOut(duration: 0.20), value: bufferedRatio)
-                }
-
-                // 3. Played progress segment (solid white)
-                if playedTrackWidth > 0 {
-                    Capsule()
-                        .fill(Color.white)
-                        .frame(width: playedTrackWidth, height: trackHeight)
-                }
-
-                // 4. Circular playhead thumb (solid white circle with shadow)
-                Circle()
-                    .fill(Color.white)
-                    .shadow(color: Color.black.opacity(0.55), radius: 3, y: 1)
-                    .frame(width: knobSize, height: knobSize)
-                    .offset(x: knobOffset)
-            }
-            .frame(width: width, height: geo.size.height)
-            .contentShape(Rectangle())
-            .onHover { hovering in
-                withAnimation(.easeOut(duration: 0.14)) {
-                    isHovered = hovering
-                }
-            }
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        let ratio = travelWidth > 0 ? max(0.0, min(1.0, Double((value.location.x - knobRadius) / travelWidth))) : 0.0
-                        isScrubbing = true
-                        scrubTime = ratio * safeDuration
-                    }
-                    .onEnded { value in
-                        let ratio = travelWidth > 0 ? max(0.0, min(1.0, Double((value.location.x - knobRadius) / travelWidth))) : 0.0
-                        let target = ratio * safeDuration
-                        scrubTime = target
-                        isScrubbing = false
-                        onCommitSeek(target)
-                    }
-            )
-        }
-        .frame(height: 20)
-    }
-}
-
 public struct PlayerView: View {
     @EnvironmentObject private var appState: AppState
     public let session: ActivePlaybackSession
 
     @State private var playerHandle: OpaquePointer? = nil
+    @State private var openingBox: OpeningPlayerBox? = nil
+    @State private var episodeSwitchTask: Task<Void, Never>? = nil
     @State private var currentItem: EmbyItem
     @State private var currentResource: DonbyCore.ResolvedPlaybackResource
     @State private var isPlaying: Bool = true
@@ -265,6 +52,18 @@ public struct PlayerView: View {
 
     private let progressTimer = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
     private let embySyncTimer = Timer.publish(every: 10.0, on: .main, in: .common).autoconnect()
+
+    private static let clockFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f
+    }()
+
+    private static let snapshotDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd_HHmmss"
+        return f
+    }()
 
     public init(session: ActivePlaybackSession) {
         self.session = session
@@ -438,6 +237,9 @@ public struct PlayerView: View {
             }
 
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                if showLogSheet || (NSApp.keyWindow?.firstResponder is NSTextView) {
+                    return event
+                }
                 showControlsAndResetTimer()
                 switch event.keyCode {
                 case 49: // Space
@@ -483,11 +285,14 @@ public struct PlayerView: View {
             guard let handle = playerHandle, !isScrubbing else { return }
             currentTime = dk_player_get_position(handle)
             bufferedAheadSeconds = dk_player_get_buffered_duration(handle)
-            displayDownloadSpeedMBs = dk_player_get_download_speed_mbs(handle)
             let dur = dk_player_get_duration(handle)
-            if dur > 0 { duration = dur }
-            else if currentItem.durationSeconds > 0 { duration = currentItem.durationSeconds }
+            if dur > 0 {
+                if abs(duration - dur) > 0.01 { duration = dur }
+            } else if currentItem.durationSeconds > 0 && abs(duration - currentItem.durationSeconds) > 0.01 {
+                duration = currentItem.durationSeconds
+            }
             dk_player_get_stats(handle, &kernelStats)
+            displayDownloadSpeedMBs = kernelStats.download_speed_mbs
 
             let pState = dk_player_get_state(handle)
             if pState == DK_STATE_ENDED && !didHandlePlaybackEnded {
@@ -500,12 +305,21 @@ public struct PlayerView: View {
                     switchToEpisode(nextEp)
                     return
                 }
+            } else if pState == DK_STATE_ERROR && openingErrorMessage == nil {
+                isPlaying = false
+                openingErrorMessage = "媒体流读取中断或网络连接异常，请检查网络或更换线路"
+                DonbyLogger.shared.log("播放内核报告流读取异常中断 (DK_STATE_ERROR)", level: .error, subsystem: "Player")
             }
 
             // Update watch history periodically (every 5s) to avoid UI frame drops
             if abs(currentTime - lastRecordedPosition) >= 5.0 {
                 lastRecordedPosition = currentTime
                 saveCurrentWatchProgress(isFinal: false)
+            }
+        }
+        .onChange(of: appState.cachePoolSizeMB) { _, newValue in
+            if let handle = playerHandle {
+                dk_player_set_buffer_limit_mb(handle, Int32(newValue))
             }
         }
         .onReceive(embySyncTimer) { _ in
@@ -644,9 +458,7 @@ public struct PlayerView: View {
     }
 
     private var specVideoCodecString: String {
-        let vCodec = withUnsafePointer(to: &kernelStats.video_codec) { ptr in
-            ptr.withMemoryRebound(to: CChar.self, capacity: 32) { String(cString: $0) }
-        }
+        let vCodec = Self.cString(from: kernelStats.video_codec)
         if !vCodec.isEmpty && vCodec != "Unknown" {
             let uc = vCodec.uppercased()
             if uc.contains("HEVC") || uc.contains("H265") { return "HEVC" }
@@ -1017,34 +829,46 @@ public struct PlayerView: View {
     }
 
     private func takeVideoSnapshot() {
-        guard let view = DKMetalLayerView.activeInstance,
-              let image = view.captureSnapshotImage() else {
+        guard let input = DKMetalLayerView.activeInstance?.currentFrameSnapshotInput() else {
             appState.showToast("截图失败：未捕获到视频画面", icon: "camera.fill", isError: true)
             return
         }
 
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.writeObjects([image])
+        let itemTitle = currentItem.name
+        let timestamp = Self.snapshotDateFormatter.string(from: Date())
+        Task.detached(priority: .userInitiated) {
+            guard let cgImg = DKMetalLayerView.renderOffscreenCGImage(
+                pixelBuffer: input.pixelBuffer,
+                colorUniforms: input.colorUniforms,
+                edrHeadroom: input.edrHeadroom
+            ) else {
+                await MainActor.run {
+                    appState.showToast("截图失败：未捕获到视频画面", icon: "camera.fill", isError: true)
+                }
+                return
+            }
 
-        let picturesURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Pictures")
-        let donbyDir = picturesURL.appendingPathComponent("Donby", isDirectory: true)
-        try? FileManager.default.createDirectory(at: donbyDir, withIntermediateDirectories: true)
+            let image = NSImage(cgImage: cgImg, size: NSSize(width: cgImg.width, height: cgImg.height))
+            let picturesURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
+                ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Pictures")
+            let donbyDir = picturesURL.appendingPathComponent("Donby", isDirectory: true)
+            try? FileManager.default.createDirectory(at: donbyDir, withIntermediateDirectories: true)
 
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd_HHmmss"
-        let timestamp = formatter.string(from: Date())
-        let safeTitle = currentItem.name.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ":", with: "_")
-        let fileURL = donbyDir.appendingPathComponent("\(safeTitle)_\(timestamp).png")
+            let safeTitle = itemTitle.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ":", with: "_")
+            let fileURL = donbyDir.appendingPathComponent("\(safeTitle)_\(timestamp).png")
 
-        if let tiff = image.tiffRepresentation,
-           let rep = NSBitmapImageRep(data: tiff),
-           let pngData = rep.representation(using: .png, properties: [:]) {
-            try? pngData.write(to: fileURL)
+            if let dest = CGImageDestinationCreateWithURL(fileURL as CFURL, UTType.png.identifier as CFString, 1, nil) {
+                CGImageDestinationAddImage(dest, cgImg, nil)
+                CGImageDestinationFinalize(dest)
+            }
+
+            await MainActor.run {
+                let pb = NSPasteboard.general
+                pb.clearContents()
+                pb.writeObjects([image])
+                appState.showToast("已截图并保存至照片与剪贴板", icon: "camera.fill")
+            }
         }
-
-        appState.showToast("已截图并保存至照片与剪贴板", icon: "camera.fill")
     }
 
     // MARK: - Deterministic FFmpeg AVStream <-> Emby MediaSource Track Resolution
@@ -1300,12 +1124,8 @@ public struct PlayerView: View {
                         osdInfoRow("流预读缓存", "\(kernelStats.cached_bytes / 1024 / 1024) MB")
                         osdInfoRow("分辨率", "\(kernelStats.width) × \(kernelStats.height)")
                         osdInfoRow("帧率", String(format: "%.3f fps", kernelStats.fps))
-                        osdInfoRow("视频编码", withUnsafePointer(to: &kernelStats.video_codec) { ptr in
-                            ptr.withMemoryRebound(to: CChar.self, capacity: 32) { String(cString: $0) }
-                        })
-                        osdInfoRow("音频编码", withUnsafePointer(to: &kernelStats.audio_codec) { ptr in
-                            ptr.withMemoryRebound(to: CChar.self, capacity: 32) { String(cString: $0) }
-                        })
+                        osdInfoRow("视频编码", Self.cString(from: kernelStats.video_codec))
+                        osdInfoRow("音频编码", Self.cString(from: kernelStats.audio_codec))
                         osdInfoRow("播放线路", session.server.activeLineName)
 
                         Divider().opacity(0.2).padding(.vertical, 4)
@@ -1408,21 +1228,40 @@ public struct PlayerView: View {
         }
         let headersStr = currentResource.headers.map { "\($0.key): \($0.value)\r\n" }.joined()
         let hwDecode = appState.enableHardwareDecode
+        let cachePoolMB = Int32(appState.cachePoolSizeMB)
         let speed = playbackSpeed
         let vol = volume
         let muted = isMuted
         let audioIdx = selectedAudioIdx
         let subIdx = selectedSubIdx
         let hasEmbyStreamCatalog = !(currentResource.mediaSource.mediaStreams ?? []).isEmpty
+        let openBox = OpeningPlayerBox()
+        self.openingBox = openBox
 
         DonbyLogger.shared.log("启动原生播放内核 (URL: \(urlStr))", level: .info, subsystem: "Player")
 
         Task.detached(priority: .userInitiated) {
             let handle = dk_player_create()
+            guard let handle else {
+                await MainActor.run {
+                    if self.openingBox === openBox { self.openingBox = nil }
+                    guard self.activePlaybackGeneration == thisGeneration else { return }
+                    self.openingErrorMessage = "初始化原生播放内核失败"
+                    self.isOpeningMedia = false
+                }
+                return
+            }
+            guard openBox.setHandle(handle) else {
+                dk_player_destroy(handle)
+                return
+            }
+            dk_player_set_buffer_limit_mb(handle, cachePoolMB)
             let ret = dk_player_open(handle, urlStr, headersStr, startSeconds, hwDecode)
+            openBox.clear()
             let addr = UInt(bitPattern: handle)
 
             await MainActor.run {
+                if self.openingBox === openBox { self.openingBox = nil }
                 guard let validHandle = OpaquePointer(bitPattern: addr) else { return }
                 guard self.activePlaybackGeneration == thisGeneration else {
                     Task.detached(priority: .userInitiated) {
@@ -1507,10 +1346,15 @@ public struct PlayerView: View {
 
     private func stopNativeKernel() {
         activePlaybackGeneration &+= 1
+        openingBox?.abort()
+        openingBox = nil
+        episodeSwitchTask?.cancel()
+        episodeSwitchTask = nil
         displayDownloadSpeedMBs = 0.0
         bufferedAheadSeconds = 0
         guard let handle = playerHandle else { return }
         self.playerHandle = nil
+        dk_player_request_abort(handle)
         Task.detached(priority: .userInitiated) {
             dk_player_close(handle)
             dk_player_destroy(handle)
@@ -1551,18 +1395,23 @@ public struct PlayerView: View {
         }
     }
 
+    private static func cString<T>(from tuple: T) -> String {
+        withUnsafeBytes(of: tuple) { raw in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: CChar.self) else { return "" }
+            var length = 0
+            while length < raw.count && base[length] != 0 {
+                length += 1
+            }
+            return String(decoding: raw.prefix(length), as: UTF8.self)
+        }
+    }
+
     private static func queryKernelTracks(handle: OpaquePointer) -> (
         audio: [MediaStream],
         subtitles: [MediaStream],
         selectedAudioIndex: Int?,
         selectedSubIndex: Int?
     ) {
-        func readString<T>(_ tuple: T, maxLen: Int) -> String {
-            withUnsafePointer(to: tuple) { ptr in
-                ptr.withMemoryRebound(to: CChar.self, capacity: maxLen) { String(cString: $0) }
-            }
-        }
-
         var audios: [MediaStream] = []
         var selAudio: Int? = nil
         let aCount = dk_player_get_track_count(handle, 1)
@@ -1570,9 +1419,9 @@ public struct PlayerView: View {
             var info = DKTrackInfo()
             guard dk_player_get_track_info(handle, 1, ord, &info) else { continue }
             let idx = Int(info.stream_index)
-            let codec = readString(info.codec, maxLen: 32)
-            let lang = readString(info.language, maxLen: 32)
-            let title = readString(info.title, maxLen: 128)
+            let codec = cString(from: info.codec)
+            let lang = cString(from: info.language)
+            let title = cString(from: info.title)
             let chLayout: String? = info.channels >= 8 ? "7.1" : (info.channels == 6 ? "5.1" : (info.channels > 0 ? "\(info.channels).0" : nil))
             if info.is_selected { selAudio = idx }
             audios.append(MediaStream(
@@ -1594,11 +1443,11 @@ public struct PlayerView: View {
             var info = DKTrackInfo()
             guard dk_player_get_track_info(handle, 2, ord, &info) else { continue }
             let idx = Int(info.stream_index)
-            let codec = readString(info.codec, maxLen: 32)
+            let codec = cString(from: info.codec)
                 .replacingOccurrences(of: "hdmv_pgs_subtitle", with: "PGS")
                 .replacingOccurrences(of: "subrip", with: "SRT")
-            let lang = readString(info.language, maxLen: 32)
-            let title = readString(info.title, maxLen: 128)
+            let lang = cString(from: info.language)
+            let title = cString(from: info.title)
             if info.is_selected { selSub = idx }
             subs.append(MediaStream(
                 index: idx,
@@ -1678,6 +1527,7 @@ public struct PlayerView: View {
     private func loadRemoteExternalSubtitle(item: SubtitleResourceItem, embyStreamIndex: Int?, silentToast: Bool) {
         selectedSubIdx = embyStreamIndex
         activeSubtitleSelection = .remoteExternal(url: item.url)
+        let expectedGeneration = activePlaybackGeneration
         let headers = currentResource.headers
         let url = item.url
         let label = item.name
@@ -1696,6 +1546,7 @@ public struct PlayerView: View {
             let ext = url.pathExtension.lowercased()
             let isAss = (ext == "ass" || ext == "ssa" || text.contains("[Script Info]"))
             await MainActor.run {
+                guard self.activePlaybackGeneration == expectedGeneration else { return }
                 if let handle = self.playerHandle {
                     dk_player_load_external_subtitle(handle, text, isAss)
                     if !silentToast {
@@ -1748,18 +1599,27 @@ public struct PlayerView: View {
     }
 
     private func switchToEpisode(_ nextEp: EmbyItem) {
-        Task {
-            if let res = try? await EmbyClient.shared.resolvePlaybackResource(
-                server: session.server,
+        episodeSwitchTask?.cancel()
+        let server = session.server
+        let preset = appState.preferredVersionPreset
+        let audioIdx = selectedAudioIdx
+        let subIdx = selectedSubIdx
+        let enable302 = appState.enable302Cache
+        episodeSwitchTask = Task {
+            guard let res = try? await EmbyClient.shared.resolvePlaybackResource(
+                server: server,
                 item: nextEp,
-                preferredPreset: appState.preferredVersionPreset,
-                audioStreamIndex: selectedAudioIdx,
-                subtitleStreamIndex: selectedSubIdx
-            ) {
-                currentItem = nextEp
-                currentResource = res
-                startNativeKernelPlayback(startSeconds: nextEp.resumePositionSeconds)
+                preferredPreset: preset,
+                audioStreamIndex: audioIdx,
+                subtitleStreamIndex: subIdx,
+                enable302Cache: enable302
+            ), !Task.isCancelled else {
+                return
             }
+            episodeSwitchTask = nil
+            currentItem = nextEp
+            currentResource = res
+            startNativeKernelPlayback(startSeconds: nextEp.resumePositionSeconds)
         }
     }
 
@@ -1802,10 +1662,22 @@ public struct PlayerView: View {
         let isEmby = !isLocal && !session.server.host.isEmpty && session.server.host != "127.0.0.1" && session.server.host != "local"
 
         // Capture stop frame / current video snapshot for local files
-        if isLocal {
+        if isLocal, let input = DKMetalLayerView.activeInstance?.currentFrameSnapshotInput() {
             let localPath = currentResource.streamURL.path
-            if let snapshot = DKMetalLayerView.activeInstance?.captureSnapshotImage() {
-                ArtworkImageCache.shared.store(snapshot, for: "local_frame_\(localPath)", aliases: ["record_thumb_local:\(localPath)_", "local:\(localPath)"])
+            Task.detached(priority: .utility) {
+                if let cgImg = DKMetalLayerView.renderOffscreenCGImage(
+                    pixelBuffer: input.pixelBuffer,
+                    colorUniforms: input.colorUniforms,
+                    edrHeadroom: input.edrHeadroom,
+                    maxDimension: 480
+                ) {
+                    let snapshot = NSImage(cgImage: cgImg, size: NSSize(width: cgImg.width, height: cgImg.height))
+                    ArtworkImageCache.shared.store(
+                        snapshot,
+                        for: "local_frame_\(localPath)",
+                        aliases: ["record_thumb_local:\(localPath)_", "local:\(localPath)"]
+                    )
+                }
             }
         }
 
@@ -1876,9 +1748,7 @@ public struct PlayerView: View {
             parts.append(res)
         }
 
-        let vCodec = withUnsafePointer(to: &kernelStats.video_codec) { ptr in
-            ptr.withMemoryRebound(to: CChar.self, capacity: 32) { String(cString: $0) }
-        }
+        let vCodec = Self.cString(from: kernelStats.video_codec)
         if !vCodec.isEmpty && vCodec != "Unknown" {
             parts.append(vCodec.uppercased())
         } else if let tag = currentItem.videoCodecTag {
@@ -1907,9 +1777,10 @@ public struct PlayerView: View {
     }
 
     private func updateClock() {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm"
-        systemClockString = f.string(from: Date())
+        let formatted = Self.clockFormatter.string(from: Date())
+        if systemClockString != formatted {
+            systemClockString = formatted
+        }
     }
 
     private func formatTime(_ sec: Double) -> String {

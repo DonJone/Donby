@@ -428,10 +428,10 @@ public struct EmbyMainView: View {
                     appState.linePickerServer = server
                 } label: {
                     HStack(spacing: 5) {
-                        RouteSwitchVectorIcon(size: 12, color: .white)
+                        RouteSwitchVectorIcon(size: 12, color: appState.accentTextColor)
                         Text("切换线路")
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(appState.accentTextColor)
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
@@ -490,7 +490,7 @@ public struct EmbyMainView: View {
                         Text("填写服务器与账号信息")
                             .font(.system(size: 13, weight: .semibold))
                     }
-                    .foregroundStyle(.white)
+                    .foregroundStyle(appState.accentTextColor)
                     .padding(.horizontal, 18)
                     .padding(.vertical, 9)
                     .background(appState.accentColor)
@@ -556,12 +556,19 @@ public struct MLibListView: View {
     @State private var items: [EmbyItem] = []
     @State private var totalCount: Int = 0
     @State private var isLoading: Bool = false
+    @State private var isLoadingMore: Bool = false
+    @State private var hasMoreItems: Bool = false
+    @State private var startIndex: Int = 0
+    @State private var loadGeneration: Int = 0
+    @State private var seenIds: Set<String> = []
     @State private var sortField: EmbySortField = .dateCreated
     @State private var ascending: Bool = false
     @State private var filterUnwatchedOnly: Bool = false
     @State private var filterFavoritesOnly: Bool = false
     @State private var searchQuery: String = ""
     @State private var showSortPopover: Bool = false
+
+    private static let pageSize = 120
 
     private let columns = [GridItem(.adaptive(minimum: 156, maximum: 182), spacing: 16)]
 
@@ -591,7 +598,7 @@ public struct MLibListView: View {
 
                 ToolbarVectorButton(
                     tooltip: "刷新列表",
-                    action: { Task { await loadLibraryItems() } }
+                    action: { Task { await loadLibraryItems(reset: true) } }
                 ) { hovered in
                     let iconColor = appState.isLightMode ? (hovered ? Color.black : Color(white: 0.32)) : (hovered ? .white : Color(white: 0.88))
                     RefreshVectorIcon(size: 14.5, color: iconColor, isSpinning: isLoading)
@@ -644,18 +651,50 @@ public struct MLibListView: View {
             } else {
                 ScrollView {
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 20) {
-                        ForEach(filteredItems) { item in
+                        ForEach(Array(filteredItems.enumerated()), id: \.element.id) { index, item in
                             PosterCardView(
                                 item: item,
                                 width: 152,
                                 onSelect: { appState.openDetail(for: item) },
                                 onPlay: { Task { await appState.startPlayback(item: item) } }
                             )
+                            .onAppear {
+                                if hasMoreItems && !isLoadingMore && index >= max(0, filteredItems.count - 12) {
+                                    Task { await loadLibraryItems(reset: false) }
+                                }
+                            }
                         }
                     }
                     .padding(.horizontal, 24)
                     .padding(.top, 12)
-                    .padding(.bottom, 32)
+                    .padding(.bottom, hasMoreItems || isLoadingMore ? 12 : 32)
+
+                    if isLoadingMore {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("正在加载更多…")
+                                .font(.system(size: 12))
+                                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                        }
+                        .padding(.bottom, 28)
+                    } else if hasMoreItems {
+                        Button {
+                            Task { await loadLibraryItems(reset: false) }
+                        } label: {
+                            Text("加载更多 (\(items.count)/\(totalCount))")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 7)
+                                .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+                                .clipShape(Capsule())
+                                .overlay(
+                                    Capsule().strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.bottom, 28)
+                    }
                 }
             }
         }
@@ -665,17 +704,32 @@ public struct MLibListView: View {
                 try? await Task.sleep(nanoseconds: 250_000_000)
                 guard !Task.isCancelled else { return }
             }
-            await loadLibraryItems()
+            await loadLibraryItems(reset: true)
         }
     }
     private var filteredItems: [EmbyItem] {
         items
     }
 
-    private func loadLibraryItems() async {
+    private func loadLibraryItems(reset: Bool) async {
         guard let server = appState.activeServer, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        isLoading = true
-        defer { isLoading = false }
+        if reset {
+            loadGeneration &+= 1
+            isLoading = true
+            isLoadingMore = false
+        } else {
+            guard !isLoading && !isLoadingMore && hasMoreItems else { return }
+            isLoadingMore = true
+        }
+        let currentGen = loadGeneration
+        let requestStart = reset ? 0 : startIndex
+        defer {
+            if reset {
+                isLoading = false
+            } else {
+                isLoadingMore = false
+            }
+        }
 
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
@@ -687,13 +741,36 @@ public struct MLibListView: View {
                 filters: filterUnwatchedOnly ? "IsUnplayed" : nil,
                 isFavorite: filterFavoritesOnly ? true : nil,
                 searchTerm: q.isEmpty ? nil : q,
-                limit: 120
+                startIndex: requestStart,
+                limit: Self.pageSize
             )
-            self.items = resp.items
-            self.totalCount = resp.totalRecordCount ?? resp.items.count
+            guard !Task.isCancelled, currentGen == loadGeneration else { return }
+            if reset {
+                self.items = resp.items
+                self.seenIds = Set(resp.items.map(\.id))
+            } else {
+                var added: [EmbyItem] = []
+                for item in resp.items where seenIds.insert(item.id).inserted {
+                    added.append(item)
+                }
+                self.items.append(contentsOf: added)
+            }
+            self.startIndex = requestStart + resp.items.count
+            if let total = resp.totalRecordCount {
+                self.totalCount = max(self.items.count, total)
+                self.hasMoreItems = resp.items.count >= Self.pageSize && self.startIndex < total
+            } else {
+                self.totalCount = self.items.count
+                self.hasMoreItems = resp.items.count >= Self.pageSize
+            }
         } catch {
-            self.items = appState.latestByLibrary[library.id] ?? []
-            self.totalCount = self.items.count
+            if Task.isCancelled || currentGen != loadGeneration { return }
+            if reset && self.items.isEmpty && q.isEmpty && !filterUnwatchedOnly && !filterFavoritesOnly {
+                self.items = appState.latestByLibrary[library.id] ?? []
+                self.seenIds = Set(self.items.map(\.id))
+                self.totalCount = self.items.count
+                self.hasMoreItems = false
+            }
         }
     }
 }

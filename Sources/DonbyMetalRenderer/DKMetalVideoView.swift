@@ -68,8 +68,14 @@ private final class DisplayLinkDriver {
             displayLink = nil
         }
         if let timer = fallbackTimer {
-            timer.invalidate()
             fallbackTimer = nil
+            if Thread.isMainThread {
+                timer.invalidate()
+            } else {
+                DispatchQueue.main.async {
+                    timer.invalidate()
+                }
+            }
         }
         handler = nil
     }
@@ -102,6 +108,7 @@ public final class DKMetalLayerView: NSView {
     private let sizeLock = NSLock()
     private var cachedDrawableSize: CGSize = .zero
     private var cachedEDRHeadroom: Float = 1.0
+    private var layoutGeneration: UInt64 = 0
     private var screenObserver: NSObjectProtocol?
 
     // Subtitle GPU texture cache (updated only when subtitle serial changes)
@@ -113,7 +120,19 @@ public final class DKMetalLayerView: NSView {
     public private(set) var lastPixelBuffer: CVPixelBuffer?
     public static weak var activeInstance: DKMetalLayerView?
     public private(set) var lastColorUniforms = DKGpuColorUniforms()
-    public var needsRedrawOnSameFrame: Bool = false
+    private var _needsRedrawOnSameFrame: Bool = false
+    public var needsRedrawOnSameFrame: Bool {
+        get {
+            sizeLock.lock()
+            defer { sizeLock.unlock() }
+            return _needsRedrawOnSameFrame
+        }
+        set {
+            sizeLock.lock()
+            _needsRedrawOnSameFrame = newValue
+            sizeLock.unlock()
+        }
+    }
     public var onDetachFromWindow: (() -> Void)?
 
     public override init(frame frameRect: NSRect) {
@@ -209,16 +228,41 @@ public final class DKMetalLayerView: NSView {
 
     public func captureSnapshotImage() -> NSImage? {
         renderLock.lock()
-        defer { renderLock.unlock() }
-        if let pb = lastPixelBuffer,
-           let cgImg = Self.renderOffscreenCGImage(
-               pixelBuffer: pb,
-               colorUniforms: lastColorUniforms,
-               edrHeadroom: currentEDRHeadroom
-           ) {
-            return NSImage(cgImage: cgImg, size: NSSize(width: cgImg.width, height: cgImg.height))
+        let pb = lastPixelBuffer
+        let uniforms = lastColorUniforms
+        renderLock.unlock()
+        guard let pb,
+              let cgImg = Self.renderOffscreenCGImage(
+                  pixelBuffer: pb,
+                  colorUniforms: uniforms,
+                  edrHeadroom: currentEDRHeadroom
+              ) else {
+            return nil
         }
-        return nil
+        return NSImage(cgImage: cgImg, size: NSSize(width: cgImg.width, height: cgImg.height))
+    }
+
+    public func captureSnapshotCGImage(maxDimension: Int? = nil) -> CGImage? {
+        renderLock.lock()
+        let pb = lastPixelBuffer
+        let uniforms = lastColorUniforms
+        renderLock.unlock()
+        guard let pb else { return nil }
+        return Self.renderOffscreenCGImage(
+            pixelBuffer: pb,
+            colorUniforms: uniforms,
+            edrHeadroom: currentEDRHeadroom,
+            maxDimension: maxDimension
+        )
+    }
+
+    public func currentFrameSnapshotInput() -> (pixelBuffer: CVPixelBuffer, colorUniforms: DKGpuColorUniforms, edrHeadroom: Float)? {
+        renderLock.lock()
+        let pb = lastPixelBuffer
+        let uniforms = lastColorUniforms
+        renderLock.unlock()
+        guard let pb else { return nil }
+        return (pb, uniforms, currentEDRHeadroom)
     }
 
     private func updateDrawableSize() {
@@ -237,10 +281,11 @@ public final class DKMetalLayerView: NSView {
 
         sizeLock.lock()
         cachedDrawableSize = targetSize
+        layoutGeneration &+= 1
         sizeLock.unlock()
     }
 
-    public static let metalShaderSource = """
+    nonisolated public static let metalShaderSource = """
     #include <metal_stdlib>
     using namespace metal;
 
@@ -664,8 +709,10 @@ public final class DKMetalLayerView: NSView {
     }
 
     public func renderLastPixelBuffer() {
+        guard renderLock.try() else { return }
+        defer { renderLock.unlock() }
         guard let pixbuf = lastPixelBuffer else { return }
-        renderPixelBuffer(pixbuf, colorUniforms: lastColorUniforms)
+        renderLocked(pixbuf, colorUniforms: lastColorUniforms)
     }
 
     private func calculateScale(videoWidth: Double, videoHeight: Double) -> SIMD2<Float> {
@@ -698,22 +745,31 @@ public final class DKMetalLayerView: NSView {
     public func renderPixelBuffer(_ pixelBuffer: CVPixelBuffer, colorUniforms: DKGpuColorUniforms? = nil) {
         guard renderLock.try() else { return }
         defer { renderLock.unlock() }
+        renderLocked(pixelBuffer, colorUniforms: colorUniforms)
+    }
+
+    private func renderLocked(_ pixelBuffer: CVPixelBuffer, colorUniforms: DKGpuColorUniforms?) {
+        sizeLock.lock()
+        let drawableSize = cachedDrawableSize
+        let gen = layoutGeneration
+        sizeLock.unlock()
+        guard drawableSize.width > 0, drawableSize.height > 0 else { return }
 
         self.lastPixelBuffer = pixelBuffer
         var uniforms = colorUniforms ?? self.lastColorUniforms
         uniforms.edr_headroom = currentEDRHeadroom
         self.lastColorUniforms = uniforms
-        self.needsRedrawOnSameFrame = false
-
-        if metalLayer.drawableSize.width <= 0 || metalLayer.drawableSize.height <= 0 {
-            updateDrawableSize()
-        }
 
         guard let queue = commandQueue,
               let cache = textureCache,
               let drawable = metalLayer.nextDrawable() else {
             return
         }
+        sizeLock.lock()
+        if layoutGeneration == gen {
+            _needsRedrawOnSameFrame = false
+        }
+        sizeLock.unlock()
 
         let cleanWidth = CVPixelBufferGetWidth(pixelBuffer)
         let cleanHeight = CVPixelBufferGetHeight(pixelBuffer)
@@ -918,7 +974,75 @@ public final class DKMetalLayerView: NSView {
 
     /// Renders a decoded `CVPixelBuffer` + `DKGpuColorUniforms` (+ optional RGBA8 subtitle bitmap)
     /// offscreen through the exact production Metal HDR/DoVi shader into a Display P3 `CGImage`.
-    public static func renderOffscreenCGImage(
+    private final class OffscreenMetalContext: @unchecked Sendable {
+        static let shared = OffscreenMetalContext()
+        let lock = NSLock()
+        let device: MTLDevice?
+        let queue: MTLCommandQueue?
+        let texCache: CVMetalTextureCache?
+        let videoPipeline: MTLRenderPipelineState?
+        let bgraPipeline: MTLRenderPipelineState?
+        let subPipeline: MTLRenderPipelineState?
+
+        private init() {
+            guard let dev = MTLCreateSystemDefaultDevice(),
+                  let q = dev.makeCommandQueue() else {
+                self.device = nil; self.queue = nil; self.texCache = nil
+                self.videoPipeline = nil; self.bgraPipeline = nil; self.subPipeline = nil
+                return
+            }
+            var cache: CVMetalTextureCache?
+            CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, dev, nil, &cache)
+            self.device = dev
+            self.queue = q
+            self.texCache = cache
+
+            guard let library = try? dev.makeLibrary(source: DKMetalLayerView.metalShaderSource, options: nil),
+                  let vert = library.makeFunction(name: "vertex_main") else {
+                self.videoPipeline = nil; self.bgraPipeline = nil; self.subPipeline = nil
+                return
+            }
+
+            if let fragMaster = library.makeFunction(name: "fragment_video_master") {
+                let desc = MTLRenderPipelineDescriptor()
+                desc.vertexFunction = vert
+                desc.fragmentFunction = fragMaster
+                desc.colorAttachments[0].pixelFormat = .rgba16Float
+                self.videoPipeline = try? dev.makeRenderPipelineState(descriptor: desc)
+            } else {
+                self.videoPipeline = nil
+            }
+
+            if let fragBgra = library.makeFunction(name: "fragment_bgra") {
+                let desc = MTLRenderPipelineDescriptor()
+                desc.vertexFunction = vert
+                desc.fragmentFunction = fragBgra
+                desc.colorAttachments[0].pixelFormat = .rgba16Float
+                self.bgraPipeline = try? dev.makeRenderPipelineState(descriptor: desc)
+            } else {
+                self.bgraPipeline = nil
+            }
+
+            if let fragSub = library.makeFunction(name: "fragment_subtitle") {
+                let subDesc = MTLRenderPipelineDescriptor()
+                subDesc.vertexFunction = vert
+                subDesc.fragmentFunction = fragSub
+                subDesc.colorAttachments[0].pixelFormat = .rgba16Float
+                subDesc.colorAttachments[0].isBlendingEnabled = true
+                subDesc.colorAttachments[0].sourceRGBBlendFactor = .one
+                subDesc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+                subDesc.colorAttachments[0].rgbBlendOperation = .add
+                subDesc.colorAttachments[0].sourceAlphaBlendFactor = .one
+                subDesc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+                subDesc.colorAttachments[0].alphaBlendOperation = .add
+                self.subPipeline = try? dev.makeRenderPipelineState(descriptor: subDesc)
+            } else {
+                self.subPipeline = nil
+            }
+        }
+    }
+
+    nonisolated public static func renderOffscreenCGImage(
         pixelBuffer: CVPixelBuffer,
         colorUniforms: DKGpuColorUniforms,
         edrHeadroom: Float = 1.0,
@@ -926,28 +1050,30 @@ public final class DKMetalLayerView: NSView {
         subtitleWidth: Int = 0,
         subtitleHeight: Int = 0,
         outputWidth: Int? = nil,
-        outputHeight: Int? = nil
+        outputHeight: Int? = nil,
+        maxDimension: Int? = nil
     ) -> CGImage? {
-        guard let dev = MTLCreateSystemDefaultDevice(),
-              let queue = dev.makeCommandQueue() else { return nil }
-        var cache: CVMetalTextureCache?
-        guard CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, dev, nil, &cache) == kCVReturnSuccess,
-              let texCache = cache else { return nil }
+        let ctx = OffscreenMetalContext.shared
+        ctx.lock.lock()
+        defer { ctx.lock.unlock() }
 
-        guard let library = try? dev.makeLibrary(source: metalShaderSource, options: nil),
-              let vert = library.makeFunction(name: "vertex_main"),
-              let fragMaster = library.makeFunction(name: "fragment_video_master") else { return nil }
-
-        let pipeDesc = MTLRenderPipelineDescriptor()
-        pipeDesc.vertexFunction = vert
-        pipeDesc.fragmentFunction = fragMaster
-        pipeDesc.colorAttachments[0].pixelFormat = .rgba16Float
-        guard let videoPipe = try? dev.makeRenderPipelineState(descriptor: pipeDesc) else { return nil }
+        guard let dev = ctx.device,
+              let queue = ctx.queue,
+              let texCache = ctx.texCache,
+              let videoPipe = ctx.videoPipeline else { return nil }
 
         let cleanW = CVPixelBufferGetWidth(pixelBuffer)
         let cleanH = CVPixelBufferGetHeight(pixelBuffer)
-        let outW = outputWidth ?? cleanW
-        let outH = outputHeight ?? cleanH
+        var outW = outputWidth ?? cleanW
+        var outH = outputHeight ?? cleanH
+        if outputWidth == nil && outputHeight == nil, let maxDim = maxDimension, maxDim > 0 {
+            let longest = max(cleanW, cleanH)
+            if longest > maxDim {
+                let ratio = Double(maxDim) / Double(longest)
+                outW = max(2, Int((Double(cleanW) * ratio).rounded()))
+                outH = max(2, Int((Double(cleanH) * ratio).rounded()))
+            }
+        }
         guard outW > 0, outH > 0 else { return nil }
 
         let outDesc = MTLTextureDescriptor.texture2DDescriptor(
@@ -961,24 +1087,8 @@ public final class DKMetalLayerView: NSView {
         guard let outTex = dev.makeTexture(descriptor: outDesc) else { return nil }
 
         let pf = CVPixelBufferGetPixelFormatType(pixelBuffer)
-        let is10Bit = (pf == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ||
-                       pf == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange ||
-                       pf == 0x78343230 || pf == 0x78663230 || pf == 0x70303130)
-        let widthY = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
-        let heightY = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
-        let widthUV = CVPixelBufferGetWidthOfPlane(pixelBuffer, 1)
-        let heightUV = CVPixelBufferGetHeightOfPlane(pixelBuffer, 1)
-
-        var yRef: CVMetalTexture?
-        var uvRef: CVMetalTexture?
-        guard CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, texCache, pixelBuffer, nil, is10Bit ? .r16Unorm : .r8Unorm, widthY, heightY, 0, &yRef) == kCVReturnSuccess,
-              CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, texCache, pixelBuffer, nil, is10Bit ? .rg16Unorm : .rg8Unorm, widthUV, heightUV, 1, &uvRef) == kCVReturnSuccess,
-              let yTex = yRef.flatMap({ CVMetalTextureGetTexture($0) }),
-              let uvTex = uvRef.flatMap({ CVMetalTextureGetTexture($0) }) else { return nil }
-
         var uniforms = colorUniforms
         uniforms.edr_headroom = max(1.0, edrHeadroom)
-        if is10Bit && uniforms.bit_depth < 10 { uniforms.bit_depth = 10 }
 
         let passDesc = MTLRenderPassDescriptor()
         passDesc.colorAttachments[0].texture = outTex
@@ -989,38 +1099,61 @@ public final class DKMetalLayerView: NSView {
         guard let cmd = queue.makeCommandBuffer(),
               let enc = cmd.makeRenderCommandEncoder(descriptor: passDesc) else { return nil }
 
-        let uMax = widthY > 0 ? min(1.0, Float(cleanW) / Float(widthY)) : 1.0
-        let vMax = heightY > 0 ? min(1.0, Float(cleanH) / Float(heightY)) : 1.0
-        var vu = DKVertexUniforms(scale: SIMD2<Float>(1, 1), uvRect: SIMD4<Float>(0, 0, uMax, vMax))
-        enc.setRenderPipelineState(videoPipe)
-        enc.setVertexBytes(&vu, length: MemoryLayout<DKVertexUniforms>.stride, index: 0)
-        enc.setFragmentTexture(yTex, index: 0)
-        enc.setFragmentTexture(uvTex, index: 1)
-        enc.setFragmentBytes(&uniforms, length: MemoryLayout<DKGpuColorUniforms>.stride, index: 0)
-        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        if pf == kCVPixelFormatType_32BGRA || pf == 0x42475241 {
+            guard let bgraPipe = ctx.bgraPipeline else { enc.endEncoding(); return nil }
+            var bgraRef: CVMetalTexture?
+            guard CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, texCache, pixelBuffer, nil, .bgra8Unorm, cleanW, cleanH, 0, &bgraRef) == kCVReturnSuccess,
+                  let bgraTex = bgraRef.flatMap({ CVMetalTextureGetTexture($0) }) else {
+                enc.endEncoding()
+                return nil
+            }
+            var vu = DKVertexUniforms(scale: SIMD2<Float>(1, 1), uvRect: SIMD4<Float>(0, 0, 1, 1))
+            enc.setRenderPipelineState(bgraPipe)
+            enc.setVertexBytes(&vu, length: MemoryLayout<DKVertexUniforms>.stride, index: 0)
+            enc.setFragmentTexture(bgraTex, index: 0)
+            enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        } else {
+            let is10Bit = (pf == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ||
+                           pf == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange ||
+                           pf == 0x78343230 || pf == 0x78663230 || pf == 0x70303130 || pf == 0x73343230)
+            if is10Bit && uniforms.bit_depth < 10 { uniforms.bit_depth = 10 }
+            let widthY = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
+            let heightY = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+            let widthUV = CVPixelBufferGetWidthOfPlane(pixelBuffer, 1)
+            let heightUV = CVPixelBufferGetHeightOfPlane(pixelBuffer, 1)
+
+            var yRef: CVMetalTexture?
+            var uvRef: CVMetalTexture?
+            guard CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, texCache, pixelBuffer, nil, is10Bit ? .r16Unorm : .r8Unorm, widthY, heightY, 0, &yRef) == kCVReturnSuccess,
+                  CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, texCache, pixelBuffer, nil, is10Bit ? .rg16Unorm : .rg8Unorm, widthUV, heightUV, 1, &uvRef) == kCVReturnSuccess,
+                  let yTex = yRef.flatMap({ CVMetalTextureGetTexture($0) }),
+                  let uvTex = uvRef.flatMap({ CVMetalTextureGetTexture($0) }) else {
+                enc.endEncoding()
+                return nil
+            }
+
+            let uMax = widthY > 0 ? min(1.0, Float(cleanW) / Float(widthY)) : 1.0
+            let vMax = heightY > 0 ? min(1.0, Float(cleanH) / Float(heightY)) : 1.0
+            var vu = DKVertexUniforms(scale: SIMD2<Float>(1, 1), uvRect: SIMD4<Float>(0, 0, uMax, vMax))
+            enc.setRenderPipelineState(videoPipe)
+            enc.setVertexBytes(&vu, length: MemoryLayout<DKVertexUniforms>.stride, index: 0)
+            enc.setFragmentTexture(yTex, index: 0)
+            enc.setFragmentTexture(uvTex, index: 1)
+            enc.setFragmentBytes(&uniforms, length: MemoryLayout<DKGpuColorUniforms>.stride, index: 0)
+            enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
 
         if let subPtr = subtitleRGBA, subtitleWidth > 0, subtitleHeight > 0,
-           let fragSub = library.makeFunction(name: "fragment_subtitle") {
-            let subPipeDesc = MTLRenderPipelineDescriptor()
-            subPipeDesc.vertexFunction = vert
-            subPipeDesc.fragmentFunction = fragSub
-            subPipeDesc.colorAttachments[0].pixelFormat = .rgba16Float
-            subPipeDesc.colorAttachments[0].isBlendingEnabled = true
-            subPipeDesc.colorAttachments[0].sourceRGBBlendFactor = .one
-            subPipeDesc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
-            subPipeDesc.colorAttachments[0].sourceAlphaBlendFactor = .one
-            subPipeDesc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
-            if let subPipe = try? dev.makeRenderPipelineState(descriptor: subPipeDesc) {
-                let sDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: subtitleWidth, height: subtitleHeight, mipmapped: false)
-                if let sTex = dev.makeTexture(descriptor: sDesc) {
-                    sTex.replace(region: MTLRegionMake2D(0, 0, subtitleWidth, subtitleHeight), mipmapLevel: 0, withBytes: subPtr, bytesPerRow: subtitleWidth * 4)
-                    var svu = DKVertexUniforms(scale: SIMD2<Float>(1, 1), uvRect: SIMD4<Float>(0, 0, 1, 1))
-                    enc.setRenderPipelineState(subPipe)
-                    enc.setVertexBytes(&svu, length: MemoryLayout<DKVertexUniforms>.stride, index: 0)
-                    enc.setFragmentTexture(sTex, index: 0)
-                    enc.setFragmentBytes(&uniforms, length: MemoryLayout<DKGpuColorUniforms>.stride, index: 0)
-                    enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-                }
+           let subPipe = ctx.subPipeline {
+            let sDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: subtitleWidth, height: subtitleHeight, mipmapped: false)
+            if let sTex = dev.makeTexture(descriptor: sDesc) {
+                sTex.replace(region: MTLRegionMake2D(0, 0, subtitleWidth, subtitleHeight), mipmapLevel: 0, withBytes: subPtr, bytesPerRow: subtitleWidth * 4)
+                var svu = DKVertexUniforms(scale: SIMD2<Float>(1, 1), uvRect: SIMD4<Float>(0, 0, 1, 1))
+                enc.setRenderPipelineState(subPipe)
+                enc.setVertexBytes(&svu, length: MemoryLayout<DKVertexUniforms>.stride, index: 0)
+                enc.setFragmentTexture(sTex, index: 0)
+                enc.setFragmentBytes(&uniforms, length: MemoryLayout<DKGpuColorUniforms>.stride, index: 0)
+                enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             }
         }
 
@@ -1118,6 +1251,18 @@ public struct DKMetalVideoView: NSViewRepresentable {
         var lastPts: Double = -1.0
         var lastBufferPtr: UnsafeMutableRawPointer?
         var lastSubSerial: UInt64 = UInt64.max
+        private var lastPausedCheckTime: TimeInterval = 0
+
+        private final class SubtitleSyncBox {
+            unowned let view: DKMetalLayerView
+            var updatedSerial: UInt64
+            var changed: Bool = false
+
+            init(view: DKMetalLayerView, serial: UInt64) {
+                self.view = view
+                self.updatedSerial = serial
+            }
+        }
 
         public func startDisplayLink(for view: DKMetalLayerView, player: OpaquePointer?) {
             self.view = view
@@ -1167,6 +1312,16 @@ public struct DKMetalVideoView: NSViewRepresentable {
             let v = self.view
             playerLock.unlock()
             guard let p = p, let v = v else { return }
+
+            let needsRedraw = v.needsRedrawOnSameFrame
+            if !needsRedraw && lastBufferPtr != nil && dk_player_get_state(p) == DK_STATE_PAUSED {
+                let now = ProcessInfo.processInfo.systemUptime
+                if now - lastPausedCheckTime < 0.08 {
+                    return
+                }
+                lastPausedCheckTime = now
+            }
+
             var pts: Double = 0
             var colorUniforms = DKGpuColorUniforms()
             guard let unmanagedBuf = dk_player_acquire_frame(p, &pts, &colorUniforms) else {
@@ -1179,26 +1334,25 @@ public struct DKMetalVideoView: NSViewRepresentable {
             let subClockPts = masterPos > 0 ? masterPos : max(0.0, pts)
             let cleanW = Int32(max(640, CVPixelBufferGetWidth(pixbuf)))
             let cleanH = Int32(max(360, CVPixelBufferGetHeight(pixbuf)))
-            var subRgba: UnsafePointer<UInt8>? = nil
-            var subW: Int32 = 0
-            var subH: Int32 = 0
-            var subSerial: UInt64 = 0
-            let hasSub = dk_player_get_subtitle_rgba(p, subClockPts, cleanW, cleanH, &subRgba, &subW, &subH, &subSerial)
-
-            var subtitleChanged = false
-            if subSerial != lastSubSerial {
-                lastSubSerial = subSerial
-                subtitleChanged = true
-                if hasSub, let ptr = subRgba, subW > 0, subH > 0 {
-                    v.updateSubtitleOverlay(rgbaPtr: ptr, width: Int(subW), height: Int(subH))
+            let syncBox = SubtitleSyncBox(view: v, serial: lastSubSerial)
+            let boxPtr = Unmanaged.passUnretained(syncBox).toOpaque()
+            dk_player_sync_subtitle_rgba(p, subClockPts, cleanW, cleanH, lastSubSerial, { rgba, w, h, serial, ctx in
+                guard let ctx else { return }
+                let box = Unmanaged<SubtitleSyncBox>.fromOpaque(ctx).takeUnretainedValue()
+                box.updatedSerial = serial
+                box.changed = true
+                if let rgba, w > 0, h > 0 {
+                    box.view.updateSubtitleOverlay(rgbaPtr: rgba, width: Int(w), height: Int(h))
                 } else {
-                    v.updateSubtitleOverlay(rgbaPtr: nil, width: 0, height: 0)
+                    box.view.updateSubtitleOverlay(rgbaPtr: nil, width: 0, height: 0)
                 }
-            }
+            }, boxPtr)
+            lastSubSerial = syncBox.updatedSerial
+            let subtitleChanged = syncBox.changed
 
             // Deduplication: if PTS and pointer match the last displayed frame and the view
             // has not resized and subtitle overlay has not changed, avoid redundant GPU load
-            if bufPtr == lastBufferPtr && pts == lastPts && !subtitleChanged && !v.needsRedrawOnSameFrame {
+            if bufPtr == lastBufferPtr && pts == lastPts && !subtitleChanged && !needsRedraw {
                 return
             }
 

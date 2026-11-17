@@ -55,8 +55,13 @@ public struct ServerListView: View {
                         Task {
                             isRefreshingAllServers = true
                             defer { isRefreshingAllServers = false }
-                            for s in appState.servers {
-                                await appState.syncExtDomains(for: s.id, showFeedback: false)
+                            let serverIDs = appState.servers.map(\.id)
+                            await withTaskGroup(of: Void.self) { group in
+                                for serverId in serverIDs {
+                                    group.addTask { @MainActor in
+                                        await appState.syncExtDomains(for: serverId, showFeedback: false)
+                                    }
+                                }
                             }
                             appState.showToast("已刷新所有服务器状态与云端线路", icon: "checkmark.circle.fill")
                         }
@@ -813,7 +818,7 @@ public struct ServerConfigSheet: View {
                         if isConnecting { ProgressView().controlSize(.small) }
                         Text("连接并拉取云端账户").font(.system(size: 13, weight: .bold))
                     }
-                    .foregroundStyle(.white).padding(.horizontal, 18).padding(.vertical, 8).background(appState.accentColor).clipShape(Capsule())
+                    .foregroundStyle(appState.accentTextColor).padding(.horizontal, 18).padding(.vertical, 8).background(appState.accentColor).clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
                 .disabled(draft.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isConnecting)
@@ -838,22 +843,7 @@ public struct ServerConfigSheet: View {
             return
         }
         errorMessage = nil
-        draft.isDemoServer = false
-        draft.name = parsed.name
-        draft.note = parsed.note
-        draft.type = parsed.type
-        draft.host = parsed.host
-        draft.port = parsed.port
-        draft.isHttps = parsed.isHttps
-        draft.path = parsed.path
-        if !parsed.username.isEmpty { draft.username = parsed.username }
-        if !parsed.password.isEmpty { draft.password = parsed.password }
-        if !parsed.accessToken.isEmpty { draft.accessToken = parsed.accessToken }
-        if !parsed.userId.isEmpty { draft.userId = parsed.userId }
-        if !parsed.backupLines.isEmpty {
-            let existingManual = draft.backupLines.filter { !$0.isAutoSynced }
-            draft.backupLines = existingManual + parsed.backupLines
-        }
+        draft.apply(parsed: parsed, overwriteName: true)
     }
 
     private func saveAndConnect() async {

@@ -1,16 +1,15 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-pub struct ChunkEntry {
-    pub offset: i64,
-    pub data: Vec<u8>,
+struct CacheInner {
+    current_bytes: usize,
+    chunks: BTreeMap<i64, Arc<Vec<u8>>>,
 }
 
 pub struct DKRSArenaCache {
     capacity: usize,
     chunk_size: usize,
-    current_bytes: usize,
-    chunks: RwLock<BTreeMap<i64, Arc<Vec<u8>>>>,
+    inner: RwLock<CacheInner>,
 }
 
 impl DKRSArenaCache {
@@ -18,19 +17,24 @@ impl DKRSArenaCache {
         Self {
             capacity: if capacity == 0 { 64 * 1024 * 1024 } else { capacity },
             chunk_size: if chunk_size == 0 { 256 * 1024 } else { chunk_size },
-            current_bytes: 0,
-            chunks: RwLock::new(BTreeMap::new()),
+            inner: RwLock::new(CacheInner {
+                current_bytes: 0,
+                chunks: BTreeMap::new(),
+            }),
         }
     }
 
     pub fn read(&self, offset: i64, dst: &mut [u8]) -> i32 {
-        let guard = match self.chunks.read() {
+        if offset < 0 || dst.is_empty() {
+            return 0;
+        }
+        let guard = match self.inner.read() {
             Ok(g) => g,
             Err(_) => return 0,
         };
 
         let chunk_start = (offset / self.chunk_size as i64) * self.chunk_size as i64;
-        if let Some(chunk_data) = guard.get(&chunk_start) {
+        if let Some(chunk_data) = guard.chunks.get(&chunk_start) {
             let inner_offset = (offset - chunk_start) as usize;
             if inner_offset < chunk_data.len() {
                 let avail = chunk_data.len() - inner_offset;
@@ -42,39 +46,48 @@ impl DKRSArenaCache {
         0
     }
 
-    pub fn write(&mut self, offset: i64, src: &[u8]) {
-        let mut guard = match self.chunks.write() {
+    pub fn write(&self, offset: i64, src: &[u8]) {
+        if offset < 0 || src.is_empty() || src.len() > self.capacity {
+            return;
+        }
+        let mut guard = match self.inner.write() {
             Ok(g) => g,
             Err(_) => return,
         };
 
         let chunk_start = (offset / self.chunk_size as i64) * self.chunk_size as i64;
+        if let Some(previous) = guard.chunks.remove(&chunk_start) {
+            guard.current_bytes = guard.current_bytes.saturating_sub(previous.len());
+        }
+
         let mut data = Vec::with_capacity(src.len());
         data.extend_from_slice(src);
 
         // FIFO evict if capacity exceeded
-        while self.current_bytes + data.len() > self.capacity && !guard.is_empty() {
-            if let Some((first_key, first_val)) = guard.iter().next().map(|(k, v)| (*k, v.len())) {
-                guard.remove(&first_key);
-                self.current_bytes = self.current_bytes.saturating_sub(first_val);
+        while guard.current_bytes + data.len() > self.capacity {
+            let Some(first_key) = guard.chunks.keys().next().copied() else {
+                break;
+            };
+            if let Some(evicted) = guard.chunks.remove(&first_key) {
+                guard.current_bytes = guard.current_bytes.saturating_sub(evicted.len());
             } else {
                 break;
             }
         }
 
-        self.current_bytes += data.len();
-        guard.insert(chunk_start, Arc::new(data));
+        guard.current_bytes += data.len();
+        guard.chunks.insert(chunk_start, Arc::new(data));
     }
 
-    pub fn clear(&mut self) {
-        if let Ok(mut g) = self.chunks.write() {
-            g.clear();
-            self.current_bytes = 0;
+    pub fn clear(&self) {
+        if let Ok(mut g) = self.inner.write() {
+            g.chunks.clear();
+            g.current_bytes = 0;
         }
     }
 
     pub fn get_bytes(&self) -> usize {
-        self.current_bytes
+        self.inner.read().map(|g| g.current_bytes).unwrap_or(0)
     }
 }
 
@@ -86,14 +99,18 @@ pub extern "C" fn dk_rs_cache_create(capacity_bytes: usize, chunk_size: usize) -
 }
 
 #[no_mangle]
-pub extern "C" fn dk_rs_cache_destroy(cache: *mut DKRSArenaCache) {
+/// # Safety
+/// `cache` must be either null or a pointer previously returned by `dk_rs_cache_create` that has not yet been destroyed.
+pub unsafe extern "C" fn dk_rs_cache_destroy(cache: *mut DKRSArenaCache) {
     if !cache.is_null() {
         unsafe { drop(Box::from_raw(cache)); }
     }
 }
 
 #[no_mangle]
-pub extern "C" fn dk_rs_cache_read(cache: *mut DKRSArenaCache, offset: i64, dst: *mut u8, size: i32) -> i32 {
+/// # Safety
+/// `cache` must be a valid pointer from `dk_rs_cache_create`, and `dst` must be writable for `size` bytes when positive.
+pub unsafe extern "C" fn dk_rs_cache_read(cache: *mut DKRSArenaCache, offset: i64, dst: *mut u8, size: i32) -> i32 {
     if cache.is_null() || dst.is_null() || size <= 0 {
         return 0;
     }
@@ -103,32 +120,40 @@ pub extern "C" fn dk_rs_cache_read(cache: *mut DKRSArenaCache, offset: i64, dst:
 }
 
 #[no_mangle]
-pub extern "C" fn dk_rs_cache_write(cache: *mut DKRSArenaCache, offset: i64, src: *const u8, size: i32) {
+/// # Safety
+/// `cache` must be a valid pointer from `dk_rs_cache_create`, and `src` must be readable for `size` bytes when positive.
+pub unsafe extern "C" fn dk_rs_cache_write(cache: *mut DKRSArenaCache, offset: i64, src: *const u8, size: i32) {
     if cache.is_null() || src.is_null() || size <= 0 {
         return;
     }
-    let c = unsafe { &mut *cache };
+    let c = unsafe { &*cache };
     let slice = unsafe { std::slice::from_raw_parts(src, size as usize) };
     c.write(offset, slice);
 }
 
 #[no_mangle]
-pub extern "C" fn dk_rs_cache_clear(cache: *mut DKRSArenaCache) {
+/// # Safety
+/// `cache` must be either null or a valid pointer from `dk_rs_cache_create`.
+pub unsafe extern "C" fn dk_rs_cache_clear(cache: *mut DKRSArenaCache) {
     if !cache.is_null() {
-        let c = unsafe { &mut *cache };
+        let c = unsafe { &*cache };
         c.clear();
     }
 }
 
 #[no_mangle]
-pub extern "C" fn dk_rs_cache_get_bytes(cache: *mut DKRSArenaCache) -> usize {
+/// # Safety
+/// `cache` must be either null or a valid pointer from `dk_rs_cache_create`.
+pub unsafe extern "C" fn dk_rs_cache_get_bytes(cache: *mut DKRSArenaCache) -> usize {
     if cache.is_null() { return 0; }
     let c = unsafe { &*cache };
     c.get_bytes()
 }
 
 #[no_mangle]
-pub extern "C" fn dk_rs_check_dovi_fel(nalu_data: *const u8, nalu_len: usize) -> bool {
+/// # Safety
+/// `nalu_data` must be either null or readable for `nalu_len` bytes.
+pub unsafe extern "C" fn dk_rs_check_dovi_fel(nalu_data: *const u8, nalu_len: usize) -> bool {
     if nalu_data.is_null() || nalu_len < 4 {
         return false;
     }

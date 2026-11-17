@@ -1,0 +1,250 @@
+import SwiftUI
+import Foundation
+import DonbyCore
+import DonbyKernelC
+
+public enum PlayerDrawerTab: String, CaseIterable, Identifiable {
+    case playlist = "播放列表"
+    case tracks = "音轨与字幕"
+    case mediaInfo = "流媒体信息"
+    public var id: String { rawValue }
+}
+
+enum PlayerSubtitleSelection: Equatable {
+    case off
+    case embedded(avStreamIndex: Int)
+    case remoteExternal(url: URL)
+    case localExternal(url: URL)
+}
+
+struct PlayerAudioTrackOption: Identifiable, Equatable {
+    var id: String { "audio-\(avStreamIndex)" }
+    let avStreamIndex: Int
+    let embyIndex: Int?
+    let label: String
+}
+
+struct PlayerSubtitleTrackOption: Identifiable, Equatable {
+    let id: String
+    let selection: PlayerSubtitleSelection
+    let embyIndex: Int?
+    let label: String
+    let badge: String?
+    let externalItem: SubtitleResourceItem?
+}
+
+/// Sleek mini volume slider with white track and circular thumb
+struct MiniVolumeSlider: View {
+    @Binding var volume: Float
+    @Binding var isMuted: Bool
+    let onChange: (Float) -> Void
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let ratio = CGFloat(isMuted ? 0 : max(0, min(1, volume)))
+            let filledW = w * ratio
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.24))
+                    .frame(height: 3.5)
+
+                Capsule()
+                    .fill(Color.white)
+                    .frame(width: max(3.5, filledW), height: 3.5)
+
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 10, height: 10)
+                    .shadow(color: .black.opacity(0.4), radius: 2, y: 1)
+                    .offset(x: min(max(0, filledW - 5), w - 10))
+            }
+            .frame(height: geo.size.height)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { val in
+                        let r = Float(max(0.0, min(1.0, val.location.x / w)))
+                        volume = r
+                        isMuted = (r == 0)
+                        onChange(r)
+                    }
+            )
+        }
+        .frame(width: 55, height: 16)
+    }
+}
+
+struct PlayerCircleButton<Content: View>: View {
+    let tooltip: String
+    @ViewBuilder let content: () -> Content
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .strokeBorder(Color.white.opacity(isHovered ? 0.95 : 0.65), lineWidth: 1.25)
+                    .background(Circle().fill(isHovered ? Color.white.opacity(0.18) : Color.clear))
+                content()
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 28, height: 28)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(tooltip)
+        .onHover { isHovered = $0 }
+    }
+}
+
+struct PlayerCircleMenu<Content: View, MenuItems: View>: View {
+    let tooltip: String
+    @ViewBuilder let content: () -> Content
+    @ViewBuilder let menuItems: () -> MenuItems
+    @State private var isHovered = false
+
+    var body: some View {
+        Menu {
+            menuItems()
+        } label: {
+            ZStack {
+                Circle()
+                    .strokeBorder(Color.white.opacity(isHovered ? 0.95 : 0.65), lineWidth: 1.25)
+                    .background(Circle().fill(isHovered ? Color.white.opacity(0.18) : Color.clear))
+                content()
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 28, height: 28)
+            .contentShape(Circle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(width: 28, height: 28)
+        .help(tooltip)
+        .onHover { isHovered = $0 }
+    }
+}
+
+/// Custom Liquid Glass video scrubber with real-time ahead-of-playhead buffered progress indicator
+struct PlayerTimelineScrubberView: View {
+    let currentTime: Double
+    let bufferedAheadSeconds: Double
+    let duration: Double
+    let accentColor: Color
+    @Binding var isScrubbing: Bool
+    @Binding var scrubTime: Double
+    let onCommitSeek: (Double) -> Void
+
+    @State private var isHovered: Bool = false
+
+    private var safeDuration: Double { max(1.0, duration) }
+    private var displayedTime: Double { isScrubbing ? scrubTime : currentTime }
+    private var playedRatio: CGFloat {
+        CGFloat(max(0.0, min(1.0, displayedTime / safeDuration)))
+    }
+    private var bufferedRatio: CGFloat {
+        let target = max(displayedTime, currentTime + max(0.0, bufferedAheadSeconds))
+        return CGFloat(max(Double(playedRatio), min(1.0, target / safeDuration)))
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let width = max(1.0, geo.size.width)
+            let trackHeight: CGFloat = (isHovered || isScrubbing) ? 5.0 : 3.5
+            let knobSize: CGFloat = (isHovered || isScrubbing) ? 14.0 : 12.0
+            let knobRadius = knobSize * 0.5
+            let travelWidth = max(1.0, width - knobSize)
+
+            let knobCenter = knobRadius + playedRatio * travelWidth
+            let knobOffset = knobCenter - knobRadius
+            let playedTrackWidth = min(width, max(trackHeight, knobCenter))
+            let bufferedTrackWidth = min(width, max(playedTrackWidth, knobRadius + bufferedRatio * travelWidth))
+
+            ZStack(alignment: .leading) {
+                // 1. Unbuffered dark background track
+                Capsule()
+                    .fill(Color.white.opacity(0.18))
+                    .frame(width: width, height: trackHeight)
+
+                // 2. Cached / Buffered progress indicator ahead of playhead (matching Image #1)
+                if bufferedTrackWidth > trackHeight {
+                    Capsule()
+                        .fill(Color(white: 0.48))
+                        .frame(width: bufferedTrackWidth, height: trackHeight)
+                        .animation(.easeOut(duration: 0.20), value: bufferedRatio)
+                }
+
+                // 3. Played progress segment (solid white)
+                if playedTrackWidth > 0 {
+                    Capsule()
+                        .fill(Color.white)
+                        .frame(width: playedTrackWidth, height: trackHeight)
+                }
+
+                // 4. Circular playhead thumb (solid white circle with shadow)
+                Circle()
+                    .fill(Color.white)
+                    .shadow(color: Color.black.opacity(0.55), radius: 3, y: 1)
+                    .frame(width: knobSize, height: knobSize)
+                    .offset(x: knobOffset)
+            }
+            .frame(width: width, height: geo.size.height)
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                withAnimation(.easeOut(duration: 0.14)) {
+                    isHovered = hovering
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let ratio = travelWidth > 0 ? max(0.0, min(1.0, Double((value.location.x - knobRadius) / travelWidth))) : 0.0
+                        isScrubbing = true
+                        scrubTime = ratio * safeDuration
+                    }
+                    .onEnded { value in
+                        let ratio = travelWidth > 0 ? max(0.0, min(1.0, Double((value.location.x - knobRadius) / travelWidth))) : 0.0
+                        let target = ratio * safeDuration
+                        scrubTime = target
+                        isScrubbing = false
+                        onCommitSeek(target)
+                    }
+            )
+        }
+        .frame(height: 20)
+    }
+}
+
+final class OpeningPlayerBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handle: OpaquePointer?
+    private var aborted = false
+
+    func setHandle(_ handle: OpaquePointer) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if aborted { return false }
+        self.handle = handle
+        return true
+    }
+
+    func abort() {
+        lock.lock()
+        aborted = true
+        let currentHandle = handle
+        lock.unlock()
+        if let currentHandle {
+            dk_player_request_abort(currentHandle)
+        }
+    }
+
+    func clear() {
+        lock.lock()
+        handle = nil
+        lock.unlock()
+    }
+}

@@ -315,6 +315,13 @@ public enum EmbySortField: String, CaseIterable, Identifiable, Sendable {
 }
 
 public struct MediaTitleParser: Sendable {
+    private static let videoExtensions = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".ts", ".flv", ".m4v", ".iso", ".rmvb"]
+    private static let sPattern = try? NSRegularExpression(pattern: #"(?i)[\s._-]*[Ss](\d{1,2})[Ee](\d{1,2})[\s._-]*"#)
+    private static let techPattern = try? NSRegularExpression(pattern: #"(?i)\b(2160p|1080p|720p|4k|uhd|web-dl|webrip|bluray|hdrip|hevc|h\.?265|x265|h\.?264|x264|aac|dts|remux|hdr10\+?|dovi)\b"#, options: [])
+    private static let epPattern = try? NSRegularExpression(pattern: #"(?i)[\s._-]+(?:EP|E)(\d{1,3})[\s._-]*"#)
+    private static let chPattern = try? NSRegularExpression(pattern: #"[\s._-]*第\s*(\d{1,3})\s*集[\s._-]*"#)
+    private static let yearPattern = try? NSRegularExpression(pattern: #"[\s._-]+(19\d\d|20\d\d)[\s._-]*"#)
+
     public struct Result: Sendable {
         public let mainTitle: String
         public let subTitle: String
@@ -329,9 +336,9 @@ public struct MediaTitleParser: Sendable {
 
     public static func parse(rawName: String) -> Result {
         var clean = rawName
-        let exts = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".ts", ".flv", ".m4v", ".iso", ".rmvb"]
-        for ext in exts {
-            if clean.lowercased().hasSuffix(ext) {
+        let lowerClean = clean.lowercased()
+        for ext in videoExtensions {
+            if lowerClean.hasSuffix(ext) {
                 clean = String(clean.dropLast(ext.count))
                 break
             }
@@ -339,8 +346,7 @@ public struct MediaTitleParser: Sendable {
         clean = clean.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // 1. Check for SxxExx pattern (e.g., S01E05, s01e05)
-        let sPattern = try? NSRegularExpression(pattern: #"(?i)[\s._-]*[Ss](\d{1,2})[Ee](\d{1,2})[\s._-]*"#)
-        if let match = sPattern?.firstMatch(in: clean, range: NSRange(clean.startIndex..., in: clean)),
+        if let match = Self.sPattern?.firstMatch(in: clean, range: NSRange(clean.startIndex..., in: clean)),
            let r = Range(match.range, in: clean),
            let sRange = Range(match.range(at: 1), in: clean),
            let eRange = Range(match.range(at: 2), in: clean) {
@@ -352,8 +358,7 @@ public struct MediaTitleParser: Sendable {
             if showName.isEmpty { showName = "剧集" }
 
             var after = String(clean[r.upperBound...]).trimmingCharacters(in: CharacterSet(charactersIn: " ._-"))
-            let techPattern = try? NSRegularExpression(pattern: #"(?i)\b(2160p|1080p|720p|4k|uhd|web-dl|webrip|bluray|hdrip|hevc|h\.?265|x265|h\.?264|x264|aac|dts|remux|hdr10\+?|dovi)\b"#, options: [])
-            if let techPattern {
+            if let techPattern = Self.techPattern {
                 after = techPattern.stringByReplacingMatches(in: after, range: NSRange(after.startIndex..., in: after), withTemplate: "")
                 after = after.trimmingCharacters(in: CharacterSet(charactersIn: " ._-"))
             }
@@ -363,8 +368,7 @@ public struct MediaTitleParser: Sendable {
         }
 
         // 2. Check for EPxx or Exx pattern (e.g. EP12, E05)
-        let epPattern = try? NSRegularExpression(pattern: #"(?i)[\s._-]+(?:EP|E)(\d{1,3})[\s._-]*"#)
-        if let match = epPattern?.firstMatch(in: clean, range: NSRange(clean.startIndex..., in: clean)),
+        if let match = Self.epPattern?.firstMatch(in: clean, range: NSRange(clean.startIndex..., in: clean)),
            let r = Range(match.range, in: clean),
            let eRange = Range(match.range(at: 1), in: clean) {
             let eNum = Int(clean[eRange]) ?? 1
@@ -374,8 +378,7 @@ public struct MediaTitleParser: Sendable {
         }
 
         // 3. Check for Chinese episode pattern (e.g. 第05集, 第5集)
-        let chPattern = try? NSRegularExpression(pattern: #"[\s._-]*第\s*(\d{1,3})\s*集[\s._-]*"#)
-        if let match = chPattern?.firstMatch(in: clean, range: NSRange(clean.startIndex..., in: clean)),
+        if let match = Self.chPattern?.firstMatch(in: clean, range: NSRange(clean.startIndex..., in: clean)),
            let r = Range(match.range, in: clean),
            let eRange = Range(match.range(at: 1), in: clean) {
             let eNum = Int(clean[eRange]) ?? 1
@@ -385,8 +388,7 @@ public struct MediaTitleParser: Sendable {
         }
 
         // 4. Check for Year (Movie pattern, e.g. 2024, 2023)
-        let yearPattern = try? NSRegularExpression(pattern: #"[\s._-]+(19\d\d|20\d\d)[\s._-]*"#)
-        if let match = yearPattern?.firstMatch(in: clean, range: NSRange(clean.startIndex..., in: clean)),
+        if let match = Self.yearPattern?.firstMatch(in: clean, range: NSRange(clean.startIndex..., in: clean)),
            let r = Range(match.range, in: clean),
            let yRange = Range(match.range(at: 1), in: clean) {
             let year = String(clean[yRange])

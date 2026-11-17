@@ -458,7 +458,8 @@ public struct DetailView: View {
                 icon: "film.stack.fill",
                 valueText: currentVersionText,
                 badgeText: appState.preferredVersionPreset.shortTitle,
-                accentColor: appState.accentColor
+                accentColor: appState.accentColor,
+                badgeForegroundColor: appState.accentTextColor
             ) {
                 if sources.isEmpty {
                     Button("默认原画版本") {}
@@ -899,7 +900,7 @@ public struct DetailView: View {
     private func specPill(_ text: String, highlight: Bool = false) -> some View {
         Text(text)
             .font(.system(size: 11, weight: .bold, design: .rounded))
-            .foregroundStyle(.white)
+            .foregroundStyle(highlight ? appState.accentTextColor : .white)
             .padding(.horizontal, 8).padding(.vertical, 3.5)
             .donbyLiquidGlassRect(cornerRadius: 6, tint: highlight ? appState.accentColor : nil, interactive: false, isHovered: false)
     }
@@ -950,6 +951,8 @@ public struct DetailView: View {
         }
         syncDefaultTracks()
 
+        async let similarTask: [EmbyItem]? = try? EmbyClient.shared.fetchSimilarItems(server: server, itemId: item.id)
+
         if item.isSeries {
             if let loadedSeasons = try? await EmbyClient.shared.fetchSeasons(server: server, seriesId: item.id), !loadedSeasons.isEmpty {
                 self.seasons = loadedSeasons
@@ -980,7 +983,7 @@ public struct DetailView: View {
             }
         }
 
-        if let sims = try? await EmbyClient.shared.fetchSimilarItems(server: server, itemId: item.id) {
+        if let sims = await similarTask {
             self.similarItems = sims
         }
     }

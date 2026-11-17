@@ -656,10 +656,18 @@ public struct MediaSourceInfo: Codable, Identifiable, Hashable, Sendable {
 
     public var formattedFileSize: String? {
         guard let size, size > 0 else { return nil }
-        let f = ByteCountFormatter()
-        f.allowedUnits = [.useGB, .useMB]; f.countStyle = .file
-        return f.string(fromByteCount: size)
+        Self.fileSizeFormatterLock.lock()
+        defer { Self.fileSizeFormatterLock.unlock() }
+        return Self.fileSizeFormatter.string(fromByteCount: size)
     }
+
+    private static let fileSizeFormatterLock = NSLock()
+    private static let fileSizeFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useGB, .useMB]
+        formatter.countStyle = .file
+        return formatter
+    }()
 
     public var formattedBitrate: String? {
         guard let bitrate, bitrate > 0 else { return nil }

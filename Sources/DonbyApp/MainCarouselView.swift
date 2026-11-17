@@ -230,7 +230,7 @@ public struct MainCarouselView: View {
                         if let res = item.resolutionBadge {
                             Text(res)
                                 .font(.system(size: 11, weight: .heavy, design: .rounded))
-                                .foregroundStyle(.white)
+                                .foregroundStyle(appState.accentTextColor)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 3)
                                 .background(appState.accentColor)

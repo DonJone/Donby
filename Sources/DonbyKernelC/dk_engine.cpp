@@ -38,10 +38,10 @@ extern "C" {
 #include <VideoToolbox/VideoToolbox.h>
 #include <CoreFoundation/CoreFoundation.h>
 
-static DKLogCallback g_log_callback = nullptr;
+static std::atomic<DKLogCallback> g_log_callback{nullptr};
 
 void dk_set_log_callback(DKLogCallback callback) {
-    g_log_callback = callback;
+    g_log_callback.store(callback, std::memory_order_release);
 }
 
 static void dk_log(int level, const char* fmt, ...) {
@@ -51,13 +51,16 @@ static void dk_log(int level, const char* fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
 
-    if (g_log_callback) {
-        g_log_callback(level, buf);
+    DKLogCallback cb = g_log_callback.load(std::memory_order_acquire);
+    if (cb) {
+        cb(level, buf);
     }
 }
 
 static void dk_ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list vl) {
     if (level > AV_LOG_INFO) return;
+    DKLogCallback cb = g_log_callback.load(std::memory_order_acquire);
+    if (!cb) return;
     char buf[1024];
     vsnprintf(buf, sizeof(buf), fmt, vl);
     size_t len = strlen(buf);
@@ -65,9 +68,9 @@ static void dk_ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_lis
         buf[len - 1] = '\0';
         len--;
     }
-    if (len > 0 && g_log_callback) {
+    if (len > 0) {
         int dk_lvl = (level <= AV_LOG_ERROR) ? 2 : (level <= AV_LOG_WARNING ? 1 : 0);
-        g_log_callback(dk_lvl, buf);
+        cb(dk_lvl, buf);
     }
 }
 
@@ -116,9 +119,6 @@ struct DKPlayer {
     std::atomic<bool> is_muted{false};
     bool hw_decode_enabled{true};
 
-    // Rust Arena Sliding Cache
-    DKRSArenaCache* rs_cache{nullptr};
-
     // FFmpeg context
     AVFormatContext* format_ctx{nullptr};
     int video_stream_idx{-1};
@@ -145,16 +145,20 @@ struct DKPlayer {
     int sw_pool_h{0};
     OSType sw_pool_ostype{0};
     std::atomic<bool> vt_failed{false};
+    std::atomic<bool> dovi_detected{false};
     uint8_t stream_dovi_profile{0};
 
     // Demux / Seek / Interrupt
     std::atomic<bool> is_closing{false};
     std::atomic<int> in_flight_readers{0};
     std::atomic<bool> abort_requested{false};
+    std::atomic<bool> external_abort_requested{false};
     std::atomic<bool> seek_requested{false};
     std::atomic<double> seek_target_sec{0.0};
     std::atomic<bool> seek_accurate{false};
     std::atomic<double> seek_drop_until_pts{-1.0};
+    std::atomic<bool> seek_preview_pending{false};
+    std::atomic<bool> force_present_next_frame{false};
     std::atomic<bool> demux_eof{false};
     std::mutex demux_mtx;
     std::condition_variable demux_cv;
@@ -168,6 +172,7 @@ struct DKPlayer {
     std::queue<AVPacket*> audio_pkt_queue;
     std::condition_variable audio_decode_cv;
     std::atomic<int64_t> queued_pkt_bytes{0};
+    std::atomic<int64_t> max_buffer_bytes{256LL * 1024LL * 1024LL};
     std::atomic<double> last_demuxed_pts{0.0};
 
     // Decoded Video Frame Queue
@@ -195,10 +200,10 @@ struct DKPlayer {
     std::atomic<int64_t> audio_underrun_samples{0};
     std::atomic<bool> audio_clock_calibrated{false};
     std::atomic<double> fallback_audio_clock{0.0};
-    std::chrono::steady_clock::time_point fallback_clock_time;
+    std::atomic<int64_t> fallback_clock_ns{0};
 
     std::atomic<double> ext_clock_base_pts{0.0};
-    std::chrono::steady_clock::time_point ext_clock_start_time;
+    std::atomic<int64_t> ext_clock_start_ns{0};
 
     // Subtitle (libass)
     ASS_Library* ass_lib{nullptr};
@@ -233,6 +238,18 @@ struct DKPlayer {
     int64_t last_speed_bytes{0};
     std::chrono::steady_clock::time_point last_speed_time{std::chrono::steady_clock::now()};
 };
+
+static inline int64_t dk_steady_now_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()
+    ).count();
+}
+
+static inline double dk_elapsed_since_ns(int64_t start_ns) {
+    if (start_ns <= 0) return 0.0;
+    int64_t diff = dk_steady_now_ns() - start_ns;
+    return diff > 0 ? (static_cast<double>(diff) * 1e-9) : 0.0;
+}
 
 static std::mutex& dk_registry_mutex() {
     static std::mutex* mtx = new std::mutex();
@@ -789,13 +806,12 @@ static double dk_get_audio_clock(DKPlayer* player) {
         if (sample_diff < 0) sample_diff = 0;
         double clock = player->audio_clock_base_pts.load() + (static_cast<double>(sample_diff) / 48000.0);
         player->fallback_audio_clock.store(clock);
-        player->fallback_clock_time = std::chrono::steady_clock::now();
+        player->fallback_clock_ns.store(dk_steady_now_ns(), std::memory_order_relaxed);
         return clock;
     }
 
     if (player->state.load() == DK_STATE_PLAYING && player->audio_clock_calibrated.load()) {
-        auto now = std::chrono::steady_clock::now();
-        double elapsed = std::chrono::duration<double>(now - player->fallback_clock_time).count() * player->playback_rate.load();
+        double elapsed = dk_elapsed_since_ns(player->fallback_clock_ns.load(std::memory_order_relaxed)) * player->playback_rate.load();
         return player->fallback_audio_clock.load() + elapsed;
     }
     return player->fallback_audio_clock.load();
@@ -809,8 +825,7 @@ static double dk_get_master_clock(DKPlayer* player) {
     }
     // Fallback: System monotonic clock when no audio track exists
     if (player->state.load() == DK_STATE_PLAYING) {
-        auto now = std::chrono::steady_clock::now();
-        double elapsed = std::chrono::duration<double>(now - player->ext_clock_start_time).count() * player->playback_rate.load();
+        double elapsed = dk_elapsed_since_ns(player->ext_clock_start_ns.load(std::memory_order_relaxed)) * player->playback_rate.load();
         return player->ext_clock_base_pts.load() + elapsed;
     }
     return player->ext_clock_base_pts.load();
@@ -962,10 +977,19 @@ static void dk_audio_decode_worker(DKPlayer* player) {
     AVFrame* frame = av_frame_alloc();
 
     while (!player->abort_requested.load()) {
+        if (player->seek_requested.load()) {
+            std::unique_lock<std::mutex> lk(player->audio_pkt_mtx);
+            player->audio_decode_cv.wait_for(lk, std::chrono::milliseconds(15), [player] {
+                return player->abort_requested.load() || !player->seek_requested.load();
+            });
+            continue;
+        }
+
         if (player->state.load() == DK_STATE_PAUSED) {
             std::unique_lock<std::mutex> lk(player->audio_pkt_mtx);
             player->audio_decode_cv.wait_for(lk, std::chrono::milliseconds(15), [player] {
-                return player->abort_requested.load() || player->state.load() != DK_STATE_PAUSED || player->seek_requested.load();
+                return player->abort_requested.load() ||
+                       (!player->seek_requested.load() && player->state.load() != DK_STATE_PAUSED);
             });
             continue;
         }
@@ -1137,10 +1161,22 @@ static void dk_video_decode_worker(DKPlayer* player) {
     bool got_any_frame = false;
 
     while (!player->abort_requested.load()) {
-        if (player->state.load() == DK_STATE_PAUSED) {
+        if (player->seek_requested.load()) {
             std::unique_lock<std::mutex> lk(player->video_pkt_mtx);
             player->video_decode_cv.wait_for(lk, std::chrono::milliseconds(15), [player] {
-                return player->abort_requested.load() || player->state.load() != DK_STATE_PAUSED || player->seek_requested.load();
+                return player->abort_requested.load() || !player->seek_requested.load();
+            });
+            continue;
+        }
+
+        if (player->state.load() == DK_STATE_PAUSED &&
+            !player->seek_preview_pending.load(std::memory_order_acquire)) {
+            std::unique_lock<std::mutex> lk(player->video_pkt_mtx);
+            player->video_decode_cv.wait_for(lk, std::chrono::milliseconds(15), [player] {
+                return player->abort_requested.load() ||
+                       (!player->seek_requested.load() &&
+                        (player->state.load() != DK_STATE_PAUSED ||
+                         player->seek_preview_pending.load(std::memory_order_acquire)));
             });
             continue;
         }
@@ -1206,6 +1242,7 @@ static void dk_video_decode_worker(DKPlayer* player) {
             }
             if (ret == AVERROR_EOF) {
                 player->video_eof.store(true);
+                player->seek_preview_pending.store(false, std::memory_order_release);
                 break;
             }
             if (ret < 0) break;
@@ -1242,8 +1279,16 @@ static void dk_video_decode_worker(DKPlayer* player) {
             if (pixbuf) {
                 DKGpuColorUniforms color = dk_build_color_uniforms(player, frame, pixbuf);
 
-                std::lock_guard<std::mutex> lock(player->video_queue_mtx);
-                player->video_queue.push({ pixbuf, pts, color });
+                {
+                    std::lock_guard<std::mutex> lock(player->video_queue_mtx);
+                    player->video_queue.push({ pixbuf, pts, color });
+                }
+                player->seek_preview_pending.store(false, std::memory_order_release);
+                player->video_frame_cv.notify_one();
+                if (player->state.load() == DK_STATE_PAUSED) {
+                    av_frame_unref(frame);
+                    break;
+                }
             }
 
             av_frame_unref(frame);
@@ -1503,6 +1548,7 @@ static void dk_decode_subtitle_packet(DKPlayer* player, AVPacket* pkt) {
 // Worker: Demuxing, thread-safe seeking, and cache writing
 static void dk_demux_worker(DKPlayer* player) {
     AVPacket* pkt = av_packet_alloc();
+    int consecutive_io_errors = 0;
 
     while (!player->abort_requested.load()) {
         // Thread-safe seek handling
@@ -1517,6 +1563,7 @@ static void dk_demux_worker(DKPlayer* player) {
             player->video_eof.store(false);
             player->audio_eof.store(false);
             player->seek_drop_until_pts.store(accurate ? target_sec : -1.0);
+            consecutive_io_errors = 0;
 
             // Flush packet queues
             {
@@ -1580,7 +1627,7 @@ static void dk_demux_worker(DKPlayer* player) {
                 player->audio_clock_base_sample_time.store(0);
                 player->audio_underrun_samples.store(0);
                 player->fallback_audio_clock.store(target_sec);
-                player->fallback_clock_time = std::chrono::steady_clock::now();
+            player->fallback_clock_ns.store(dk_steady_now_ns(), std::memory_order_relaxed);
             }
 
             if (player->audio_queue) {
@@ -1590,12 +1637,8 @@ static void dk_demux_worker(DKPlayer* player) {
             }
 
             player->ext_clock_base_pts.store(target_sec);
-            player->ext_clock_start_time = std::chrono::steady_clock::now();
+        player->ext_clock_start_ns.store(dk_steady_now_ns(), std::memory_order_relaxed);
             player->current_pos_sec.store(target_sec);
-
-            if (player->rs_cache) {
-                dk_rs_cache_clear(player->rs_cache);
-            }
 
             {
                 std::lock_guard<std::mutex> sl(player->speed_mtx);
@@ -1605,6 +1648,9 @@ static void dk_demux_worker(DKPlayer* player) {
             }
 
             dk_log(0, "DKEngine: Seek completed to %.2fs (accurate=%d)", target_sec, accurate ? 1 : 0);
+            const bool was_paused = (player->state.load() == DK_STATE_PAUSED);
+            player->seek_preview_pending.store(was_paused, std::memory_order_release);
+            player->force_present_next_frame.store(true, std::memory_order_release);
             player->seek_requested.store(false);
             player->video_decode_cv.notify_all();
             player->audio_decode_cv.notify_all();
@@ -1630,7 +1676,8 @@ static void dk_demux_worker(DKPlayer* player) {
 
         const bool time_enough = (player->video_stream_idx < 0) ? (a_pkts >= 1500) : (ahead_sec >= 90.0 && v_pkts >= 60);
         const bool pkts_enough = (v_pkts >= 2500);
-        const bool mem_enough = (total_pkt_bytes >= (128LL * 1024LL * 1024LL));
+        const int64_t buffer_limit_bytes = player->max_buffer_bytes.load(std::memory_order_relaxed);
+        const bool mem_enough = (total_pkt_bytes >= buffer_limit_bytes);
 
         if (time_enough || pkts_enough || mem_enough) {
             std::unique_lock<std::mutex> lock(player->demux_mtx);
@@ -1641,6 +1688,7 @@ static void dk_demux_worker(DKPlayer* player) {
         int ret = av_read_frame(player->format_ctx, pkt);
         if (ret < 0) {
             if (ret == AVERROR_EOF) {
+                consecutive_io_errors = 0;
                 if (!player->demux_eof.exchange(true)) {
                     {
                         std::lock_guard<std::mutex> lock(player->video_pkt_mtx);
@@ -1653,17 +1701,34 @@ static void dk_demux_worker(DKPlayer* player) {
                     }
                     player->audio_decode_cv.notify_one();
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                std::unique_lock<std::mutex> lock(player->demux_mtx);
+                player->demux_cv.wait_for(lock, std::chrono::milliseconds(50), [player] {
+                    return player->abort_requested.load() || player->seek_requested.load() || !player->demux_eof.load();
+                });
                 continue;
             }
             if (player->abort_requested.load()) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (ret == AVERROR(EAGAIN)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+            consecutive_io_errors++;
+            if (consecutive_io_errors == 1) {
+                char errbuf[256];
+                av_strerror(ret, errbuf, sizeof(errbuf));
+                dk_log(1, "DKEngine Warning: av_read_frame failed (%d: %s), retrying", ret, errbuf);
+            }
+            if (consecutive_io_errors >= 10) {
+                char errbuf[256];
+                av_strerror(ret, errbuf, sizeof(errbuf));
+                dk_log(2, "DKEngine Error: av_read_frame failed %d consecutive times (%d: %s), stopping playback", consecutive_io_errors, ret, errbuf);
+                player->state.store(DK_STATE_ERROR);
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
             continue;
         }
-
-        if (player->rs_cache && pkt->data && pkt->size > 0 && pkt->pos >= 0) {
-            dk_rs_cache_write(player->rs_cache, pkt->pos, pkt->data, pkt->size);
-        }
+        consecutive_io_errors = 0;
 
         if (player->format_ctx && player->format_ctx->pb) {
             int64_t pb_bytes = player->format_ctx->pb->bytes_read;
@@ -1689,12 +1754,14 @@ static void dk_demux_worker(DKPlayer* player) {
         }
 
         if (pkt->stream_index == player->video_stream_idx) {
-            if (dk_rs_check_dovi_fel(pkt->data, pkt->size)) {
+            if (!player->dovi_detected.load(std::memory_order_relaxed) &&
+                dk_rs_check_dovi_fel(pkt->data, pkt->size)) {
+                player->dovi_detected.store(true, std::memory_order_relaxed);
                 std::lock_guard<std::mutex> lock(player->stats_mtx);
                 player->stats.is_dolby_vision = true;
             }
             AVPacket* v_copy = av_packet_alloc();
-            av_packet_ref(v_copy, pkt);
+            av_packet_move_ref(v_copy, pkt);
             {
                 std::lock_guard<std::mutex> lock(player->video_pkt_mtx);
                 player->video_pkt_queue.push(v_copy);
@@ -1703,7 +1770,7 @@ static void dk_demux_worker(DKPlayer* player) {
             player->video_decode_cv.notify_one();
         } else if (pkt->stream_index == player->audio_stream_idx.load(std::memory_order_relaxed)) {
             AVPacket* a_copy = av_packet_alloc();
-            av_packet_ref(a_copy, pkt);
+            av_packet_move_ref(a_copy, pkt);
             {
                 std::lock_guard<std::mutex> lock(player->audio_pkt_mtx);
                 player->audio_pkt_queue.push(a_copy);
@@ -1712,9 +1779,10 @@ static void dk_demux_worker(DKPlayer* player) {
             player->audio_decode_cv.notify_one();
         } else if (pkt->stream_index == player->sub_stream_idx.load(std::memory_order_relaxed)) {
             dk_decode_subtitle_packet(player, pkt);
+            av_packet_unref(pkt);
+        } else {
+            av_packet_unref(pkt);
         }
-
-        av_packet_unref(pkt);
     }
 
     av_packet_free(&pkt);
@@ -1724,9 +1792,6 @@ DKPlayer* dk_player_create(void) {
     av_log_set_level(AV_LOG_INFO);
     av_log_set_callback(dk_ffmpeg_log_callback);
     DKPlayer* player = new DKPlayer();
-
-    // 64MB memory sliding arena, 256KB chunks
-    player->rs_cache = dk_rs_cache_create(64 * 1024 * 1024, 256 * 1024);
 
     player->ass_lib = ass_library_init();
     if (player->ass_lib) {
@@ -1739,7 +1804,7 @@ DKPlayer* dk_player_create(void) {
         std::lock_guard<std::mutex> lk(dk_registry_mutex());
         dk_live_players().push_back(player);
     }
-    dk_log(0, "DKEngine: Created native player instance (Rust 64MB arena + libass initialized)");
+    dk_log(0, "DKEngine: Created native player instance (libass initialized)");
     return player;
 }
 
@@ -1772,10 +1837,6 @@ void dk_player_destroy(DKPlayer* player) {
         ass_library_done(player->ass_lib);
         player->ass_lib = nullptr;
     }
-    if (player->rs_cache) {
-        dk_rs_cache_destroy(player->rs_cache);
-        player->rs_cache = nullptr;
-    }
 
     delete player;
 }
@@ -1807,9 +1868,32 @@ static std::string dk_normalize_path_or_url(const char* in_url) {
     return s;
 }
 
+void dk_player_request_abort(DKPlayer* player) {
+    if (!player) return;
+    std::lock_guard<std::mutex> lk(dk_registry_mutex());
+    auto& vec = dk_live_players();
+    if (std::find(vec.begin(), vec.end(), player) == vec.end()) {
+        return;
+    }
+    player->external_abort_requested.store(true, std::memory_order_seq_cst);
+    player->abort_requested.store(true, std::memory_order_seq_cst);
+    player->demux_cv.notify_all();
+    player->video_decode_cv.notify_all();
+    player->audio_decode_cv.notify_all();
+    player->video_frame_cv.notify_all();
+}
+
 int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, double start_sec, bool hw_decode) {
     if (!player || !url) return -1;
+    if (player->external_abort_requested.load(std::memory_order_seq_cst)) {
+        player->state.store(DK_STATE_ERROR);
+        return -1;
+    }
     dk_player_close(player);
+    if (player->external_abort_requested.load(std::memory_order_seq_cst)) {
+        player->state.store(DK_STATE_ERROR);
+        return -1;
+    }
 
     std::string normalized_url = dk_normalize_path_or_url(url);
     const char* open_target = normalized_url.c_str();
@@ -1824,6 +1908,7 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
     player->current_url = open_target;
     player->hw_decode_enabled = hw_decode;
     player->vt_failed.store(false);
+    player->dovi_detected.store(false);
     player->stream_dovi_profile = 0;
     player->demux_eof.store(false);
     player->video_eof.store(false);
@@ -1832,8 +1917,15 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
     player->queued_pkt_bytes.store(0);
     player->last_demuxed_pts.store(std::max(0.0, start_sec));
     player->last_decoded_video_pts = -1.0;
-    player->abort_requested.store(false);
+    player->abort_requested.store(false, std::memory_order_seq_cst);
+    if (player->external_abort_requested.load(std::memory_order_seq_cst)) {
+        player->abort_requested.store(true, std::memory_order_seq_cst);
+        player->state.store(DK_STATE_ERROR);
+        return -1;
+    }
     player->seek_requested.store(false);
+    player->seek_preview_pending.store(false);
+    player->force_present_next_frame.store(false);
     player->video_stream_idx = -1;
     player->audio_stream_idx.store(-1);
     player->sub_stream_idx.store(-1);
@@ -1879,18 +1971,25 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
 
     int open_ret = avformat_open_input(&player->format_ctx, open_target, nullptr, &opts);
     av_dict_free(&opts);
-    if (open_ret < 0) {
+    if (open_ret < 0 || player->abort_requested.load(std::memory_order_seq_cst) || player->external_abort_requested.load(std::memory_order_seq_cst)) {
         char errbuf[256];
         av_strerror(open_ret, errbuf, sizeof(errbuf));
         dk_log(2, "DKEngine Error: avformat_open_input failed (%d: %s)", open_ret, errbuf);
-        avformat_free_context(player->format_ctx);
-        player->format_ctx = nullptr;
+        if (open_ret >= 0 && player->format_ctx) {
+            avformat_close_input(&player->format_ctx);
+        } else if (player->format_ctx) {
+            avformat_free_context(player->format_ctx);
+            player->format_ctx = nullptr;
+        }
         player->state.store(DK_STATE_ERROR);
         return -1;
     }
 
-    if (avformat_find_stream_info(player->format_ctx, nullptr) < 0) {
+    if (avformat_find_stream_info(player->format_ctx, nullptr) < 0 ||
+        player->abort_requested.load(std::memory_order_seq_cst) ||
+        player->external_abort_requested.load(std::memory_order_seq_cst)) {
         dk_log(2, "DKEngine Error: avformat_find_stream_info failed");
+        avformat_close_input(&player->format_ctx);
         player->state.store(DK_STATE_ERROR);
         return -1;
     }
@@ -1942,6 +2041,7 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
                 if (sd.type == AV_PKT_DATA_DOVI_CONF && sd.data && sd.size >= sizeof(AVDOVIDecoderConfigurationRecord)) {
                     const auto* dovi_conf = reinterpret_cast<const AVDOVIDecoderConfigurationRecord*>(sd.data);
                     player->stream_dovi_profile = dovi_conf->dv_profile;
+                    player->dovi_detected.store(true, std::memory_order_relaxed);
                     player->stats.is_dolby_vision = true;
                     player->stats.is_hdr = true;
                     dk_log(0, "DKEngine: Detected Dolby Vision Configuration Record (profile=%u, level=%u, compat=%u)",
@@ -2066,8 +2166,15 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
         player->fallback_audio_clock.store(0.0);
     }
 
-    player->ext_clock_start_time = std::chrono::steady_clock::now();
-    player->fallback_clock_time = std::chrono::steady_clock::now();
+    int64_t now_ns = dk_steady_now_ns();
+    player->ext_clock_start_ns.store(now_ns, std::memory_order_relaxed);
+    player->fallback_clock_ns.store(now_ns, std::memory_order_relaxed);
+
+    if (player->abort_requested.load(std::memory_order_seq_cst) ||
+        player->external_abort_requested.load(std::memory_order_seq_cst)) {
+        player->state.store(DK_STATE_ERROR);
+        return -1;
+    }
 
     player->demux_thread = std::thread(dk_demux_worker, player);
     if (player->video_codec_ctx) {
@@ -2169,10 +2276,6 @@ void dk_player_close(DKPlayer* player) {
     if (player->hw_device_ctx) { av_buffer_unref(&player->hw_device_ctx); }
     if (player->format_ctx) { avformat_close_input(&player->format_ctx); }
 
-    if (player->rs_cache) {
-        dk_rs_cache_clear(player->rs_cache);
-    }
-
     player->video_stream_idx = -1;
     player->audio_stream_idx = -1;
     player->sub_stream_idx = -1;
@@ -2188,8 +2291,9 @@ void dk_player_play(DKPlayer* player) {
         if (player->audio_queue && player->audio_queue_started.load()) {
             AudioQueueStart(player->audio_queue, nullptr);
         }
-        player->ext_clock_start_time = std::chrono::steady_clock::now();
-        player->fallback_clock_time = std::chrono::steady_clock::now();
+        int64_t now_ns = dk_steady_now_ns();
+        player->ext_clock_start_ns.store(now_ns, std::memory_order_relaxed);
+        player->fallback_clock_ns.store(now_ns, std::memory_order_relaxed);
         player->video_decode_cv.notify_all();
         player->audio_decode_cv.notify_all();
     }
@@ -2226,9 +2330,10 @@ void dk_player_set_rate(DKPlayer* player, float rate) {
         AudioQueueSetParameter(player->audio_queue, kAudioQueueParam_PlayRate, rate);
     }
     player->ext_clock_base_pts.store(current_pos);
-    player->ext_clock_start_time = std::chrono::steady_clock::now();
+    int64_t now_ns = dk_steady_now_ns();
+    player->ext_clock_start_ns.store(now_ns, std::memory_order_relaxed);
     player->fallback_audio_clock.store(current_pos);
-    player->fallback_clock_time = std::chrono::steady_clock::now();
+    player->fallback_clock_ns.store(now_ns, std::memory_order_relaxed);
 }
 
 void dk_player_set_volume(DKPlayer* player, float volume, bool muted) {
@@ -2240,6 +2345,14 @@ void dk_player_set_volume(DKPlayer* player, float volume, bool muted) {
         float effective_vol = muted ? 0.0f : volume;
         AudioQueueSetParameter(player->audio_queue, kAudioQueueParam_Volume, effective_vol);
     }
+}
+
+void dk_player_set_buffer_limit_mb(DKPlayer* player, int32_t limit_mb) {
+    DKReaderGuard guard(player);
+    if (!guard) return;
+    int32_t clamped = std::clamp<int32_t>(limit_mb, 32, 2048);
+    player->max_buffer_bytes.store(static_cast<int64_t>(clamped) * 1024LL * 1024LL, std::memory_order_relaxed);
+    player->demux_cv.notify_one();
 }
 
 int dk_player_get_track_count(DKPlayer* player, int track_type) {
@@ -2516,6 +2629,7 @@ CVPixelBufferRef dk_player_acquire_frame(DKPlayer* player, double* out_pts, DKGp
 
     // Always immediately deliver the very first frame to initialize the surface without black screen
     if (player->last_frame == nullptr && !player->video_queue.empty()) {
+        player->force_present_next_frame.store(false, std::memory_order_release);
         auto& front = player->video_queue.front();
         player->last_frame = front.pixel_buffer;
         player->last_pts = front.pts;
@@ -2528,6 +2642,24 @@ CVPixelBufferRef dk_player_acquire_frame(DKPlayer* player, double* out_pts, DKGp
         if (out_pts) *out_pts = player->last_pts;
         if (out_color) *out_color = player->last_color;
         dk_log(0, "DKEngine: First video frame presented immediately (PTS: %.3fs)", player->last_pts);
+        return player->last_frame;
+    }
+
+    if (player->force_present_next_frame.exchange(false, std::memory_order_acq_rel) && !player->video_queue.empty()) {
+        auto& front = player->video_queue.front();
+        if (player->last_frame) {
+            CVPixelBufferRelease(player->last_frame);
+        }
+        player->last_frame = front.pixel_buffer;
+        player->last_pts = front.pts;
+        player->last_color = front.color;
+        player->current_pos_sec.store(front.pts);
+        player->video_queue.pop();
+        player->video_frame_cv.notify_one();
+
+        CVPixelBufferRetain(player->last_frame);
+        if (out_pts) *out_pts = player->last_pts;
+        if (out_color) *out_color = player->last_color;
         return player->last_frame;
     }
 
@@ -2574,7 +2706,7 @@ CVPixelBufferRef dk_player_acquire_frame_for_host_time(DKPlayer* player, double*
     return dk_player_acquire_frame(player, out_pts, nullptr);
 }
 
-bool dk_player_get_subtitle_rgba(
+static bool dk_update_subtitle_rgba_locked(
     DKPlayer* player,
     double pts,
     int32_t canvas_w,
@@ -2584,16 +2716,11 @@ bool dk_player_get_subtitle_rgba(
     int32_t* out_h,
     uint64_t* out_serial
 ) {
-    DKReaderGuard guard(player);
-    if (!guard || !out_rgba || !out_w || !out_h || !out_serial) return false;
-    if (canvas_w <= 0 || canvas_h <= 0) return false;
-
     if (canvas_w > 1920) {
         canvas_h = std::max(1, (canvas_h * 1920) / canvas_w);
         canvas_w = 1920;
     }
 
-    std::lock_guard<std::mutex> lock(player->ass_mtx);
     *out_serial = player->sub_serial;
 
     if (player->has_bitmap_subs) {
@@ -2737,6 +2864,47 @@ bool dk_player_get_subtitle_rgba(
     return true;
 }
 
+bool dk_player_get_subtitle_rgba(
+    DKPlayer* player,
+    double pts,
+    int32_t canvas_w,
+    int32_t canvas_h,
+    const uint8_t** out_rgba,
+    int32_t* out_w,
+    int32_t* out_h,
+    uint64_t* out_serial
+) {
+    DKReaderGuard guard(player);
+    if (!guard || !out_rgba || !out_w || !out_h || !out_serial) return false;
+    if (canvas_w <= 0 || canvas_h <= 0) return false;
+
+    std::lock_guard<std::mutex> lock(player->ass_mtx);
+    return dk_update_subtitle_rgba_locked(player, pts, canvas_w, canvas_h, out_rgba, out_w, out_h, out_serial);
+}
+
+void dk_player_sync_subtitle_rgba(
+    DKPlayer* player,
+    double pts,
+    int32_t canvas_w,
+    int32_t canvas_h,
+    uint64_t last_serial,
+    DKSubtitleRgbaCallback callback,
+    void* context
+) {
+    DKReaderGuard guard(player);
+    if (!guard || !callback || canvas_w <= 0 || canvas_h <= 0) return;
+
+    std::lock_guard<std::mutex> lock(player->ass_mtx);
+    const uint8_t* rgba = nullptr;
+    int32_t w = 0;
+    int32_t h = 0;
+    uint64_t serial = player->sub_serial;
+    bool has_sub = dk_update_subtitle_rgba_locked(player, pts, canvas_w, canvas_h, &rgba, &w, &h, &serial);
+    if (serial != last_serial) {
+        callback(has_sub ? rgba : nullptr, has_sub ? w : 0, has_sub ? h : 0, serial, context);
+    }
+}
+
 bool dk_player_get_subtitle_overlay(DKPlayer* player, double pts, DKSubtitleBitmap* out_bitmap) {
     DKReaderGuard guard(player);
     if (!guard || !player->ass_renderer || !player->ass_track || !out_bitmap) return false;
@@ -2807,11 +2975,14 @@ double dk_player_get_buffered_duration(DKPlayer* player) {
 void dk_player_get_stats(DKPlayer* player, DKRuntimeStats* out_stats) {
     DKReaderGuard guard(player);
     if (guard && out_stats) {
+        int64_t total_bytes = dk_player_get_total_bytes_read(player);
+        double speed_mbs = dk_player_get_download_speed_mbs(player);
+        int64_t cached = std::max<int64_t>(0, player->queued_pkt_bytes.load(std::memory_order_relaxed));
         std::lock_guard<std::mutex> lock(player->stats_mtx);
         *out_stats = player->stats;
-        out_stats->cached_bytes = dk_rs_cache_get_bytes(player->rs_cache);
-        out_stats->total_bytes_read = dk_player_get_total_bytes_read(player);
-        out_stats->download_speed_mbs = dk_player_get_download_speed_mbs(player);
+        out_stats->cached_bytes = cached;
+        out_stats->total_bytes_read = total_bytes;
+        out_stats->download_speed_mbs = speed_mbs;
     }
 }
 

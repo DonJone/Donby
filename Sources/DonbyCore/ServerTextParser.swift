@@ -207,10 +207,30 @@ public enum ServerTextParser {
         result.path = (cleanPath == "/") ? "" : cleanPath
     }
 
+    private static let regexCacheLock = NSLock()
+    private static var keyValueRegexCache: [String: NSRegularExpression] = [:]
+
+    private static func cachedKeyValueRegex(for key: String) -> NSRegularExpression? {
+        regexCacheLock.lock()
+        if let cached = keyValueRegexCache[key] {
+            regexCacheLock.unlock()
+            return cached
+        }
+        regexCacheLock.unlock()
+
+        let pattern = #"(?:^|[·\s\|🔗📛📯🪄【])"# + NSRegularExpression.escapedPattern(for: key) + #"[\s】]*[:：\|]\s*(.+)$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        regexCacheLock.lock()
+        keyValueRegexCache[key] = regex
+        regexCacheLock.unlock()
+        return regex
+    }
+
     private static func matchKeyValue(in line: String, keys: [String]) -> String? {
         for key in keys {
-            let pattern = #"(?:^|[·\s\|🔗📛📯🪄【])"# + NSRegularExpression.escapedPattern(for: key) + #"[\s】]*[:：\|]\s*(.+)$"#
-            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+            if let regex = cachedKeyValueRegex(for: key),
                let match = regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
                match.numberOfRanges > 1,
                let valRange = Range(match.range(at: 1), in: line) {
@@ -242,4 +262,35 @@ public struct ParsedServerImportResult: Sendable {
     }
 
     public var isValid: Bool { !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+}
+
+public extension EmbyServerConfig {
+    mutating func apply(parsed: ParsedServerImportResult, overwriteName: Bool = true) {
+        isDemoServer = false
+        if !parsed.name.isEmpty,
+           overwriteName || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            name = parsed.name
+        }
+        note = parsed.note
+        type = parsed.type
+        host = parsed.host
+        port = parsed.port
+        isHttps = parsed.isHttps
+        path = parsed.path
+        if !parsed.username.isEmpty { username = parsed.username }
+        if !parsed.password.isEmpty { password = parsed.password }
+        if !parsed.accessToken.isEmpty { accessToken = parsed.accessToken }
+        if !parsed.userId.isEmpty { userId = parsed.userId }
+        if !parsed.iconURL.isEmpty { iconURL = parsed.iconURL }
+        if !parsed.backupLines.isEmpty {
+            let existingManual = backupLines.filter { !$0.isAutoSynced }
+            backupLines = existingManual + parsed.backupLines
+        }
+    }
+
+    func applying(parsed: ParsedServerImportResult, overwriteName: Bool = true) -> EmbyServerConfig {
+        var copy = self
+        copy.apply(parsed: parsed, overwriteName: overwriteName)
+        return copy
+    }
 }

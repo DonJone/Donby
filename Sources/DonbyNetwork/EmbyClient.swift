@@ -27,15 +27,30 @@ public actor RedirectCacheStore {
 public final class EmbyClient: Sendable {
     public static let shared = EmbyClient()
 
+    private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)
+        }
+    }
+
     public let clientName = "Donby"
     public var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.15"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.16"
     }
     public let deviceName: String
     public let deviceId: String
+    private let noRedirectSession: URLSession
 
     private init() {
-        self.deviceName = Host.current().localizedName ?? "Mac"
+        let host = ProcessInfo.processInfo.hostName
+            .replacingOccurrences(of: ".local", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.deviceName = host.isEmpty ? "Mac" : host
+
+        let redirectConfig = URLSessionConfiguration.ephemeral
+        redirectConfig.timeoutIntervalForRequest = 4.0
+        self.noRedirectSession = URLSession(configuration: redirectConfig, delegate: NoRedirectDelegate(), delegateQueue: nil)
+
         if let saved = UserDefaults.standard.string(forKey: "donby.deviceId"), !saved.isEmpty {
             self.deviceId = saved
         } else {
@@ -223,7 +238,7 @@ public final class EmbyClient: Sendable {
         return []
     }
 
-    public func pingLine(baseURL: String, token: String = "") async -> Int? {
+    public func pingLine(baseURL: String, token: String = "", timeout: TimeInterval = 4.0) async -> Int? {
         let start = DispatchTime.now()
         do {
             let path = token.isEmpty ? "/System/Info/Public" : "/System/Info"
@@ -232,7 +247,7 @@ public final class EmbyClient: Sendable {
                 path: path,
                 method: "GET",
                 token: token,
-                timeout: 4.0
+                timeout: max(1.0, timeout)
             )
             let (_, response) = try await URLSession.shared.data(for: req)
             guard let http = response as? HTTPURLResponse, (200...404).contains(http.statusCode) else {
@@ -545,7 +560,8 @@ public final class EmbyClient: Sendable {
         preferredSourceId: String? = nil,
         preferredPreset: PreferredVersionPreset = .higherBitrate,
         audioStreamIndex: Int? = nil,
-        subtitleStreamIndex: Int? = nil
+        subtitleStreamIndex: Int? = nil,
+        enable302Cache: Bool = true
     ) async throws -> ResolvedPlaybackResource {
         guard !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw EmbyClientError.noPlayableStream
@@ -616,7 +632,7 @@ public final class EmbyClient: Sendable {
 
         var resolvedURL = initialURL
         let cacheKey = "\(server.id.uuidString)|\(item.id)|\(selectedSource.id)|\(baseURL)"
-        if server.cache302Request {
+        if enable302Cache && server.cache302Request {
             if let cached = await RedirectCacheStore.shared.cachedRedirect(for: cacheKey) {
                 resolvedURL = cached
                 routeNote += " · 302缓存命中"
@@ -679,19 +695,11 @@ public final class EmbyClient: Sendable {
     }
 
     private func probe302Redirect(url: URL, headers: [String: String]) async -> URL? {
-        final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-            func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-                completionHandler(nil)
-            }
-        }
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 4.0
-        let session = URLSession(configuration: config, delegate: NoRedirectDelegate(), delegateQueue: nil)
         var req = URLRequest(url: url)
         req.httpMethod = "HEAD"
         for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
         do {
-            let (_, resp) = try await session.data(for: req)
+            let (_, resp) = try await noRedirectSession.data(for: req)
             if let http = resp as? HTTPURLResponse, (300...399).contains(http.statusCode),
                let loc = http.value(forHTTPHeaderField: "Location"),
                let redirectURL = URL(string: loc, relativeTo: url)?.absoluteURL {

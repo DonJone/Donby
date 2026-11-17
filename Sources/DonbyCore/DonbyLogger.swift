@@ -26,11 +26,23 @@ public struct DonbyLogEntry: Identifiable, Equatable {
     public let level: DonbyLogLevel
     public let subsystem: String
     public let message: String
+    public let formattedTime: String
 
-    public var formattedTime: String {
+    private static let formatterLock = NSLock()
+    private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss.SSS"
-        return f.string(from: timestamp)
+        return f
+    }()
+
+    public init(timestamp: Date, level: DonbyLogLevel, subsystem: String, message: String) {
+        self.timestamp = timestamp
+        self.level = level
+        self.subsystem = subsystem
+        self.message = message
+        Self.formatterLock.lock()
+        self.formattedTime = Self.timeFormatter.string(from: timestamp)
+        Self.formatterLock.unlock()
     }
 
     public var fullLine: String {
@@ -45,6 +57,8 @@ public final class DonbyLogger: ObservableObject {
 
     private let lock = NSLock()
     private let maxEntries = 2000
+    private var pendingEntries: [DonbyLogEntry] = []
+    private var isFlushScheduled = false
     public let logFileURL: URL
     private var fileHandle: FileHandle?
 
@@ -85,15 +99,29 @@ public final class DonbyLogger: ObservableObject {
         if let data = line.data(using: .utf8) {
             fileHandle?.write(data)
         }
-
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.entries.append(entry)
-            if self.entries.count > self.maxEntries {
-                self.entries.removeFirst(self.entries.count - self.maxEntries)
-            }
+        pendingEntries.append(entry)
+        let shouldScheduleFlush = !isFlushScheduled
+        if shouldScheduleFlush {
+            isFlushScheduled = true
         }
         lock.unlock()
+
+        if shouldScheduleFlush {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.lock.lock()
+                let batch = self.pendingEntries
+                self.pendingEntries.removeAll(keepingCapacity: true)
+                self.isFlushScheduled = false
+                self.lock.unlock()
+
+                guard !batch.isEmpty else { return }
+                self.entries.append(contentsOf: batch)
+                if self.entries.count > self.maxEntries {
+                    self.entries.removeFirst(self.entries.count - self.maxEntries)
+                }
+            }
+        }
     }
 
     public func logFromKernel(level: Int32, message: String) {
@@ -109,14 +137,14 @@ public final class DonbyLogger: ObservableObject {
 
     public func clear() {
         lock.lock()
-        defer { lock.unlock() }
+        pendingEntries.removeAll(keepingCapacity: true)
+        try? fileHandle?.truncate(atOffset: 0)
+        logInitialBanner()
+        lock.unlock()
 
         DispatchQueue.main.async { [weak self] in
             self?.entries.removeAll()
         }
-
-        try? fileHandle?.truncate(atOffset: 0)
-        logInitialBanner()
     }
 
     public func exportAllText() -> String {
@@ -125,7 +153,10 @@ public final class DonbyLogger: ObservableObject {
         if let data = try? Data(contentsOf: logFileURL), let str = String(data: data, encoding: .utf8) {
             return str
         }
-        return entries.map(\.fullLine).joined(separator: "\n")
+        if Thread.isMainThread {
+            return entries.map(\.fullLine).joined(separator: "\n")
+        }
+        return ""
     }
 
     public func revealLogInFinder() {

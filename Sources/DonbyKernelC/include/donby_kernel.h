@@ -102,16 +102,20 @@ typedef struct {
 typedef void (*DKLogCallback)(int level, const char* message);
 void dk_set_log_callback(DKLogCallback callback);
 
+typedef void (*DKSubtitleRgbaCallback)(const uint8_t* rgba, int32_t width, int32_t height, uint64_t serial, void* context);
+
 DKPlayer* dk_player_create(void);
 void      dk_player_destroy(DKPlayer* player);
 
 int       dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, double start_sec, bool hw_decode);
+void      dk_player_request_abort(DKPlayer* player);
 void      dk_player_close(DKPlayer* player);
 void      dk_player_play(DKPlayer* player);
 void      dk_player_pause(DKPlayer* player);
 void      dk_player_seek(DKPlayer* player, double target_sec, bool accurate);
 void      dk_player_set_rate(DKPlayer* player, float rate);
 void      dk_player_set_volume(DKPlayer* player, float volume, bool muted);
+void      dk_player_set_buffer_limit_mb(DKPlayer* player, int32_t limit_mb);
 
 int       dk_player_get_track_count(DKPlayer* player, int track_type);
 bool      dk_player_get_track_info(DKPlayer* player, int track_type, int ordinal, DKTrackInfo* out_info);
@@ -122,6 +126,7 @@ CVPixelBufferRef dk_player_acquire_frame_for_host_time(DKPlayer* player, double*
 CVPixelBufferRef dk_player_acquire_frame(DKPlayer* player, double* out_pts, DKGpuColorUniforms* out_color);
 bool      dk_player_get_subtitle_overlay(DKPlayer* player, double pts, DKSubtitleBitmap* out_bitmap);
 bool      dk_player_get_subtitle_rgba(DKPlayer* player, double pts, int32_t canvas_w, int32_t canvas_h, const uint8_t** out_rgba, int32_t* out_w, int32_t* out_h, uint64_t* out_serial);
+void      dk_player_sync_subtitle_rgba(DKPlayer* player, double pts, int32_t canvas_w, int32_t canvas_h, uint64_t last_serial, DKSubtitleRgbaCallback callback, void* context);
 
 DKPlayerState dk_player_get_state(DKPlayer* player);
 double        dk_player_get_position(DKPlayer* player);

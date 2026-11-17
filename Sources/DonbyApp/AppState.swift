@@ -25,11 +25,11 @@ public final class AppState: ObservableObject {
     @Published public var isStartingPlayback: Bool = false
 
     @Published public var servers: [EmbyServerConfig] = [] {
-        didSet { saveServersToDisk() }
+        didSet { if !isLoadingFromDisk { saveServersToDisk() } }
     }
     @Published public var activeServerId: UUID? = nil {
         didSet {
-            if let id = activeServerId {
+            if !isLoadingFromDisk, let id = activeServerId {
                 UserDefaults.standard.set(id.uuidString, forKey: "donby.activeServerId")
             }
         }
@@ -49,12 +49,12 @@ public final class AppState: ObservableObject {
     @Published public var iconSets: [IconLibrarySet] = []
 
     @Published public var urlMediaItems: [LocalOrURLMediaItem] = [] {
-        didSet { saveURLMediaToDisk() }
+        didSet { if !isLoadingFromDisk { saveURLMediaToDisk() } }
     }
 
     private let localFoldersStorageKey = "donby.localFolders.v1"
     @Published public var localFolders: [LocalMediaFolder] = [] {
-        didSet { saveLocalFoldersToDisk() }
+        didSet { if !isLoadingFromDisk { saveLocalFoldersToDisk() } }
     }
     @Published public var browsingFolder: LocalMediaFolder? = nil
 
@@ -63,14 +63,21 @@ public final class AppState: ObservableObject {
     @AppStorage("donby.defaultFilesFolderId") public var defaultFilesFolderId: String = ""
 
     @Published public var iptvChannels: [IPTVChannelItem] = [] {
-        didSet { saveIPTVChannelsToDisk() }
+        didSet { if !isLoadingFromDisk { saveIPTVChannelsToDisk() } }
     }
+    private var isLoadingFromDisk: Bool = false
 
     @Published public var watchHistory: [WatchRecordItem] = []
     private var saveWatchHistoryTask: Task<Void, Never>? = nil
     private var lastRecordedWatchItemId: String? = nil
     private var lastRecordedWatchPosition: Double = -1.0
     private var lastRecordedWatchDate: Date = .distantPast
+    private var inFlightSeriesNameTasks: [String: Task<String?, Never>] = [:]
+    private var activeSyncDomainsCount: Int = 0
+    private var activePingLinesCount: Int = 0
+    private let jsonEncoder = JSONEncoder()
+    private let jsonDecoder = JSONDecoder()
+    private static let maxWatchHistoryCount = 300
 
     @AppStorage("donby.displayConnectStatus") public var displayConnectionStatus: Bool = true
     @AppStorage("donby.displayMediaStats") public var displayMediaStatistics: Bool = true
@@ -194,12 +201,14 @@ public final class AppState: ObservableObject {
     public init() {
         AppState.sharedInstance = self
         self.isSidebarCollapsed = UserDefaults.standard.bool(forKey: "donby.defaultSidebarCollapsed")
+        isLoadingFromDisk = true
         loadServersFromDisk()
         loadURLMediaFromDisk()
         loadLocalFoldersFromDisk()
         loadCachedSeriesNamesFromDisk()
         loadIPTVChannelsFromDisk()
         loadWatchHistoryFromDisk()
+        isLoadingFromDisk = false
 
         dk_set_log_callback { level, message in
             guard let message = message else { return }
@@ -265,21 +274,21 @@ public final class AppState: ObservableObject {
             self.activeServerId = uuid
         }
         guard let data = UserDefaults.standard.data(forKey: serversStorageKey),
-              let decoded = try? JSONDecoder().decode([EmbyServerConfig].self, from: data) else {
+              let decoded = try? jsonDecoder.decode([EmbyServerConfig].self, from: data) else {
             return
         }
         self.servers = decoded.filter { !$0.isDemoServer }
     }
 
     private func saveServersToDisk() {
-        if let data = try? JSONEncoder().encode(servers) {
+        if let data = try? jsonEncoder.encode(servers) {
             UserDefaults.standard.set(data, forKey: serversStorageKey)
         }
     }
 
     private func loadURLMediaFromDisk() {
         if let data = UserDefaults.standard.data(forKey: urlMediaStorageKey),
-           let decoded = try? JSONDecoder().decode([LocalOrURLMediaItem].self, from: data) {
+           let decoded = try? jsonDecoder.decode([LocalOrURLMediaItem].self, from: data) {
             self.urlMediaItems = decoded
         } else {
             self.urlMediaItems = []
@@ -287,14 +296,14 @@ public final class AppState: ObservableObject {
     }
 
     private func saveURLMediaToDisk() {
-        if let data = try? JSONEncoder().encode(urlMediaItems) {
+        if let data = try? jsonEncoder.encode(urlMediaItems) {
             UserDefaults.standard.set(data, forKey: urlMediaStorageKey)
         }
     }
 
     private func loadLocalFoldersFromDisk() {
         if let data = UserDefaults.standard.data(forKey: localFoldersStorageKey),
-           let decoded = try? JSONDecoder().decode([LocalMediaFolder].self, from: data) {
+           let decoded = try? jsonDecoder.decode([LocalMediaFolder].self, from: data) {
             self.localFolders = decoded
         } else {
             self.localFolders = []
@@ -302,14 +311,14 @@ public final class AppState: ObservableObject {
     }
 
     private func saveLocalFoldersToDisk() {
-        if let data = try? JSONEncoder().encode(localFolders) {
+        if let data = try? jsonEncoder.encode(localFolders) {
             UserDefaults.standard.set(data, forKey: localFoldersStorageKey)
         }
     }
 
     private func loadIPTVChannelsFromDisk() {
         if let data = UserDefaults.standard.data(forKey: iptvChannelsStorageKey),
-           let decoded = try? JSONDecoder().decode([IPTVChannelItem].self, from: data) {
+           let decoded = try? jsonDecoder.decode([IPTVChannelItem].self, from: data) {
             self.iptvChannels = decoded
         } else {
             self.iptvChannels = []
@@ -317,14 +326,14 @@ public final class AppState: ObservableObject {
     }
 
     private func saveIPTVChannelsToDisk() {
-        if let data = try? JSONEncoder().encode(iptvChannels) {
+        if let data = try? jsonEncoder.encode(iptvChannels) {
             UserDefaults.standard.set(data, forKey: iptvChannelsStorageKey)
         }
     }
 
     private func loadWatchHistoryFromDisk() {
         if let data = UserDefaults.standard.data(forKey: watchHistoryStorageKey),
-           let decoded = try? JSONDecoder().decode([WatchRecordItem].self, from: data) {
+           let decoded = try? jsonDecoder.decode([WatchRecordItem].self, from: data) {
             var sanitizedMap: [String: WatchRecordItem] = [:]
             var order: [String] = []
 
@@ -384,14 +393,14 @@ public final class AppState: ObservableObject {
                     order.append(dedupKey)
                 }
             }
-            self.watchHistory = order.compactMap { sanitizedMap[$0] }
+            self.watchHistory = Array(order.compactMap { sanitizedMap[$0] }.prefix(Self.maxWatchHistoryCount))
         } else {
             self.watchHistory = []
         }
     }
 
     private func saveWatchHistoryToDisk() {
-        if let data = try? JSONEncoder().encode(watchHistory) {
+        if let data = try? jsonEncoder.encode(watchHistory) {
             UserDefaults.standard.set(data, forKey: watchHistoryStorageKey)
         }
     }
@@ -408,34 +417,49 @@ public final class AppState: ObservableObject {
         UserDefaults.standard.set(cachedSeriesNames, forKey: cachedSeriesNamesStorageKey)
     }
 
-    public func resolveSeriesName(for itemId: String) async -> String? {
-        if let cached = cachedSeriesNames[itemId], !cached.isEmpty {
-            return cached
+    private func findLoadedSeriesName(for itemId: String) -> String? {
+        let topLists = [carouselItems, resumeItems, nextUpItems, favoriteItems]
+        for list in topLists {
+            if let s = list.first(where: { $0.id == itemId })?.seriesName, !s.isEmpty {
+                return s
+            }
         }
-        if let found = allLoadedMediaItems.first(where: { $0.id == itemId })?.seriesName, !found.isEmpty {
-            cachedSeriesNames[itemId] = found
-            saveCachedSeriesNamesToDisk()
-            return found
-        }
-        if let found = resumeItems.first(where: { $0.id == itemId })?.seriesName, !found.isEmpty {
-            cachedSeriesNames[itemId] = found
-            saveCachedSeriesNamesToDisk()
-            return found
-        }
-        if let found = nextUpItems.first(where: { $0.id == itemId })?.seriesName, !found.isEmpty {
-            cachedSeriesNames[itemId] = found
-            saveCachedSeriesNamesToDisk()
-            return found
-        }
-        guard let server = activeServer, !server.host.isEmpty else { return nil }
-        if let fetched = try? await EmbyClient.shared.fetchItemDetail(server: server, itemId: itemId) {
-            if let s = fetched.seriesName, !s.isEmpty {
-                cachedSeriesNames[itemId] = s
-                saveCachedSeriesNamesToDisk()
+        for list in latestByLibrary.values {
+            if let s = list.first(where: { $0.id == itemId })?.seriesName, !s.isEmpty {
                 return s
             }
         }
         return nil
+    }
+
+    public func resolveSeriesName(for itemId: String) async -> String? {
+        if let cached = cachedSeriesNames[itemId], !cached.isEmpty {
+            return cached
+        }
+        if let found = findLoadedSeriesName(for: itemId) {
+            cachedSeriesNames[itemId] = found
+            saveCachedSeriesNamesToDisk()
+            return found
+        }
+        if let existingTask = inFlightSeriesNameTasks[itemId] {
+            return await existingTask.value
+        }
+        guard let server = activeServer, !server.host.isEmpty else { return nil }
+        let task = Task<String?, Never> {
+            guard let fetched = try? await EmbyClient.shared.fetchItemDetail(server: server, itemId: itemId),
+                  let s = fetched.seriesName, !s.isEmpty else {
+                return nil
+            }
+            return s
+        }
+        inFlightSeriesNameTasks[itemId] = task
+        let resolved = await task.value
+        inFlightSeriesNameTasks.removeValue(forKey: itemId)
+        if let resolved, !resolved.isEmpty {
+            cachedSeriesNames[itemId] = resolved
+            saveCachedSeriesNamesToDisk()
+        }
+        return resolved
     }
 
     public func updateRecordTitles(id: String, newTitle: String, newSubtitle: String?) {
@@ -492,7 +516,8 @@ public final class AppState: ObservableObject {
 
     public func importM3UContent(_ content: String) {
         let lines = content.components(separatedBy: .newlines)
-        var addedCount = 0
+        var existingURLs = Set(iptvChannels.map(\.urlString))
+        var newChannels: [IPTVChannelItem] = []
         var currentName: String? = nil
         var currentGroup = "导入频道"
 
@@ -515,17 +540,17 @@ public final class AppState: ObservableObject {
                 }
             } else if !line.hasPrefix("#") {
                 // This is stream URL
-                let name = currentName ?? "未知频道 \(addedCount + 1)"
-                if !iptvChannels.contains(where: { $0.urlString == line }) {
-                    iptvChannels.append(IPTVChannelItem(name: name, group: currentGroup, urlString: line))
-                    addedCount += 1
+                let name = currentName ?? "未知频道 \(newChannels.count + 1)"
+                if existingURLs.insert(line).inserted {
+                    newChannels.append(IPTVChannelItem(name: name, group: currentGroup, urlString: line))
                 }
                 currentName = nil
             }
         }
 
-        if addedCount > 0 {
-            showToast("成功导入 \(addedCount) 个 IPTV 频道", icon: "sparkles.tv")
+        if !newChannels.isEmpty {
+            iptvChannels.append(contentsOf: newChannels)
+            showToast("成功导入 \(newChannels.count) 个 IPTV 频道", icon: "sparkles.tv")
         } else {
             showToast("未检测到有效 M3U 频道，请检查文件格式", icon: "exclamationmark.triangle", isError: true)
         }
@@ -611,6 +636,9 @@ public final class AppState: ObservableObject {
             resolutionTag: resolutionTag
         )
         watchHistory.insert(record, at: 0)
+        if watchHistory.count > Self.maxWatchHistoryCount {
+            watchHistory.removeLast(watchHistory.count - Self.maxWatchHistoryCount)
+        }
         scheduleSaveWatchHistory(immediate: false)
         if let posterURL, !posterURL.isEmpty {
             ArtworkImageCache.shared.aliasKeys(["record_thumb_\(recId)_\(posterURL)"], to: posterURL)
@@ -624,6 +652,11 @@ public final class AppState: ObservableObject {
         watchHistory.removeAll()
         flushWatchHistory()
         showToast("已清空全部观看记录", icon: "trash.fill")
+    }
+
+    public func deleteWatchRecord(id: String) {
+        watchHistory.removeAll { $0.id == id }
+        scheduleSaveWatchHistory(immediate: true)
     }
 
     public func resumePlaybackFromRecord(_ record: WatchRecordItem) {
@@ -712,6 +745,8 @@ public final class AppState: ObservableObject {
         openedServerId = server.id
         selectedLibrary = nil
         detailStack.removeAll()
+        homeErrorMessage = nil
+        inFlightSeriesNameTasks.removeAll()
 
         // Instantaneous switch from memory/disk snapshot
         if let snap = ServerHomeCacheStore.shared.snapshot(for: server.id), !snap.libraryViews.isEmpty {
@@ -722,6 +757,14 @@ public final class AppState: ObservableObject {
             self.latestByLibrary = snap.latestByLibrary
             self.carouselItems = snap.carouselItems
             self.isLoadingHome = false
+        } else {
+            self.libraryViews = []
+            self.resumeItems = []
+            self.nextUpItems = []
+            self.favoriteItems = []
+            self.latestByLibrary = [:]
+            self.carouselItems = []
+            self.isLoadingHome = !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
 
         Task { await loadActiveServerHome(syncDomains: true) }
@@ -786,17 +829,31 @@ public final class AppState: ObservableObject {
         }
     }
 
-    public static func scanFolderVideos(path: String) -> [LocalVideoFileInfo] {
+    nonisolated private static let supportedVideoExtensions: Set<String> = ["mp4", "mkv", "mov", "webm", "avi", "m4v", "flv", "ts", "m2ts", "wmv", "iso", "rmvb"]
+
+    nonisolated public static func countFolderVideos(path: String) -> Int {
+        let fm = FileManager.default
+        let url = URL(fileURLWithPath: path)
+        guard let items = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
+            return 0
+        }
+        var count = 0
+        for fileURL in items where supportedVideoExtensions.contains(fileURL.pathExtension.lowercased()) {
+            count += 1
+        }
+        return count
+    }
+
+    nonisolated public static func scanFolderVideos(path: String) -> [LocalVideoFileInfo] {
         let fm = FileManager.default
         let url = URL(fileURLWithPath: path)
         guard let items = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey], options: [.skipsHiddenFiles]) else {
             return []
         }
-        let exts: Set<String> = ["mp4", "mkv", "mov", "webm", "avi", "m4v", "flv", "ts", "m2ts", "wmv", "iso", "rmvb"]
         var list: [LocalVideoFileInfo] = []
         for fileURL in items {
             let ext = fileURL.pathExtension.lowercased()
-            if exts.contains(ext) {
+            if supportedVideoExtensions.contains(ext) {
                 let res = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
                 let size = Int64(res?.fileSize ?? 0)
                 let date = res?.contentModificationDate ?? Date()
@@ -834,23 +891,7 @@ public final class AppState: ObservableObject {
         }
         let targetSlot = existingSlot ?? servers.first(where: { $0.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
         var draft = targetSlot ?? EmbyServerConfig(name: "UHDNow", host: "", port: 443, isHttps: true, username: "", iconURL: "uhd")
-        draft.isDemoServer = false
-        if !parsed.name.isEmpty { draft.name = parsed.name }
-        draft.note = parsed.note
-        draft.type = parsed.type
-        draft.host = parsed.host
-        draft.port = parsed.port
-        draft.isHttps = parsed.isHttps
-        draft.path = parsed.path
-        if !parsed.username.isEmpty { draft.username = parsed.username }
-        if !parsed.password.isEmpty { draft.password = parsed.password }
-        if !parsed.accessToken.isEmpty { draft.accessToken = parsed.accessToken }
-        if !parsed.userId.isEmpty { draft.userId = parsed.userId }
-        if !parsed.iconURL.isEmpty { draft.iconURL = parsed.iconURL }
-        if !parsed.backupLines.isEmpty {
-            let existingManual = draft.backupLines.filter { !$0.isAutoSynced }
-            draft.backupLines = existingManual + parsed.backupLines
-        }
+        draft.apply(parsed: parsed, overwriteName: true)
         editingServer = draft
         showAddServerSheet = true
         showToast("已识别服务器「\(draft.name)」", icon: "wand.and.stars")
@@ -908,7 +949,8 @@ public final class AppState: ObservableObject {
             if let sId = sysInfo.id, !sId.isEmpty && server.serverId.isEmpty { server.serverId = sId }
             if server.name.isEmpty { server.name = sysInfo.serverName ?? server.host }
         }
-        if let domains = await EmbyClient.shared.fetchExtServerDomains(
+        if autoSyncDomains,
+           let domains = await EmbyClient.shared.fetchExtServerDomains(
             baseURL: server.activeBaseURL,
             token: server.accessToken,
             userId: server.userId
@@ -940,14 +982,21 @@ public final class AppState: ObservableObject {
             if showFeedback { showToast("请先填写服务器地址与账号", icon: "exclamationmark.triangle.fill", isError: true) }
             return
         }
+        activeSyncDomainsCount += 1
         isSyncingDomains = true
-        defer { isSyncingDomains = false }
+        defer {
+            activeSyncDomainsCount = max(0, activeSyncDomainsCount - 1)
+            isSyncingDomains = activeSyncDomainsCount > 0
+        }
 
         if server.accessToken.isEmpty && !server.username.isEmpty && !server.password.isEmpty {
             if let auth = try? await EmbyClient.shared.authenticate(baseURL: server.activeBaseURL, username: server.username, password: server.password) {
                 server.accessToken = auth.accessToken ?? ""
                 if let uid = auth.user?.id { server.userId = uid }
-                servers[idx] = server
+                if let currentIdx = servers.firstIndex(where: { $0.id == serverId }) {
+                    servers[currentIdx].accessToken = server.accessToken
+                    if !server.userId.isEmpty { servers[currentIdx].userId = server.userId }
+                }
             }
         }
 
@@ -961,10 +1010,11 @@ public final class AppState: ObservableObject {
             token: server.accessToken,
             userId: server.userId
         ) {
-            server.mergeExtDomains(domains)
-            servers[idx] = server
+            if let currentIdx = servers.firstIndex(where: { $0.id == serverId }) {
+                servers[currentIdx].mergeExtDomains(domains)
+            }
             if showFeedback { showToast("已同步 \(domains.count) 条 UHD 云端线路", icon: "icloud.and.arrow.down.fill") }
-            await pingAllLines(for: server.id)
+            await pingAllLines(for: serverId)
         } else if showFeedback {
             showToast("当前服务端未部署 ServerDomains 扩展，保持现有线路", icon: "info.circle.fill")
         }
@@ -992,19 +1042,24 @@ public final class AppState: ObservableObject {
         guard let idx = servers.firstIndex(where: { $0.id == serverId }) else { return }
         let server = servers[idx]
         guard !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        activePingLinesCount += 1
         isPingingLines = true
-        defer { isPingingLines = false }
+        defer {
+            activePingLinesCount = max(0, activePingLinesCount - 1)
+            isPingingLines = activePingLinesCount > 0
+        }
 
         let mainURL = server.mainLineURL
         let token = server.accessToken
         let backupSnapshot = server.backupLines
+        let pingTimeout = TimeInterval(max(1, pingTimeoutSeconds))
 
-        async let mainPing = EmbyClient.shared.pingLine(baseURL: mainURL, token: token)
+        async let mainPing = EmbyClient.shared.pingLine(baseURL: mainURL, token: token, timeout: pingTimeout)
         var linePings: [UUID: Int?] = [:]
         await withTaskGroup(of: (UUID, Int?).self) { group in
             for line in backupSnapshot {
                 group.addTask {
-                    let ms = await EmbyClient.shared.pingLine(baseURL: line.url, token: token)
+                    let ms = await EmbyClient.shared.pingLine(baseURL: line.url, token: token, timeout: pingTimeout)
                     return (line.id, ms)
                 }
             }
@@ -1066,7 +1121,7 @@ public final class AppState: ObservableObject {
         }
         homeErrorMessage = nil
 
-        if syncDomains {
+        if syncDomains && autoSyncDomains {
             Task { await syncExtDomains(for: server.id, showFeedback: false) }
         }
 
@@ -1098,7 +1153,7 @@ public final class AppState: ObservableObject {
             self.nextUpItems = nextUps
             self.favoriteItems = favs
 
-            var latestMap: [String: [EmbyItem]] = self.latestByLibrary
+            var latestMap: [String: [EmbyItem]] = [:]
             var heroCandidates: [EmbyItem] = []
 
             await withTaskGroup(of: (String, [EmbyItem]).self) { group in
@@ -1190,7 +1245,8 @@ public final class AppState: ObservableObject {
                 preferredSourceId: preferredSourceId,
                 preferredPreset: preferredVersionPreset,
                 audioStreamIndex: audioStreamIndex,
-                subtitleStreamIndex: subtitleStreamIndex
+                subtitleStreamIndex: subtitleStreamIndex,
+                enable302Cache: enable302Cache
             )
 
             let startSec = fromBeginning ? 0 : targetItem.resumePositionSeconds
@@ -1314,7 +1370,8 @@ public final class AppState: ObservableObject {
             let resource = try await EmbyClient.shared.resolvePlaybackResource(
                 server: server,
                 item: item,
-                preferredSourceId: preferredSourceId
+                preferredSourceId: preferredSourceId,
+                enable302Cache: enable302Cache
             )
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(resource.streamURL.absoluteString, forType: .string)
