@@ -14,6 +14,7 @@ public struct EmbyMainView: View {
     public init() {}
 
     public var body: some View {
+        let appearance = appState.cardAppearance
         Group {
             if let library = appState.selectedLibrary {
                 MLibListView(library: library)
@@ -21,131 +22,54 @@ public struct EmbyMainView: View {
                 VStack(spacing: 0) {
                     embyTopToolbar
 
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 22) {
-                            if let server = appState.activeServer, server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    if let server = appState.activeServer, server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 22) {
                                 unconfiguredServerHero(server: server)
                                     .padding(.horizontal, 24)
-                            } else if let err = appState.homeErrorMessage {
+                            }
+                            .padding(.top, 12)
+                            .padding(.bottom, 36)
+                        }
+                    } else if let err = appState.homeErrorMessage {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 22) {
                                 errorBanner(message: err)
                                     .padding(.horizontal, 24)
-                            } else if appState.isLoadingHome && appState.libraryViews.isEmpty {
-                                VStack(spacing: 16) {
-                                    ProgressView()
-                                        .controlSize(.regular)
-                                        .tint(appState.accentColor)
-                                    Text("正在连接服务端并加载媒体库...")
-                                        .font(.system(size: 13, weight: .medium))
-                                        .foregroundStyle(Color(white: 0.60))
-                                }
-                                .frame(maxWidth: .infinity, minHeight: 260)
                             }
-
-                            if !inlineSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            .padding(.top, 12)
+                            .padding(.bottom, 36)
+                        }
+                    } else if appState.isLoadingHome && appState.libraryViews.isEmpty {
+                        VStack(spacing: 16) {
+                            ProgressView()
+                                .controlSize(.regular)
+                                .tint(appState.accentColor)
+                            Text("正在连接服务端并加载媒体库...")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(Color(white: 0.60))
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if !inlineSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 22) {
                                 inlineSearchResultsSection
                                     .padding(.horizontal, 24)
-                            } else {
-                                if appState.showCarousel && !appState.carouselItems.isEmpty {
-                                    MainCarouselView(
-                                        items: appState.carouselItems,
-                                        onPlay: { item in Task { await appState.startPlayback(item: item) } },
-                                        onSelectDetail: { item in appState.openDetail(for: item) }
-                                    )
-                                    .padding(.horizontal, 24)
-                                }
-
-                                if appState.showMyMedia && !appState.libraryViews.isEmpty {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        SectionHeaderView(title: "我的媒体")
-                                            .padding(.horizontal, 24)
-                                        ScrollView(.horizontal, showsIndicators: false) {
-                                            HStack(spacing: 14) {
-                                                ForEach(appState.libraryViews) { lib in
-                                                    LibraryCardView(library: lib, itemCount: lib.childCount ?? appState.latestByLibrary[lib.id]?.count) {
-                                                        withAnimation(.easeOut(duration: 0.18)) { appState.selectedLibrary = lib }
-                                                    }
-                                                }
-                                            }
-                                            .padding(.horizontal, 24)
-                                            .padding(.vertical, 8)
-                                        }
-                                        .frame(height: 128)
-                                    }
-                                }
-
-                                if appState.showContinueWatching && !appState.resumeItems.isEmpty {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        SectionHeaderView(title: "继续观看")
-                                            .padding(.horizontal, 24)
-                                        ScrollView(.horizontal, showsIndicators: false) {
-                                            HStack(spacing: 16) {
-                                                ForEach(appState.resumeItems) { item in
-                                                    LandscapeCardView(
-                                                        item: item,
-                                                        width: 248,
-                                                        onPlay: { Task { await appState.startPlayback(item: item) } },
-                                                        onDetail: { appState.openDetail(for: item) }
-                                                    )
-                                                }
-                                            }
-                                            .padding(.horizontal, 24)
-                                            .padding(.vertical, 8)
-                                        }
-                                        .frame(height: 198)
-                                    }
-                                }
-
-                                if appState.showNextUp && !appState.nextUpItems.isEmpty {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        SectionHeaderView(title: "接下来观看")
-                                            .padding(.horizontal, 24)
-                                        ScrollView(.horizontal, showsIndicators: false) {
-                                            HStack(spacing: 16) {
-                                                ForEach(appState.nextUpItems) { item in
-                                                    LandscapeCardView(
-                                                        item: item,
-                                                        width: 248,
-                                                        onPlay: { Task { await appState.startPlayback(item: item) } },
-                                                        onDetail: { appState.openDetail(for: item) }
-                                                    )
-                                                }
-                                            }
-                                            .padding(.horizontal, 24)
-                                            .padding(.vertical, 8)
-                                        }
-                                        .frame(height: 198)
-                                    }
-                                }
-
-                                ForEach(appState.libraryViews) { lib in
-                                    if let items = appState.latestByLibrary[lib.id], !items.isEmpty {
-                                        VStack(alignment: .leading, spacing: 8) {
-                                            SectionHeaderView(title: lib.name, actionTitle: "更多") {
-                                                withAnimation(.easeOut(duration: 0.18)) { appState.selectedLibrary = lib }
-                                            }
-                                            .padding(.horizontal, 24)
-                                            ScrollView(.horizontal, showsIndicators: false) {
-                                                HStack(spacing: 15) {
-                                                    ForEach(items) { item in
-                                                        PosterCardView(
-                                                            item: item,
-                                                            width: 152,
-                                                            onSelect: { appState.openDetail(for: item) },
-                                                            onPlay: { Task { await appState.startPlayback(item: item) } }
-                                                        )
-                                                    }
-                                                }
-                                                .padding(.horizontal, 24)
-                                                .padding(.vertical, 8)
-                                            }
-                                            .frame(height: 285)
-                                        }
-                                    }
-                                }
                             }
+                            .padding(.top, 12)
+                            .padding(.bottom, 36)
                         }
-                        .padding(.top, 12)
-                        .padding(.bottom, 36)
+                    } else {
+                        NativeEmbyHomeView(
+                            carouselItems: appState.carouselItems,
+                            showCarousel: appState.showCarousel,
+                            shelves: homeShelves,
+                            appearance: appearance,
+                            appState: appState,
+                            onSelectItem: { item in appState.openDetail(for: item) },
+                            onPlayItem: { item in Task { await appState.startPlayback(item: item) } },
+                            onOpenLibrary: { lib in withAnimation(.easeOut(duration: 0.18)) { appState.selectedLibrary = lib } }
+                        )
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -174,6 +98,53 @@ public struct EmbyMainView: View {
                 }
             }
         }
+    }
+
+    private var homeShelves: [HomeShelfSection] {
+        var result: [HomeShelfSection] = []
+        if appState.showMyMedia && !appState.libraryViews.isEmpty {
+            var counts: [String: Int] = [:]
+            for lib in appState.libraryViews {
+                if let count = lib.childCount ?? appState.latestByLibrary[lib.id]?.count {
+                    counts[lib.id] = count
+                }
+            }
+            result.append(HomeShelfSection(
+                id: "my_media",
+                title: "我的媒体",
+                kind: .library,
+                items: appState.libraryViews,
+                countsByLibrary: counts
+            ))
+        }
+        if appState.showContinueWatching && !appState.resumeItems.isEmpty {
+            result.append(HomeShelfSection(
+                id: "continue_watching",
+                title: "继续观看",
+                kind: .landscape,
+                items: appState.resumeItems
+            ))
+        }
+        if appState.showNextUp && !appState.nextUpItems.isEmpty {
+            result.append(HomeShelfSection(
+                id: "next_up",
+                title: "接下来观看",
+                kind: .landscape,
+                items: appState.nextUpItems
+            ))
+        }
+        for lib in appState.libraryViews {
+            if let items = appState.latestByLibrary[lib.id], !items.isEmpty {
+                result.append(HomeShelfSection(
+                    id: "lib_\(lib.id)",
+                    title: lib.name,
+                    kind: .poster,
+                    items: items,
+                    library: lib
+                ))
+            }
+        }
+        return result
     }
 
     private var embyTopToolbar: some View {
@@ -366,6 +337,7 @@ public struct EmbyMainView: View {
 
     private var inlineSearchResultsSection: some View {
         let results = inlineSearchResults
+        let appearance = appState.cardAppearance
         return VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 8) {
                 SectionHeaderView(title: "搜索结果", subtitle: "共找到 \(results.count) 个")
@@ -390,9 +362,11 @@ public struct EmbyMainView: View {
                         PosterCardView(
                             item: item,
                             width: 152,
+                            appearance: appearance,
                             onSelect: { appState.openDetail(for: item) },
                             onPlay: { Task { await appState.startPlayback(item: item) } }
                         )
+                        .equatable()
                     }
                 }
                 .padding(.vertical, 4)
@@ -556,6 +530,7 @@ public struct MLibListView: View {
     public let library: EmbyItem
 
     @State private var items: [EmbyItem] = []
+    @State private var itemsRevision: Int = 0
     @State private var totalCount: Int = 0
     @State private var isLoading: Bool = false
     @State private var isLoadingMore: Bool = false
@@ -572,9 +547,8 @@ public struct MLibListView: View {
 
     private static let pageSize = 120
 
-    private let columns = [GridItem(.adaptive(minimum: 156, maximum: 182), spacing: 16)]
-
     public var body: some View {
+        let appearance = appState.cardAppearance
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 ToolbarVectorButton(
@@ -651,53 +625,17 @@ public struct MLibListView: View {
             if isLoading && items.isEmpty {
                 VStack { Spacer(); ProgressView(); Spacer() }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView {
-                    LazyVGrid(columns: columns, alignment: .leading, spacing: 20) {
-                        ForEach(Array(filteredItems.enumerated()), id: \.element.id) { index, item in
-                            PosterCardView(
-                                item: item,
-                                width: 152,
-                                onSelect: { appState.openDetail(for: item) },
-                                onPlay: { Task { await appState.startPlayback(item: item) } }
-                            )
-                            .onAppear {
-                                if hasMoreItems && !isLoadingMore && index >= max(0, filteredItems.count - 12) {
-                                    Task { await loadLibraryItems(reset: false) }
-                                }
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 24)
-                    .padding(.top, 12)
-                    .padding(.bottom, hasMoreItems || isLoadingMore ? 12 : 32)
-
-                    if isLoadingMore {
-                        HStack(spacing: 8) {
-                            ProgressView().controlSize(.small)
-                            Text("正在加载更多…")
-                                .font(.system(size: 12))
-                                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                        }
-                        .padding(.bottom, 28)
-                    } else if hasMoreItems {
-                        Button {
-                            Task { await loadLibraryItems(reset: false) }
-                        } label: {
-                            Text("加载更多 (\(items.count)/\(totalCount))")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 7)
-                                .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
-                                .clipShape(Capsule())
-                                .overlay(
-                                    Capsule().strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.bottom, 28)
-                    }
-                }
+                NativePosterGridView(
+                    items: items,
+                    itemsRevision: itemsRevision,
+                    totalCount: totalCount,
+                    hasMoreItems: hasMoreItems,
+                    isLoadingMore: isLoadingMore,
+                    appearance: appearance,
+                    onSelect: { item in appState.openDetail(for: item) },
+                    onPlay: { item in Task { await appState.startPlayback(item: item) } },
+                    onLoadMore: { Task { await loadLibraryItems(reset: false) } }
+                )
             }
         }
         .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
@@ -708,9 +646,6 @@ public struct MLibListView: View {
             }
             await loadLibraryItems(reset: true)
         }
-    }
-    private var filteredItems: [EmbyItem] {
-        items
     }
 
     private func loadLibraryItems(reset: Bool) async {
@@ -750,12 +685,14 @@ public struct MLibListView: View {
             if reset {
                 self.items = resp.items
                 self.seenIds = Set(resp.items.map(\.id))
+                self.itemsRevision &+= 1
             } else {
                 var added: [EmbyItem] = []
                 for item in resp.items where seenIds.insert(item.id).inserted {
                     added.append(item)
                 }
                 self.items.append(contentsOf: added)
+                self.itemsRevision &+= 1
             }
             self.startIndex = requestStart + resp.items.count
             if let total = resp.totalRecordCount {
@@ -770,6 +707,7 @@ public struct MLibListView: View {
             if reset && self.items.isEmpty && q.isEmpty && !filterUnwatchedOnly && !filterFavoritesOnly {
                 self.items = appState.latestByLibrary[library.id] ?? []
                 self.seenIds = Set(self.items.map(\.id))
+                self.itemsRevision &+= 1
                 self.totalCount = self.items.count
                 self.hasMoreItems = false
             }

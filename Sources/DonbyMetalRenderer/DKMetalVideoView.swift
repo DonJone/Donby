@@ -1254,6 +1254,10 @@ public struct DKMetalVideoView: NSViewRepresentable {
         coordinator.stopDisplayLink()
     }
 
+    public func sizeThatFits(_ proposal: ProposedViewSize, nsView: DKMetalLayerView, context: Context) -> CGSize? {
+        proposal.replacingUnspecifiedDimensions()
+    }
+
     public func makeCoordinator() -> Coordinator {
         Coordinator()
     }

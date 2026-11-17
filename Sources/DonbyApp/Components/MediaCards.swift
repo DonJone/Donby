@@ -1,5 +1,99 @@
 import SwiftUI
 import DonbyCore
+import DonbyNetwork
+
+public struct DonbyCardAppearance: Equatable, Sendable {
+    public let server: EmbyServerConfig?
+    public let isLightMode: Bool
+    public let accentColor: Color
+    public let accentTextColor: Color
+    public let showResolutionBadge: Bool
+    public let showRatingBadge: Bool
+    public let isMonochromeTheme: Bool
+
+    public init(
+        server: EmbyServerConfig?,
+        isLightMode: Bool,
+        accentColor: Color,
+        accentTextColor: Color,
+        showResolutionBadge: Bool,
+        showRatingBadge: Bool,
+        isMonochromeTheme: Bool = false
+    ) {
+        self.server = server
+        self.isLightMode = isLightMode
+        self.accentColor = accentColor
+        self.accentTextColor = accentTextColor
+        self.showResolutionBadge = showResolutionBadge
+        self.showRatingBadge = showRatingBadge
+        self.isMonochromeTheme = isMonochromeTheme
+    }
+
+    public var hidesLibraryTextOverlay: Bool {
+        server?.usesUHDLogo == true
+    }
+
+    public static func == (lhs: DonbyCardAppearance, rhs: DonbyCardAppearance) -> Bool {
+        lhs.server?.id == rhs.server?.id &&
+        lhs.server?.activeBaseURL == rhs.server?.activeBaseURL &&
+        lhs.server?.accessToken == rhs.server?.accessToken &&
+        lhs.server?.usesUHDLogo == rhs.server?.usesUHDLogo &&
+        lhs.isLightMode == rhs.isLightMode &&
+        lhs.accentColor == rhs.accentColor &&
+        lhs.accentTextColor == rhs.accentTextColor &&
+        lhs.showResolutionBadge == rhs.showResolutionBadge &&
+        lhs.showRatingBadge == rhs.showRatingBadge &&
+        lhs.isMonochromeTheme == rhs.isMonochromeTheme
+    }
+}
+
+private struct PosterHoverOverlay: View {
+    let cornerRadius: CGFloat
+    let borderDefaultColor: Color
+    let accentColor: Color
+    let showPlayButton: Bool
+    let playCircleSize: CGFloat
+    let playIconSize: CGFloat
+    let onPlay: (() -> Void)?
+
+    @State private var isHovered: Bool = false
+
+    var body: some View {
+        ZStack {
+            if isHovered && showPlayButton, let onPlay {
+                Color.black.opacity(0.22)
+                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+
+                Button(action: onPlay) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.black.opacity(0.62))
+                            .overlay(Circle().strokeBorder(Color.white.opacity(0.32), lineWidth: 0.75))
+                            .frame(width: playCircleSize, height: playCircleSize)
+                        Image(systemName: "play.fill")
+                            .font(.system(size: playIconSize, weight: .bold))
+                            .foregroundStyle(.white)
+                            .offset(x: 1)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .strokeBorder(
+                    isHovered ? accentColor.opacity(0.88) : borderDefaultColor,
+                    lineWidth: isHovered ? 1.5 : 0.65
+                )
+                .allowsHitTesting(false)
+        }
+        .contentShape(Rectangle())
+        .onHover { hovered in
+            if isHovered != hovered {
+                isHovered = hovered
+            }
+        }
+    }
+}
 
 // MARK: - High-Performance Fractional Progress Bar (Zero GeometryReader Layout Invalidation)
 public struct FractionalProgressBar: View {
@@ -29,21 +123,40 @@ public struct FractionalProgressBar: View {
 }
 
 // MARK: - Native Poster Card
-public struct PosterCardView: View {
-    @EnvironmentObject private var appState: AppState
+public struct PosterCardView: View, Equatable {
     public let item: EmbyItem
     public var width: CGFloat? = nil
+    public let appearance: DonbyCardAppearance
     public var onSelect: () -> Void
     public var onPlay: (() -> Void)? = nil
 
-    @State private var isHovered: Bool = false
     private var targetWidth: CGFloat { width ?? 152 }
     private var targetHeight: CGFloat { targetWidth * 1.5 }
+
+    public init(
+        item: EmbyItem,
+        width: CGFloat? = nil,
+        appearance: DonbyCardAppearance,
+        onSelect: @escaping () -> Void,
+        onPlay: (() -> Void)? = nil
+    ) {
+        self.item = item
+        self.width = width
+        self.appearance = appearance
+        self.onSelect = onSelect
+        self.onPlay = onPlay
+    }
+
+    public static func == (lhs: PosterCardView, rhs: PosterCardView) -> Bool {
+        lhs.item == rhs.item &&
+        lhs.width == rhs.width &&
+        lhs.appearance == rhs.appearance
+    }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             ZStack {
-                MediaArtworkView(server: appState.activeServer, item: item, kind: .primary, maxWidth: 420)
+                MediaArtworkView(server: appearance.server, item: item, kind: .primary, maxWidth: 360)
                     .frame(width: targetWidth, height: targetHeight)
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
@@ -56,7 +169,7 @@ public struct PosterCardView: View {
 
                 VStack {
                     HStack(alignment: .top, spacing: 4) {
-                        if appState.showResolutionBadge, let resBadge = item.resolutionBadge {
+                        if appearance.showResolutionBadge, let resBadge = item.resolutionBadge {
                             Text(resBadge)
                                 .font(.system(size: 9.5, weight: .heavy, design: .rounded))
                                 .foregroundStyle(.white)
@@ -71,15 +184,15 @@ public struct PosterCardView: View {
                         if let unplayed = item.userData?.unplayedItemCount, unplayed > 0 {
                             Text("\(unplayed)")
                                 .font(.system(size: 10, weight: .bold, design: .rounded))
-                                .foregroundStyle(appState.accentTextColor)
+                                .foregroundStyle(appearance.accentTextColor)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
-                                .background(appState.accentColor)
+                                .background(appearance.accentColor)
                                 .clipShape(Capsule())
                         } else if item.userData?.played == true {
                             Image(systemName: "checkmark.circle.fill")
                                 .font(.system(size: 13, weight: .bold))
-                                .foregroundStyle(appState.accentColor)
+                                .foregroundStyle(appearance.accentColor)
                                 .background(Circle().fill(Color.black.opacity(0.6)))
                         }
                     }
@@ -89,7 +202,7 @@ public struct PosterCardView: View {
 
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
-                            if appState.showRatingBadge, let rating = item.communityRating, rating > 0 {
+                            if appearance.showRatingBadge, let rating = item.communityRating, rating > 0 {
                                 HStack(spacing: 3) {
                                     Image(systemName: "star.fill")
                                         .font(.system(size: 8.5))
@@ -114,79 +227,80 @@ public struct PosterCardView: View {
                         }
 
                         if item.progressFraction > 0 && item.progressFraction < 0.99 {
-                            FractionalProgressBar(fraction: item.progressFraction, color: appState.accentColor, height: 3)
+                            FractionalProgressBar(fraction: item.progressFraction, color: appearance.accentColor, height: 3)
                         }
                     }
                     .padding(7)
                 }
 
-                if isHovered, let onPlay {
-                    Color.black.opacity(0.22)
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-
-                    Button(action: onPlay) {
-                        ZStack {
-                            Circle()
-                                .fill(.ultraThinMaterial)
-                                .frame(width: 40, height: 40)
-                            Image(systemName: "play.fill")
-                                .font(.system(size: 15, weight: .bold))
-                                .foregroundStyle(.white)
-                                .offset(x: 1)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                }
+                PosterHoverOverlay(
+                    cornerRadius: 10,
+                    borderDefaultColor: Color.white.opacity(0.06),
+                    accentColor: appearance.accentColor,
+                    showPlayButton: onPlay != nil,
+                    playCircleSize: 40,
+                    playIconSize: 15,
+                    onPlay: onPlay
+                )
             }
             .frame(width: targetWidth, height: targetHeight)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(
-                        isHovered ? appState.accentColor.opacity(0.85) : Color.white.opacity(0.06),
-                        lineWidth: isHovered ? 1.5 : 0.65
-                    )
-            )
-            .shadow(
-                color: isHovered ? Color.black.opacity(0.30) : Color.clear,
-                radius: isHovered ? 6 : 0,
-                y: isHovered ? 3 : 0
-            )
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.name)
                     .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appearance.isLightMode))
                     .lineLimit(1)
 
                 Text(item.displaySubtitle.isEmpty ? (item.isSeries ? "剧集" : "电影") : item.displaySubtitle)
                     .font(.system(size: 11))
-                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appearance.isLightMode))
                     .lineLimit(1)
             }
             .frame(width: targetWidth, alignment: .leading)
         }
         .contentShape(Rectangle())
-        .onHover { isHovered = $0 }
         .onTapGesture { onSelect() }
     }
 }
 
 // MARK: - Native Landscape Card
-public struct LandscapeCardView: View {
-    @EnvironmentObject private var appState: AppState
+public struct LandscapeCardView: View, Equatable {
     public let item: EmbyItem
     public var width: CGFloat = 248
     public var subtitleOverride: String? = nil
+    public let appearance: DonbyCardAppearance
     public var onPlay: () -> Void
     public var onDetail: () -> Void
 
-    @State private var isHovered: Bool = false
     private var height: CGFloat { width * 9.0 / 16.0 }
+
+    public init(
+        item: EmbyItem,
+        width: CGFloat = 248,
+        subtitleOverride: String? = nil,
+        appearance: DonbyCardAppearance,
+        onPlay: @escaping () -> Void,
+        onDetail: @escaping () -> Void
+    ) {
+        self.item = item
+        self.width = width
+        self.subtitleOverride = subtitleOverride
+        self.appearance = appearance
+        self.onPlay = onPlay
+        self.onDetail = onDetail
+    }
+
+    public static func == (lhs: LandscapeCardView, rhs: LandscapeCardView) -> Bool {
+        lhs.item == rhs.item &&
+        lhs.width == rhs.width &&
+        lhs.subtitleOverride == rhs.subtitleOverride &&
+        lhs.appearance == rhs.appearance
+    }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack {
-                MediaArtworkView(server: appState.activeServer, item: item, kind: .thumb, maxWidth: 560)
+                MediaArtworkView(server: appearance.server, item: item, kind: .thumb, maxWidth: 500)
                     .frame(width: width, height: height)
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
@@ -232,58 +346,41 @@ public struct LandscapeCardView: View {
                     Spacer()
 
                     if item.progressFraction > 0 {
-                        FractionalProgressBar(fraction: item.progressFraction, color: appState.accentColor, height: 3.5)
+                        FractionalProgressBar(fraction: item.progressFraction, color: appearance.accentColor, height: 3.5)
                             .padding(8)
                     }
                 }
 
-                ZStack {
-                    Circle()
-                        .fill(.ultraThinMaterial)
-                        .overlay(Circle().strokeBorder(Color.white.opacity(0.35), lineWidth: 0.75))
-                        .frame(width: 36, height: 36)
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(.white)
-                        .offset(x: 1)
-                }
-                .shadow(color: Color.black.opacity(0.35), radius: 6, y: 2)
-                .opacity(isHovered ? 1.0 : 0.0)
-                .scaleEffect(isHovered ? 1.0 : 0.88)
-                .animation(.easeOut(duration: 0.18), value: isHovered)
+                PosterHoverOverlay(
+                    cornerRadius: 10,
+                    borderDefaultColor: Color.white.opacity(0.06),
+                    accentColor: appearance.accentColor,
+                    showPlayButton: true,
+                    playCircleSize: 36,
+                    playIconSize: 13,
+                    onPlay: onPlay
+                )
             }
             .frame(width: width, height: height)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(
-                        isHovered ? appState.accentColor.opacity(0.85) : Color.white.opacity(0.06),
-                        lineWidth: isHovered ? 1.5 : 0.65
-                    )
-            )
-            .shadow(
-                color: isHovered ? Color.black.opacity(0.30) : Color.clear,
-                radius: isHovered ? 6 : 0,
-                y: isHovered ? 3 : 0
-            )
             .onTapGesture { onPlay() }
 
             HStack(alignment: .center, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.isEpisode ? (item.seriesName ?? item.name) : item.name)
                         .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appearance.isLightMode))
                         .lineLimit(1)
 
                     Text(subtitleOverride ?? (item.isEpisode ? item.name : item.displaySubtitle))
                         .font(.system(size: 11))
-                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appearance.isLightMode))
                         .lineLimit(1)
                 }
                 Spacer(minLength: 4)
                 Button(action: onDetail) {
                     Image(systemName: "info.circle")
                         .font(.system(size: 13.5))
-                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appearance.isLightMode))
                         .frame(width: 22, height: 22)
                         .contentShape(Circle())
                 }
@@ -292,27 +389,46 @@ public struct LandscapeCardView: View {
             }
             .frame(width: width)
         }
-        .onHover { isHovered = $0 }
     }
 }
 
 // MARK: - Native Library Card
-public struct LibraryCardView: View {
-    @EnvironmentObject private var appState: AppState
+public struct LibraryCardView: View, Equatable {
     public let library: EmbyItem
     public let itemCount: Int?
+    public let appearance: DonbyCardAppearance
     public let action: () -> Void
 
-    @State private var isHovered: Bool = false
-
     private var hidesTextOverlay: Bool {
-        appState.activeServer?.usesUHDLogo == true
+        appearance.hidesLibraryTextOverlay
+    }
+
+    private var artworkKind: EmbyImageKind {
+        (library.backdropImageTags?.isEmpty == false) ? .backdrop : .primary
+    }
+
+    public init(
+        library: EmbyItem,
+        itemCount: Int?,
+        appearance: DonbyCardAppearance,
+        action: @escaping () -> Void
+    ) {
+        self.library = library
+        self.itemCount = itemCount
+        self.appearance = appearance
+        self.action = action
+    }
+
+    public static func == (lhs: LibraryCardView, rhs: LibraryCardView) -> Bool {
+        lhs.library == rhs.library &&
+        lhs.itemCount == rhs.itemCount &&
+        lhs.appearance == rhs.appearance
     }
 
     public var body: some View {
         Button(action: action) {
             ZStack(alignment: .bottomLeading) {
-                MediaArtworkView(server: appState.activeServer, item: library, kind: .backdrop, maxWidth: 440)
+                MediaArtworkView(server: appearance.server, item: library, kind: artworkKind, maxWidth: 440)
                     .frame(width: 205, height: 112)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
@@ -349,25 +465,20 @@ public struct LibraryCardView: View {
                     }
                 }
                 .padding(11)
+
+                PosterHoverOverlay(
+                    cornerRadius: 12,
+                    borderDefaultColor: appearance.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08),
+                    accentColor: Color.white.opacity(0.50),
+                    showPlayButton: false,
+                    playCircleSize: 36,
+                    playIconSize: 13,
+                    onPlay: nil
+                )
             }
             .frame(width: 205, height: 112)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(
-                        isHovered ? Color.white.opacity(0.40) : (appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08)),
-                        lineWidth: isHovered ? 1.2 : 0.65
-                    )
-            )
-            .shadow(
-                color: Color.black.opacity(isHovered ? 0.22 : (appState.isLightMode ? 0.04 : 0.12)),
-                radius: isHovered ? 8 : 4,
-                y: isHovered ? 4 : 2
-            )
-            .scaleEffect(isHovered ? 1.02 : 1.0)
-            .animation(.easeOut(duration: 0.16), value: isHovered)
         }
         .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
     }
 }
 

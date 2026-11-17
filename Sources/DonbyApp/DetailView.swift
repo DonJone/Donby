@@ -880,18 +880,21 @@ public struct DetailView: View {
     }
 
     private var similarSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let appearance = appState.cardAppearance
+        return VStack(alignment: .leading, spacing: 10) {
             SectionHeaderView(title: "类似作品")
                 .padding(.horizontal, 28)
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 15) {
+                LazyHStack(spacing: 15) {
                     ForEach(similarItems) { sim in
                         PosterCardView(
                             item: sim,
                             width: 148,
+                            appearance: appearance,
                             onSelect: { appState.openDetail(for: sim) },
                             onPlay: { Task { await appState.startPlayback(item: sim) } }
                         )
+                        .equatable()
                     }
                 }
                 .padding(.horizontal, 28)

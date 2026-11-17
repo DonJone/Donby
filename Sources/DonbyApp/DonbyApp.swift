@@ -58,9 +58,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
             let registeredPaths = NSWorkspace.shared.urlsForApplications(withBundleIdentifier: bundleID).map(\.path)
             for candidate in registeredPaths where candidate != bundlePath {
-                if candidate.hasPrefix("/Volumes/") || !fileMgr.fileExists(atPath: candidate) {
-                    runLsregister(["-u", candidate])
-                }
+                runLsregister(["-u", candidate])
             }
 
             runLsregister(["-f", bundlePath])

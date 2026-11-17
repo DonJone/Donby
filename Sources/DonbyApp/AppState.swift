@@ -177,6 +177,18 @@ public final class AppState: ObservableObject {
         return servers.first(where: \.isDefaultHome) ?? servers.first
     }
 
+    public var cardAppearance: DonbyCardAppearance {
+        DonbyCardAppearance(
+            server: activeServer,
+            isLightMode: isLightMode,
+            accentColor: accentColor,
+            accentTextColor: accentTextColor,
+            showResolutionBadge: showResolutionBadge,
+            showRatingBadge: showRatingBadge,
+            isMonochromeTheme: isMonochromeTheme
+        )
+    }
+
     public var currentDetailItem: EmbyItem? { detailStack.last }
 
     public var allLoadedMediaItems: [EmbyItem] {
@@ -1190,6 +1202,7 @@ public final class AppState: ObservableObject {
 
             var latestMap: [String: [EmbyItem]] = [:]
             var heroCandidates: [EmbyItem] = []
+            let hadCachedLatest = !self.latestByLibrary.isEmpty
 
             await withTaskGroup(of: (String, [EmbyItem]).self) { group in
                 for view in views {
@@ -1206,7 +1219,7 @@ public final class AppState: ObservableObject {
                 for await (viewId, items) in group {
                     guard currentGen == self.homeLoadGeneration else { return }
                     latestMap[viewId] = items
-                    if self.latestByLibrary[viewId] != items {
+                    if !hadCachedLatest && self.latestByLibrary[viewId] != items {
                         self.latestByLibrary[viewId] = items
                     }
                     for item in items.prefix(3) where !heroCandidates.contains(where: { $0.id == item.id }) {

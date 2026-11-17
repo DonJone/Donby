@@ -6,12 +6,41 @@ import DonbyCore
 import DonbyNetwork
 import DonbyKernelC
 
+public enum ScrollActivityTracker {
+    private static let lock = NSLock()
+    private static var _isScrolling = false
+
+    public static var isScrolling: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _isScrolling
+    }
+
+    public static func setScrolling(_ active: Bool) {
+        lock.lock()
+        _isScrolling = active
+        lock.unlock()
+    }
+}
+
 // MARK: - Native Artwork & Local Poster Cache
 public final class ArtworkImageCache: @unchecked Sendable {
     public static let shared = ArtworkImageCache()
     private let memoryCache = NSCache<NSString, NSImage>()
-    private let diskQueue = DispatchQueue(label: "com.don.ArtworkDiskCache", qos: .utility)
-    private let decodeQueue = DispatchQueue(label: "com.don.ArtworkDecode", qos: .userInitiated, attributes: .concurrent)
+    private let thumbCGMemoryCache = NSCache<NSString, CGImage>()
+    private let fullCGMemoryCache = NSCache<NSString, CGImage>()
+    private static let srgbColorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+    private let colorSpaceLock = NSLock()
+    private var _displayColorSpace: CGColorSpace
+    private var _displayColorSpaceICC: Data?
+    private let diskQueue = DispatchQueue(label: "com.don.ArtworkDiskCache", qos: .background)
+    private let decodeOperationQueue: OperationQueue = {
+        let q = OperationQueue()
+        q.name = "com.don.ArtworkDecode"
+        q.qualityOfService = .userInitiated
+        q.maxConcurrentOperationCount = 4
+        return q
+    }()
     private let fileManager = FileManager.default
     private let cacheDirectoryURL: URL
     private var writesSinceLastPrune: Int = 0
@@ -20,8 +49,18 @@ public final class ArtworkImageCache: @unchecked Sendable {
     private static let maxDiskCacheAge: TimeInterval = 30 * 86400
 
     private init() {
+        let initialCS = CGDisplayCopyColorSpace(CGMainDisplayID())
+        self._displayColorSpace = initialCS
+        self._displayColorSpaceICC = initialCS.copyICCData() as Data?
+
         memoryCache.countLimit = 800
-        memoryCache.totalCostLimit = 200 * 1024 * 1024 // 200 MB
+        memoryCache.totalCostLimit = 80 * 1024 * 1024 // 80 MB
+
+        thumbCGMemoryCache.countLimit = 1800
+        thumbCGMemoryCache.totalCostLimit = 320 * 1024 * 1024 // 320 MB
+
+        fullCGMemoryCache.countLimit = 48
+        fullCGMemoryCache.totalCostLimit = 160 * 1024 * 1024 // 160 MB
 
         let base = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
@@ -29,8 +68,134 @@ public final class ArtworkImageCache: @unchecked Sendable {
         self.cacheDirectoryURL = dir
         try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
 
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshDisplayColorSpaceIfNeeded()
+        }
+
         diskQueue.asyncAfter(deadline: .now() + 10.0) { [weak self] in
             self?.pruneDiskCacheIfNeeded()
+        }
+    }
+
+    public var activeDisplayColorSpace: CGColorSpace {
+        colorSpaceLock.lock()
+        defer { colorSpaceLock.unlock() }
+        return _displayColorSpace
+    }
+
+    private func refreshDisplayColorSpaceIfNeeded() {
+        let latestCS = CGDisplayCopyColorSpace(CGMainDisplayID())
+        let latestICC = latestCS.copyICCData() as Data?
+        colorSpaceLock.lock()
+        let changed = (latestICC != _displayColorSpaceICC)
+        if changed {
+            _displayColorSpace = latestCS
+            _displayColorSpaceICC = latestICC
+        }
+        colorSpaceLock.unlock()
+        if changed {
+            thumbCGMemoryCache.removeAllObjects()
+            fullCGMemoryCache.removeAllObjects()
+        }
+    }
+
+    private func targetCGMemoryCache(for maxPixelSize: Int) -> NSCache<NSString, CGImage> {
+        maxPixelSize > 900 ? fullCGMemoryCache : thumbCGMemoryCache
+    }
+
+    private func cgCacheKey(for key: String, maxPixelSize: Int) -> NSString {
+        let bucket: String
+        if maxPixelSize >= 2400 {
+            bucket = "uhd"
+        } else if maxPixelSize > 900 {
+            bucket = "full"
+        } else {
+            bucket = "thumb"
+        }
+        return "\(key)#\(bucket)" as NSString
+    }
+
+    private func decodedByteCost(for cgImage: CGImage) -> Int {
+        max(1, cgImage.bytesPerRow * cgImage.height)
+    }
+
+    private func decodedByteCost(for image: NSImage, fallbackBytes: Int) -> Int {
+        if let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            return decodedByteCost(for: cg)
+        }
+        let estimated = Int(image.size.width * image.size.height) * 4
+        return max(1, max(estimated, fallbackBytes))
+    }
+
+    private final class DecodeState<T>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<T?, Never>?
+        private var cancelled = false
+        private weak var operation: Operation?
+
+        func install(continuation: CheckedContinuation<T?, Never>, operation: Operation) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if cancelled {
+                return false
+            }
+            self.continuation = continuation
+            self.operation = operation
+            return true
+        }
+
+        func finish(_ value: T?) {
+            lock.lock()
+            let cont = continuation
+            continuation = nil
+            lock.unlock()
+            cont?.resume(returning: value)
+        }
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            let cont = continuation
+            continuation = nil
+            let op = operation
+            lock.unlock()
+            op?.cancel()
+            cont?.resume(returning: nil)
+        }
+    }
+
+    private func runOnDecodeQueue<T>(
+        priority: Operation.QueuePriority = .normal,
+        _ work: @escaping @Sendable (Operation?) -> T?
+    ) async -> T? {
+        if Task.isCancelled { return nil }
+        let state = DecodeState<T>()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
+                let op = BlockOperation()
+                op.queuePriority = priority
+                op.addExecutionBlock { [weak op] in
+                    if op?.isCancelled == true {
+                        state.finish(nil)
+                        return
+                    }
+                    state.finish(work(op))
+                }
+                op.completionBlock = {
+                    state.finish(nil)
+                }
+                if state.install(continuation: continuation, operation: op) {
+                    decodeOperationQueue.addOperation(op)
+                } else {
+                    continuation.resume(returning: nil)
+                }
+            }
+        } onCancel: {
+            state.cancel()
         }
     }
 
@@ -46,29 +211,97 @@ public final class ArtworkImageCache: @unchecked Sendable {
 
     /// Decodes and downsamples compressed image data in the background using hardware-accelerated ImageIO.
     public func decodeThumbnail(from data: Data, maxPixelSize: Int = 500) -> NSImage? {
+        if let cgImg = decodeCGThumbnail(from: data, maxPixelSize: maxPixelSize) {
+            return NSImage(cgImage: cgImg, size: NSSize(width: cgImg.width, height: cgImg.height))
+        }
+        return NSImage(data: data)
+    }
+
+    /// Decodes and downsamples compressed image data into a ready-to-render CGImage.
+    public func decodeCGThumbnail(from data: Data, maxPixelSize: Int = 500) -> CGImage? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        return decodeCGThumbnail(fromSource: source, maxPixelSize: maxPixelSize, isPreThumb: false)
+    }
+
+    /// Decodes and downsamples an image file on disk directly via ImageIO without copying into a temporary Data buffer.
+    public func decodeCGThumbnail(fromURL url: URL, maxPixelSize: Int = 500, isPreThumb: Bool = false) -> CGImage? {
+        guard access(url.path, R_OK) == 0,
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            return nil
+        }
+        return decodeCGThumbnail(fromSource: source, maxPixelSize: maxPixelSize, isPreThumb: isPreThumb)
+    }
+
+    private func decodeCGThumbnail(fromSource source: CGImageSource, maxPixelSize: Int, isPreThumb: Bool) -> CGImage? {
         let options: [CFString: Any]
-        if maxPixelSize >= 2400 {
+        if isPreThumb || maxPixelSize >= 2400 {
             options = [
-                kCGImageSourceShouldCacheImmediately: true
+                kCGImageSourceShouldCacheImmediately: false,
+                kCGImageSourceShouldCache: false
             ]
         } else {
             options = [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceShouldCacheImmediately: false,
+                kCGImageSourceShouldCache: false,
                 kCGImageSourceCreateThumbnailWithTransform: true,
                 kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
             ]
         }
-        guard let cgImg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) ?? CGImageSourceCreateImageAtIndex(source, 0, options as CFDictionary) else {
-            return NSImage(data: data)
+        let rawCG: CGImage?
+        if isPreThumb || maxPixelSize >= 2400 {
+            rawCG = CGImageSourceCreateImageAtIndex(source, 0, options as CFDictionary)
+                ?? CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+        } else {
+            rawCG = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+                ?? CGImageSourceCreateImageAtIndex(source, 0, options as CFDictionary)
         }
-        return NSImage(cgImage: cgImg, size: NSSize(width: cgImg.width, height: cgImg.height))
+        guard let rawCG else {
+            return nil
+        }
+        return normalizeToDisplaySpace(rawCG)
+    }
+
+    private func normalizeToDisplaySpace(_ image: CGImage) -> CGImage {
+        let w = image.width
+        let h = image.height
+        guard w > 0, h > 0 else { return image }
+
+        let hasAlpha: Bool = {
+            switch image.alphaInfo {
+            case .first, .last, .premultipliedFirst, .premultipliedLast, .alphaOnly:
+                return true
+            default:
+                return false
+            }
+        }()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue
+            | (hasAlpha ? CGImageAlphaInfo.premultipliedFirst.rawValue : CGImageAlphaInfo.noneSkipFirst.rawValue)
+
+        guard let ctx = CGContext(
+            data: nil,
+            width: w,
+            height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: activeDisplayColorSpace,
+            bitmapInfo: bitmapInfo
+        ) else {
+            return image
+        }
+        ctx.interpolationQuality = .none
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return ctx.makeImage() ?? image
     }
 
     /// Instantaneous O(1) in-memory lookup. Completely safe to call on Main Thread in body or computed properties.
     public func imageFromMemory(for key: String) -> NSImage? {
         memoryCache.object(forKey: key as NSString)
+    }
+
+    /// Instantaneous O(1) CGImage in-memory lookup bucketed by target resolution.
+    public func cgImageFromMemory(for key: String, maxPixelSize: Int = 500) -> CGImage? {
+        targetCGMemoryCache(for: maxPixelSize).object(forKey: cgCacheKey(for: key, maxPixelSize: maxPixelSize))
     }
 
     /// Asynchronous disk lookup that never blocks the Main Thread or scroll animations.
@@ -77,23 +310,83 @@ public final class ArtworkImageCache: @unchecked Sendable {
             return mem
         }
         let fileURL = cacheDirectoryURL.appendingPathComponent(diskFileName(for: key))
-        return await withCheckedContinuation { continuation in
-            decodeQueue.async { [weak self] in
-                guard let self else { continuation.resume(returning: nil); return }
-                guard let data = try? Data(contentsOf: fileURL) else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                self.diskQueue.async { [weak self] in
-                    self?.touchIfStale(fileURL)
-                }
-                if let thumb = self.decodeThumbnail(from: data, maxPixelSize: maxPixelSize) {
-                    self.memoryCache.setObject(thumb, forKey: key as NSString, cost: data.count / 4)
-                    continuation.resume(returning: thumb)
-                } else {
-                    continuation.resume(returning: nil)
+        return await runOnDecodeQueue { [weak self] op in
+            if op?.isCancelled == true { return nil }
+            guard let self else { return nil }
+            guard let data = try? Data(contentsOf: fileURL) else {
+                return nil
+            }
+            self.diskQueue.async { [weak self] in
+                self?.touchIfStale(fileURL)
+            }
+            if let thumb = self.decodeThumbnail(from: data, maxPixelSize: maxPixelSize) {
+                let cost = self.decodedByteCost(for: thumb, fallbackBytes: data.count)
+                self.memoryCache.setObject(thumb, forKey: key as NSString, cost: cost)
+                return thumb
+            }
+            return nil
+        }
+    }
+
+    /// Checks multiple candidate disk keys in one bounded background decode task.
+    public func cgImageFromDiskBatchAsync(
+        forKeys keys: [String],
+        maxPixelSize: Int = 500,
+        priority: Operation.QueuePriority = .normal
+    ) async -> CGImage? {
+        for key in keys {
+            if let mem = cgImageFromMemory(for: key, maxPixelSize: maxPixelSize) {
+                return mem
+            }
+        }
+        if Task.isCancelled { return nil }
+        let isThumbBucket = maxPixelSize <= 900
+        let primaryKey = keys[0]
+        let diskThumbURL = isThumbBucket
+            ? cacheDirectoryURL.appendingPathComponent(diskFileName(for: "\(primaryKey)#thumb_v1_\(maxPixelSize)"))
+            : nil
+        let fileURLs = keys.map { cacheDirectoryURL.appendingPathComponent(diskFileName(for: $0)) }
+        return await runOnDecodeQueue(priority: priority) { [weak self] op in
+            if op?.isCancelled == true { return nil }
+            guard let self else { return nil }
+            for key in keys {
+                if let mem = self.cgImageFromMemory(for: key, maxPixelSize: maxPixelSize) {
+                    return mem
                 }
             }
+            let memCache = self.targetCGMemoryCache(for: maxPixelSize)
+            if let diskThumbURL,
+               let thumbCG = self.decodeCGThumbnail(fromURL: diskThumbURL, maxPixelSize: maxPixelSize, isPreThumb: true) {
+                self.diskQueue.async { [weak self] in
+                    self?.touchIfStale(diskThumbURL)
+                }
+                let cost = self.decodedByteCost(for: thumbCG)
+                for key in keys {
+                    memCache.setObject(thumbCG, forKey: self.cgCacheKey(for: key, maxPixelSize: maxPixelSize), cost: cost)
+                }
+                return thumbCG
+            }
+
+            for (idx, fileURL) in fileURLs.enumerated() {
+                if op?.isCancelled == true { return nil }
+                guard let cgImg = self.decodeCGThumbnail(fromURL: fileURL, maxPixelSize: maxPixelSize) else {
+                    continue
+                }
+                let sourceBytes = self.fileByteSize(at: fileURL)
+                self.diskQueue.async { [weak self] in
+                    self?.touchIfStale(fileURL)
+                    if let self, let diskThumbURL, sourceBytes > 220_000, !ScrollActivityTracker.isScrolling {
+                        self.persistDiskThumbnail(cgImg, to: diskThumbURL)
+                    }
+                }
+                let cost = self.decodedByteCost(for: cgImg)
+                memCache.setObject(cgImg, forKey: self.cgCacheKey(for: primaryKey, maxPixelSize: maxPixelSize), cost: cost)
+                if idx > 0 {
+                    memCache.setObject(cgImg, forKey: self.cgCacheKey(for: keys[idx], maxPixelSize: maxPixelSize), cost: cost)
+                }
+                return cgImg
+            }
+            return nil
         }
     }
 
@@ -106,7 +399,7 @@ public final class ArtworkImageCache: @unchecked Sendable {
             let fileURL = cacheDirectoryURL.appendingPathComponent(diskFileName(for: key))
             if let data = try? Data(contentsOf: fileURL),
                let img = NSImage(data: data) {
-                memoryCache.setObject(img, forKey: key as NSString, cost: data.count)
+                memoryCache.setObject(img, forKey: key as NSString, cost: decodedByteCost(for: img, fallbackBytes: data.count))
                 return img
             }
         }
@@ -114,9 +407,19 @@ public final class ArtworkImageCache: @unchecked Sendable {
     }
 
     public func store(_ image: NSImage, for key: String, aliases: [String] = []) {
-        memoryCache.setObject(image, forKey: key as NSString)
+        let cost = decodedByteCost(for: image, fallbackBytes: 256 * 1024)
+        memoryCache.setObject(image, forKey: key as NSString, cost: cost)
+        let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        if let cg {
+            let px = max(cg.width, cg.height)
+            targetCGMemoryCache(for: px).setObject(cg, forKey: cgCacheKey(for: key, maxPixelSize: px), cost: decodedByteCost(for: cg))
+        }
         for alias in aliases where !alias.isEmpty {
-            memoryCache.setObject(image, forKey: alias as NSString)
+            memoryCache.setObject(image, forKey: alias as NSString, cost: cost)
+            if let cg {
+                let px = max(cg.width, cg.height)
+                targetCGMemoryCache(for: px).setObject(cg, forKey: cgCacheKey(for: alias, maxPixelSize: px), cost: decodedByteCost(for: cg))
+            }
         }
         diskQueue.async { [weak self, cacheDirectoryURL] in
             guard let tiff = image.tiffRepresentation,
@@ -134,9 +437,10 @@ public final class ArtworkImageCache: @unchecked Sendable {
     public func storeRawData(_ data: Data, for key: String, maxPixelSize: Int = 500, aliases: [String] = []) -> NSImage? {
         let decoded = decodeThumbnail(from: data, maxPixelSize: maxPixelSize) ?? NSImage(data: data)
         if let decoded {
-            memoryCache.setObject(decoded, forKey: key as NSString, cost: data.count / 4)
+            let cost = decodedByteCost(for: decoded, fallbackBytes: data.count)
+            memoryCache.setObject(decoded, forKey: key as NSString, cost: cost)
             for alias in aliases where !alias.isEmpty {
-                memoryCache.setObject(decoded, forKey: alias as NSString, cost: data.count / 4)
+                memoryCache.setObject(decoded, forKey: alias as NSString, cost: cost)
             }
         }
         diskQueue.async { [weak self, cacheDirectoryURL] in
@@ -148,27 +452,83 @@ public final class ArtworkImageCache: @unchecked Sendable {
     }
 
     public func storeRawDataAsync(_ data: Data, for key: String, maxPixelSize: Int = 500, aliases: [String] = []) async -> NSImage? {
-        await withCheckedContinuation { continuation in
-            decodeQueue.async { [weak self] in
-                guard let self else {
-                    continuation.resume(returning: nil)
-                    return
+        await runOnDecodeQueue { [weak self] op in
+            if op?.isCancelled == true { return nil }
+            guard let self else { return nil }
+            let decoded = self.decodeThumbnail(from: data, maxPixelSize: maxPixelSize) ?? NSImage(data: data)
+            if let decoded {
+                let cost = self.decodedByteCost(for: decoded, fallbackBytes: data.count)
+                self.memoryCache.setObject(decoded, forKey: key as NSString, cost: cost)
+                for alias in aliases where !alias.isEmpty {
+                    self.memoryCache.setObject(decoded, forKey: alias as NSString, cost: cost)
                 }
-                let decoded = self.decodeThumbnail(from: data, maxPixelSize: maxPixelSize) ?? NSImage(data: data)
-                if let decoded {
-                    self.memoryCache.setObject(decoded, forKey: key as NSString, cost: data.count / 4)
-                    for alias in aliases where !alias.isEmpty {
-                        self.memoryCache.setObject(decoded, forKey: alias as NSString, cost: data.count / 4)
-                    }
-                }
-                self.diskQueue.async { [weak self] in
-                    guard let self else { return }
-                    self.writeRawDataToDisk(data, baseDir: self.cacheDirectoryURL, key: key, aliases: aliases)
-                    self.recordDiskWriteAndPruneIfNeeded()
-                }
-                continuation.resume(returning: decoded)
             }
+            self.diskQueue.async { [weak self] in
+                guard let self else { return }
+                self.writeRawDataToDisk(data, baseDir: self.cacheDirectoryURL, key: key, aliases: aliases)
+                self.recordDiskWriteAndPruneIfNeeded()
+            }
+            return decoded
         }
+    }
+
+    public func storeRawDataCGAsync(
+        _ data: Data,
+        for key: String,
+        maxPixelSize: Int = 500,
+        aliases: [String] = [],
+        priority: Operation.QueuePriority = .normal
+    ) async -> CGImage? {
+        await runOnDecodeQueue(priority: priority) { [weak self] op in
+            if op?.isCancelled == true { return nil }
+            guard let self else { return nil }
+            let cgImg = self.decodeCGThumbnail(from: data, maxPixelSize: maxPixelSize)
+            if let cgImg {
+                let memCache = self.targetCGMemoryCache(for: maxPixelSize)
+                let cost = self.decodedByteCost(for: cgImg)
+                memCache.setObject(cgImg, forKey: self.cgCacheKey(for: key, maxPixelSize: maxPixelSize), cost: cost)
+                for alias in aliases where !alias.isEmpty {
+                    memCache.setObject(cgImg, forKey: self.cgCacheKey(for: alias, maxPixelSize: maxPixelSize), cost: cost)
+                }
+            }
+            let diskThumbURL = maxPixelSize <= 900
+                ? self.cacheDirectoryURL.appendingPathComponent(self.diskFileName(for: "\(key)#thumb_v1_\(maxPixelSize)"))
+                : nil
+            self.diskQueue.async { [weak self] in
+                guard let self else { return }
+                self.writeRawDataToDisk(data, baseDir: self.cacheDirectoryURL, key: key, aliases: aliases)
+                if let diskThumbURL, let cgImg, data.count > 140_000 {
+                    self.persistDiskThumbnail(cgImg, to: diskThumbURL)
+                }
+                self.recordDiskWriteAndPruneIfNeeded()
+            }
+            return cgImg
+        }
+    }
+
+    private func fileByteSize(at url: URL) -> Int64 {
+        var st = stat()
+        guard stat(url.path, &st) == 0 else { return 0 }
+        return Int64(st.st_size)
+    }
+
+    private func persistDiskThumbnail(_ image: CGImage, to url: URL) {
+        guard !fileManager.fileExists(atPath: url.path) else { return }
+        let hasAlpha: Bool = {
+            switch image.alphaInfo {
+            case .first, .last, .premultipliedFirst, .premultipliedLast, .alphaOnly:
+                return true
+            default:
+                return false
+            }
+        }()
+        let uti: CFString = (hasAlpha ? "public.png" : "public.jpeg") as CFString
+        let mdata = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(mdata, uti, 1, nil) else { return }
+        let props: CFDictionary? = hasAlpha ? nil : ([kCGImageDestinationLossyCompressionQuality: 0.86] as CFDictionary)
+        CGImageDestinationAddImage(dest, image, props)
+        guard CGImageDestinationFinalize(dest) else { return }
+        try? (mdata as Data).write(to: url, options: .atomic)
     }
 
     private func writeRawDataToDisk(_ data: Data, baseDir: URL, key: String, aliases: [String]) {
@@ -286,13 +646,13 @@ public final class ArtworkImageCache: @unchecked Sendable {
 private actor DownloadConcurrencyGate {
     private let limit: Int
     private var active: Int = 0
-    private var waiters: [(id: UUID, continuation: CheckedContinuation<Void, Error>)] = []
+    private var waiters: [(id: UUID, priority: Int, continuation: CheckedContinuation<Void, Error>)] = []
 
     init(limit: Int) {
         self.limit = limit
     }
 
-    func acquire() async throws {
+    func acquire(priority: Operation.QueuePriority = .normal) async throws {
         try Task.checkCancellation()
         if active < limit {
             active += 1
@@ -305,7 +665,7 @@ private actor DownloadConcurrencyGate {
                     cont.resume(throwing: CancellationError())
                     return
                 }
-                waiters.append((waiterId, cont))
+                waiters.append((waiterId, priority.rawValue, cont))
             }
         } onCancel: {
             Task { await self.cancelWaiter(id: waiterId) }
@@ -321,7 +681,13 @@ private actor DownloadConcurrencyGate {
 
     func release() {
         if !waiters.isEmpty {
-            let next = waiters.removeFirst()
+            var bestIdx = 0
+            var bestPri = waiters[0].priority
+            for idx in 1..<waiters.count where waiters[idx].priority > bestPri {
+                bestPri = waiters[idx].priority
+                bestIdx = idx
+            }
+            let next = waiters.remove(at: bestIdx)
             next.continuation.resume(returning: ())
             return
         }
@@ -344,7 +710,7 @@ private actor ArtworkDownloadCoordinator {
         self.session = session
     }
 
-    func download(for request: URLRequest) async throws -> (Data, URLResponse) {
+    func download(for request: URLRequest, priority: Operation.QueuePriority = .normal) async throws -> (Data, URLResponse) {
         try Task.checkCancellation()
         let key = request.url?.absoluteString ?? UUID().uuidString
         let entryId: UUID
@@ -357,7 +723,7 @@ private actor ArtworkDownloadCoordinator {
             let task = Task {
                 let result: Result<(Data, URLResponse), Error>
                 do {
-                    try await gate.acquire()
+                    try await gate.acquire(priority: priority)
                     do {
                         try Task.checkCancellation()
                         let response = try await session.data(for: request)
@@ -425,6 +791,7 @@ private actor ArtworkDownloadCoordinator {
 public final class ArtworkDownloadManager: @unchecked Sendable {
     public static let shared = ArtworkDownloadManager()
     private let coordinator: ArtworkDownloadCoordinator
+    fileprivate let cgLoadCoordinator = CGImageLoadCoordinator()
 
     private init() {
         let config = URLSessionConfiguration.default
@@ -435,8 +802,75 @@ public final class ArtworkDownloadManager: @unchecked Sendable {
         self.coordinator = ArtworkDownloadCoordinator(session: URLSession(configuration: config))
     }
 
-    public func download(for request: URLRequest) async throws -> (Data, URLResponse) {
-        try await coordinator.download(for: request)
+    public func download(for request: URLRequest, priority: Operation.QueuePriority = .normal) async throws -> (Data, URLResponse) {
+        try await coordinator.download(for: request, priority: priority)
+    }
+}
+
+private actor CGImageLoadCoordinator {
+    private struct InFlightEntry {
+        let id: UUID
+        let task: Task<Void, Never>
+        var waiters: [(id: UUID, continuation: CheckedContinuation<CGImage?, Never>)] = []
+    }
+
+    private var inFlight: [String: InFlightEntry] = [:]
+
+    func load(key: String, work: @escaping @Sendable () async -> CGImage?) async -> CGImage? {
+        if Task.isCancelled { return nil }
+        let entryId: UUID
+        if let existing = inFlight[key] {
+            entryId = existing.id
+        } else {
+            let newId = UUID()
+            let task = Task {
+                let img = await work()
+                self.complete(key: key, entryId: newId, result: img)
+            }
+            inFlight[key] = InFlightEntry(id: newId, task: task)
+            entryId = newId
+        }
+
+        let waiterId = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<CGImage?, Never>) in
+                if Task.isCancelled {
+                    cont.resume(returning: nil)
+                    cancelWaiterIfNeeded(key: key, entryId: entryId, waiterId: waiterId)
+                    return
+                }
+                guard var entry = inFlight[key], entry.id == entryId else {
+                    cont.resume(returning: nil)
+                    return
+                }
+                entry.waiters.append((waiterId, cont))
+                inFlight[key] = entry
+            }
+        } onCancel: {
+            Task { await self.cancelWaiterIfNeeded(key: key, entryId: entryId, waiterId: waiterId) }
+        }
+    }
+
+    private func complete(key: String, entryId: UUID, result: CGImage?) {
+        guard let entry = inFlight[key], entry.id == entryId else { return }
+        inFlight.removeValue(forKey: key)
+        for waiter in entry.waiters {
+            waiter.continuation.resume(returning: result)
+        }
+    }
+
+    private func cancelWaiterIfNeeded(key: String, entryId: UUID, waiterId: UUID) {
+        guard var entry = inFlight[key], entry.id == entryId else { return }
+        if let idx = entry.waiters.firstIndex(where: { $0.id == waiterId }) {
+            let waiter = entry.waiters.remove(at: idx)
+            waiter.continuation.resume(returning: nil)
+        }
+        if entry.waiters.isEmpty {
+            entry.task.cancel()
+            inFlight.removeValue(forKey: key)
+        } else {
+            inFlight[key] = entry
+        }
     }
 }
 
@@ -447,7 +881,7 @@ public struct MediaArtworkView: View {
     public var kind: EmbyImageKind = .primary
     public var maxWidth: Int = 600
 
-    @State private var loadedImage: NSImage? = nil
+    @State private var loadedImage: CGImage? = nil
 
     public init(
         server: EmbyServerConfig?,
@@ -461,12 +895,23 @@ public struct MediaArtworkView: View {
         self.maxWidth = maxWidth
     }
 
-    private var remoteURL: URL? {
-        guard let server, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return EmbyClient.shared.imageURL(server: server, item: item, kind: kind, maxWidth: maxWidth)
+    nonisolated public static func resolvedTargetPixelSize(kind: EmbyImageKind, maxWidth: Int) -> Int {
+        if kind == .backdrop && maxWidth >= 2400 {
+            return maxWidth
+        }
+        if kind == .backdrop && maxWidth >= 1200 {
+            return min(max(maxWidth, 1920), 2200)
+        }
+        if kind == .primary && maxWidth > 0 && maxWidth <= 480 {
+            return min(max(Int(Double(maxWidth) * 1.45), 360), 720)
+        }
+        if maxWidth > 0 {
+            return min(max(maxWidth, 280), 1200)
+        }
+        return 480
     }
 
-    private var candidateURLs: [URL] {
+    nonisolated public static func candidateURLs(server: EmbyServerConfig?, item: EmbyItem, kind: EmbyImageKind, maxWidth: Int) -> [URL] {
         guard let server, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
         var urls: [URL] = []
         if kind == .backdrop {
@@ -493,6 +938,13 @@ public struct MediaArtworkView: View {
                     urls.append(thumb)
                 }
             }
+            if (item.backdropImageTags ?? []).isEmpty,
+               item.imageTags?["Primary"] != nil,
+               (item.isFolder == true || (item.primaryImageAspectRatio ?? 0) >= 1.2) {
+                if let pUrl = EmbyClient.shared.imageURL(server: server, item: item, kind: .primary, maxWidth: maxWidth), !urls.contains(pUrl) {
+                    urls.append(pUrl)
+                }
+            }
             return urls
         }
 
@@ -515,14 +967,112 @@ public struct MediaArtworkView: View {
                     urls.append(sPrimary)
                 }
             }
+        } else if item.isFolder == true || item.type == "CollectionFolder" {
+            if let thumb = EmbyClient.shared.imageURL(server: server, itemId: item.id, kind: .thumb, maxWidth: maxWidth), !urls.contains(thumb) {
+                urls.append(thumb)
+            }
+            if let backdrop = EmbyClient.shared.imageURL(server: server, itemId: item.id, kind: .backdrop, maxWidth: maxWidth), !urls.contains(backdrop) {
+                urls.append(backdrop)
+            }
         }
         return urls
+    }
+
+    nonisolated public static func cacheKeys(for item: EmbyItem, kind: EmbyImageKind) -> [String] {
+        let primaryKey = "item_\(item.id)_\(kind.rawValue)"
+        if kind == .backdrop {
+            var keys = [primaryKey]
+            if item.isEpisode, let sId = item.seriesId {
+                keys.append("series_\(sId)_backdrop")
+            }
+            if (item.backdropImageTags ?? []).isEmpty,
+               item.imageTags?["Primary"] != nil,
+               (item.isFolder == true || (item.primaryImageAspectRatio ?? 0) >= 1.2) {
+                keys.append("item_\(item.id)_primary")
+            }
+            return keys
+        }
+        return [primaryKey, item.id]
+    }
+
+    nonisolated public static func cachedCGImageInMemory(item: EmbyItem, kind: EmbyImageKind, maxWidth: Int) -> CGImage? {
+        let targetPixelSize = resolvedTargetPixelSize(kind: kind, maxWidth: maxWidth)
+        for key in cacheKeys(for: item, kind: kind) {
+            if let cached = ArtworkImageCache.shared.cgImageFromMemory(for: key, maxPixelSize: targetPixelSize) {
+                return cached
+            }
+        }
+        return nil
+    }
+
+    nonisolated public static func loadOrFetchCGImage(
+        server: EmbyServerConfig?,
+        item: EmbyItem,
+        kind: EmbyImageKind,
+        maxWidth: Int,
+        priority: Operation.QueuePriority = .normal
+    ) async -> CGImage? {
+        if let mem = cachedCGImageInMemory(item: item, kind: kind, maxWidth: maxWidth) {
+            return mem
+        }
+        let targetPixelSize = resolvedTargetPixelSize(kind: kind, maxWidth: maxWidth)
+        let checkKeys = cacheKeys(for: item, kind: kind)
+        let primaryKey = checkKeys[0]
+        let bucket = targetPixelSize >= 2400 ? "uhd" : (targetPixelSize > 900 ? "full" : "thumb")
+        let coalesceKey = "\(primaryKey)#\(bucket)|\(server?.activeBaseURL ?? "")"
+
+        return await ArtworkDownloadManager.shared.cgLoadCoordinator.load(key: coalesceKey) {
+            if let mem = cachedCGImageInMemory(item: item, kind: kind, maxWidth: maxWidth) {
+                return mem
+            }
+            if let diskImg = await ArtworkImageCache.shared.cgImageFromDiskBatchAsync(
+                forKeys: checkKeys,
+                maxPixelSize: targetPixelSize,
+                priority: priority
+            ) {
+                return diskImg
+            }
+
+            guard let server, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            let urls = candidateURLs(server: server, item: item, kind: kind, maxWidth: maxWidth)
+            for url in urls {
+                if Task.isCancelled { return nil }
+                do {
+                    let req = EmbyClient.shared.makeImageRequest(url: url, server: server)
+                    let (data, resp) = try await ArtworkDownloadManager.shared.download(for: req, priority: priority)
+                    if Task.isCancelled { return nil }
+                    if let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
+                       data.count > 128 {
+                        var aliases = [url.absoluteString]
+                        if kind == .backdrop {
+                            if item.isEpisode, let sId = item.seriesId {
+                                aliases.append("series_\(sId)_backdrop")
+                            }
+                        } else {
+                            aliases.append(contentsOf: [item.id, "item_\(item.id)"])
+                        }
+                        if let decoded = await ArtworkImageCache.shared.storeRawDataCGAsync(
+                            data,
+                            for: primaryKey,
+                            maxPixelSize: targetPixelSize,
+                            aliases: aliases,
+                            priority: priority
+                        ) {
+                            return decoded
+                        }
+                    }
+                } catch {
+                    continue
+                }
+            }
+            return nil
+        }
     }
 
     public var body: some View {
         ZStack {
             if let img = resolvedImage {
-                Image(nsImage: img)
+                Image(decorative: img, scale: 2.0)
                     .resizable()
                     .scaledToFill()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -543,91 +1093,18 @@ public struct MediaArtworkView: View {
             if resolvedImage != nil {
                 return
             }
-            let primaryKey = "item_\(item.id)_\(kind.rawValue)"
-            let targetPixelSize: Int
-            if kind == .backdrop {
-                targetPixelSize = max(maxWidth * 2, 2880) // Full Retina/4K resolution for hero backdrop
-            } else if maxWidth > 0 {
-                targetPixelSize = min(maxWidth * 2, 1200)
-            } else {
-                targetPixelSize = 600
-            }
-
-            // 1. Fast background disk check with hardware downsampling
-            let checkKeys: [String]
-            if kind == .backdrop {
-                if item.isEpisode, let sId = item.seriesId {
-                    checkKeys = [primaryKey, "series_\(sId)_backdrop"]
-                } else {
-                    checkKeys = [primaryKey]
-                }
-            } else {
-                checkKeys = [primaryKey, item.id]
-            }
-
-            for key in checkKeys {
-                if Task.isCancelled { return }
-                if let diskImg = await ArtworkImageCache.shared.imageFromDiskAsync(for: key, maxPixelSize: targetPixelSize) {
-                    if !Task.isCancelled {
-                        await MainActor.run {
-                            self.loadedImage = diskImg
-                        }
-                    }
-                    return
-                }
-            }
-
-            guard let server, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            let urls = candidateURLs
-            for url in urls {
-                if Task.isCancelled { return }
-                do {
-                    let req = EmbyClient.shared.makeImageRequest(url: url, server: server)
-                    let (data, resp) = try await ArtworkDownloadManager.shared.download(for: req)
-                    if Task.isCancelled { return }
-                    if let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
-                       data.count > 128 {
-                        var aliases = [url.absoluteString]
-                        if kind == .backdrop {
-                            if item.isEpisode, let sId = item.seriesId {
-                                aliases.append("series_\(sId)_backdrop")
-                            }
-                        } else {
-                            aliases.append(contentsOf: [self.item.id, "item_\(self.item.id)"])
-                        }
-                        if let decoded = await ArtworkImageCache.shared.storeRawDataAsync(
-                            data,
-                            for: primaryKey,
-                            maxPixelSize: targetPixelSize,
-                            aliases: aliases
-                        ) {
-                            if !Task.isCancelled {
-                                await MainActor.run {
-                                    self.loadedImage = decoded
-                                }
-                            }
-                            return
-                        }
-                    }
-                } catch {
-                    continue
+            if let img = await Self.loadOrFetchCGImage(server: server, item: item, kind: kind, maxWidth: maxWidth, priority: .high),
+               !Task.isCancelled {
+                await MainActor.run {
+                    self.loadedImage = img
                 }
             }
         }
     }
 
-    private var resolvedImage: NSImage? {
+    private var resolvedImage: CGImage? {
         if let loadedImage { return loadedImage }
-        // Fast O(1) direct memory lookup (instant, zero candidate URLs allocations)
-        let primaryKey = "item_\(item.id)_\(kind.rawValue)"
-        if let cached = ArtworkImageCache.shared.imageFromMemory(for: primaryKey) { return cached }
-        if kind == .backdrop, item.isEpisode, let sId = item.seriesId {
-            if let sCached = ArtworkImageCache.shared.imageFromMemory(for: "series_\(sId)_backdrop") { return sCached }
-        }
-        if kind != .backdrop {
-            if let cached = ArtworkImageCache.shared.imageFromMemory(for: item.id) { return cached }
-        }
-        return nil
+        return Self.cachedCGImageInMemory(item: item, kind: kind, maxWidth: maxWidth)
     }
 }
 

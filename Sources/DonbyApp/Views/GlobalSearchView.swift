@@ -157,9 +157,11 @@ public struct GlobalSearchView: View {
                                         PosterCardView(
                                             item: item,
                                             width: 150,
+                                            appearance: appState.cardAppearance,
                                             onSelect: { appState.openDetail(for: item) },
                                             onPlay: { Task { await appState.startPlayback(item: item) } }
                                         )
+                                        .equatable()
                                     }
                                 }
                             }
@@ -291,9 +293,11 @@ public struct GlobalSearchView: View {
                             PosterCardView(
                                 item: item,
                                 width: 150,
+                                appearance: appState.cardAppearance,
                                 onSelect: { appState.openDetail(for: item) },
                                 onPlay: { Task { await appState.startPlayback(item: item) } }
                             )
+                            .equatable()
                         }
                     }
                 }

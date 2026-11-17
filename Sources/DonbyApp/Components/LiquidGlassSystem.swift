@@ -62,6 +62,10 @@ public struct DonbyVisualEffectView: NSViewRepresentable {
         nsView.material = material
         nsView.blendingMode = blendingMode
     }
+
+    public func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSVisualEffectView, context: Context) -> CGSize? {
+        proposal.replacingUnspecifiedDimensions()
+    }
 }
 
 public struct DonbyBackdropBlur: NSViewRepresentable {
@@ -86,6 +90,10 @@ public struct DonbyBackdropBlur: NSViewRepresentable {
     public func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
         nsView.material = material
         nsView.alphaValue = alpha
+    }
+
+    public func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSVisualEffectView, context: Context) -> CGSize? {
+        proposal.replacingUnspecifiedDimensions()
     }
 }
 

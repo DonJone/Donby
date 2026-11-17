@@ -43,6 +43,10 @@ private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
         coordinator.detach()
     }
 
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: AnchorNSView, context: Context) -> CGSize? {
+        proposal.replacingUnspecifiedDimensions()
+    }
+
     final class AnchorNSView: NSView {
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
@@ -101,7 +105,7 @@ private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
             }
 
             let localPt = view.convert(event.locationInWindow, from: nil)
-            guard view.bounds.contains(localPt) else {
+            guard view.visibleRect.contains(localPt) else {
                 return event
             }
 
@@ -149,22 +153,29 @@ private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
 public struct MainCarouselView: View {
     @EnvironmentObject private var appState: AppState
     public let items: [EmbyItem]
+    public var isScrollPaused: (() -> Bool)? = nil
     public let onPlay: (EmbyItem) -> Void
     public let onSelectDetail: (EmbyItem) -> Void
 
     @State private var currentIndex: Int = 0
-    @State private var isHovering: Bool = false
+    @State private var hoverBox = HoverStateBox()
     @State private var slideDirection: Int = 1
     @State private var lastManualInteraction: Date = .distantPast
 
-    private let timer = Timer.publish(every: 6.0, on: .main, in: .common).autoconnect()
+    private final class HoverStateBox {
+        var isHovering: Bool = false
+    }
+
+    private let timer = Timer.publish(every: 6.0, on: .main, in: .default).autoconnect()
 
     public init(
         items: [EmbyItem],
+        isScrollPaused: (() -> Bool)? = nil,
         onPlay: @escaping (EmbyItem) -> Void,
         onSelectDetail: @escaping (EmbyItem) -> Void
     ) {
         self.items = items
+        self.isScrollPaused = isScrollPaused
         self.onPlay = onPlay
         self.onSelectDetail = onSelectDetail
     }
@@ -324,7 +335,6 @@ public struct MainCarouselView: View {
                     onSwipePrev: { stepSlide(-1) }
                 )
             )
-            .onHover { isHovering = $0 }
             .gesture(
                 DragGesture(minimumDistance: 28)
                     .onEnded { val in
@@ -343,7 +353,6 @@ public struct MainCarouselView: View {
                         Circle()
                             .fill(idx == currentIndex ? Color.white : Color.white.opacity(0.36))
                             .frame(width: 7, height: 7)
-                            .shadow(color: Color.black.opacity(0.45), radius: 2, y: 1)
                             .contentShape(Circle())
                             .onTapGesture {
                                 slideDirection = idx >= currentIndex ? 1 : -1
@@ -367,11 +376,27 @@ public struct MainCarouselView: View {
                         lineWidth: 1
                     )
             )
-            .onHover { h in withAnimation(.easeInOut(duration: 0.2)) { isHovering = h } }
+            .onHover { hoverBox.isHovering = $0 }
             .onReceive(timer) { _ in
-                guard !isHovering && items.count > 1 && Date().timeIntervalSince(lastManualInteraction) > 5.0 else { return }
+                guard !(isScrollPaused?() ?? false) else { return }
+                guard !hoverBox.isHovering && items.count > 1 && Date().timeIntervalSince(lastManualInteraction) > 5.0 else { return }
                 slideDirection = 1
                 withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) { currentIndex = (currentIndex + 1) % items.count }
+            }
+            .task(id: "\(appState.activeServer?.activeBaseURL ?? "")|\(currentIndex)|\(items.count)") {
+                guard items.count > 1 else { return }
+                let nextIdx = (currentIndex + 1) % items.count
+                let nextItem = items[nextIdx]
+                let server = appState.activeServer
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                guard !Task.isCancelled else { return }
+                _ = await MediaArtworkView.loadOrFetchCGImage(
+                    server: server,
+                    item: nextItem,
+                    kind: .backdrop,
+                    maxWidth: 1600,
+                    priority: .low
+                )
             }
         }
     }
