@@ -471,6 +471,35 @@ public final class AppState: ObservableObject {
         scheduleSaveWatchHistory(immediate: true)
     }
 
+    public func formattedWatchRecordMetadata(
+        for item: EmbyItem,
+        resolvedSeriesName: String? = nil
+    ) -> (title: String, subtitle: String?) {
+        if item.isEpisode {
+            let seriesName = [
+                resolvedSeriesName,
+                item.seriesName,
+                cachedSeriesNames[item.id],
+                item.seriesId.flatMap { cachedSeriesNames[$0] }
+            ]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+
+            let recTitle = seriesName ?? item.name
+            var subParts: [String] = []
+            if let code = item.episodeCodeString, !code.isEmpty {
+                subParts.append(code)
+            }
+            if !item.name.isEmpty && !subParts.contains(item.name) && item.name != recTitle {
+                subParts.append(item.name)
+            }
+            let recSubtitle = subParts.isEmpty ? item.resolutionBadge : subParts.joined(separator: " · ")
+            return (recTitle, recSubtitle)
+        }
+        let recSubtitle = item.displaySubtitle.isEmpty ? item.resolutionBadge : item.displaySubtitle
+        return (item.name, recSubtitle)
+    }
+
     public func flushWatchHistory() {
         saveWatchHistoryTask?.cancel()
         saveWatchHistoryTask = nil
@@ -1129,8 +1158,12 @@ public final class AppState: ObservableObject {
         Task {
             if let counts = try? await EmbyClient.shared.fetchCounts(server: server),
                let idx = self.servers.firstIndex(where: { $0.id == server.id }) {
-                self.servers[idx].movieCount = counts.movieCount ?? self.servers[idx].movieCount
-                self.servers[idx].episodeCount = counts.episodeCount ?? counts.seriesCount ?? self.servers[idx].episodeCount
+                let newMovies = counts.movieCount ?? self.servers[idx].movieCount
+                let newEpisodes = counts.episodeCount ?? counts.seriesCount ?? self.servers[idx].episodeCount
+                if self.servers[idx].movieCount != newMovies || self.servers[idx].episodeCount != newEpisodes {
+                    self.servers[idx].movieCount = newMovies
+                    self.servers[idx].episodeCount = newEpisodes
+                }
             }
         }
 
@@ -1179,7 +1212,9 @@ public final class AppState: ObservableObject {
             }
 
             guard currentGen == homeLoadGeneration else { return }
-            self.latestByLibrary = latestMap
+            if self.latestByLibrary != latestMap {
+                self.latestByLibrary = latestMap
+            }
             self.carouselItems = Array((heroCandidates.isEmpty ? resumes : heroCandidates).prefix(8))
 
             let snapshot = ServerHomeCacheStore.ServerHomeSnapshot(
@@ -1269,18 +1304,13 @@ public final class AppState: ObservableObject {
                     if let sid = targetItem.seriesId { cachedSeriesNames[sid] = s }
                     saveCachedSeriesNamesToDisk()
                 }
-                recTitle = (sName != nil && !sName!.isEmpty) ? sName! : targetItem.name
-                var subParts: [String] = []
-                if let code = targetItem.episodeCodeString, !code.isEmpty {
-                    subParts.append(code)
-                }
-                if !targetItem.name.isEmpty && !subParts.contains(targetItem.name) && targetItem.name != recTitle {
-                    subParts.append(targetItem.name)
-                }
-                recSubtitle = subParts.isEmpty ? targetItem.resolutionBadge : subParts.joined(separator: " · ")
+                let meta = formattedWatchRecordMetadata(for: targetItem, resolvedSeriesName: sName)
+                recTitle = meta.title
+                recSubtitle = meta.subtitle
             } else {
-                recTitle = targetItem.name
-                recSubtitle = targetItem.displaySubtitle.isEmpty ? targetItem.resolutionBadge : targetItem.displaySubtitle
+                let meta = formattedWatchRecordMetadata(for: targetItem)
+                recTitle = meta.title
+                recSubtitle = meta.subtitle
             }
 
             recordWatch(

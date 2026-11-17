@@ -11,6 +11,7 @@ public final class ArtworkImageCache: @unchecked Sendable {
     public static let shared = ArtworkImageCache()
     private let memoryCache = NSCache<NSString, NSImage>()
     private let diskQueue = DispatchQueue(label: "com.don.ArtworkDiskCache", qos: .utility)
+    private let decodeQueue = DispatchQueue(label: "com.don.ArtworkDecode", qos: .userInitiated, attributes: .concurrent)
     private let fileManager = FileManager.default
     private let cacheDirectoryURL: URL
     private var writesSinceLastPrune: Int = 0
@@ -77,13 +78,15 @@ public final class ArtworkImageCache: @unchecked Sendable {
         }
         let fileURL = cacheDirectoryURL.appendingPathComponent(diskFileName(for: key))
         return await withCheckedContinuation { continuation in
-            diskQueue.async { [weak self] in
+            decodeQueue.async { [weak self] in
                 guard let self else { continuation.resume(returning: nil); return }
                 guard let data = try? Data(contentsOf: fileURL) else {
                     continuation.resume(returning: nil)
                     return
                 }
-                self.touchIfStale(fileURL)
+                self.diskQueue.async { [weak self] in
+                    self?.touchIfStale(fileURL)
+                }
                 if let thumb = self.decodeThumbnail(from: data, maxPixelSize: maxPixelSize) {
                     self.memoryCache.setObject(thumb, forKey: key as NSString, cost: data.count / 4)
                     continuation.resume(returning: thumb)
@@ -122,12 +125,7 @@ public final class ArtworkImageCache: @unchecked Sendable {
                 return
             }
             guard let self else { return }
-            let fileURL = cacheDirectoryURL.appendingPathComponent(self.diskFileName(for: key))
-            try? data.write(to: fileURL, options: .atomic)
-            for alias in aliases where !alias.isEmpty {
-                let aliasURL = cacheDirectoryURL.appendingPathComponent(self.diskFileName(for: alias))
-                try? data.write(to: aliasURL, options: .atomic)
-            }
+            self.writeRawDataToDisk(data, baseDir: cacheDirectoryURL, key: key, aliases: aliases)
             self.recordDiskWriteAndPruneIfNeeded()
         }
     }
@@ -151,7 +149,7 @@ public final class ArtworkImageCache: @unchecked Sendable {
 
     public func storeRawDataAsync(_ data: Data, for key: String, maxPixelSize: Int = 500, aliases: [String] = []) async -> NSImage? {
         await withCheckedContinuation { continuation in
-            diskQueue.async { [weak self] in
+            decodeQueue.async { [weak self] in
                 guard let self else {
                     continuation.resume(returning: nil)
                     return
@@ -163,8 +161,11 @@ public final class ArtworkImageCache: @unchecked Sendable {
                         self.memoryCache.setObject(decoded, forKey: alias as NSString, cost: data.count / 4)
                     }
                 }
-                self.writeRawDataToDisk(data, baseDir: self.cacheDirectoryURL, key: key, aliases: aliases)
-                self.recordDiskWriteAndPruneIfNeeded()
+                self.diskQueue.async { [weak self] in
+                    guard let self else { return }
+                    self.writeRawDataToDisk(data, baseDir: self.cacheDirectoryURL, key: key, aliases: aliases)
+                    self.recordDiskWriteAndPruneIfNeeded()
+                }
                 continuation.resume(returning: decoded)
             }
         }
@@ -175,8 +176,12 @@ public final class ArtworkImageCache: @unchecked Sendable {
         try? data.write(to: fileURL, options: .atomic)
         for alias in aliases where !alias.isEmpty {
             let aliasURL = baseDir.appendingPathComponent(diskFileName(for: alias))
-            if !FileManager.default.fileExists(atPath: aliasURL.path) {
-                try? FileManager.default.linkItem(at: fileURL, to: aliasURL)
+            if aliasURL == fileURL { continue }
+            if fileManager.fileExists(atPath: aliasURL.path) {
+                try? fileManager.removeItem(at: aliasURL)
+            }
+            if (try? fileManager.linkItem(at: fileURL, to: aliasURL)) == nil {
+                try? data.write(to: aliasURL, options: .atomic)
             }
         }
     }
@@ -198,15 +203,24 @@ public final class ArtworkImageCache: @unchecked Sendable {
             }
             diskQueue.async { [weak self, cacheDirectoryURL] in
                 guard let self else { return }
+                let canonicalURL = cacheDirectoryURL.appendingPathComponent(self.diskFileName(for: canonicalKey))
+                if self.fileManager.fileExists(atPath: canonicalURL.path) {
+                    for alias in aliases where !alias.isEmpty {
+                        let aliasURL = cacheDirectoryURL.appendingPathComponent(self.diskFileName(for: alias))
+                        if aliasURL == canonicalURL { continue }
+                        if self.fileManager.fileExists(atPath: aliasURL.path) {
+                            try? self.fileManager.removeItem(at: aliasURL)
+                        }
+                        try? self.fileManager.linkItem(at: canonicalURL, to: aliasURL)
+                    }
+                    return
+                }
                 guard let tiff = img.tiffRepresentation,
                       let rep = NSBitmapImageRep(data: tiff),
                       let data = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.90]) else {
                     return
                 }
-                for alias in aliases where !alias.isEmpty {
-                    let aliasURL = cacheDirectoryURL.appendingPathComponent(self.diskFileName(for: alias))
-                    try? data.write(to: aliasURL, options: .atomic)
-                }
+                self.writeRawDataToDisk(data, baseDir: cacheDirectoryURL, key: canonicalKey, aliases: aliases)
                 self.recordDiskWriteAndPruneIfNeeded()
             }
         }

@@ -4,6 +4,7 @@ import DonbyCore
 public actor RedirectCacheStore {
     public static let shared = RedirectCacheStore()
     private var cache: [String: (url: URL, expiresAt: Date)] = [:]
+    private static let maxEntries = 256
 
     private init() {}
 
@@ -16,7 +17,15 @@ public actor RedirectCacheStore {
     }
 
     public func storeRedirect(_ url: URL, for key: String, ttlSeconds: TimeInterval = 1800) {
-        cache[key] = (url: url, expiresAt: Date().addingTimeInterval(ttlSeconds))
+        let now = Date()
+        if cache.count >= Self.maxEntries {
+            cache = cache.filter { $0.value.expiresAt > now }
+            if cache.count >= Self.maxEntries,
+               let oldestKey = cache.min(by: { $0.value.expiresAt < $1.value.expiresAt })?.key {
+                cache.removeValue(forKey: oldestKey)
+            }
+        }
+        cache[key] = (url: url, expiresAt: now.addingTimeInterval(ttlSeconds))
     }
 
     public func clearAll() {
@@ -35,7 +44,7 @@ public final class EmbyClient: Sendable {
 
     public let clientName = "Donby"
     public var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.16"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.17"
     }
     public let deviceName: String
     public let deviceId: String
@@ -695,18 +704,48 @@ public final class EmbyClient: Sendable {
     }
 
     private func probe302Redirect(url: URL, headers: [String: String]) async -> URL? {
-        var req = URLRequest(url: url)
-        req.httpMethod = "HEAD"
-        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
-        do {
-            let (_, resp) = try await noRedirectSession.data(for: req)
-            if let http = resp as? HTTPURLResponse, (300...399).contains(http.statusCode),
-               let loc = http.value(forHTTPHeaderField: "Location"),
-               let redirectURL = URL(string: loc, relativeTo: url)?.absoluteURL {
-                return redirectURL
+        var currentURL = url
+        var hop = 0
+        let maxHops = 3
+        while hop < maxHops {
+            var req = URLRequest(url: currentURL)
+            req.httpMethod = "HEAD"
+            if currentURL.host == url.host {
+                for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
             }
-        } catch { return nil }
-        return nil
+            guard let (_, resp) = try? await noRedirectSession.data(for: req),
+                  let http = resp as? HTTPURLResponse else {
+                break
+            }
+            if (300...399).contains(http.statusCode),
+               let loc = http.value(forHTTPHeaderField: "Location"),
+               let nextURL = URL(string: loc, relativeTo: currentURL)?.absoluteURL {
+                currentURL = nextURL
+                hop += 1
+                continue
+            }
+            if http.statusCode == 405 || http.statusCode == 501 {
+                var rangeReq = URLRequest(url: currentURL)
+                rangeReq.httpMethod = "GET"
+                rangeReq.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+                if currentURL.host == url.host {
+                    for (k, v) in headers { rangeReq.setValue(v, forHTTPHeaderField: k) }
+                }
+                if let (byteStream, getResp) = try? await noRedirectSession.bytes(for: rangeReq),
+                   let getHttp = getResp as? HTTPURLResponse {
+                    byteStream.task.cancel()
+                    if (300...399).contains(getHttp.statusCode),
+                       let loc = getHttp.value(forHTTPHeaderField: "Location"),
+                       let nextURL = URL(string: loc, relativeTo: currentURL)?.absoluteURL {
+                        currentURL = nextURL
+                        hop += 1
+                        continue
+                    }
+                }
+            }
+            break
+        }
+        return hop > 0 ? currentURL : nil
     }
 
     public func reportPlaybackStart(

@@ -1605,21 +1605,42 @@ public struct PlayerView: View {
         let audioIdx = selectedAudioIdx
         let subIdx = selectedSubIdx
         let enable302 = appState.enable302Cache
+        let prevItemId = currentItem.id
+        let prevSourceId = currentResource.mediaSource.id
+        let prevSessionId = currentResource.playSessionId
+        let prevPos = currentTime
+        saveCurrentWatchProgress(isFinal: true)
         episodeSwitchTask = Task {
-            guard let res = try? await EmbyClient.shared.resolvePlaybackResource(
-                server: server,
-                item: nextEp,
-                preferredPreset: preset,
-                audioStreamIndex: audioIdx,
-                subtitleStreamIndex: subIdx,
-                enable302Cache: enable302
-            ), !Task.isCancelled else {
-                return
+            do {
+                let res = try await EmbyClient.shared.resolvePlaybackResource(
+                    server: server,
+                    item: nextEp,
+                    preferredPreset: preset,
+                    audioStreamIndex: audioIdx,
+                    subtitleStreamIndex: subIdx,
+                    enable302Cache: enable302
+                )
+                guard !Task.isCancelled else { return }
+                if !server.host.isEmpty && !server.accessToken.isEmpty {
+                    Task {
+                        await EmbyClient.shared.reportPlaybackStopped(
+                            server: server,
+                            itemId: prevItemId,
+                            mediaSourceId: prevSourceId,
+                            playSessionId: prevSessionId,
+                            positionSeconds: prevPos
+                        )
+                    }
+                }
+                episodeSwitchTask = nil
+                currentItem = nextEp
+                currentResource = res
+                startNativeKernelPlayback(startSeconds: nextEp.resumePositionSeconds)
+            } catch {
+                guard !Task.isCancelled else { return }
+                episodeSwitchTask = nil
+                appState.showToast("切换剧集失败: \(error.localizedDescription)", icon: "exclamationmark.triangle.fill", isError: true)
             }
-            episodeSwitchTask = nil
-            currentItem = nextEp
-            currentResource = res
-            startNativeKernelPlayback(startSeconds: nextEp.resumePositionSeconds)
         }
     }
 
@@ -1689,31 +1710,10 @@ public struct PlayerView: View {
             let parsed = MediaTitleParser.parse(rawName: localPath.components(separatedBy: "/").last ?? currentItem.name)
             recTitle = parsed.mainTitle
             recSubtitle = parsed.subTitle
-        } else if currentItem.isEpisode {
-            let sName: String? = {
-                if let s = currentItem.seriesName, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    return s
-                }
-                if let s = appState.cachedSeriesNames[currentItem.id], !s.isEmpty {
-                    return s
-                }
-                if let sid = currentItem.seriesId, let s = appState.cachedSeriesNames[sid], !s.isEmpty {
-                    return s
-                }
-                return nil
-            }()
-            recTitle = sName ?? currentItem.name
-            var subParts: [String] = []
-            if let code = currentItem.episodeCodeString, !code.isEmpty {
-                subParts.append(code)
-            }
-            if !currentItem.name.isEmpty && !subParts.contains(currentItem.name) && currentItem.name != recTitle {
-                subParts.append(currentItem.name)
-            }
-            recSubtitle = subParts.isEmpty ? currentItem.resolutionBadge : subParts.joined(separator: " · ")
         } else {
-            recTitle = currentItem.name
-            recSubtitle = currentItem.displaySubtitle.isEmpty ? currentItem.resolutionBadge : currentItem.displaySubtitle
+            let meta = appState.formattedWatchRecordMetadata(for: currentItem)
+            recTitle = meta.title
+            recSubtitle = meta.subtitle
         }
 
         let resolvedSourceType = isLocal ? "本地文件" : (isEmby ? "Emby" : "网络直链")

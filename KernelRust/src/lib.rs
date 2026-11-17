@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
 struct CacheInner {
     current_bytes: usize,
-    chunks: BTreeMap<i64, Arc<Vec<u8>>>,
+    chunks: BTreeMap<i64, Arc<[u8]>>,
+    order: VecDeque<i64>,
 }
 
 pub struct DKRSArenaCache {
@@ -20,6 +21,7 @@ impl DKRSArenaCache {
             inner: RwLock::new(CacheInner {
                 current_bytes: 0,
                 chunks: BTreeMap::new(),
+                order: VecDeque::new(),
             }),
         }
     }
@@ -33,7 +35,8 @@ impl DKRSArenaCache {
             Err(_) => return 0,
         };
 
-        let chunk_start = (offset / self.chunk_size as i64) * self.chunk_size as i64;
+        let chunk_sz = self.chunk_size as i64;
+        let chunk_start = (offset / chunk_sz) * chunk_sz;
         if let Some(chunk_data) = guard.chunks.get(&chunk_start) {
             let inner_offset = (offset - chunk_start) as usize;
             if inner_offset < chunk_data.len() {
@@ -55,33 +58,36 @@ impl DKRSArenaCache {
             Err(_) => return,
         };
 
-        let chunk_start = (offset / self.chunk_size as i64) * self.chunk_size as i64;
+        let chunk_sz = self.chunk_size as i64;
+        let chunk_start = (offset / chunk_sz) * chunk_sz;
         if let Some(previous) = guard.chunks.remove(&chunk_start) {
             guard.current_bytes = guard.current_bytes.saturating_sub(previous.len());
+            if let Some(pos) = guard.order.iter().position(|&k| k == chunk_start) {
+                guard.order.remove(pos);
+            }
         }
 
-        let mut data = Vec::with_capacity(src.len());
-        data.extend_from_slice(src);
+        let data: Arc<[u8]> = Arc::from(src);
 
         // FIFO evict if capacity exceeded
         while guard.current_bytes + data.len() > self.capacity {
-            let Some(first_key) = guard.chunks.keys().next().copied() else {
+            let Some(oldest_key) = guard.order.pop_front() else {
                 break;
             };
-            if let Some(evicted) = guard.chunks.remove(&first_key) {
+            if let Some(evicted) = guard.chunks.remove(&oldest_key) {
                 guard.current_bytes = guard.current_bytes.saturating_sub(evicted.len());
-            } else {
-                break;
             }
         }
 
         guard.current_bytes += data.len();
-        guard.chunks.insert(chunk_start, Arc::new(data));
+        guard.chunks.insert(chunk_start, data);
+        guard.order.push_back(chunk_start);
     }
 
     pub fn clear(&self) {
         if let Ok(mut g) = self.inner.write() {
             g.chunks.clear();
+            g.order.clear();
             g.current_bytes = 0;
         }
     }
@@ -168,4 +174,68 @@ pub unsafe extern "C" fn dk_rs_check_dovi_fel(nalu_data: *const u8, nalu_len: us
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_read_write_and_partial_offset() {
+        let cache = DKRSArenaCache::new(64, 16);
+        cache.write(0, b"0123456789abcdef");
+        assert_eq!(cache.get_bytes(), 16);
+
+        let mut buf = [0u8; 6];
+        let n = cache.read(4, &mut buf);
+        assert_eq!(n, 6);
+        assert_eq!(&buf, b"456789");
+    }
+
+    #[test]
+    fn cache_evicts_oldest_not_lowest_offset() {
+        let cache = DKRSArenaCache::new(32, 16);
+        cache.write(160, &[1u8; 16]);
+        cache.write(0, &[2u8; 16]);
+        assert_eq!(cache.get_bytes(), 32);
+
+        // Seeking back to 0 and then writing 32 should evict 160 (oldest), keeping 0 and 32.
+        cache.write(32, &[3u8; 16]);
+        assert_eq!(cache.get_bytes(), 32);
+
+        let mut buf = [0u8; 16];
+        assert_eq!(cache.read(160, &mut buf), 0);
+        assert_eq!(cache.read(0, &mut buf), 16);
+        assert_eq!(buf, [2u8; 16]);
+        assert_eq!(cache.read(32, &mut buf), 16);
+        assert_eq!(buf, [3u8; 16]);
+    }
+
+    #[test]
+    fn cache_overwrite_and_clear() {
+        let cache = DKRSArenaCache::new(64, 16);
+        cache.write(0, &[1u8; 16]);
+        cache.write(0, &[9u8; 8]);
+        assert_eq!(cache.get_bytes(), 8);
+
+        let mut buf = [0u8; 8];
+        assert_eq!(cache.read(0, &mut buf), 8);
+        assert_eq!(buf, [9u8; 8]);
+
+        cache.clear();
+        assert_eq!(cache.get_bytes(), 0);
+        assert_eq!(cache.read(0, &mut buf), 0);
+    }
+
+    #[test]
+    fn dovi_fel_nalu_detection() {
+        let rpu_nal = [0x00, 0x00, 0x01, 62 << 1, 0xAA];
+        let hevc_idr = [0x00, 0x00, 0x01, 19 << 1, 0xBB];
+        unsafe {
+            assert!(dk_rs_check_dovi_fel(rpu_nal.as_ptr(), rpu_nal.len()));
+            assert!(!dk_rs_check_dovi_fel(hevc_idr.as_ptr(), hevc_idr.len()));
+            assert!(!dk_rs_check_dovi_fel(std::ptr::null(), 10));
+            assert!(!dk_rs_check_dovi_fel(rpu_nal.as_ptr(), 3));
+        }
+    }
 }

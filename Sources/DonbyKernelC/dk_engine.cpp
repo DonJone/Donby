@@ -220,7 +220,10 @@ struct DKPlayer {
     uint64_t rendered_pgs_gen{0};
     std::vector<uint8_t> sub_rgba_buf;
     uint64_t sub_serial{0};
+    uint64_t sub_read_order{0};
     bool sub_last_non_empty{false};
+    int sub_dirty_y0{0};
+    int sub_dirty_y1{0};
 
     // Worker Threads
     std::thread demux_thread;
@@ -230,6 +233,7 @@ struct DKPlayer {
     // Runtime Stats
     std::mutex stats_mtx;
     DKRuntimeStats stats{};
+    std::atomic<double> atomic_video_bitrate_mbps{0.0};
 
     // Download / Throughput Tracking
     std::mutex speed_mtx;
@@ -1049,6 +1053,10 @@ static void dk_audio_decode_worker(DKPlayer* player) {
             }
             if (ret == AVERROR_EOF) {
                 player->audio_eof.store(true);
+                if (!player->abort_requested.load() && !player->is_closing.load() &&
+                    !player->audio_queue_started.load() && player->buffered_audio_samples.load() > 0) {
+                    dk_start_audio_queue_with_buffered_data(player);
+                }
                 break;
             }
             if (ret < 0) break;
@@ -1304,7 +1312,14 @@ static void dk_video_decode_worker(DKPlayer* player) {
 
 static void dk_ensure_default_ass_track_header(DKPlayer* player) {
     if (!player || !player->ass_lib || !player->ass_track) return;
-    if (player->ass_track->n_styles > 0) return;
+    if (player->ass_track->event_format != nullptr) return;
+    if (player->ass_track->n_styles > 1) {
+        const char* events_hdr =
+            "[Events]\r\n"
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\r\n";
+        ass_process_codec_private(player->ass_track, const_cast<char*>(events_hdr), static_cast<int>(std::strlen(events_hdr)));
+        return;
+    }
     const char* default_hdr =
         "[Script Info]\r\n"
         "ScriptType: v4.00+\r\n"
@@ -1335,6 +1350,8 @@ static void dk_open_subtitle_decoder_locked(DKPlayer* player, int stream_idx) {
     player->rendered_pgs_gen = 0;
     player->has_bitmap_subs = false;
     player->sub_last_non_empty = false;
+    player->sub_dirty_y0 = 0;
+    player->sub_dirty_y1 = 0;
     player->sub_serial++;
 
     if (!player->format_ctx || stream_idx < 0 || static_cast<unsigned>(stream_idx) >= player->format_ctx->nb_streams) {
@@ -1536,7 +1553,7 @@ static void dk_decode_subtitle_packet(DKPlayer* player, AVPacket* pkt) {
                     if (clean_txt[k] == '\n') formatted += "\\N";
                     else formatted += clean_txt[k];
                 }
-                std::string chunk = "0,0,Default,,0,0,0,," + formatted;
+                std::string chunk = std::to_string(++player->sub_read_order) + ",0,Default,,0,0,0,," + formatted;
                 ass_process_chunk(player->ass_track, chunk.data(), static_cast<int>(chunk.size()), start_ms, dur_ms);
             }
         }
@@ -1596,13 +1613,28 @@ static void dk_demux_worker(DKPlayer* player) {
             }
             {
                 std::lock_guard<std::mutex> slk(player->ass_mtx);
-                if (player->sub_codec_ctx) avcodec_flush_buffers(player->sub_codec_ctx);
-                if (player->ass_track) ass_flush_events(player->ass_track);
-                player->pgs_cues.clear();
-                player->sub_rgba_buf.clear();
-                player->pgs_generation++;
+                if (player->sub_stream_idx.load(std::memory_order_relaxed) >= 0) {
+                    if (player->sub_codec_ctx) avcodec_flush_buffers(player->sub_codec_ctx);
+                    if (player->ass_track) ass_flush_events(player->ass_track);
+                    player->pgs_cues.clear();
+                    player->pgs_generation++;
+                }
+                if (!player->sub_rgba_buf.empty() && player->ass_canvas_w > 0 && player->ass_canvas_h > 0) {
+                    int y0 = std::clamp(player->sub_dirty_y0, 0, player->ass_canvas_h);
+                    int y1 = std::clamp(player->sub_dirty_y1, y0, player->ass_canvas_h);
+                    if (y1 > y0) {
+                        const size_t row_bytes = static_cast<size_t>(player->ass_canvas_w) * 4;
+                        const size_t offset = static_cast<size_t>(y0) * row_bytes;
+                        const size_t len = static_cast<size_t>(y1 - y0) * row_bytes;
+                        if (offset + len <= player->sub_rgba_buf.size()) {
+                            std::memset(player->sub_rgba_buf.data() + offset, 0, len);
+                        }
+                    }
+                }
                 player->rendered_pgs_gen = 0;
                 player->sub_last_non_empty = false;
+                player->sub_dirty_y0 = 0;
+                player->sub_dirty_y1 = 0;
                 player->sub_serial++;
             }
 
@@ -1648,7 +1680,11 @@ static void dk_demux_worker(DKPlayer* player) {
             }
 
             dk_log(0, "DKEngine: Seek completed to %.2fs (accurate=%d)", target_sec, accurate ? 1 : 0);
-            const bool was_paused = (player->state.load() == DK_STATE_PAUSED);
+            const DKPlayerState cur_st = player->state.load();
+            const bool was_paused = (cur_st == DK_STATE_PAUSED || cur_st == DK_STATE_ENDED);
+            if (cur_st == DK_STATE_ENDED) {
+                player->state.store(DK_STATE_PAUSED);
+            }
             player->seek_preview_pending.store(was_paused, std::memory_order_release);
             player->force_present_next_frame.store(true, std::memory_order_release);
             player->seek_requested.store(false);
@@ -2071,7 +2107,21 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
                     player->video_codec_ctx->thread_count = static_cast<int>(std::clamp<unsigned>(hc > 0 ? hc : 4, 2, 8));
                     player->video_codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
                 }
-                avcodec_open2(player->video_codec_ctx, dec, nullptr);
+                if (avcodec_open2(player->video_codec_ctx, dec, nullptr) < 0) {
+                    bool opened_sw = false;
+                    if (player->stats.is_hw_accelerated) {
+                        if (player->hw_device_ctx) {
+                            av_buffer_unref(&player->hw_device_ctx);
+                        }
+                        player->stats.is_hw_accelerated = false;
+                        opened_sw = dk_fallback_video_to_software(player);
+                    }
+                    if (!opened_sw) {
+                        avcodec_free_context(&player->video_codec_ctx);
+                        player->video_stream_idx = -1;
+                        continue;
+                    }
+                }
 
                 player->stats.width = st->codecpar->width;
                 player->stats.height = st->codecpar->height;
@@ -2088,6 +2138,7 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
                 } else if (player->format_ctx->bit_rate > 0) {
                     player->stats.video_bitrate_mbps = static_cast<double>(player->format_ctx->bit_rate) / 1000000.0;
                 }
+                player->atomic_video_bitrate_mbps.store(player->stats.video_bitrate_mbps, std::memory_order_relaxed);
 
                 bool is_hdr = false;
                 if (player->stats.is_dolby_vision) {
@@ -2126,6 +2177,9 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
                     std::snprintf(player->stats.audio_codec, sizeof(player->stats.audio_codec), "%s", dec->name);
                     dk_log(0, "DKEngine: Audio Stream #%u: %s (%d channels, %dHz)",
                            i, dec->name, st->codecpar->ch_layout.nb_channels, st->codecpar->sample_rate);
+                } else {
+                    avcodec_free_context(&player->audio_codec_ctx);
+                    player->audio_stream_idx = -1;
                 }
             }
         } else if (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE && player->sub_stream_idx < 0 &&
@@ -2279,6 +2333,7 @@ void dk_player_close(DKPlayer* player) {
     player->video_stream_idx = -1;
     player->audio_stream_idx = -1;
     player->sub_stream_idx = -1;
+    player->atomic_video_bitrate_mbps.store(0.0, std::memory_order_relaxed);
     player->audio_queue_started.store(false);
     player->state.store(DK_STATE_IDLE);
 }
@@ -2286,7 +2341,8 @@ void dk_player_close(DKPlayer* player) {
 void dk_player_play(DKPlayer* player) {
     DKReaderGuard guard(player);
     if (!guard) return;
-    if (player && player->state.load() == DK_STATE_PAUSED) {
+    DKPlayerState st = player->state.load();
+    if (st == DK_STATE_PAUSED || st == DK_STATE_ENDED) {
         player->state.store(DK_STATE_PLAYING);
         if (player->audio_queue && player->audio_queue_started.load()) {
             AudioQueueStart(player->audio_queue, nullptr);
@@ -2454,6 +2510,9 @@ void dk_player_select_track(DKPlayer* player, int track_type, int stream_index) 
                 }
                 std::lock_guard<std::mutex> lock(player->stats_mtx);
                 std::snprintf(player->stats.audio_codec, sizeof(player->stats.audio_codec), "%s", dec->name);
+            } else {
+                avcodec_free_context(&player->audio_codec_ctx);
+                player->audio_stream_idx.store(-1);
             }
         }
         player->seek_target_sec.store(cur_pts);
@@ -2535,6 +2594,8 @@ void dk_player_load_external_subtitle(DKPlayer* player, const char* content_utf8
     player->has_bitmap_subs = false;
     player->rendered_pgs_gen = 0;
     player->sub_last_non_empty = false;
+    player->sub_dirty_y0 = 0;
+    player->sub_dirty_y1 = 0;
     player->sub_serial++;
     if (player->ass_track) {
         ass_free_track(player->ass_track);
@@ -2566,7 +2627,7 @@ void dk_player_load_external_subtitle(DKPlayer* player, const char* content_utf8
     std::string cue_body;
     auto flush_cue = [&]() {
         if (cue_start >= 0 && cue_end > cue_start && !cue_body.empty()) {
-            std::string chunk = "0,0,Default,,0,0,0,," + dk_sanitize_srt_vtt_tags(cue_body);
+            std::string chunk = std::to_string(++player->sub_read_order) + ",0,Default,,0,0,0,," + dk_sanitize_srt_vtt_tags(cue_body);
             ass_process_chunk(player->ass_track, chunk.data(), static_cast<int>(chunk.size()), cue_start, cue_end - cue_start);
         }
         cue_start = cue_end = -1;
@@ -2716,6 +2777,29 @@ static bool dk_update_subtitle_rgba_locked(
     int32_t* out_h,
     uint64_t* out_serial
 ) {
+    auto clear_subtitle_canvas = [&](int target_w, int target_h) {
+        const size_t expected_bytes = static_cast<size_t>(target_w) * static_cast<size_t>(target_h) * 4;
+        if (player->sub_rgba_buf.size() != expected_bytes) {
+            player->sub_rgba_buf.resize(expected_bytes);
+            std::memset(player->sub_rgba_buf.data(), 0, expected_bytes);
+            player->sub_dirty_y0 = 0;
+            player->sub_dirty_y1 = 0;
+            return;
+        }
+        int y0 = std::clamp(player->sub_dirty_y0, 0, target_h);
+        int y1 = std::clamp(player->sub_dirty_y1, y0, target_h);
+        if (y1 > y0) {
+            const size_t row_bytes = static_cast<size_t>(target_w) * 4;
+            std::memset(
+                player->sub_rgba_buf.data() + static_cast<size_t>(y0) * row_bytes,
+                0,
+                static_cast<size_t>(y1 - y0) * row_bytes
+            );
+        }
+        player->sub_dirty_y0 = 0;
+        player->sub_dirty_y1 = 0;
+    };
+
     if (canvas_w > 1920) {
         canvas_h = std::max(1, (canvas_h * 1920) / canvas_w);
         canvas_w = 1920;
@@ -2736,6 +2820,9 @@ static bool dk_update_subtitle_rgba_locked(
         }
         if (!active_cue) {
             if (player->sub_last_non_empty) {
+                if (player->ass_canvas_w > 0 && player->ass_canvas_h > 0) {
+                    clear_subtitle_canvas(player->ass_canvas_w, player->ass_canvas_h);
+                }
                 player->sub_last_non_empty = false;
                 player->sub_serial++;
             }
@@ -2751,7 +2838,9 @@ static bool dk_update_subtitle_rgba_locked(
         if (player->rendered_pgs_gen != active_cue->id || player->ass_canvas_w != dst_w || player->ass_canvas_h != dst_h) {
             player->ass_canvas_w = dst_w;
             player->ass_canvas_h = dst_h;
-            player->sub_rgba_buf.assign(static_cast<size_t>(dst_w) * static_cast<size_t>(dst_h) * 4, 0);
+            clear_subtitle_canvas(dst_w, dst_h);
+            int new_y0 = dst_h;
+            int new_y1 = 0;
             for (const auto& r : active_cue->rects) {
                 int mapped_y = r.y - crop_top;
                 int base_y = std::clamp(mapped_y, 8, std::max(8, dst_h - r.h - 14));
@@ -2759,6 +2848,8 @@ static bool dk_update_subtitle_rgba_locked(
                 for (int y = 0; y < r.h; y++) {
                     int dy = base_y + y;
                     if (dy < 0 || dy >= dst_h) continue;
+                    new_y0 = std::min(new_y0, dy);
+                    new_y1 = std::max(new_y1, dy + 1);
                     for (int x = 0; x < r.w; x++) {
                         int dx = base_x + x;
                         if (dx < 0 || dx >= dst_w) continue;
@@ -2771,6 +2862,10 @@ static bool dk_update_subtitle_rgba_locked(
                         dp[3] = static_cast<uint8_t>(std::min(255, sp[3] + (dp[3] * inv_a + 127) / 255));
                     }
                 }
+            }
+            if (new_y1 > new_y0) {
+                player->sub_dirty_y0 = new_y0;
+                player->sub_dirty_y1 = new_y1;
             }
             player->rendered_pgs_gen = active_cue->id;
             player->sub_last_non_empty = true;
@@ -2785,6 +2880,9 @@ static bool dk_update_subtitle_rgba_locked(
 
     if (!player->ass_renderer || !player->ass_track) {
         if (player->sub_last_non_empty) {
+            if (player->ass_canvas_w > 0 && player->ass_canvas_h > 0) {
+                clear_subtitle_canvas(player->ass_canvas_w, player->ass_canvas_h);
+            }
             player->sub_last_non_empty = false;
             player->sub_serial++;
             *out_serial = player->sub_serial;
@@ -2794,6 +2892,8 @@ static bool dk_update_subtitle_rgba_locked(
     if (player->ass_canvas_w != canvas_w || player->ass_canvas_h != canvas_h) {
         player->ass_canvas_w = canvas_w;
         player->ass_canvas_h = canvas_h;
+        player->sub_dirty_y0 = 0;
+        player->sub_dirty_y1 = 0;
         ass_set_frame_size(player->ass_renderer, canvas_w, canvas_h);
         ass_set_storage_size(player->ass_renderer, canvas_w, canvas_h);
     }
@@ -2803,6 +2903,7 @@ static bool dk_update_subtitle_rgba_locked(
     ASS_Image* img = ass_render_frame(player->ass_renderer, player->ass_track, now_ms, &change);
     if (!img) {
         if (player->sub_last_non_empty) {
+            clear_subtitle_canvas(canvas_w, canvas_h);
             player->sub_last_non_empty = false;
             player->sub_serial++;
         }
@@ -2811,7 +2912,9 @@ static bool dk_update_subtitle_rgba_locked(
     }
 
     if (change != 0 || !player->sub_last_non_empty || player->sub_rgba_buf.size() != static_cast<size_t>(canvas_w) * canvas_h * 4) {
-        player->sub_rgba_buf.assign(static_cast<size_t>(canvas_w) * canvas_h * 4, 0);
+        clear_subtitle_canvas(canvas_w, canvas_h);
+        int new_y0 = canvas_h;
+        int new_y1 = 0;
         for (ASS_Image* cur = img; cur != nullptr; cur = cur->next) {
             if (cur->w <= 0 || cur->h <= 0 || !cur->bitmap) continue;
             uint8_t cr = (cur->color >> 24) & 0xFF;
@@ -2833,6 +2936,8 @@ static bool dk_update_subtitle_rgba_locked(
             for (int y = 0; y < cur->h; y++) {
                 int dy = cur->dst_y + y;
                 if (dy < 0 || dy >= canvas_h) continue;
+                new_y0 = std::min(new_y0, dy);
+                new_y1 = std::max(new_y1, dy + 1);
                 const uint8_t* mask_row = cur->bitmap + y * cur->stride;
                 uint8_t* dst_row = player->sub_rgba_buf.data() + static_cast<size_t>(dy) * canvas_w * 4;
                 for (int x = 0; x < cur->w; x++) {
@@ -2852,6 +2957,10 @@ static bool dk_update_subtitle_rgba_locked(
                     dp[3] = static_cast<uint8_t>(std::min<uint32_t>(255, a + (dp[3] * inv_a + 127) / 255));
                 }
             }
+        }
+        if (new_y1 > new_y0) {
+            player->sub_dirty_y0 = new_y0;
+            player->sub_dirty_y1 = new_y1;
         }
         player->sub_last_non_empty = true;
         player->sub_serial++;
@@ -2960,8 +3069,9 @@ double dk_player_get_buffered_duration(DKPlayer* player) {
 
     const int64_t queued_bytes = std::max<int64_t>(0, player->queued_pkt_bytes.load(std::memory_order_relaxed));
     double bitrate_bps = 25.0 * 1024.0 * 1024.0;
-    if (player->stats.video_bitrate_mbps > 0.1) {
-        bitrate_bps = player->stats.video_bitrate_mbps * 1000000.0;
+    const double measured_mbps = player->atomic_video_bitrate_mbps.load(std::memory_order_relaxed);
+    if (measured_mbps > 0.1) {
+        bitrate_bps = measured_mbps * 1000000.0;
     }
     const double pkt_bytes_sec = static_cast<double>(queued_bytes) / (bitrate_bps / 8.0);
 

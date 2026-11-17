@@ -6,17 +6,34 @@ cd "$(dirname "$0")"
 echo "==> Building native playback kernel..."
 ./build_kernel.sh
 
-SDK_PATH="/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk"
-if [ ! -d "$SDK_PATH" ]; then
+DEV_DIR="$(xcode-select -p 2>/dev/null || true)"
+if [ -n "${DONBY_SDK_PATH:-}" ] && [ -d "${DONBY_SDK_PATH}" ]; then
+    SDK_PATH="${DONBY_SDK_PATH}"
+elif [ "$DEV_DIR" = "/Library/Developer/CommandLineTools" ]; then
     SDK_PATH="$(xcrun --show-sdk-path)"
+    CLT_PLUGINS="/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins"
+    FALLBACK_SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk"
+    if [ ! -f "${CLT_PLUGINS}/libSwiftUIMacros.dylib" ] && \
+       grep -q "SwiftUIMacros" "${SDK_PATH}/System/Library/Frameworks/SwiftUICore.framework/Versions/A/Modules/SwiftUICore.swiftmodule/"*.swiftinterface 2>/dev/null && \
+       [ -d "$FALLBACK_SDK" ]; then
+        echo "==> Note: CLT SDK $(basename "$SDK_PATH") requires SwiftUIMacros (Xcode plugin); using $(basename "$FALLBACK_SDK")"
+        SDK_PATH="$FALLBACK_SDK"
+    fi
+else
+    SDK_PATH="$(xcrun --show-sdk-path)"
+fi
+if [ ! -d "$SDK_PATH" ]; then
+    echo "ERROR: Valid macOS SDK not found: $SDK_PATH" >&2
+    exit 1
 fi
 
 echo "==> Building Donby release binary..."
 swift build --sdk "$SDK_PATH" -c release
 
 BIN_PATH="$(swift build --sdk "$SDK_PATH" -c release --show-bin-path)/Donby"
-APP_DIR="Donby.app"
+APP_DIR="${DONBY_APP_DIR:-Donby.app}"
 
+mkdir -p "$(dirname "$APP_DIR")"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
@@ -31,8 +48,8 @@ if [ -f "Resources/AppIcon.icns" ]; then
 fi
 cp Resources/uhdnow_*.png "$APP_DIR/Contents/Resources/" 2>/dev/null || true
 
-APP_VERSION="${DONBY_VERSION:-1.3.16}"
-BUILD_NUMBER="${DONBY_BUILD_NUMBER:-$(date +%Y%m%d%H%M)}"
+APP_VERSION="${DONBY_VERSION:-1.3.17}"
+BUILD_NUMBER="${DONBY_BUILD_NUMBER:-$(date -u +%Y%m%d%H%M)}"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -94,4 +111,11 @@ fi
 
 codesign --force --deep --sign - "$APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"
-echo "==> Packaged and signed: $(pwd)/$APP_DIR"
+ABS_APP_DIR="$(cd "$(dirname "$APP_DIR")" && pwd)/$(basename "$APP_DIR")"
+if [ -z "${CI:-}" ] && [ "$ABS_APP_DIR" != "/Applications/Donby.app" ]; then
+    LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+    if [ -x "$LSREGISTER" ]; then
+        "$LSREGISTER" -u "$ABS_APP_DIR" >/dev/null 2>&1 || true
+    fi
+fi
+echo "==> Packaged and signed: ${ABS_APP_DIR}"

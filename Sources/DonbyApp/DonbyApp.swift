@@ -14,23 +14,56 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
 
+        let bundlePath = Bundle.main.bundlePath
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.don.Donby"
+        let userApps = (NSHomeDirectory() as NSString).appendingPathComponent("Applications")
+        let canonicalPaths: Set<String> = [
+            "/Applications/Donby.app",
+            (userApps as NSString).appendingPathComponent("Donby.app")
+        ]
+        guard canonicalPaths.contains(bundlePath) else { return }
+
         DispatchQueue.global(qos: .utility).async {
-            let bundlePath = Bundle.main.bundlePath
             let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-            if FileManager.default.fileExists(atPath: lsregister) {
+            let fileMgr = FileManager.default
+            let hasLsregister = fileMgr.isExecutableFile(atPath: lsregister)
+
+            @Sendable func runLsregister(_ args: [String]) {
+                guard hasLsregister else { return }
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: lsregister)
-                process.arguments = ["-f", bundlePath]
+                process.arguments = args
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
                 try? process.run()
+                process.waitUntilExit()
             }
-            if bundlePath == "/Applications/Donby.app" {
-                let fileMgr = FileManager.default
-                for extra in ["/Applications/Donby 2.app", "/Applications/Donby 3.app"] {
-                    if fileMgr.fileExists(atPath: extra) {
-                        try? fileMgr.removeItem(atPath: extra)
-                    }
+
+            let parentDir = (bundlePath as NSString).deletingLastPathComponent
+            for extraName in ["Donby 2.app", "Donby 3.app"] {
+                let extra = (parentDir as NSString).appendingPathComponent(extraName)
+                if fileMgr.fileExists(atPath: extra) {
+                    runLsregister(["-u", extra])
+                    try? fileMgr.removeItem(atPath: extra)
                 }
             }
+
+            if let volumes = try? fileMgr.contentsOfDirectory(atPath: "/Volumes") {
+                for vol in volumes where vol == "Donby" || vol.hasPrefix("Donby ") {
+                    runLsregister(["-u", "/Volumes/\(vol)/Donby.app"])
+                }
+            } else {
+                runLsregister(["-u", "/Volumes/Donby/Donby.app"])
+            }
+
+            let registeredPaths = NSWorkspace.shared.urlsForApplications(withBundleIdentifier: bundleID).map(\.path)
+            for candidate in registeredPaths where candidate != bundlePath {
+                if candidate.hasPrefix("/Volumes/") || !fileMgr.fileExists(atPath: candidate) {
+                    runLsregister(["-u", candidate])
+                }
+            }
+
+            runLsregister(["-f", bundlePath])
         }
     }
 

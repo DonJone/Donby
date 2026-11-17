@@ -3,22 +3,29 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-VERSION="${DONBY_VERSION:-1.3.16}"
+VERSION="${DONBY_VERSION:-1.3.17}"
 ARCH="$(uname -m)"
 APP_NAME="Donby"
-APP_DIR="${APP_NAME}.app"
 DIST_DIR="dist"
 DMG_NAME="${APP_NAME}-${VERSION}-macOS-${ARCH}.dmg"
 DMG_PATH="${DIST_DIR}/${DMG_NAME}"
 
-echo "==> [1/4] Building standalone ${APP_DIR} (v${VERSION}, ${ARCH})..."
-DONBY_VERSION="$VERSION" BUNDLE_DYLIBS=1 ./build_app.sh
-
-echo "==> [2/4] Preparing DMG staging folder..."
 STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/donby-dmg.XXXXXX")"
 trap 'rm -rf "$STAGING_DIR"' EXIT
 
-cp -R "$APP_DIR" "${STAGING_DIR}/${APP_NAME}.app"
+if [ -n "${CI:-}" ]; then
+    APP_DIR="${APP_NAME}.app"
+else
+    APP_DIR="${STAGING_DIR}/${APP_NAME}.app"
+fi
+
+echo "==> [1/4] Building standalone ${APP_DIR} (v${VERSION}, ${ARCH})..."
+DONBY_VERSION="$VERSION" DONBY_APP_DIR="$APP_DIR" BUNDLE_DYLIBS=1 ./build_app.sh
+
+echo "==> [2/4] Preparing DMG staging folder..."
+if [ "$APP_DIR" != "${STAGING_DIR}/${APP_NAME}.app" ]; then
+    cp -R "$APP_DIR" "${STAGING_DIR}/${APP_NAME}.app"
+fi
 ln -s /Applications "${STAGING_DIR}/Applications"
 
 if [ -f "Resources/AppIcon.icns" ]; then
