@@ -37,6 +37,7 @@ final class HorizontalShelfScrollView: NSScrollView {
             nextResponder?.scrollWheel(with: event)
             return
         }
+        (documentView as? InteractiveCollectionView)?.clearHover()
         super.scrollWheel(with: event)
     }
 }
@@ -54,7 +55,7 @@ final class InteractiveCollectionView: NSCollectionView {
     var canHover: (() -> Bool)?
     private var hoverTrackingArea: NSTrackingArea?
     private weak var activeHoveredItem: (any HoverableCollectionItem)?
-    private var mouseDownPoint: NSPoint?
+    private var mouseDownWindowPoint: NSPoint?
     private weak var mouseDownItem: (any HoverableCollectionItem)?
 
     override func updateTrackingAreas() {
@@ -77,14 +78,28 @@ final class InteractiveCollectionView: NSCollectionView {
         activeHoveredItem = nil
     }
 
+    // LayerOnlyCellRootView returns nil from hitTest for fast 120Hz scrolling, which also makes
+    // NSCollectionView.indexPathForItem(at:) return nil on AppKit, so resolve against visibleItems directly.
+    private func hoverableItem(at point: NSPoint) -> (any HoverableCollectionItem)? {
+        for cell in visibleItems().reversed() {
+            guard let hoverable = cell as? any HoverableCollectionItem,
+                  cell.view.superview != nil,
+                  !cell.view.isHidden else { continue }
+            let localPoint = cell.view.convert(point, from: self)
+            if cell.view.bounds.contains(localPoint) {
+                return hoverable
+            }
+        }
+        return nil
+    }
+
     override func mouseMoved(with event: NSEvent) {
         guard canHover?() ?? true else {
             clearHover()
             return
         }
         let point = convert(event.locationInWindow, from: nil)
-        guard let indexPath = indexPathForItem(at: point),
-              let cell = item(at: indexPath) as? any HoverableCollectionItem else {
+        guard let cell = hoverableItem(at: point) else {
             clearHover()
             return
         }
@@ -95,9 +110,9 @@ final class InteractiveCollectionView: NSCollectionView {
         }
         if activeHoveredItem !== cell {
             activeHoveredItem?.setHovered(false)
-            cell.setHovered(true)
             activeHoveredItem = cell
         }
+        cell.setHovered(true)
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -106,27 +121,27 @@ final class InteractiveCollectionView: NSCollectionView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        if let indexPath = indexPathForItem(at: point),
-           let cell = item(at: indexPath) as? any HoverableCollectionItem {
-            mouseDownPoint = point
+        if let cell = hoverableItem(at: point) {
+            mouseDownWindowPoint = event.locationInWindow
             mouseDownItem = cell
             return
         }
-        mouseDownPoint = nil
+        mouseDownWindowPoint = nil
         mouseDownItem = nil
         super.mouseDown(with: event)
     }
 
     override func mouseUp(with event: NSEvent) {
-        guard let downPoint = mouseDownPoint, let targetCell = mouseDownItem else {
+        guard let downPoint = mouseDownWindowPoint, let targetCell = mouseDownItem else {
             super.mouseUp(with: event)
             return
         }
-        mouseDownPoint = nil
+        mouseDownWindowPoint = nil
         mouseDownItem = nil
         guard targetCell.view.superview != nil else { return }
-        let upPoint = convert(event.locationInWindow, from: nil)
-        guard hypot(upPoint.x - downPoint.x, upPoint.y - downPoint.y) < 6 else { return }
+        let upWindowPoint = event.locationInWindow
+        guard hypot(upWindowPoint.x - downPoint.x, upWindowPoint.y - downPoint.y) < 6 else { return }
+        let upPoint = convert(upWindowPoint, from: nil)
         let localPoint = targetCell.view.convert(upPoint, from: self)
         targetCell.handleClick(at: localPoint)
     }

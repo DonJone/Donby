@@ -44,7 +44,7 @@ public final class EmbyClient: Sendable {
 
     public let clientName = "Donby"
     public var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.19"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.20"
     }
     public let deviceName: String
     public let deviceId: String
