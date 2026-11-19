@@ -44,7 +44,7 @@ public final class EmbyClient: Sendable {
 
     public let clientName = "Donby"
     public var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.20"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.21"
     }
     public let deviceName: String
     public let deviceId: String
@@ -159,10 +159,44 @@ public final class EmbyClient: Sendable {
         return req
     }
 
-    private func requestJSON<T: Decodable>(_ type: T.Type, for req: URLRequest) async throws -> T {
-        let (data, response) = try await apiSession.data(for: req)
-        try validateResponse(response)
-        return try JSONDecoder().decode(T.self, from: data)
+    private func requestJSON<T: Decodable>(
+        _ type: T.Type,
+        for req: URLRequest,
+        priority: APIRequestGate.Priority = .normal
+    ) async throws -> T {
+        try await APIRequestGate.shared.withPermit(priority: priority) {
+            let (data, response) = try await self.apiSession.data(for: req)
+            try self.validateResponse(response)
+            return try JSONDecoder().decode(T.self, from: data)
+        }
+    }
+
+    public func fetchUserDownloadPermission(server: EmbyServerConfig) async -> Bool {
+        guard !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !server.userId.isEmpty,
+              let req = try? makeRequest(
+                baseURL: server.activeBaseURL,
+                path: "/Users/\(server.userId)",
+                token: server.accessToken,
+                userId: server.userId,
+                timeout: 10
+              ) else {
+            return true
+        }
+        struct EmbyUserPolicyWrapper: Decodable {
+            struct Policy: Decodable {
+                let enableContentDownloading: Bool?
+                enum CodingKeys: String, CodingKey {
+                    case enableContentDownloading = "EnableContentDownloading"
+                }
+            }
+            let policy: Policy?
+            enum CodingKeys: String, CodingKey { case policy = "Policy" }
+        }
+        guard let decoded = try? await requestJSON(EmbyUserPolicyWrapper.self, for: req, priority: .normal) else {
+            return true
+        }
+        return decoded.policy?.enableContentDownloading ?? true
     }
 
     public func authenticate(
@@ -549,7 +583,7 @@ public final class EmbyClient: Sendable {
             bodyData: deviceProfilePayloadData,
             timeout: 15
         )
-        return try await requestJSON(EmbyPlaybackInfoResponse.self, for: req)
+        return try await requestJSON(EmbyPlaybackInfoResponse.self, for: req, priority: .playback)
     }
 
     public func resolvePlaybackResource(
@@ -664,8 +698,10 @@ public final class EmbyClient: Sendable {
             }
         }
 
+        let embyDownloadURL = URL(string: "\(baseURL)/emby/Items/\(item.id)/Download?MediaSourceId=\(selectedSource.id)&api_key=\(server.accessToken)")
         return ResolvedPlaybackResource(
             streamURL: resolvedURL,
+            downloadURL: embyDownloadURL ?? resolvedURL,
             headers: headers,
             playSessionId: playSessionId,
             mediaSource: selectedSource,
@@ -800,7 +836,9 @@ public final class EmbyClient: Sendable {
                 bodyData: body,
                 timeout: 8
               ) else { return }
-        _ = try? await apiSession.data(for: req)
+        _ = try? await APIRequestGate.shared.withPermit(priority: .playback) {
+            try await self.apiSession.data(for: req)
+        }
     }
 
     public func setFavorite(server: EmbyServerConfig, itemId: String, isFavorite: Bool) async throws {
@@ -857,6 +895,21 @@ public final class EmbyClient: Sendable {
         kind: EmbyImageKind = .primary,
         maxWidth: Int = 600
     ) -> URL? {
+        switch kind {
+        case .primary:
+            if let s = item.uhdPosterURL, let u = URL(string: s) { return u }
+        case .backdrop:
+            if let s = item.uhdBackdropURL, let u = URL(string: s) { return u }
+        case .thumb:
+            if let s = item.uhdThumbURL ?? item.uhdBackdropURL ?? item.uhdPosterURL, let u = URL(string: s) { return u }
+        case .logo:
+            if let s = item.uhdLogoURL, let u = URL(string: s) { return u }
+        }
+
+        if server.type == .uhdNative {
+            return nil
+        }
+
         guard !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
@@ -916,6 +969,12 @@ public final class EmbyClient: Sendable {
         person: EmbyPerson,
         maxWidth: Int = 260
     ) -> [URL] {
+        if let direct = person.uhdImageURL, let u = URL(string: direct) {
+            return [u]
+        }
+        if server.type == .uhdNative {
+            return []
+        }
         guard !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return []
         }
@@ -951,7 +1010,7 @@ public final class EmbyClient: Sendable {
     public func makeImageRequest(url: URL, server: EmbyServerConfig?) -> URLRequest {
         var req = URLRequest(url: url, timeoutInterval: 12)
         req.setValue("Donby/\(appVersion) (macOS)", forHTTPHeaderField: "User-Agent")
-        if let server, !server.accessToken.isEmpty {
+        if let server, server.type != .uhdNative, !server.accessToken.isEmpty {
             req.setValue(server.accessToken, forHTTPHeaderField: "X-Emby-Token")
             req.setValue(buildAuthorizationHeader(userId: server.userId, token: server.accessToken), forHTTPHeaderField: "X-Emby-Authorization")
         }

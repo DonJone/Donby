@@ -49,129 +49,128 @@ public struct LogViewerSheet: View {
     }
 
     public var body: some View {
-        VStack(spacing: 0) {
+        let baseContent = VStack(spacing: 0) {
             // Header
-            HStack(spacing: 12) {
+            HStack(spacing: 10) {
                 Image(systemName: "terminal.fill")
-                    .font(.system(size: 16, weight: .bold))
+                    .font(.system(size: isModal ? 16 : 15, weight: .bold))
                     .foregroundStyle(appState.accentColor)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("运行日志与核心诊断")
-                        .font(.system(size: 14, weight: .bold))
+                        .font(.system(size: isModal ? 14 : 16, weight: .bold))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Text(logger.logFileURL.path)
                         .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
-
-                Spacer()
-
-                Button {
-                    copyAllLogs()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: copiedFeedback ? "checkmark" : "doc.on.doc")
-                        Text(copiedFeedback ? "已复制" : "复制全部")
-                    }
-                    .font(.system(size: 12))
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    .background(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 6))
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    logger.revealLogInFinder()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "folder.fill")
-                        Text("在访达中显示")
-                    }
-                    .font(.system(size: 12))
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    .background(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 6))
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    logger.clear()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "trash")
-                        Text("清空")
-                    }
-                    .font(.system(size: 12))
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    .background(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 6))
-                }
-                .buttonStyle(.plain)
-
-                if isModal {
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 16))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 18).padding(.vertical, 14)
-            .background(.ultraThinMaterial)
-
-            Divider().opacity(0.2)
-
-            // Toolbar: Filter chips & Search
-            HStack(spacing: 12) {
-                Picker("", selection: $selectedFilter) {
-                    ForEach(LogFilter.allCases) { f in
-                        Text(f.rawValue).tag(f)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 320)
+                .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
 
                 HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                    TextField("筛选日志关键词…", text: $searchText)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 12))
-                    if !searchText.isEmpty {
-                        Button { searchText = "" } label: {
-                            Image(systemName: "xmark.circle.fill").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Button {
+                        copyAllLogs()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: copiedFeedback ? "checkmark" : "doc.on.doc")
+                            Text(copiedFeedback ? "已复制" : (isModal ? "复制全部" : "复制"))
+                        }
+                        .font(.system(size: 11.5, weight: .medium))
+                        .padding(.horizontal, 9).padding(.vertical, 5)
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        .background(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+                    .fixedSize()
+
+                    Button {
+                        logger.revealLogInFinder()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "folder.fill")
+                            Text(isModal ? "在访达中显示" : "访达")
+                        }
+                        .font(.system(size: 11.5, weight: .medium))
+                        .padding(.horizontal, 9).padding(.vertical, 5)
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        .background(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+                    .fixedSize()
+                    .help("在访达中显示日志文件")
+
+                    Button {
+                        logger.clear()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "trash")
+                            Text("清空")
+                        }
+                        .font(.system(size: 11.5, weight: .medium))
+                        .padding(.horizontal, 9).padding(.vertical, 5)
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        .background(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+                    .fixedSize()
+
+                    if isModal {
+                        Button {
+                            dismiss()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 16))
+                                .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(.horizontal, 8).padding(.vertical, 5)
-                .background(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .frame(minWidth: 120, maxWidth: 220)
-
-                Spacer()
-
-                Toggle("自动滚屏", isOn: $autoScroll)
-                    .toggleStyle(.checkbox)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
-                    .fixedSize()
+                .fixedSize()
             }
-            .padding(.horizontal, 18).padding(.vertical, 10)
-            .background(appState.isLightMode ? Color.black.opacity(0.04) : Color.black.opacity(0.3))
+            .padding(.horizontal, isModal ? 18 : 24)
+            .padding(.top, isModal ? 14 : 22)
+            .padding(.bottom, 12)
+            .background(isModal ? AnyShapeStyle(.ultraThinMaterial) : AnyShapeStyle(DonbyGlassPalette.canvas(isLight: appState.isLightMode)))
 
-            Divider().opacity(0.2)
+            Divider().opacity(appState.isLightMode ? 0.30 : 0.14)
+
+            // Responsive Toolbar: wraps cleanly into 2 rows when embedded inside narrow Settings pane
+            Group {
+                if isModal {
+                    HStack(spacing: 12) {
+                        filterSegmentedPicker
+                            .frame(maxWidth: 320)
+                        searchFieldBox
+                            .frame(minWidth: 140, maxWidth: 220)
+                        Spacer()
+                        autoScrollCheckbox
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 10) {
+                            filterChipRow
+                            Spacer(minLength: 8)
+                            autoScrollCheckbox
+                        }
+                        searchFieldBox
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+            }
+            .padding(.horizontal, isModal ? 18 : 24)
+            .padding(.vertical, 10)
+            .background(isModal
+                        ? (appState.isLightMode ? Color.black.opacity(0.04) : Color.black.opacity(0.3))
+                        : DonbyGlassPalette.canvas(isLight: appState.isLightMode))
 
             // Log Console Content
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 3) {
+                    LazyVStack(alignment: .leading, spacing: 4) {
                         ForEach(filteredEntries) { entry in
                             logRow(entry)
                                 .id(entry.id)
@@ -179,7 +178,18 @@ public struct LogViewerSheet: View {
                     }
                     .padding(14)
                 }
-                .background(Color(nsColor: .textBackgroundColor).opacity(0.95))
+                .background(
+                    isModal
+                        ? Color(nsColor: .textBackgroundColor).opacity(0.95)
+                        : DonbyGlassPalette.cardBackground(isLight: appState.isLightMode)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: isModal ? 0 : 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: isModal ? 0 : 12, style: .continuous)
+                        .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: isModal ? 0 : 0.6)
+                )
+                .padding(.horizontal, isModal ? 0 : 24)
+                .padding(.bottom, isModal ? 0 : 4)
                 .onChange(of: logger.entries.count) { _, _ in
                     if autoScroll, let last = filteredEntries.last {
                         proxy.scrollTo(last.id, anchor: .bottom)
@@ -187,45 +197,127 @@ public struct LogViewerSheet: View {
                 }
             }
 
-            Divider().opacity(0.2)
+            Divider().opacity(appState.isLightMode ? 0.25 : 0.14)
+                .padding(.top, isModal ? 0 : 8)
 
             // Footer
-            HStack {
-                Text("共显示 \(filteredEntries.count) / \(logger.entries.count) 条运行日志记录")
+            HStack(spacing: 12) {
+                Text("共 \(filteredEntries.count) / \(logger.entries.count) 条日志")
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text("日志持久化存储路径: ~/Library/Logs/Donby/donby.log")
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    .fixedSize()
+                Spacer(minLength: 8)
+                Text("路径: ~/Library/Logs/Donby/donby.log")
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
-            .padding(.horizontal, 18).padding(.vertical, 8)
-            .background(.ultraThinMaterial)
+            .padding(.horizontal, isModal ? 18 : 24)
+            .padding(.vertical, 10)
+            .background(isModal ? AnyShapeStyle(.ultraThinMaterial) : AnyShapeStyle(DonbyGlassPalette.canvas(isLight: appState.isLightMode)))
         }
-        .frame(minWidth: 800, minHeight: 520)
+
+        if isModal {
+            baseContent
+                .frame(minWidth: 800, minHeight: 520)
+        } else {
+            baseContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+        }
+    }
+
+    private var filterSegmentedPicker: some View {
+        Picker("", selection: $selectedFilter) {
+            ForEach(LogFilter.allCases) { f in
+                Text(f.rawValue).tag(f)
+            }
+        }
+        .pickerStyle(.segmented)
+    }
+
+    private var filterChipRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(LogFilter.allCases) { filter in
+                    let isSel = (selectedFilter == filter)
+                    Button {
+                        selectedFilter = filter
+                    } label: {
+                        Text(filter.rawValue)
+                            .font(.system(size: 11.5, weight: isSel ? .semibold : .medium))
+                            .foregroundStyle(isSel ? appState.accentTextColor : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(isSel ? appState.accentColor : (appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.07)))
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private var searchFieldBox: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11))
+                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+            TextField("筛选日志关键词…", text: $searchText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+            if !searchText.isEmpty {
+                Button { searchText = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var autoScrollCheckbox: some View {
+        Toggle("自动滚屏", isOn: $autoScroll)
+            .toggleStyle(.checkbox)
+            .font(.system(size: 11.5))
+            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+            .fixedSize()
     }
 
     private func logRow(_ entry: DonbyLogEntry) -> some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: 6) {
             Text(entry.formattedTime)
-                .font(.system(size: 11, weight: .regular, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 82, alignment: .leading)
+                .font(.system(size: 10.5, weight: .regular, design: .monospaced))
+                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                .frame(width: 66, alignment: .leading)
 
             Text(entry.level.tag)
                 .font(.system(size: 10, weight: .bold, design: .monospaced))
                 .foregroundStyle(levelColor(entry.level))
-                .frame(width: 58, alignment: .leading)
+                .frame(width: 48, alignment: .leading)
 
             Text("[\(entry.subsystem)]")
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundStyle(appState.accentColor.opacity(0.85))
-                .frame(width: 80, alignment: .leading)
+                .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(appState.accentColor.opacity(0.9))
+                .frame(width: 72, alignment: .leading)
+                .lineLimit(1)
 
             Text(entry.message)
                 .font(.system(size: 11.5, design: .monospaced))
-                .foregroundStyle(entry.level == .error ? Color.red.opacity(0.95) : (entry.level == .warning ? Color.yellow.opacity(0.95) : Color.primary))
+                .foregroundStyle(
+                    entry.level == .error
+                        ? Color.red.opacity(0.95)
+                        : (entry.level == .warning ? Color.orange.opacity(0.95) : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                )
                 .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, 2)

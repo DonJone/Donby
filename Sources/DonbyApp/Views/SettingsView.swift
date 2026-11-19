@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import DonbyCore
+import DonbyNetwork
 
 // MARK: - Settings View (Preferences)
 public enum SettingsSectionTab: String, CaseIterable, Identifiable {
@@ -357,7 +358,66 @@ public struct SettingsView: View {
                     Stepper("\(appState.edSeconds) 秒", value: $appState.edSeconds, in: 0...300, step: 5)
                 }
 
+                Toggle("自动执行片头 / 片尾跳过 (支持按季独立记忆)", isOn: $appState.autoSkipIntroOutro)
+                Toggle("片尾自动连播下一集", isOn: $appState.autoNextEpisode)
                 Toggle("开启弹幕支持 (Danmaku Layer)", isOn: $appState.enableDanmaku)
+            }
+            .padding(18)
+            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+            )
+
+            VStack(alignment: .leading, spacing: 14) {
+                Text("字幕渲染与简繁转换默认值")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+
+                HStack {
+                    Text("默认简繁实时转换")
+                        .font(.system(size: 13))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    Spacer()
+                    Picker("", selection: $appState.subtitleStyle.transform) {
+                        ForEach(SubtitleTextTransform.allCases) { item in
+                            Text(item.title).tag(item)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 220)
+                }
+
+                HStack {
+                    Text("HDR 字幕峰值亮度校准")
+                        .font(.system(size: 13))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    Spacer()
+                    Picker("", selection: $appState.subtitleStyle.hdrPeakNits) {
+                        ForEach(SubtitleHDRPeakNits.allCases) { nits in
+                            Text(nits.title).tag(nits)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 170)
+                }
+
+                HStack {
+                    Text(String(format: "字幕缩放 %.2fx", appState.subtitleStyle.scale))
+                        .font(.system(size: 13))
+                    Slider(value: $appState.subtitleStyle.scale, in: 0.6...1.8, step: 0.05)
+                }
+
+                HStack {
+                    Text("垂直位置 \(Int(appState.subtitleStyle.verticalPositionPercent))%")
+                        .font(.system(size: 13))
+                    Slider(value: $appState.subtitleStyle.verticalPositionPercent, in: 60...100, step: 1)
+                }
+
+                Toggle("覆盖内封 ASS 默认样式", isOn: $appState.subtitleStyle.overrideASSStyle)
+                Toggle("控制栏弹出时平滑上移防遮挡", isOn: $appState.subtitleStyle.antiOcclusionEnabled)
+                Toggle("自动记住主/副字幕轨道及外挂字幕选择", isOn: $appState.rememberSubtitleSelection)
             }
             .padding(18)
             .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
@@ -372,7 +432,7 @@ public struct SettingsView: View {
     // 3. 线路与网络
     private var networkSettingsTab: some View {
         VStack(alignment: .leading, spacing: 24) {
-            settingsHeader(title: "线路与网络", subtitle: "ServerDomains 多线路热备、302 直连缓存与流媒体预读优化")
+            settingsHeader(title: "线路与网络", subtitle: "ServerDomains 多线路热备、Turbo 多连接分片加速与分层磁盘缓存")
 
             VStack(alignment: .leading, spacing: 16) {
                 Toggle("ServerDomains 云端线路自动同步", isOn: $appState.autoSyncDomains)
@@ -386,6 +446,64 @@ public struct SettingsView: View {
                 Text("解析影视直链时智能预热直连 CDN 地址，跳过 Emby 反向代理二次中转，提升 4K 播放起播速度。")
                     .font(.system(size: 11.5))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+
+                Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
+
+                Toggle("启用 Turbo 多连接分片加速引擎 (Custom AVIO)", isOn: $appState.turboEnabled)
+                Text("开启多连接 HTTP Range 并发预取、落后分片竞速救援与 429 退避，并严格遵守 UHDNow 配额连接上限。")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+
+                HStack {
+                    Text("单流并发连接上限 (按服务器配额自动裁剪)")
+                        .font(.system(size: 13))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    Spacer()
+                    Stepper("\(appState.turboConnectionBudget) 线程", value: $appState.turboConnectionBudget, in: 1...8, step: 1)
+                }
+
+                HStack {
+                    Text("Turbo 内存热分片池")
+                        .font(.system(size: 13))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    Spacer()
+                    Picker("", selection: $appState.turboMemoryCacheMB) {
+                        Text("250 MB").tag(250)
+                        Text("500 MB (推荐)").tag(500)
+                        Text("1024 MB").tag(1024)
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 150)
+                }
+
+                HStack {
+                    Text("磁盘临时分片预算 (LRU 自动清理)")
+                        .font(.system(size: 13))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    Spacer()
+                    Picker("", selection: $appState.turboDiskCacheMB) {
+                        Text("512 MB").tag(512)
+                        Text("2048 MB (2 GB · 推荐)").tag(2048)
+                        Text("4096 MB (4 GB)").tag(4096)
+                        Text("8192 MB (8 GB)").tag(8192)
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 185)
+                }
+
+                HStack {
+                    let usage = DonbyTurboCacheEngine.shared.calculateDiskUsage()
+                    Text("当前临时缓存占用：\(ByteCountFormatter.string(fromByteCount: usage.unpinnedCacheBytes, countStyle: .file)) · 已锁定离线：\(ByteCountFormatter.string(fromByteCount: usage.pinnedDownloadBytes, countStyle: .file))")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    Spacer()
+                    Button("清理临时分片缓存") {
+                        DonbyTurboCacheEngine.shared.clearAllUnpinnedCache()
+                        appState.showToast("已清理临时播放分片缓存", icon: "sparkles")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
 
                 Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
 
@@ -429,7 +547,7 @@ public struct SettingsView: View {
                     Text("Donby")
                         .font(.system(size: 20, weight: .heavy, design: .rounded))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    let currentVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.20"
+                    let currentVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.21"
                     Text("版本 \(currentVer) (Build 2026.11) · macOS Apple Silicon")
                         .font(.system(size: 12))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))

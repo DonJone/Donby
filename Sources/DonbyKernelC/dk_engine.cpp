@@ -103,6 +103,14 @@ struct PgsCue {
     std::vector<PgsBitmapRect> rects;
 };
 
+struct StoredAssEvent {
+    long long start_ms{0};
+    long long dur_ms{0};
+    std::string raw_line;
+    bool is_full_dialogue{false};
+    bool is_forced{false};
+};
+
 static_assert(sizeof(DKGpuColorUniforms) == 3088, "DKGpuColorUniforms must match Metal constant layout (3088 bytes)");
 
 struct DKPlayer {
@@ -119,15 +127,24 @@ struct DKPlayer {
     std::atomic<bool> is_muted{false};
     bool hw_decode_enabled{true};
 
-    // FFmpeg context
+    // FFmpeg context & Custom AVIO
     AVFormatContext* format_ctx{nullptr};
+    AVIOContext* custom_avio_ctx{nullptr};
+    void* custom_io_opaque{nullptr};
+    DKCustomIOReadCallback custom_io_read{nullptr};
+    DKCustomIOSeekCallback custom_io_seek{nullptr};
+    DKCustomIOAbortCallback custom_io_abort{nullptr};
+    DKCustomIOCloseCallback custom_io_close{nullptr};
+
     int video_stream_idx{-1};
     std::atomic<int> audio_stream_idx{-1};
     std::atomic<int> sub_stream_idx{-1};
+    std::atomic<int> secondary_sub_stream_idx{-1};
 
     AVCodecContext* video_codec_ctx{nullptr};
     AVCodecContext* audio_codec_ctx{nullptr};
     AVCodecContext* sub_codec_ctx{nullptr};
+    AVCodecContext* secondary_sub_codec_ctx{nullptr};
     AVBufferRef* hw_device_ctx{nullptr};
     SwrContext* swr_ctx{nullptr};
     SwsContext* sws_ctx{nullptr};
@@ -209,7 +226,9 @@ struct DKPlayer {
     // Subtitle (libass)
     ASS_Library* ass_lib{nullptr};
     ASS_Renderer* ass_renderer{nullptr};
+    ASS_Renderer* secondary_ass_renderer{nullptr};
     ASS_Track* ass_track{nullptr};
+    ASS_Track* secondary_ass_track{nullptr};
     std::mutex ass_mtx;
     int ass_canvas_w{0};
     int ass_canvas_h{0};
@@ -225,6 +244,15 @@ struct DKPlayer {
     bool sub_last_non_empty{false};
     int sub_dirty_y0{0};
     int sub_dirty_y1{0};
+    DKSubtitleStyleConfig sub_style{1.0f, 2.8f, 92.0f, 0.0, 0.0, 0, false, false};
+    std::string primary_codec_private;
+    std::string secondary_codec_private;
+    std::vector<StoredAssEvent> primary_ass_events;
+    std::vector<StoredAssEvent> secondary_ass_events;
+    std::string primary_ext_raw;
+    bool primary_ext_is_ass{false};
+    std::string secondary_ext_raw;
+    bool secondary_ext_is_ass{false};
 
     // Worker Threads
     std::thread demux_thread;
@@ -1315,14 +1343,147 @@ static void dk_video_decode_worker(DKPlayer* player) {
     av_frame_free(&frame);
 }
 
-static void dk_ensure_default_ass_track_header(DKPlayer* player) {
-    if (!player || !player->ass_lib || !player->ass_track) return;
-    if (player->ass_track->event_format != nullptr) return;
-    if (player->ass_track->n_styles > 1) {
+static std::string dk_cf_transform_segment(const std::string& seg, int32_t mode) {
+    if (mode == 0 || seg.empty()) return seg;
+    CFStringRef src = CFStringCreateWithBytes(
+        kCFAllocatorDefault,
+        reinterpret_cast<const UInt8*>(seg.data()),
+        static_cast<CFIndex>(seg.size()),
+        kCFStringEncodingUTF8,
+        false
+    );
+    if (!src) return seg;
+    CFMutableStringRef mut = CFStringCreateMutableCopy(kCFAllocatorDefault, 0, src);
+    CFRelease(src);
+    if (!mut) return seg;
+    CFStringRef transform_id = (mode == 1) ? CFSTR("Hant-Hans") : CFSTR("Hans-Hant");
+    CFStringTransform(mut, nullptr, transform_id, false);
+    CFIndex max_len = CFStringGetMaximumSizeForEncoding(CFStringGetLength(mut), kCFStringEncodingUTF8) + 1;
+    std::string out(static_cast<size_t>(max_len), '\0');
+    Boolean ok = CFStringGetCString(mut, out.data(), max_len, kCFStringEncodingUTF8);
+    CFRelease(mut);
+    if (!ok) return seg;
+    out.resize(std::strlen(out.c_str()));
+    return out;
+}
+
+// Transform ASS dialogue payload while preserving ASS tags {...} and escape codes (\N, \n, \h)
+static std::string dk_transform_ass_payload(const std::string& payload, int32_t mode) {
+    if (mode == 0 || payload.empty()) return payload;
+    std::string out;
+    out.reserve(payload.size() + 16);
+    size_t i = 0;
+    while (i < payload.size()) {
+        if (payload[i] == '{') {
+            size_t close = payload.find('}', i + 1);
+            if (close != std::string::npos) {
+                out.append(payload, i, close - i + 1);
+                i = close + 1;
+                continue;
+            }
+        }
+        if (payload[i] == '\\' && i + 1 < payload.size() &&
+            (payload[i + 1] == 'N' || payload[i + 1] == 'n' || payload[i + 1] == 'h')) {
+            out.append(payload, i, 2);
+            i += 2;
+            continue;
+        }
+        size_t start = i;
+        while (i < payload.size() && payload[i] != '{' &&
+               !(payload[i] == '\\' && i + 1 < payload.size() &&
+                 (payload[i + 1] == 'N' || payload[i + 1] == 'n' || payload[i + 1] == 'h'))) {
+            i++;
+        }
+        out += dk_cf_transform_segment(payload.substr(start, i - start), mode);
+    }
+    return out;
+}
+
+// Transform an ASS Dialogue line or ReadOrder chunk line (preserving leading CSV fields before Text)
+static std::string dk_transform_ass_line(const std::string& line, int32_t mode, bool is_full_dialogue) {
+    if (mode == 0 || line.empty()) return line;
+    int target_commas = is_full_dialogue ? 9 : 8;
+    int seen_commas = 0;
+    size_t split_pos = std::string::npos;
+    for (size_t i = 0; i < line.size(); i++) {
+        if (line[i] == ',') {
+            seen_commas++;
+            if (seen_commas == target_commas) {
+                split_pos = i + 1;
+                break;
+            }
+        }
+    }
+    if (split_pos == std::string::npos || split_pos >= line.size()) {
+        return dk_transform_ass_payload(line, mode);
+    }
+    return line.substr(0, split_pos) + dk_transform_ass_payload(line.substr(split_pos), mode);
+}
+
+static std::string dk_transform_ass_document(const std::string& doc, int32_t mode) {
+    if (mode == 0 || doc.empty()) return doc;
+    std::string out;
+    out.reserve(doc.size() + 32);
+    size_t pos = 0;
+    while (pos < doc.size()) {
+        size_t nl = doc.find('\n', pos);
+        std::string line = (nl == std::string::npos) ? doc.substr(pos) : doc.substr(pos, nl - pos + 1);
+        pos = (nl == std::string::npos) ? doc.size() : (nl + 1);
+        if (line.rfind("Dialogue:", 0) == 0) {
+            out += dk_transform_ass_line(line, mode, true);
+        } else {
+            out += line;
+        }
+    }
+    return out;
+}
+
+static void dk_apply_style_to_ass_track_locked(DKPlayer* player, ASS_Track* track, bool is_secondary) {
+    if (!player || !track) return;
+    float user_scale = std::clamp(player->sub_style.scale > 0.1f ? player->sub_style.scale : 1.0f, 0.5f, 2.5f);
+    float role_scale = is_secondary ? (user_scale * 0.82f) : user_scale;
+    float border = std::clamp(player->sub_style.border_width >= 0.0f ? player->sub_style.border_width : 2.8f, 0.0f, 8.0f);
+    float pos_pct = std::clamp(player->sub_style.vertical_pos_percent > 10.0f ? player->sub_style.vertical_pos_percent : 92.0f, 50.0f, 98.0f);
+    int play_res_y = (track->PlayResY > 0) ? track->PlayResY : 1080;
+    int margin_v = std::clamp(
+        static_cast<int>(std::lround((100.0f - pos_pct) * 0.01f * static_cast<float>(play_res_y))),
+        8,
+        play_res_y / 2
+    );
+    if (is_secondary) {
+        margin_v = std::min(play_res_y / 2, margin_v + static_cast<int>(std::lround(58.0f * (static_cast<float>(play_res_y) / 1080.0f))));
+    }
+
+    for (int i = 0; i < track->n_styles; i++) {
+        ASS_Style& st = track->styles[i];
+        bool is_default = (st.Name && std::strcmp(st.Name, "Default") == 0) || (track->n_styles == 1);
+        if (player->sub_style.override_ass_style || is_default) {
+            double base_fs = (56.0 * static_cast<double>(play_res_y)) / 1080.0;
+            st.FontSize = base_fs * static_cast<double>(role_scale);
+            st.Outline = static_cast<double>(border) * (is_secondary ? 0.85 : 1.0) * (static_cast<double>(play_res_y) / 1080.0);
+            st.MarginV = margin_v;
+            if (player->sub_style.override_ass_style) {
+                st.ScaleX = 1.0;
+                st.ScaleY = 1.0;
+                st.Alignment = 2; // Bottom-center
+                st.BorderStyle = 1;
+            }
+        }
+    }
+}
+
+static void dk_ensure_ass_track_header_for(DKPlayer* player, ASS_Track* track, bool is_secondary) {
+    if (!player || !player->ass_lib || !track) return;
+    if (track->event_format != nullptr) {
+        dk_apply_style_to_ass_track_locked(player, track, is_secondary);
+        return;
+    }
+    if (track->n_styles > 1) {
         const char* events_hdr =
             "[Events]\r\n"
             "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\r\n";
-        ass_process_codec_private(player->ass_track, const_cast<char*>(events_hdr), static_cast<int>(std::strlen(events_hdr)));
+        ass_process_codec_private(track, const_cast<char*>(events_hdr), static_cast<int>(std::strlen(events_hdr)));
+        dk_apply_style_to_ass_track_locked(player, track, is_secondary);
         return;
     }
     const char* default_hdr =
@@ -1338,22 +1499,41 @@ static void dk_ensure_default_ass_track_header(DKPlayer* player) {
         "\r\n"
         "[Events]\r\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\r\n";
-    ass_process_codec_private(player->ass_track, const_cast<char*>(default_hdr), static_cast<int>(std::strlen(default_hdr)));
+    ass_process_codec_private(track, const_cast<char*>(default_hdr), static_cast<int>(std::strlen(default_hdr)));
+    dk_apply_style_to_ass_track_locked(player, track, is_secondary);
 }
 
-static void dk_open_subtitle_decoder_locked(DKPlayer* player, int stream_idx) {
-    if (player->sub_codec_ctx) {
-        avcodec_free_context(&player->sub_codec_ctx);
+static void dk_ensure_default_ass_track_header(DKPlayer* player) {
+    if (!player) return;
+    dk_ensure_ass_track_header_for(player, player->ass_track, false);
+}
+
+static void dk_open_subtitle_decoder_for_slot_locked(DKPlayer* player, int stream_idx, bool is_secondary) {
+    AVCodecContext*& codec_ctx = is_secondary ? player->secondary_sub_codec_ctx : player->sub_codec_ctx;
+    ASS_Track*& track = is_secondary ? player->secondary_ass_track : player->ass_track;
+    std::string& codec_priv = is_secondary ? player->secondary_codec_private : player->primary_codec_private;
+    std::vector<StoredAssEvent>& events = is_secondary ? player->secondary_ass_events : player->primary_ass_events;
+    std::string& ext_raw = is_secondary ? player->secondary_ext_raw : player->primary_ext_raw;
+
+    if (codec_ctx) {
+        avcodec_free_context(&codec_ctx);
     }
-    if (player->ass_track) {
-        ass_free_track(player->ass_track);
-        player->ass_track = nullptr;
+    if (track) {
+        ass_free_track(track);
+        track = nullptr;
     }
-    player->pgs_cues.clear();
+    codec_priv.clear();
+    events.clear();
+    if (stream_idx >= 0) {
+        ext_raw.clear();
+    }
+    if (!is_secondary) {
+        player->pgs_cues.clear();
+        player->pgs_generation++;
+        player->rendered_pgs_gen = 0;
+        player->has_bitmap_subs = false;
+    }
     player->sub_rgba_buf.clear();
-    player->pgs_generation++;
-    player->rendered_pgs_gen = 0;
-    player->has_bitmap_subs = false;
     player->sub_last_non_empty = false;
     player->sub_dirty_y0 = 0;
     player->sub_dirty_y1 = 0;
@@ -1366,58 +1546,69 @@ static void dk_open_subtitle_decoder_locked(DKPlayer* player, int stream_idx) {
     if (st->codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE) return;
 
     if (player->ass_lib) {
-        player->ass_track = ass_new_track(player->ass_lib);
+        track = ass_new_track(player->ass_lib);
     }
-    if (st->codecpar->width > 0 && st->codecpar->height > 0) {
-        player->sub_storage_w = st->codecpar->width;
-        player->sub_storage_h = st->codecpar->height;
-    } else if (player->stats.width > 0 && player->stats.height > 0) {
-        player->sub_storage_w = player->stats.width;
-        player->sub_storage_h = player->stats.height;
+    if (!is_secondary) {
+        if (st->codecpar->width > 0 && st->codecpar->height > 0) {
+            player->sub_storage_w = st->codecpar->width;
+            player->sub_storage_h = st->codecpar->height;
+        } else if (player->stats.width > 0 && player->stats.height > 0) {
+            player->sub_storage_w = player->stats.width;
+            player->sub_storage_h = player->stats.height;
+        }
     }
 
     const AVCodec* dec = avcodec_find_decoder(st->codecpar->codec_id);
     if (!dec) {
-        if (player->ass_track && st->codecpar->extradata && st->codecpar->extradata_size > 0) {
-            ass_process_codec_private(player->ass_track, reinterpret_cast<char*>(st->codecpar->extradata), st->codecpar->extradata_size);
+        if (track && st->codecpar->extradata && st->codecpar->extradata_size > 0) {
+            codec_priv.assign(reinterpret_cast<const char*>(st->codecpar->extradata), st->codecpar->extradata_size);
+            ass_process_codec_private(track, codec_priv.data(), static_cast<int>(codec_priv.size()));
         }
-        dk_ensure_default_ass_track_header(player);
+        dk_ensure_ass_track_header_for(player, track, is_secondary);
         return;
     }
 
-    player->sub_codec_ctx = avcodec_alloc_context3(dec);
-    if (!player->sub_codec_ctx) return;
-    avcodec_parameters_to_context(player->sub_codec_ctx, st->codecpar);
-    player->sub_codec_ctx->pkt_timebase = st->time_base;
-    if (avcodec_open2(player->sub_codec_ctx, dec, nullptr) < 0) {
-        avcodec_free_context(&player->sub_codec_ctx);
+    codec_ctx = avcodec_alloc_context3(dec);
+    if (!codec_ctx) return;
+    avcodec_parameters_to_context(codec_ctx, st->codecpar);
+    codec_ctx->pkt_timebase = st->time_base;
+    if (avcodec_open2(codec_ctx, dec, nullptr) < 0) {
+        avcodec_free_context(&codec_ctx);
         return;
     }
 
-    if (player->ass_track) {
+    if (track) {
         if (st->codecpar->codec_id == AV_CODEC_ID_ASS || st->codecpar->codec_id == AV_CODEC_ID_SSA) {
             if (st->codecpar->extradata && st->codecpar->extradata_size > 0) {
-                ass_process_codec_private(player->ass_track, reinterpret_cast<char*>(st->codecpar->extradata), st->codecpar->extradata_size);
-            } else if (player->sub_codec_ctx->subtitle_header && player->sub_codec_ctx->subtitle_header_size > 0) {
-                ass_process_codec_private(player->ass_track, reinterpret_cast<char*>(player->sub_codec_ctx->subtitle_header), player->sub_codec_ctx->subtitle_header_size);
+                codec_priv.assign(reinterpret_cast<const char*>(st->codecpar->extradata), st->codecpar->extradata_size);
+                ass_process_codec_private(track, codec_priv.data(), static_cast<int>(codec_priv.size()));
+            } else if (codec_ctx->subtitle_header && codec_ctx->subtitle_header_size > 0) {
+                codec_priv.assign(reinterpret_cast<const char*>(codec_ctx->subtitle_header), codec_ctx->subtitle_header_size);
+                ass_process_codec_private(track, codec_priv.data(), static_cast<int>(codec_priv.size()));
             }
-            dk_ensure_default_ass_track_header(player);
+            dk_ensure_ass_track_header_for(player, track, is_secondary);
         } else {
-            dk_ensure_default_ass_track_header(player);
+            dk_ensure_ass_track_header_for(player, track, is_secondary);
         }
     }
-    dk_log(0, "DKEngine: Opened embedded subtitle stream #%d (%s)", stream_idx, dec->name ? dec->name : "subtitle");
+    dk_log(0, "DKEngine: Opened %s embedded subtitle stream #%d (%s)",
+           is_secondary ? "secondary" : "primary",
+           stream_idx, dec->name ? dec->name : "subtitle");
 }
 
-static void dk_decode_subtitle_packet(DKPlayer* player, AVPacket* pkt) {
+static void dk_open_subtitle_decoder_locked(DKPlayer* player, int stream_idx) {
+    dk_open_subtitle_decoder_for_slot_locked(player, stream_idx, false);
+}
+
+static void dk_decode_subtitle_packet_for_slot_locked(DKPlayer* player, AVPacket* pkt, int stream_idx, bool is_secondary) {
     if (!player || !pkt || !player->format_ctx) return;
-    std::lock_guard<std::mutex> lk(player->ass_mtx);
-    const int active_sub_idx = player->sub_stream_idx.load(std::memory_order_relaxed);
-    if (active_sub_idx < 0 || pkt->stream_index != active_sub_idx ||
-        static_cast<unsigned>(active_sub_idx) >= player->format_ctx->nb_streams) {
-        return;
-    }
-    AVStream* st = player->format_ctx->streams[active_sub_idx];
+    if (stream_idx < 0 || static_cast<unsigned>(stream_idx) >= player->format_ctx->nb_streams) return;
+    AVStream* st = player->format_ctx->streams[stream_idx];
+    AVCodecContext* codec_ctx = is_secondary ? player->secondary_sub_codec_ctx : player->sub_codec_ctx;
+    ASS_Track* track = is_secondary ? player->secondary_ass_track : player->ass_track;
+    std::vector<StoredAssEvent>& events = is_secondary ? player->secondary_ass_events : player->primary_ass_events;
+
+    const bool stream_is_forced = (st->disposition & AV_DISPOSITION_FORCED) != 0;
 
     int64_t raw_ts = (pkt->pts != AV_NOPTS_VALUE) ? pkt->pts : pkt->dts;
     long long pkt_pts_ms = (raw_ts != AV_NOPTS_VALUE)
@@ -1427,21 +1618,34 @@ static void dk_decode_subtitle_packet(DKPlayer* player, AVPacket* pkt) {
         ? av_rescale_q(pkt->duration, st->time_base, AVRational{1, 1000})
         : 3500;
 
-    if ((st->codecpar->codec_id == AV_CODEC_ID_ASS || st->codecpar->codec_id == AV_CODEC_ID_SSA) && player->ass_track && pkt->data && pkt->size > 0) {
-        dk_ensure_default_ass_track_header(player);
-        const char* raw_ass = reinterpret_cast<const char*>(pkt->data);
-        if (pkt->size >= 9 && std::strncmp(raw_ass, "Dialogue:", 9) == 0) {
-            ass_process_data(player->ass_track, const_cast<char*>(raw_ass), pkt->size);
-        } else {
-            ass_process_chunk(player->ass_track, const_cast<char*>(raw_ass), pkt->size, pkt_pts_ms, pkt_dur_ms);
+    auto feed_and_store_ass_event = [&](const std::string& raw_str, bool is_dialogue, bool evt_forced, long long s_ms, long long d_ms) {
+        if (!track) return;
+        if (events.size() < 4096) {
+            events.push_back({s_ms, d_ms, raw_str, is_dialogue, evt_forced});
         }
+        if (player->sub_style.forced_only && !evt_forced) {
+            return;
+        }
+        std::string transformed = dk_transform_ass_line(raw_str, player->sub_style.text_transform, is_dialogue);
+        if (is_dialogue) {
+            ass_process_data(track, transformed.data(), static_cast<int>(transformed.size()));
+        } else {
+            ass_process_chunk(track, transformed.data(), static_cast<int>(transformed.size()), s_ms, d_ms);
+        }
+    };
+
+    if ((st->codecpar->codec_id == AV_CODEC_ID_ASS || st->codecpar->codec_id == AV_CODEC_ID_SSA) && track && pkt->data && pkt->size > 0) {
+        dk_ensure_ass_track_header_for(player, track, is_secondary);
+        std::string raw_ass(reinterpret_cast<const char*>(pkt->data), static_cast<size_t>(pkt->size));
+        bool is_diag = (raw_ass.size() >= 9 && std::strncmp(raw_ass.c_str(), "Dialogue:", 9) == 0);
+        feed_and_store_ass_event(raw_ass, is_diag, stream_is_forced, pkt_pts_ms, pkt_dur_ms);
         return;
     }
 
-    if (!player->sub_codec_ctx) return;
+    if (!codec_ctx) return;
     AVSubtitle sub{};
     int got_sub = 0;
-    int ret = avcodec_decode_subtitle2(player->sub_codec_ctx, &sub, &got_sub, pkt);
+    int ret = avcodec_decode_subtitle2(codec_ctx, &sub, &got_sub, pkt);
     if (ret < 0 || !got_sub) {
         avsubtitle_free(&sub);
         return;
@@ -1453,7 +1657,7 @@ static void dk_decode_subtitle_packet(DKPlayer* player, AVPacket* pkt) {
         ? (sub.end_display_time - sub.start_display_time)
         : pkt_dur_ms;
 
-    if (sub.format == 0) {
+    if (sub.format == 0 && !is_secondary) {
         player->has_bitmap_subs = true;
         double cue_start = static_cast<double>(start_ms) / 1000.0;
         double cue_end = (sub.end_display_time > sub.start_display_time && sub.end_display_time < 3600000)
@@ -1469,16 +1673,14 @@ static void dk_decode_subtitle_packet(DKPlayer* player, AVPacket* pkt) {
             cue.id = ++player->pgs_generation;
             cue.start_sec = cue_start;
             cue.end_sec = cue_end;
-            cue.canvas_w = (player->sub_codec_ctx->width > 0) ? player->sub_codec_ctx->width : player->sub_storage_w;
-            cue.canvas_h = (player->sub_codec_ctx->height > 0) ? player->sub_codec_ctx->height : player->sub_storage_h;
+            cue.canvas_w = (codec_ctx->width > 0) ? codec_ctx->width : player->sub_storage_w;
+            cue.canvas_h = (codec_ctx->height > 0) ? codec_ctx->height : player->sub_storage_h;
 
-            // Measure peak bright-glyph luma across all rects in this PGS cue so UHD Blu-ray
-            // HDR-dimmed palettes (e.g. Y=145..180) and standard palettes (Y=235) render at
-            // a consistent 245/255 paper-white matching SRT/ASS subtitles.
             float cue_peak_luma = 0.0f;
             for (unsigned r = 0; r < sub.num_rects; r++) {
                 const AVSubtitleRect* rect = sub.rects[r];
                 if (!rect || rect->type != SUBTITLE_BITMAP || rect->w <= 0 || rect->h <= 0 || !rect->data[0] || !rect->data[1]) continue;
+                if (player->sub_style.forced_only && !stream_is_forced && !(rect->flags & AV_SUBTITLE_FLAG_FORCED)) continue;
                 const uint32_t* pal = reinterpret_cast<const uint32_t*>(rect->data[1]);
                 bool seen_idx[256] = {false};
                 for (int row = 0; row < rect->h; row++) {
@@ -1506,6 +1708,7 @@ static void dk_decode_subtitle_packet(DKPlayer* player, AVPacket* pkt) {
             for (unsigned r = 0; r < sub.num_rects; r++) {
                 const AVSubtitleRect* rect = sub.rects[r];
                 if (!rect || rect->type != SUBTITLE_BITMAP || rect->w <= 0 || rect->h <= 0 || !rect->data[0] || !rect->data[1]) continue;
+                if (player->sub_style.forced_only && !stream_is_forced && !(rect->flags & AV_SUBTITLE_FLAG_FORCED)) continue;
                 PgsBitmapRect dst_r;
                 dst_r.x = rect->x;
                 dst_r.y = rect->y;
@@ -1537,19 +1740,16 @@ static void dk_decode_subtitle_packet(DKPlayer* player, AVPacket* pkt) {
                 player->pgs_cues.push_back(std::move(cue));
             }
         }
-    } else if (player->ass_track) {
-        dk_ensure_default_ass_track_header(player);
+    } else if (track) {
+        dk_ensure_ass_track_header_for(player, track, is_secondary);
         for (unsigned r = 0; r < sub.num_rects; r++) {
             const AVSubtitleRect* rect = sub.rects[r];
             if (!rect) continue;
+            bool evt_forced = stream_is_forced || ((rect->flags & AV_SUBTITLE_FLAG_FORCED) != 0);
             if (rect->type == SUBTITLE_ASS && rect->ass) {
-                const char* ass_line = rect->ass;
-                if (std::strncmp(ass_line, "Dialogue:", 9) == 0) {
-                    ass_process_data(player->ass_track, const_cast<char*>(ass_line), static_cast<int>(std::strlen(ass_line)));
-                } else {
-                    // Normalize FFmpeg internal ReadOrder chunk style name if needed
-                    ass_process_chunk(player->ass_track, const_cast<char*>(ass_line), static_cast<int>(std::strlen(ass_line)), start_ms, dur_ms);
-                }
+                std::string ass_line = rect->ass;
+                bool is_diag = (ass_line.size() >= 9 && std::strncmp(ass_line.c_str(), "Dialogue:", 9) == 0);
+                feed_and_store_ass_event(ass_line, is_diag, evt_forced, start_ms, dur_ms);
             } else if (rect->type == SUBTITLE_TEXT && rect->text) {
                 std::string clean_txt = rect->text;
                 std::string formatted;
@@ -1559,12 +1759,25 @@ static void dk_decode_subtitle_packet(DKPlayer* player, AVPacket* pkt) {
                     else formatted += clean_txt[k];
                 }
                 std::string chunk = std::to_string(++player->sub_read_order) + ",0,Default,,0,0,0,," + formatted;
-                ass_process_chunk(player->ass_track, chunk.data(), static_cast<int>(chunk.size()), start_ms, dur_ms);
+                feed_and_store_ass_event(chunk, false, evt_forced, start_ms, dur_ms);
             }
         }
     }
 
     avsubtitle_free(&sub);
+}
+
+static void dk_decode_subtitle_packet(DKPlayer* player, AVPacket* pkt) {
+    if (!player || !pkt || !player->format_ctx) return;
+    std::lock_guard<std::mutex> lk(player->ass_mtx);
+    const int pri_idx = player->sub_stream_idx.load(std::memory_order_relaxed);
+    const int sec_idx = player->secondary_sub_stream_idx.load(std::memory_order_relaxed);
+    if (pri_idx >= 0 && pkt->stream_index == pri_idx) {
+        dk_decode_subtitle_packet_for_slot_locked(player, pkt, pri_idx, false);
+    }
+    if (sec_idx >= 0 && pkt->stream_index == sec_idx && sec_idx != pri_idx) {
+        dk_decode_subtitle_packet_for_slot_locked(player, pkt, sec_idx, true);
+    }
 }
 
 // Worker: Demuxing, thread-safe seeking, and cache writing
@@ -1623,8 +1836,14 @@ static void dk_demux_worker(DKPlayer* player) {
                 if (player->sub_stream_idx.load(std::memory_order_relaxed) >= 0) {
                     if (player->sub_codec_ctx) avcodec_flush_buffers(player->sub_codec_ctx);
                     if (player->ass_track) ass_flush_events(player->ass_track);
+                    player->primary_ass_events.clear();
                     player->pgs_cues.clear();
                     player->pgs_generation++;
+                }
+                if (player->secondary_sub_stream_idx.load(std::memory_order_relaxed) >= 0) {
+                    if (player->secondary_sub_codec_ctx) avcodec_flush_buffers(player->secondary_sub_codec_ctx);
+                    if (player->secondary_ass_track) ass_flush_events(player->secondary_ass_track);
+                    player->secondary_ass_events.clear();
                 }
                 if (!player->sub_rgba_buf.empty() && player->ass_canvas_w > 0 && player->ass_canvas_h > 0) {
                     int y0 = std::clamp(player->sub_dirty_y0, 0, player->ass_canvas_h);
@@ -1775,9 +1994,9 @@ static void dk_demux_worker(DKPlayer* player) {
 
         if (player->format_ctx && player->format_ctx->pb) {
             int64_t pb_bytes = player->format_ctx->pb->bytes_read;
-            if (pb_bytes > 0) {
+            if (pb_bytes > 0 && pb_bytes > player->total_bytes_read.load(std::memory_order_relaxed)) {
                 player->total_bytes_read.store(pb_bytes, std::memory_order_relaxed);
-            } else if (pkt->size > 0) {
+            } else if (!player->custom_io_read && pkt->size > 0 && pb_bytes <= 0) {
                 player->total_bytes_read.fetch_add(pkt->size, std::memory_order_relaxed);
             }
         } else if (pkt->size > 0) {
@@ -1820,7 +2039,8 @@ static void dk_demux_worker(DKPlayer* player) {
                 player->queued_pkt_bytes.fetch_add(a_copy->size, std::memory_order_relaxed);
             }
             player->audio_decode_cv.notify_one();
-        } else if (pkt->stream_index == player->sub_stream_idx.load(std::memory_order_relaxed)) {
+        } else if (pkt->stream_index == player->sub_stream_idx.load(std::memory_order_relaxed) ||
+                   pkt->stream_index == player->secondary_sub_stream_idx.load(std::memory_order_relaxed)) {
             dk_decode_subtitle_packet(player, pkt);
             av_packet_unref(pkt);
         } else {
@@ -1841,6 +2061,10 @@ DKPlayer* dk_player_create(void) {
         player->ass_renderer = ass_renderer_init(player->ass_lib);
         if (player->ass_renderer) {
             ass_set_fonts(player->ass_renderer, nullptr, "PingFang SC", 1, nullptr, 1);
+        }
+        player->secondary_ass_renderer = ass_renderer_init(player->ass_lib);
+        if (player->secondary_ass_renderer) {
+            ass_set_fonts(player->secondary_ass_renderer, nullptr, "PingFang SC", 1, nullptr, 1);
         }
     }
     {
@@ -1863,6 +2087,9 @@ void dk_player_destroy(DKPlayer* player) {
         player->abort_requested.store(true, std::memory_order_release);
         vec.erase(it);
     }
+    if (player->custom_io_abort && player->custom_io_opaque) {
+        player->custom_io_abort(player->custom_io_opaque);
+    }
     while (player->in_flight_readers.load(std::memory_order_acquire) > 0) {
         std::this_thread::sleep_for(std::chrono::microseconds(200));
     }
@@ -1872,9 +2099,17 @@ void dk_player_destroy(DKPlayer* player) {
         ass_free_track(player->ass_track);
         player->ass_track = nullptr;
     }
+    if (player->secondary_ass_track) {
+        ass_free_track(player->secondary_ass_track);
+        player->secondary_ass_track = nullptr;
+    }
     if (player->ass_renderer) {
         ass_renderer_done(player->ass_renderer);
         player->ass_renderer = nullptr;
+    }
+    if (player->secondary_ass_renderer) {
+        ass_renderer_done(player->secondary_ass_renderer);
+        player->secondary_ass_renderer = nullptr;
     }
     if (player->ass_lib) {
         ass_library_done(player->ass_lib);
@@ -1911,6 +2146,49 @@ static std::string dk_normalize_path_or_url(const char* in_url) {
     return s;
 }
 
+static int dk_avio_read_thunk(void* opaque, uint8_t* buf, int buf_size) {
+    DKPlayer* player = static_cast<DKPlayer*>(opaque);
+    if (!player || !player->custom_io_read) return AVERROR_EOF;
+    if (player->abort_requested.load(std::memory_order_relaxed) ||
+        player->is_closing.load(std::memory_order_relaxed)) {
+        return AVERROR_EXIT;
+    }
+    int n = player->custom_io_read(player->custom_io_opaque, buf, buf_size);
+    if (n > 0) {
+        player->total_bytes_read.fetch_add(n, std::memory_order_relaxed);
+        return n;
+    }
+    if (n == 0) {
+        return AVERROR_EOF;
+    }
+    return (player->abort_requested.load(std::memory_order_relaxed) ||
+            player->is_closing.load(std::memory_order_relaxed))
+        ? AVERROR_EXIT
+        : AVERROR(EIO);
+}
+
+static int64_t dk_avio_seek_thunk(void* opaque, int64_t offset, int whence) {
+    DKPlayer* player = static_cast<DKPlayer*>(opaque);
+    if (!player || !player->custom_io_seek) return AVERROR(ENOSYS);
+    return player->custom_io_seek(player->custom_io_opaque, offset, whence);
+}
+
+void dk_player_set_custom_io(
+    DKPlayer* player,
+    void* opaque,
+    DKCustomIOReadCallback read_cb,
+    DKCustomIOSeekCallback seek_cb,
+    DKCustomIOAbortCallback abort_cb,
+    DKCustomIOCloseCallback close_cb
+) {
+    if (!player) return;
+    player->custom_io_opaque = opaque;
+    player->custom_io_read = read_cb;
+    player->custom_io_seek = seek_cb;
+    player->custom_io_abort = abort_cb;
+    player->custom_io_close = close_cb;
+}
+
 void dk_player_request_abort(DKPlayer* player) {
     if (!player) return;
     std::lock_guard<std::mutex> lk(dk_registry_mutex());
@@ -1920,6 +2198,9 @@ void dk_player_request_abort(DKPlayer* player) {
     }
     player->external_abort_requested.store(true, std::memory_order_seq_cst);
     player->abort_requested.store(true, std::memory_order_seq_cst);
+    if (player->custom_io_abort && player->custom_io_opaque) {
+        player->custom_io_abort(player->custom_io_opaque);
+    }
     player->demux_cv.notify_all();
     player->video_decode_cv.notify_all();
     player->audio_decode_cv.notify_all();
@@ -1932,8 +2213,31 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
         player->state.store(DK_STATE_ERROR);
         return -1;
     }
+    // Preserve any pending custom IO registered prior to open
+    void* saved_io_opaque = player->custom_io_opaque;
+    DKCustomIOReadCallback saved_io_read = player->custom_io_read;
+    DKCustomIOSeekCallback saved_io_seek = player->custom_io_seek;
+    DKCustomIOAbortCallback saved_io_abort = player->custom_io_abort;
+    DKCustomIOCloseCallback saved_io_close = player->custom_io_close;
+    player->custom_io_opaque = nullptr;
+    player->custom_io_read = nullptr;
+    player->custom_io_seek = nullptr;
+    player->custom_io_abort = nullptr;
+    player->custom_io_close = nullptr;
+
     dk_player_close(player);
+
+    player->custom_io_opaque = saved_io_opaque;
+    player->custom_io_read = saved_io_read;
+    player->custom_io_seek = saved_io_seek;
+    player->custom_io_abort = saved_io_abort;
+    player->custom_io_close = saved_io_close;
+
     if (player->external_abort_requested.load(std::memory_order_seq_cst)) {
+        if (player->custom_io_close && player->custom_io_opaque) {
+            player->custom_io_close(player->custom_io_opaque);
+            player->custom_io_opaque = nullptr;
+        }
         player->state.store(DK_STATE_ERROR);
         return -1;
     }
@@ -1941,9 +2245,10 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
     std::string normalized_url = dk_normalize_path_or_url(url);
     const char* open_target = normalized_url.c_str();
     bool is_local_file = (!normalized_url.empty() && normalized_url[0] == '/');
+    const bool use_custom_io = (player->custom_io_read != nullptr && player->custom_io_opaque != nullptr);
 
-    dk_log(0, "DKEngine: Opening URL: %s (target=%s, local=%d, hw_decode=%d, start=%.2fs)",
-           url, open_target, is_local_file ? 1 : 0, hw_decode ? 1 : 0, start_sec);
+    dk_log(0, "DKEngine: Opening URL: %s (target=%s, local=%d, custom_io=%d, hw_decode=%d, start=%.2fs)",
+           url, open_target, is_local_file ? 1 : 0, use_custom_io ? 1 : 0, hw_decode ? 1 : 0, start_sec);
     auto start_time = std::chrono::steady_clock::now();
 
     player->state.store(DK_STATE_OPENING);
@@ -1964,6 +2269,10 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
     player->abort_requested.store(false, std::memory_order_seq_cst);
     if (player->external_abort_requested.load(std::memory_order_seq_cst)) {
         player->abort_requested.store(true, std::memory_order_seq_cst);
+        if (player->custom_io_close && player->custom_io_opaque) {
+            player->custom_io_close(player->custom_io_opaque);
+            player->custom_io_opaque = nullptr;
+        }
         player->state.store(DK_STATE_ERROR);
         return -1;
     }
@@ -1973,13 +2282,14 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
     player->video_stream_idx = -1;
     player->audio_stream_idx.store(-1);
     player->sub_stream_idx.store(-1);
+    player->secondary_sub_stream_idx.store(-1);
     {
         std::lock_guard<std::mutex> lk(player->stats_mtx);
         player->stats = DKRuntimeStats{};
     }
 
     AVDictionary* opts = nullptr;
-    if (is_local_file) {
+    if (is_local_file || use_custom_io) {
         av_dict_set(&opts, "probesize", "10485760", 0);
         av_dict_set(&opts, "analyzeduration", "5000000", 0);
         av_dict_set(&opts, "buffer_size", "2097152", 0);
@@ -2013,7 +2323,34 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
     player->format_ctx->interrupt_callback.callback = dk_interrupt_callback;
     player->format_ctx->interrupt_callback.opaque = player;
 
-    int open_ret = avformat_open_input(&player->format_ctx, open_target, nullptr, &opts);
+    if (use_custom_io) {
+        constexpr int kAvioBufSize = 256 * 1024;
+        uint8_t* avio_buf = static_cast<uint8_t*>(av_malloc(kAvioBufSize));
+        if (avio_buf) {
+            player->custom_avio_ctx = avio_alloc_context(
+                avio_buf,
+                kAvioBufSize,
+                0,
+                player,
+                dk_avio_read_thunk,
+                nullptr,
+                player->custom_io_seek ? dk_avio_seek_thunk : nullptr
+            );
+            if (player->custom_avio_ctx) {
+                player->format_ctx->pb = player->custom_avio_ctx;
+                player->format_ctx->flags |= AVFMT_FLAG_CUSTOM_IO;
+            } else {
+                av_free(avio_buf);
+            }
+        }
+    }
+
+    int open_ret = avformat_open_input(
+        &player->format_ctx,
+        (use_custom_io && player->custom_avio_ctx) ? nullptr : open_target,
+        nullptr,
+        &opts
+    );
     av_dict_free(&opts);
     if (open_ret < 0 || player->abort_requested.load(std::memory_order_seq_cst) || player->external_abort_requested.load(std::memory_order_seq_cst)) {
         char errbuf[256];
@@ -2022,8 +2359,17 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
         if (open_ret >= 0 && player->format_ctx) {
             avformat_close_input(&player->format_ctx);
         } else if (player->format_ctx) {
+            player->format_ctx->pb = nullptr;
             avformat_free_context(player->format_ctx);
             player->format_ctx = nullptr;
+        }
+        if (player->custom_avio_ctx) {
+            av_freep(&player->custom_avio_ctx->buffer);
+            avio_context_free(&player->custom_avio_ctx);
+        }
+        if (player->custom_io_close && player->custom_io_opaque) {
+            player->custom_io_close(player->custom_io_opaque);
+            player->custom_io_opaque = nullptr;
         }
         player->state.store(DK_STATE_ERROR);
         return -1;
@@ -2034,6 +2380,14 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
         player->external_abort_requested.load(std::memory_order_seq_cst)) {
         dk_log(2, "DKEngine Error: avformat_find_stream_info failed");
         avformat_close_input(&player->format_ctx);
+        if (player->custom_avio_ctx) {
+            av_freep(&player->custom_avio_ctx->buffer);
+            avio_context_free(&player->custom_avio_ctx);
+        }
+        if (player->custom_io_close && player->custom_io_opaque) {
+            player->custom_io_close(player->custom_io_opaque);
+            player->custom_io_opaque = nullptr;
+        }
         player->state.store(DK_STATE_ERROR);
         return -1;
     }
@@ -2258,6 +2612,9 @@ void dk_player_close(DKPlayer* player) {
         return;
     }
     player->abort_requested.store(true);
+    if (player->custom_io_abort && player->custom_io_opaque) {
+        player->custom_io_abort(player->custom_io_opaque);
+    }
 
     while (player->in_flight_readers.load(std::memory_order_acquire) > 0) {
         std::this_thread::sleep_for(std::chrono::microseconds(200));
@@ -2331,17 +2688,48 @@ void dk_player_close(DKPlayer* player) {
         if (player->sub_codec_ctx) {
             avcodec_free_context(&player->sub_codec_ctx);
         }
+        if (player->secondary_sub_codec_ctx) {
+            avcodec_free_context(&player->secondary_sub_codec_ctx);
+        }
+        if (player->secondary_ass_track) {
+            ass_free_track(player->secondary_ass_track);
+            player->secondary_ass_track = nullptr;
+        }
+        player->primary_ass_events.clear();
+        player->secondary_ass_events.clear();
+        player->primary_codec_private.clear();
+        player->secondary_codec_private.clear();
+        player->primary_ext_raw.clear();
+        player->secondary_ext_raw.clear();
         player->pgs_cues.clear();
     }
 
     if (player->video_codec_ctx) { avcodec_free_context(&player->video_codec_ctx); }
     if (player->audio_codec_ctx) { avcodec_free_context(&player->audio_codec_ctx); }
     if (player->hw_device_ctx) { av_buffer_unref(&player->hw_device_ctx); }
-    if (player->format_ctx) { avformat_close_input(&player->format_ctx); }
+    if (player->format_ctx) {
+        if (player->custom_avio_ctx) {
+            player->format_ctx->pb = nullptr;
+        }
+        avformat_close_input(&player->format_ctx);
+    }
+    if (player->custom_avio_ctx) {
+        av_freep(&player->custom_avio_ctx->buffer);
+        avio_context_free(&player->custom_avio_ctx);
+    }
+    if (player->custom_io_close && player->custom_io_opaque) {
+        player->custom_io_close(player->custom_io_opaque);
+    }
+    player->custom_io_opaque = nullptr;
+    player->custom_io_read = nullptr;
+    player->custom_io_seek = nullptr;
+    player->custom_io_abort = nullptr;
+    player->custom_io_close = nullptr;
 
     player->video_stream_idx = -1;
     player->audio_stream_idx = -1;
     player->sub_stream_idx = -1;
+    player->secondary_sub_stream_idx = -1;
     player->atomic_video_bitrate_mbps.store(0.0, std::memory_order_relaxed);
     player->audio_queue_started.store(false);
     player->state.store(DK_STATE_IDLE);
@@ -2444,6 +2832,7 @@ bool dk_player_get_track_info(DKPlayer* player, int track_type, int ordinal, DKT
             out_info->stream_index = static_cast<int32_t>(i);
             out_info->channels = st->codecpar->ch_layout.nb_channels;
             out_info->is_default = (st->disposition & AV_DISPOSITION_DEFAULT) != 0;
+            out_info->is_forced = (st->disposition & AV_DISPOSITION_FORCED) != 0;
             if (track_type == 0) out_info->is_selected = (player->video_stream_idx == static_cast<int>(i));
             else if (track_type == 1) out_info->is_selected = (player->audio_stream_idx.load() == static_cast<int>(i));
             else out_info->is_selected = (player->sub_stream_idx.load() == static_cast<int>(i));
@@ -2462,6 +2851,31 @@ bool dk_player_get_track_info(DKPlayer* player, int track_type, int ordinal, DKT
         seen++;
     }
     return false;
+}
+
+int dk_player_get_chapter_count(DKPlayer* player) {
+    DKReaderGuard guard(player);
+    if (!guard || !player->format_ctx) return 0;
+    return static_cast<int>(player->format_ctx->nb_chapters);
+}
+
+bool dk_player_get_chapter_info(DKPlayer* player, int ordinal, DKChapterInfo* out_info) {
+    DKReaderGuard guard(player);
+    if (!guard || !player->format_ctx || !out_info || ordinal < 0 ||
+        static_cast<unsigned int>(ordinal) >= player->format_ctx->nb_chapters) {
+        return false;
+    }
+    std::memset(out_info, 0, sizeof(DKChapterInfo));
+    AVChapter* ch = player->format_ctx->chapters[ordinal];
+    if (!ch) return false;
+    out_info->index = ordinal;
+    double tb = av_q2d(ch->time_base);
+    out_info->start_sec = (ch->start != AV_NOPTS_VALUE) ? (ch->start * tb) : 0.0;
+    out_info->end_sec = (ch->end != AV_NOPTS_VALUE) ? (ch->end * tb) : out_info->start_sec;
+    if (const AVDictionaryEntry* t = av_dict_get(ch->metadata, "title", nullptr, 0); t && t->value) {
+        std::snprintf(out_info->title, sizeof(out_info->title), "%s", t->value);
+    }
+    return true;
 }
 
 void dk_player_select_track(DKPlayer* player, int track_type, int stream_index) {
@@ -2535,7 +2949,7 @@ void dk_player_select_track(DKPlayer* player, int track_type, int stream_index) 
         player->seek_accurate.store(true);
         player->seek_requested.store(true);
         player->demux_cv.notify_all();
-    } else if (track_type == 2) { // Subtitle
+    } else if (track_type == 2) { // Primary Subtitle
         if (stream_index >= 0) {
             if (static_cast<unsigned int>(stream_index) >= player->format_ctx->nb_streams ||
                 player->format_ctx->streams[stream_index]->codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE) {
@@ -2557,6 +2971,30 @@ void dk_player_select_track(DKPlayer* player, int track_type, int stream_index) 
         } else {
             dk_log(0, "DKEngine: Subtitles disabled by user");
         }
+    }
+}
+
+void dk_player_select_secondary_subtitle_track(DKPlayer* player, int stream_index) {
+    DKReaderGuard guard(player);
+    if (!guard || !player->format_ctx) return;
+    if (stream_index >= 0) {
+        if (static_cast<unsigned int>(stream_index) >= player->format_ctx->nb_streams ||
+            player->format_ctx->streams[stream_index]->codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE) {
+            dk_log(1, "DKEngine: Ignored invalid secondary subtitle stream index %d", stream_index);
+            return;
+        }
+    }
+    double cur_pts = dk_get_master_clock(player);
+    {
+        std::lock_guard<std::mutex> slk(player->ass_mtx);
+        player->secondary_sub_stream_idx.store(stream_index);
+        dk_open_subtitle_decoder_for_slot_locked(player, stream_index, true);
+    }
+    if (stream_index >= 0) {
+        player->seek_target_sec.store(std::max(0.0, cur_pts));
+        player->seek_accurate.store(true);
+        player->seek_requested.store(true);
+        player->demux_cv.notify_all();
     }
 }
 
@@ -2596,44 +3034,33 @@ static std::string dk_sanitize_srt_vtt_tags(const std::string& raw) {
     return out;
 }
 
-void dk_player_load_external_subtitle(DKPlayer* player, const char* content_utf8, bool is_ass) {
-    DKReaderGuard guard(player);
-    if (!guard || !content_utf8 || !player->ass_lib) return;
-
-    std::lock_guard<std::mutex> slk(player->ass_mtx);
-    player->sub_stream_idx.store(-1);
-    if (player->sub_codec_ctx) {
-        avcodec_free_context(&player->sub_codec_ctx);
+static void dk_populate_external_subtitle_track_locked(
+    DKPlayer* player,
+    const std::string& raw_utf8,
+    bool is_ass,
+    bool is_secondary
+) {
+    ASS_Track*& track = is_secondary ? player->secondary_ass_track : player->ass_track;
+    if (track) {
+        ass_free_track(track);
+        track = nullptr;
     }
-    player->pgs_cues.clear();
-    player->sub_rgba_buf.clear();
-    player->has_bitmap_subs = false;
-    player->rendered_pgs_gen = 0;
-    player->sub_last_non_empty = false;
-    player->sub_dirty_y0 = 0;
-    player->sub_dirty_y1 = 0;
-    player->sub_serial++;
-    if (player->ass_track) {
-        ass_free_track(player->ass_track);
-        player->ass_track = nullptr;
-    }
-
-    size_t len = std::strlen(content_utf8);
-    if (len == 0) return;
+    if (raw_utf8.empty() || !player->ass_lib) return;
 
     if (is_ass) {
-        player->ass_track = ass_read_memory(player->ass_lib, const_cast<char*>(content_utf8), len, nullptr);
-        if (player->ass_track) {
-            dk_ensure_default_ass_track_header(player);
+        std::string transformed = dk_transform_ass_document(raw_utf8, player->sub_style.text_transform);
+        track = ass_read_memory(player->ass_lib, transformed.data(), transformed.size(), nullptr);
+        if (track) {
+            dk_ensure_ass_track_header_for(player, track, is_secondary);
         }
         return;
     }
 
-    player->ass_track = ass_new_track(player->ass_lib);
-    if (!player->ass_track) return;
-    dk_ensure_default_ass_track_header(player);
+    track = ass_new_track(player->ass_lib);
+    if (!track) return;
+    dk_ensure_ass_track_header_for(player, track, is_secondary);
 
-    std::string text(content_utf8, len);
+    std::string text = raw_utf8;
     if (text.size() >= 3 && static_cast<uint8_t>(text[0]) == 0xEF && static_cast<uint8_t>(text[1]) == 0xBB && static_cast<uint8_t>(text[2]) == 0xBF) {
         text.erase(0, 3);
     }
@@ -2643,8 +3070,10 @@ void dk_player_load_external_subtitle(DKPlayer* player, const char* content_utf8
     std::string cue_body;
     auto flush_cue = [&]() {
         if (cue_start >= 0 && cue_end > cue_start && !cue_body.empty()) {
-            std::string chunk = std::to_string(++player->sub_read_order) + ",0,Default,,0,0,0,," + dk_sanitize_srt_vtt_tags(cue_body);
-            ass_process_chunk(player->ass_track, chunk.data(), static_cast<int>(chunk.size()), cue_start, cue_end - cue_start);
+            std::string body_sanitized = dk_sanitize_srt_vtt_tags(cue_body);
+            std::string body_transformed = dk_transform_ass_payload(body_sanitized, player->sub_style.text_transform);
+            std::string chunk = std::to_string(++player->sub_read_order) + ",0,Default,,0,0,0,," + body_transformed;
+            ass_process_chunk(track, chunk.data(), static_cast<int>(chunk.size()), cue_start, cue_end - cue_start);
         }
         cue_start = cue_end = -1;
         cue_body.clear();
@@ -2680,6 +3109,127 @@ void dk_player_load_external_subtitle(DKPlayer* player, const char* content_utf8
         }
     }
     flush_cue();
+}
+
+static void dk_rebuild_embedded_ass_track_locked(DKPlayer* player, bool is_secondary) {
+    ASS_Track*& track = is_secondary ? player->secondary_ass_track : player->ass_track;
+    const std::string& codec_priv = is_secondary ? player->secondary_codec_private : player->primary_codec_private;
+    const std::vector<StoredAssEvent>& events = is_secondary ? player->secondary_ass_events : player->primary_ass_events;
+    if (track) {
+        ass_free_track(track);
+        track = nullptr;
+    }
+    if (!player->ass_lib) return;
+    track = ass_new_track(player->ass_lib);
+    if (!track) return;
+    if (!codec_priv.empty()) {
+        ass_process_codec_private(track, const_cast<char*>(codec_priv.data()), static_cast<int>(codec_priv.size()));
+    }
+    dk_ensure_ass_track_header_for(player, track, is_secondary);
+    for (const auto& ev : events) {
+        if (player->sub_style.forced_only && !ev.is_forced) continue;
+        std::string transformed = dk_transform_ass_line(ev.raw_line, player->sub_style.text_transform, ev.is_full_dialogue);
+        if (ev.is_full_dialogue) {
+            ass_process_data(track, transformed.data(), static_cast<int>(transformed.size()));
+        } else {
+            ass_process_chunk(track, transformed.data(), static_cast<int>(transformed.size()), ev.start_ms, ev.dur_ms);
+        }
+    }
+}
+
+void dk_player_load_external_subtitle(DKPlayer* player, const char* content_utf8, bool is_ass) {
+    DKReaderGuard guard(player);
+    if (!guard || !content_utf8 || !player->ass_lib) return;
+
+    std::lock_guard<std::mutex> slk(player->ass_mtx);
+    player->sub_stream_idx.store(-1);
+    if (player->sub_codec_ctx) {
+        avcodec_free_context(&player->sub_codec_ctx);
+    }
+    player->primary_ass_events.clear();
+    player->primary_codec_private.clear();
+    player->pgs_cues.clear();
+    player->sub_rgba_buf.clear();
+    player->has_bitmap_subs = false;
+    player->rendered_pgs_gen = 0;
+    player->sub_last_non_empty = false;
+    player->sub_dirty_y0 = 0;
+    player->sub_dirty_y1 = 0;
+    player->sub_serial++;
+    player->primary_ext_raw = content_utf8;
+    player->primary_ext_is_ass = is_ass;
+    dk_populate_external_subtitle_track_locked(player, player->primary_ext_raw, is_ass, false);
+}
+
+void dk_player_load_secondary_external_subtitle(DKPlayer* player, const char* content_utf8, bool is_ass) {
+    DKReaderGuard guard(player);
+    if (!guard || !content_utf8 || !player->ass_lib) return;
+
+    std::lock_guard<std::mutex> slk(player->ass_mtx);
+    player->secondary_sub_stream_idx.store(-1);
+    if (player->secondary_sub_codec_ctx) {
+        avcodec_free_context(&player->secondary_sub_codec_ctx);
+    }
+    player->secondary_ass_events.clear();
+    player->secondary_codec_private.clear();
+    player->sub_rgba_buf.clear();
+    player->sub_last_non_empty = false;
+    player->sub_dirty_y0 = 0;
+    player->sub_dirty_y1 = 0;
+    player->sub_serial++;
+    player->secondary_ext_raw = content_utf8;
+    player->secondary_ext_is_ass = is_ass;
+    dk_populate_external_subtitle_track_locked(player, player->secondary_ext_raw, is_ass, true);
+}
+
+void dk_player_set_subtitle_style(DKPlayer* player, const DKSubtitleStyleConfig* config) {
+    DKReaderGuard guard(player);
+    if (!guard || !config) return;
+
+    std::lock_guard<std::mutex> slk(player->ass_mtx);
+    const bool transform_changed = (player->sub_style.text_transform != config->text_transform);
+    const bool forced_changed = (player->sub_style.forced_only != config->forced_only);
+    const bool override_changed = (player->sub_style.override_ass_style != config->override_ass_style);
+    player->sub_style = *config;
+
+    if (transform_changed || forced_changed || override_changed) {
+        if (!player->primary_ext_raw.empty()) {
+            dk_populate_external_subtitle_track_locked(player, player->primary_ext_raw, player->primary_ext_is_ass, false);
+        } else if (player->sub_stream_idx.load(std::memory_order_relaxed) >= 0 && !player->has_bitmap_subs) {
+            dk_rebuild_embedded_ass_track_locked(player, false);
+        }
+        if (!player->secondary_ext_raw.empty()) {
+            dk_populate_external_subtitle_track_locked(player, player->secondary_ext_raw, player->secondary_ext_is_ass, true);
+        } else if (player->secondary_sub_stream_idx.load(std::memory_order_relaxed) >= 0) {
+            dk_rebuild_embedded_ass_track_locked(player, true);
+        }
+    }
+
+    if (player->ass_track) {
+        dk_apply_style_to_ass_track_locked(player, player->ass_track, false);
+    }
+    if (player->secondary_ass_track) {
+        dk_apply_style_to_ass_track_locked(player, player->secondary_ass_track, true);
+    }
+    player->sub_last_non_empty = false;
+    player->rendered_pgs_gen = 0;
+    player->sub_serial++;
+}
+
+bool dk_player_get_subtitle_vertical_bounds(DKPlayer* player, int32_t* out_y0, int32_t* out_y1, int32_t* out_canvas_h) {
+    DKReaderGuard guard(player);
+    if (!guard || !out_y0 || !out_y1 || !out_canvas_h) return false;
+    std::lock_guard<std::mutex> slk(player->ass_mtx);
+    if (!player->sub_last_non_empty || player->ass_canvas_h <= 0 || player->sub_dirty_y1 <= player->sub_dirty_y0) {
+        *out_y0 = 0;
+        *out_y1 = 0;
+        *out_canvas_h = 0;
+        return false;
+    }
+    *out_y0 = player->sub_dirty_y0;
+    *out_y1 = player->sub_dirty_y1;
+    *out_canvas_h = player->ass_canvas_h;
+    return true;
 }
 
 CVPixelBufferRef dk_player_acquire_frame(DKPlayer* player, double* out_pts, DKGpuColorUniforms* out_color) {
@@ -2783,6 +3333,59 @@ CVPixelBufferRef dk_player_acquire_frame_for_host_time(DKPlayer* player, double*
     return dk_player_acquire_frame(player, out_pts, nullptr);
 }
 
+static void dk_composite_ass_images_to_rgba(
+    ASS_Image* img,
+    uint8_t* rgba_buf,
+    int canvas_w,
+    int canvas_h,
+    int y_offset,
+    int& inout_y0,
+    int& inout_y1
+) {
+    for (ASS_Image* cur = img; cur != nullptr; cur = cur->next) {
+        if (cur->w <= 0 || cur->h <= 0 || !cur->bitmap) continue;
+        uint8_t cr = (cur->color >> 24) & 0xFF;
+        uint8_t cg = (cur->color >> 16) & 0xFF;
+        uint8_t cb = (cur->color >> 8) & 0xFF;
+        uint8_t ca = 255 - (cur->color & 0xFF);
+        if (ca == 0) continue;
+
+        int max_c = std::max({static_cast<int>(cr), static_cast<int>(cg), static_cast<int>(cb)});
+        int min_c = std::min({static_cast<int>(cr), static_cast<int>(cg), static_cast<int>(cb)});
+        if (max_c >= 140 && (max_c - min_c) <= 18) {
+            float scale = 245.0f / static_cast<float>(max_c);
+            cr = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(cr * scale)), 0, 255));
+            cg = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(cg * scale)), 0, 255));
+            cb = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(cb * scale)), 0, 255));
+        }
+
+        for (int y = 0; y < cur->h; y++) {
+            int dy = cur->dst_y + y + y_offset;
+            if (dy < 0 || dy >= canvas_h) continue;
+            inout_y0 = std::min(inout_y0, dy);
+            inout_y1 = std::max(inout_y1, dy + 1);
+            const uint8_t* mask_row = cur->bitmap + y * cur->stride;
+            uint8_t* dst_row = rgba_buf + static_cast<size_t>(dy) * canvas_w * 4;
+            for (int x = 0; x < cur->w; x++) {
+                int dx = cur->dst_x + x;
+                if (dx < 0 || dx >= canvas_w) continue;
+                uint32_t m = mask_row[x];
+                if (m == 0) continue;
+                uint32_t a = (m * ca + 127) / 255;
+                uint8_t sr = static_cast<uint8_t>((cr * a + 127) / 255);
+                uint8_t sg = static_cast<uint8_t>((cg * a + 127) / 255);
+                uint8_t sb = static_cast<uint8_t>((cb * a + 127) / 255);
+                uint8_t* dp = dst_row + dx * 4;
+                uint32_t inv_a = 255 - a;
+                dp[0] = static_cast<uint8_t>(std::min<uint32_t>(255, sr + (dp[0] * inv_a + 127) / 255));
+                dp[1] = static_cast<uint8_t>(std::min<uint32_t>(255, sg + (dp[1] * inv_a + 127) / 255));
+                dp[2] = static_cast<uint8_t>(std::min<uint32_t>(255, sb + (dp[2] * inv_a + 127) / 255));
+                dp[3] = static_cast<uint8_t>(std::min<uint32_t>(255, a + (dp[3] * inv_a + 127) / 255));
+            }
+        }
+    }
+}
+
 static bool dk_update_subtitle_rgba_locked(
     DKPlayer* player,
     double pts,
@@ -2822,19 +3425,21 @@ static bool dk_update_subtitle_rgba_locked(
     }
 
     *out_serial = player->sub_serial;
+    const double pri_pts = pts - player->sub_style.primary_delay_sec;
+    const double sec_pts = pts - player->sub_style.secondary_delay_sec;
 
     if (player->has_bitmap_subs) {
-        while (!player->pgs_cues.empty() && player->pgs_cues.front().end_sec < pts - 2.0) {
+        while (!player->pgs_cues.empty() && player->pgs_cues.front().end_sec < pri_pts - 2.0) {
             player->pgs_cues.pop_front();
         }
         const PgsCue* active_cue = nullptr;
         for (const auto& cue : player->pgs_cues) {
-            if (pts >= cue.start_sec && pts < cue.end_sec && !cue.rects.empty()) {
+            if (pri_pts >= cue.start_sec && pri_pts < cue.end_sec && !cue.rects.empty()) {
                 active_cue = &cue;
                 break;
             }
         }
-        if (!active_cue) {
+        if (!active_cue && !player->secondary_ass_track) {
             if (player->sub_last_non_empty) {
                 if (player->ass_canvas_w > 0 && player->ass_canvas_h > 0) {
                     clear_subtitle_canvas(player->ass_canvas_w, player->ass_canvas_h);
@@ -2845,56 +3450,77 @@ static bool dk_update_subtitle_rgba_locked(
             *out_serial = player->sub_serial;
             return false;
         }
-        int cue_w = std::max(1, active_cue->canvas_w);
-        int cue_h = std::max(1, active_cue->canvas_h);
-        int dst_w = cue_w;
-        int dst_h = (canvas_w > 0 && canvas_h > 0) ? std::max(1, (cue_w * canvas_h) / canvas_w) : cue_h;
-        int crop_top = (cue_h > dst_h + 20) ? ((cue_h - dst_h) / 2) : 0;
+        if (active_cue) {
+            int cue_w = std::max(1, active_cue->canvas_w);
+            int cue_h = std::max(1, active_cue->canvas_h);
+            int dst_w = cue_w;
+            int dst_h = (canvas_w > 0 && canvas_h > 0) ? std::max(1, (cue_w * canvas_h) / canvas_w) : cue_h;
+            int crop_top = (cue_h > dst_h + 20) ? ((cue_h - dst_h) / 2) : 0;
 
-        if (player->rendered_pgs_gen != active_cue->id || player->ass_canvas_w != dst_w || player->ass_canvas_h != dst_h) {
-            player->ass_canvas_w = dst_w;
-            player->ass_canvas_h = dst_h;
-            clear_subtitle_canvas(dst_w, dst_h);
-            int new_y0 = dst_h;
-            int new_y1 = 0;
-            for (const auto& r : active_cue->rects) {
-                int mapped_y = r.y - crop_top;
-                int base_y = std::clamp(mapped_y, 8, std::max(8, dst_h - r.h - 14));
-                int base_x = (r.x + r.w > dst_w) ? std::max(0, dst_w - r.w) : std::max(0, r.x);
-                for (int y = 0; y < r.h; y++) {
-                    int dy = base_y + y;
-                    if (dy < 0 || dy >= dst_h) continue;
-                    new_y0 = std::min(new_y0, dy);
-                    new_y1 = std::max(new_y1, dy + 1);
-                    for (int x = 0; x < r.w; x++) {
-                        int dx = base_x + x;
-                        if (dx < 0 || dx >= dst_w) continue;
-                        const uint8_t* sp = &r.rgba[(static_cast<size_t>(y) * r.w + x) * 4];
-                        uint8_t* dp = &player->sub_rgba_buf[(static_cast<size_t>(dy) * dst_w + dx) * 4];
-                        uint8_t inv_a = 255 - sp[3];
-                        dp[0] = static_cast<uint8_t>(std::min(255, sp[0] + (dp[0] * inv_a + 127) / 255));
-                        dp[1] = static_cast<uint8_t>(std::min(255, sp[1] + (dp[1] * inv_a + 127) / 255));
-                        dp[2] = static_cast<uint8_t>(std::min(255, sp[2] + (dp[2] * inv_a + 127) / 255));
-                        dp[3] = static_cast<uint8_t>(std::min(255, sp[3] + (dp[3] * inv_a + 127) / 255));
+            if (player->rendered_pgs_gen != active_cue->id || player->ass_canvas_w != dst_w || player->ass_canvas_h != dst_h) {
+                player->ass_canvas_w = dst_w;
+                player->ass_canvas_h = dst_h;
+                clear_subtitle_canvas(dst_w, dst_h);
+                int new_y0 = dst_h;
+                int new_y1 = 0;
+                for (const auto& r : active_cue->rects) {
+                    int mapped_y = r.y - crop_top;
+                    int base_y = std::clamp(mapped_y, 8, std::max(8, dst_h - r.h - 14));
+                    int base_x = (r.x + r.w > dst_w) ? std::max(0, dst_w - r.w) : std::max(0, r.x);
+                    for (int y = 0; y < r.h; y++) {
+                        int dy = base_y + y;
+                        if (dy < 0 || dy >= dst_h) continue;
+                        new_y0 = std::min(new_y0, dy);
+                        new_y1 = std::max(new_y1, dy + 1);
+                        for (int x = 0; x < r.w; x++) {
+                            int dx = base_x + x;
+                            if (dx < 0 || dx >= dst_w) continue;
+                            const uint8_t* sp = &r.rgba[(static_cast<size_t>(y) * r.w + x) * 4];
+                            uint8_t* dp = &player->sub_rgba_buf[(static_cast<size_t>(dy) * dst_w + dx) * 4];
+                            uint8_t inv_a = 255 - sp[3];
+                            dp[0] = static_cast<uint8_t>(std::min(255, sp[0] + (dp[0] * inv_a + 127) / 255));
+                            dp[1] = static_cast<uint8_t>(std::min(255, sp[1] + (dp[1] * inv_a + 127) / 255));
+                            dp[2] = static_cast<uint8_t>(std::min(255, sp[2] + (dp[2] * inv_a + 127) / 255));
+                            dp[3] = static_cast<uint8_t>(std::min(255, sp[3] + (dp[3] * inv_a + 127) / 255));
+                        }
                     }
                 }
+                if (player->secondary_ass_track && player->ass_renderer) {
+                    ass_set_frame_size(player->ass_renderer, dst_w, dst_h);
+                    ass_set_storage_size(player->ass_renderer, dst_w, dst_h);
+                    int sec_change = 0;
+                    ASS_Image* sec_img = ass_render_frame(
+                        player->ass_renderer,
+                        player->secondary_ass_track,
+                        static_cast<long long>(std::max(0.0, sec_pts) * 1000.0),
+                        &sec_change
+                    );
+                    if (sec_img) {
+                        int sec_y1 = 0;
+                        for (ASS_Image* c = sec_img; c != nullptr; c = c->next) {
+                            if (c->w > 0 && c->h > 0) sec_y1 = std::max(sec_y1, c->dst_y + c->h);
+                        }
+                        int y_off = (new_y1 > new_y0 && sec_y1 > new_y0 - 6) ? ((new_y0 - 8) - sec_y1) : 0;
+                        dk_composite_ass_images_to_rgba(sec_img, player->sub_rgba_buf.data(), dst_w, dst_h, y_off, new_y0, new_y1);
+                    }
+                }
+                if (new_y1 > new_y0) {
+                    player->sub_dirty_y0 = new_y0;
+                    player->sub_dirty_y1 = new_y1;
+                }
+                player->rendered_pgs_gen = active_cue->id;
+                player->sub_last_non_empty = true;
+                player->sub_serial++;
             }
-            if (new_y1 > new_y0) {
-                player->sub_dirty_y0 = new_y0;
-                player->sub_dirty_y1 = new_y1;
-            }
-            player->rendered_pgs_gen = active_cue->id;
-            player->sub_last_non_empty = true;
-            player->sub_serial++;
+            *out_rgba = player->sub_rgba_buf.data();
+            *out_w = dst_w;
+            *out_h = dst_h;
+            *out_serial = player->sub_serial;
+            return true;
         }
-        *out_rgba = player->sub_rgba_buf.data();
-        *out_w = dst_w;
-        *out_h = dst_h;
-        *out_serial = player->sub_serial;
-        return true;
     }
 
-    if (!player->ass_renderer || !player->ass_track) {
+    if (!player->ass_renderer || (!player->ass_track && !player->secondary_ass_track)) {
         if (player->sub_last_non_empty) {
             if (player->ass_canvas_w > 0 && player->ass_canvas_h > 0) {
                 clear_subtitle_canvas(player->ass_canvas_w, player->ass_canvas_h);
@@ -2912,12 +3538,26 @@ static bool dk_update_subtitle_rgba_locked(
         player->sub_dirty_y1 = 0;
         ass_set_frame_size(player->ass_renderer, canvas_w, canvas_h);
         ass_set_storage_size(player->ass_renderer, canvas_w, canvas_h);
+        if (player->secondary_ass_renderer) {
+            ass_set_frame_size(player->secondary_ass_renderer, canvas_w, canvas_h);
+            ass_set_storage_size(player->secondary_ass_renderer, canvas_w, canvas_h);
+        }
     }
 
-    long long now_ms = static_cast<long long>(pts * 1000.0);
-    int change = 0;
-    ASS_Image* img = ass_render_frame(player->ass_renderer, player->ass_track, now_ms, &change);
-    if (!img) {
+    long long pri_ms = static_cast<long long>(std::max(0.0, pri_pts) * 1000.0);
+    long long sec_ms = static_cast<long long>(std::max(0.0, sec_pts) * 1000.0);
+
+    int change_pri = 0;
+    int change_sec = 0;
+    ASS_Image* img_pri = player->ass_track
+        ? ass_render_frame(player->ass_renderer, player->ass_track, pri_ms, &change_pri)
+        : nullptr;
+    ASS_Renderer* sec_rend = player->secondary_ass_renderer ? player->secondary_ass_renderer : player->ass_renderer;
+    ASS_Image* img_sec = (player->secondary_ass_track && sec_rend)
+        ? ass_render_frame(sec_rend, player->secondary_ass_track, sec_ms, &change_sec)
+        : nullptr;
+
+    if (!img_pri && !img_sec) {
         if (player->sub_last_non_empty) {
             clear_subtitle_canvas(canvas_w, canvas_h);
             player->sub_last_non_empty = false;
@@ -2927,52 +3567,31 @@ static bool dk_update_subtitle_rgba_locked(
         return false;
     }
 
-    if (change != 0 || !player->sub_last_non_empty || player->sub_rgba_buf.size() != static_cast<size_t>(canvas_w) * canvas_h * 4) {
+    if (change_pri != 0 || change_sec != 0 || !player->sub_last_non_empty ||
+        player->sub_rgba_buf.size() != static_cast<size_t>(canvas_w) * canvas_h * 4) {
         clear_subtitle_canvas(canvas_w, canvas_h);
         int new_y0 = canvas_h;
         int new_y1 = 0;
-        for (ASS_Image* cur = img; cur != nullptr; cur = cur->next) {
-            if (cur->w <= 0 || cur->h <= 0 || !cur->bitmap) continue;
-            uint8_t cr = (cur->color >> 24) & 0xFF;
-            uint8_t cg = (cur->color >> 16) & 0xFF;
-            uint8_t cb = (cur->color >> 8) & 0xFF;
-            uint8_t ca = 255 - (cur->color & 0xFF);
-            if (ca == 0) continue;
-
-            // Keep neutral white/grey dialogue styles uniform with normalized 245/255 PGS white
-            int max_c = std::max({static_cast<int>(cr), static_cast<int>(cg), static_cast<int>(cb)});
-            int min_c = std::min({static_cast<int>(cr), static_cast<int>(cg), static_cast<int>(cb)});
-            if (max_c >= 140 && (max_c - min_c) <= 18) {
-                float scale = 245.0f / static_cast<float>(max_c);
-                cr = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(cr * scale)), 0, 255));
-                cg = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(cg * scale)), 0, 255));
-                cb = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(cb * scale)), 0, 255));
+        int pri_y0 = canvas_h;
+        int pri_y1 = 0;
+        if (img_pri) {
+            dk_composite_ass_images_to_rgba(img_pri, player->sub_rgba_buf.data(), canvas_w, canvas_h, 0, pri_y0, pri_y1);
+            new_y0 = std::min(new_y0, pri_y0);
+            new_y1 = std::max(new_y1, pri_y1);
+        }
+        if (img_sec) {
+            int sec_raw_y0 = canvas_h;
+            int sec_raw_y1 = 0;
+            for (ASS_Image* cur = img_sec; cur != nullptr; cur = cur->next) {
+                if (cur->w <= 0 || cur->h <= 0 || !cur->bitmap) continue;
+                sec_raw_y0 = std::min(sec_raw_y0, cur->dst_y);
+                sec_raw_y1 = std::max(sec_raw_y1, cur->dst_y + cur->h);
             }
-
-            for (int y = 0; y < cur->h; y++) {
-                int dy = cur->dst_y + y;
-                if (dy < 0 || dy >= canvas_h) continue;
-                new_y0 = std::min(new_y0, dy);
-                new_y1 = std::max(new_y1, dy + 1);
-                const uint8_t* mask_row = cur->bitmap + y * cur->stride;
-                uint8_t* dst_row = player->sub_rgba_buf.data() + static_cast<size_t>(dy) * canvas_w * 4;
-                for (int x = 0; x < cur->w; x++) {
-                    int dx = cur->dst_x + x;
-                    if (dx < 0 || dx >= canvas_w) continue;
-                    uint32_t m = mask_row[x];
-                    if (m == 0) continue;
-                    uint32_t a = (m * ca + 127) / 255;
-                    uint8_t sr = static_cast<uint8_t>((cr * a + 127) / 255);
-                    uint8_t sg = static_cast<uint8_t>((cg * a + 127) / 255);
-                    uint8_t sb = static_cast<uint8_t>((cb * a + 127) / 255);
-                    uint8_t* dp = dst_row + dx * 4;
-                    uint32_t inv_a = 255 - a;
-                    dp[0] = static_cast<uint8_t>(std::min<uint32_t>(255, sr + (dp[0] * inv_a + 127) / 255));
-                    dp[1] = static_cast<uint8_t>(std::min<uint32_t>(255, sg + (dp[1] * inv_a + 127) / 255));
-                    dp[2] = static_cast<uint8_t>(std::min<uint32_t>(255, sb + (dp[2] * inv_a + 127) / 255));
-                    dp[3] = static_cast<uint8_t>(std::min<uint32_t>(255, a + (dp[3] * inv_a + 127) / 255));
-                }
+            int y_offset = 0;
+            if (pri_y1 > pri_y0 && sec_raw_y1 > pri_y0 - 6) {
+                y_offset = (pri_y0 - 8) - sec_raw_y1;
             }
+            dk_composite_ass_images_to_rgba(img_sec, player->sub_rgba_buf.data(), canvas_w, canvas_h, y_offset, new_y0, new_y1);
         }
         if (new_y1 > new_y0) {
             player->sub_dirty_y0 = new_y0;

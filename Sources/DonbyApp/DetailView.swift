@@ -5,6 +5,7 @@ import DonbyKernelC
 
 public struct DetailView: View {
     @EnvironmentObject private var appState: AppState
+    @ObservedObject private var downloadManager = DonbyDownloadManager.shared
     public let initialItem: EmbyItem
 
     @State private var item: EmbyItem
@@ -302,6 +303,14 @@ public struct DetailView: View {
                                     Button {
                                         didUserDisableSubtitle = true
                                         selectedSubtitleIndex = nil
+                                        if let srvId = appState.activeServer?.id {
+                                            appState.recordPrimarySubtitleChoice(
+                                                serverId: srvId,
+                                                item: item,
+                                                preference: .disabled,
+                                                updateGlobal: false
+                                            )
+                                        }
                                     } label: {
                                         if selectedSubtitleIndex == nil {
                                             Label("关闭字幕", systemImage: "checkmark")
@@ -315,6 +324,20 @@ public struct DetailView: View {
                                             Button {
                                                 didUserDisableSubtitle = false
                                                 selectedSubtitleIndex = stream.index
+                                                if let srvId = appState.activeServer?.id {
+                                                    appState.recordPrimarySubtitleChoice(
+                                                        serverId: srvId,
+                                                        item: item,
+                                                        preference: SubtitleTrackPreference(
+                                                            isDisabled: false,
+                                                            language: stream.language,
+                                                            titleHint: stream.readableLabel,
+                                                            codec: stream.codec,
+                                                            isExternal: stream.isExternal == true,
+                                                            embyStreamIndex: stream.index
+                                                        )
+                                                    )
+                                                }
                                             } label: {
                                                 if stream.index == selectedSubtitleIndex {
                                                     Label(stream.readableLabel, systemImage: "checkmark")
@@ -325,6 +348,8 @@ public struct DetailView: View {
                                         }
                                     }
                                 }
+
+                                detailDownloadButton
                             }
 
                             // Main Wide Frosted Capsule Play Button (as in better1.png)
@@ -343,7 +368,8 @@ public struct DetailView: View {
                                         episodesQueue: episodes,
                                         preferredSourceId: selectedSourceId,
                                         audioStreamIndex: selectedAudioIndex,
-                                        subtitleStreamIndex: selectedSubtitleIndex
+                                        subtitleStreamIndex: selectedSubtitleIndex,
+                                        subtitleExplicitlyOff: didUserDisableSubtitle
                                     )
                                 }
                             }
@@ -365,6 +391,20 @@ public struct DetailView: View {
                                     Text(genres.joined(separator: " · "))
                                         .font(.system(size: 12.5, weight: .semibold))
                                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                                }
+
+                                if let dlSummary = heroDownloadedBadgeText {
+                                    HStack(spacing: 3.5) {
+                                        Image(systemName: "arrow.down.circle.fill")
+                                            .font(.system(size: 10.5, weight: .bold))
+                                        Text(dlSummary)
+                                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                                    }
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 2.5)
+                                    .background(Color(red: 0.16, green: 0.68, blue: 0.34).opacity(0.92))
+                                    .clipShape(Capsule())
                                 }
                             }
 
@@ -388,6 +428,79 @@ public struct DetailView: View {
                 }
                 .padding(.horizontal, 28)
                 .padding(.bottom, 14)
+            }
+        }
+    }
+
+    private var heroDownloadedBadgeText: String? {
+        if item.isSeries {
+            let cnt = downloadManager.statusIndex.downloadedCount(forSeries: item)
+            return cnt > 0 ? "已下载 \(cnt) 集" : nil
+        }
+        if downloadManager.completedEntry(for: item.id) != nil {
+            return "已离线下载"
+        }
+        if let active = downloadManager.activeOrCompletedEntry(for: item.id),
+           active.status == .downloading || active.status == .queued {
+            return String(format: "下载中 %.0f%%", active.progressFraction * 100)
+        }
+        return nil
+    }
+
+    @ViewBuilder
+    private var detailDownloadButton: some View {
+        let matchingEntry = downloadManager.entries.first {
+            $0.itemId == item.id && (selectedSourceId.isEmpty || $0.mediaSourceId == selectedSourceId)
+        }
+        let serverAllows = appState.activeServer.map { appState.canDownload(from: $0) } ?? true
+        let iconName: String = {
+            if !serverAllows { return "lock" }
+            switch matchingEntry?.status {
+            case .completed: return "arrow.down.circle.fill"
+            case .downloading, .queued: return "arrow.down.circle"
+            default: return "arrow.down"
+            }
+        }()
+        let tintCol: Color? = {
+            if !serverAllows { return .secondary }
+            switch matchingEntry?.status {
+            case .completed: return Color(red: 0.22, green: 0.86, blue: 0.38)
+            case .downloading, .queued: return appState.accentColor
+            default: return nil
+            }
+        }()
+        let tip: String = {
+            if !serverAllows { return "当前账户套餐不允许离线下载" }
+            switch matchingEntry?.status {
+            case .completed: return "已离线缓存（点击打开下载页面）"
+            case .downloading:
+                return String(format: "下载中 %.0f%%", (matchingEntry?.progressFraction ?? 0) * 100)
+            case .queued: return "已在下载队列等待"
+            default: return item.isSeries ? "离线下载首集或未看剧集至 ~/Movies/Donby" : "离线下载至 ~/Movies/Donby"
+            }
+        }()
+
+        LiquidGlassCircleButton(
+            systemImage: iconName,
+            iconColor: tintCol,
+            size: 38,
+            tooltip: tip
+        ) {
+            if matchingEntry?.status == .completed {
+                appState.selectSidebarModule(.downloads)
+                return
+            }
+            guard let server = appState.activeServer, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                appState.showToast("当前为离线模式", icon: "internaldrive.fill")
+                return
+            }
+            Task {
+                await appState.enqueueDownload(
+                    server: server,
+                    item: item,
+                    seriesItemHint: item.isSeries ? item : nil,
+                    preferredSourceId: selectedSourceId.isEmpty ? nil : selectedSourceId
+                )
             }
         }
     }
@@ -437,6 +550,7 @@ public struct DetailView: View {
                 preferredSourceId: selectedSourceId,
                 audioStreamIndex: selectedAudioIndex,
                 subtitleStreamIndex: selectedSubtitleIndex,
+                subtitleExplicitlyOff: didUserDisableSubtitle,
                 fromBeginning: true
             )
         }
@@ -527,7 +641,16 @@ public struct DetailView: View {
                 accentColor: appState.accentColor
             ) {
                 Button {
+                    didUserDisableSubtitle = true
                     selectedSubtitleIndex = nil
+                    if let srvId = appState.activeServer?.id {
+                        appState.recordPrimarySubtitleChoice(
+                            serverId: srvId,
+                            item: item,
+                            preference: .disabled,
+                            updateGlobal: false
+                        )
+                    }
                 } label: {
                     if selectedSubtitleIndex == nil {
                         Label("关闭字幕", systemImage: "checkmark")
@@ -539,7 +662,22 @@ public struct DetailView: View {
                     Divider()
                     ForEach(subtitleStreams) { stream in
                         Button {
+                            didUserDisableSubtitle = false
                             selectedSubtitleIndex = stream.index
+                            if let srvId = appState.activeServer?.id {
+                                appState.recordPrimarySubtitleChoice(
+                                    serverId: srvId,
+                                    item: item,
+                                    preference: SubtitleTrackPreference(
+                                        isDisabled: false,
+                                        language: stream.language,
+                                        titleHint: stream.readableLabel,
+                                        codec: stream.codec,
+                                        isExternal: stream.isExternal == true,
+                                        embyStreamIndex: stream.index
+                                    )
+                                )
+                            }
                         } label: {
                             if stream.index == selectedSubtitleIndex {
                                 Label(stream.readableLabel, systemImage: "checkmark")
@@ -700,7 +838,11 @@ public struct DetailView: View {
     }
 
     private func episodeCardItem(_ ep: EmbyItem, isSelected: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let epDownloadEntry = downloadManager.activeOrCompletedEntry(for: ep.id)
+        let isEpDownloaded = (epDownloadEntry?.status == .completed)
+        let isEpDownloading = (epDownloadEntry?.status == .downloading || epDownloadEntry?.status == .queued)
+
+        return VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .bottomLeading) {
                 MediaArtworkView(server: appState.activeServer, item: ep, kind: .primary, maxWidth: 560)
                     .frame(width: 256, height: 144)
@@ -715,7 +857,7 @@ public struct DetailView: View {
 
                 // Badges overlay
                 VStack {
-                    HStack {
+                    HStack(spacing: 6) {
                         if let code = ep.episodeCodeString {
                             Text(code)
                                 .font(.system(size: 11.5, weight: .bold, design: .rounded))
@@ -724,6 +866,31 @@ public struct DetailView: View {
                                 .padding(.vertical, 3)
                                 .background(Color.black.opacity(0.70))
                                 .clipShape(Capsule())
+                        }
+                        if isEpDownloaded {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.down.circle.fill")
+                                    .font(.system(size: 9.5, weight: .bold))
+                                Text("已下载")
+                                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(Color(red: 0.16, green: 0.68, blue: 0.34).opacity(0.92))
+                            .clipShape(Capsule())
+                        } else if isEpDownloading, let entry = epDownloadEntry {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.down.circle")
+                                    .font(.system(size: 9.5, weight: .bold))
+                                Text(String(format: "%.0f%%", entry.progressFraction * 100))
+                                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(appState.accentColor.opacity(0.92))
+                            .clipShape(Capsule())
                         }
                         Spacer()
                         if let duration = ep.runtimeMinutesString {
@@ -778,8 +945,54 @@ public struct DetailView: View {
                         item: targetEp,
                         episodesQueue: episodes,
                         audioStreamIndex: selectedAudioIndex,
-                        subtitleStreamIndex: selectedSubtitleIndex
+                        subtitleStreamIndex: selectedSubtitleIndex,
+                        subtitleExplicitlyOff: didUserDisableSubtitle
                     )
+                }
+            }
+            .contextMenu {
+                Button {
+                    let targetEp = (ep.seriesName == nil || ep.seriesName!.isEmpty) ? ep.withSeriesName(item.name) : ep
+                    Task {
+                        await appState.startPlayback(
+                            item: targetEp,
+                            episodesQueue: episodes,
+                            audioStreamIndex: selectedAudioIndex,
+                            subtitleStreamIndex: selectedSubtitleIndex,
+                            subtitleExplicitlyOff: didUserDisableSubtitle
+                        )
+                    }
+                } label: {
+                    Label(isEpDownloaded ? "离线播放本集" : "立即播放", systemImage: "play.fill")
+                }
+
+                if isEpDownloaded, let doneEntry = epDownloadEntry {
+                    if let videoPath = doneEntry.localVideoFilePath,
+                       FileManager.default.fileExists(atPath: videoPath) {
+                        Button {
+                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: videoPath)])
+                        } label: {
+                            Label("在访达中显示视频文件", systemImage: "folder")
+                        }
+                    }
+                    Button(role: .destructive) {
+                        DonbyDownloadManager.shared.removeDownload(assetKey: doneEntry.assetKey)
+                    } label: {
+                        Label("删除本地离线文件", systemImage: "trash")
+                    }
+                } else if !isEpDownloading, let srv = appState.activeServer, !srv.host.isEmpty {
+                    let targetEp = (ep.seriesName == nil || ep.seriesName!.isEmpty) ? ep.withSeriesName(item.name) : ep
+                    Button {
+                        Task {
+                            await appState.enqueueDownload(
+                                server: srv,
+                                item: targetEp,
+                                seriesItemHint: item
+                            )
+                        }
+                    } label: {
+                        Label("离线下载此集", systemImage: "arrow.down.circle")
+                    }
                 }
             }
 
@@ -929,7 +1142,8 @@ public struct DetailView: View {
                     episodesQueue: episodes,
                     preferredSourceId: best.id,
                     audioStreamIndex: selectedAudioIndex,
-                    subtitleStreamIndex: selectedSubtitleIndex
+                    subtitleStreamIndex: selectedSubtitleIndex,
+                    subtitleExplicitlyOff: didUserDisableSubtitle
                 )
                 appState.showToast("已启动原画最高规格直解: \(best.displayVersionName)", icon: "sparkles")
             }
@@ -939,20 +1153,85 @@ public struct DetailView: View {
                     item: item,
                     episodesQueue: episodes,
                     audioStreamIndex: selectedAudioIndex,
-                    subtitleStreamIndex: selectedSubtitleIndex
+                    subtitleStreamIndex: selectedSubtitleIndex,
+                    subtitleExplicitlyOff: didUserDisableSubtitle
                 )
                 appState.showToast("已启动原画规格直解播放", icon: "sparkles")
             }
         }
     }
 
+    private func offlineGroupForCurrentItem() -> OfflineLibraryGroup? {
+        let groups = DonbyOfflineLibraryStorage.scanOfflineLibrary(entries: downloadManager.entries)
+        let targetSeriesId = initialItem.isSeries ? initialItem.id : (initialItem.seriesId ?? initialItem.id)
+        return groups.first { g in
+            g.displayItem.id == initialItem.id ||
+            g.displayItem.id == targetSeriesId ||
+            g.displayItem.name == (initialItem.seriesName ?? initialItem.name) ||
+            g.episodesBySeason.values.contains(where: { eps in eps.contains(where: { $0.id == initialItem.id }) })
+        }
+    }
+
     private func loadFullDetailData() async {
+        // Hydrate from local offline library first so offline items / slow networks show immediately
+        if let localGroup = offlineGroupForCurrentItem() {
+            self.item = localGroup.displayItem
+            if localGroup.isSeries && !localGroup.seasonItems.isEmpty {
+                self.seasons = localGroup.seasonItems
+                let preferredSeasonNum = initialItem.isEpisode
+                    ? (initialItem.parentIndexNumber ?? localGroup.seasonItems.first?.indexNumber ?? 1)
+                    : (localGroup.seasonItems.first?.indexNumber ?? 1)
+                self.selectedSeasonIndex = preferredSeasonNum
+                self.episodes = localGroup.episodesBySeason[preferredSeasonNum] ?? []
+            }
+            syncDefaultTracks()
+        }
+
         guard let server = appState.activeServer else { return }
         guard !server.host.isEmpty else { return }
         isLoadingDetails = true
         defer { isLoadingDetails = false }
 
         let targetSeriesId: String? = initialItem.isSeries ? initialItem.id : (initialItem.isEpisode ? initialItem.seriesId : nil)
+
+        if server.type == .uhdNative {
+            async let detailTask = try? UHDStreamClient.shared.fetchItemDetail(server: server, item: initialItem)
+            let creditMediaId = initialItem.isEpisode ? (initialItem.seriesId ?? initialItem.id) : initialItem.id
+            async let creditsTask = try? UHDStreamClient.shared.fetchCredits(server: server, mediaId: creditMediaId)
+            async let assetsTask: [MediaSourceInfo]? = {
+                guard !initialItem.isSeries else { return nil }
+                return try? await UHDStreamClient.shared.fetchAssetMediaSources(server: server, item: initialItem)
+            }()
+            async let seasonsTask: [EmbyItem]? = {
+                guard let sid = targetSeriesId, !sid.isEmpty else { return nil }
+                return try? await UHDStreamClient.shared.fetchSeasons(server: server, tvId: sid)
+            }()
+
+            if let detailed = await detailTask {
+                guard !Task.isCancelled else { return }
+                let loadedSources = await assetsTask
+                let loadedPeople = await creditsTask
+                self.item = detailed.withDetailEnrichment(mediaSources: loadedSources, people: loadedPeople)
+            }
+            guard !Task.isCancelled else { return }
+            syncDefaultTracks()
+
+            if let preloadedSeasons = await seasonsTask, !preloadedSeasons.isEmpty {
+                self.seasons = preloadedSeasons
+                if item.isEpisode, let firstSeason = preloadedSeasons.first(where: { ($0.indexNumber ?? 1) == (item.parentIndexNumber ?? 1) }) ?? preloadedSeasons.first {
+                    let sNum = item.parentIndexNumber ?? firstSeason.indexNumber ?? 1
+                    selectedSeasonIndex = sNum
+                    await loadEpisodesForSeason(firstSeason, seasonNumber: sNum)
+                } else if let firstSeason = preloadedSeasons.first(where: { ($0.indexNumber ?? 1) > 0 }) ?? preloadedSeasons.first {
+                    let sNum = firstSeason.indexNumber ?? 1
+                    selectedSeasonIndex = sNum
+                    await loadEpisodesForSeason(firstSeason, seasonNumber: sNum)
+                }
+            }
+            self.similarItems = []
+            return
+        }
+
         async let detailTask = try? EmbyClient.shared.fetchItemDetail(server: server, itemId: initialItem.id)
         async let similarTask = try? EmbyClient.shared.fetchSimilarItems(server: server, itemId: initialItem.id)
         async let seasonsTask: [EmbyItem]? = {
@@ -1017,7 +1296,27 @@ public struct DetailView: View {
     private func loadEpisodesForSeason(_ season: EmbyItem, seasonNumber: Int? = nil) async {
         let sNum = seasonNumber ?? season.indexNumber ?? 1
         selectedSeasonIndex = sNum
+        if let localGroup = offlineGroupForCurrentItem(),
+           let localEps = localGroup.episodesBySeason[sNum], !localEps.isEmpty,
+           (appState.activeServer?.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) {
+            self.episodes = localEps
+            return
+        }
         guard let server = appState.activeServer else { return }
+        if server.type == .uhdNative {
+            let tvId = item.isEpisode ? (item.seriesId ?? item.id) : item.id
+            let sName = item.isEpisode ? item.seriesName : item.name
+            if let page = try? await UHDStreamClient.shared.fetchSeasonEpisodes(
+                server: server,
+                tvId: tvId,
+                seasonId: season.id,
+                seasonNumber: sNum,
+                seriesName: sName
+            ) {
+                self.episodes = page.items
+            }
+            return
+        }
         do {
             let eps = try await EmbyClient.shared.fetchEpisodes(server: server, seriesId: item.isEpisode ? (item.seriesId ?? item.id) : item.id, seasonId: season.id)
             if !eps.isEmpty {
@@ -1052,6 +1351,30 @@ public struct DetailView: View {
         if let selSub = selectedSubtitleIndex, subtitleStreams.contains(where: { $0.index == selSub }) {
             // keep valid subtitle selection
         } else if !didUserDisableSubtitle {
+            if let srvId = appState.activeServer?.id,
+               let remembered = appState.resolvedPrimarySubtitleMemory(serverId: srvId, item: item) {
+                if remembered.isDisabled {
+                    didUserDisableSubtitle = true
+                    selectedSubtitleIndex = nil
+                    return
+                }
+                let candidates = subtitleStreams.map { stream in
+                    SubtitleTrackCandidate(
+                        id: "emb-\(stream.index ?? -1)",
+                        language: stream.language,
+                        title: stream.readableLabel,
+                        codec: stream.codec,
+                        isExternal: stream.isExternal == true,
+                        embyIndex: stream.index,
+                        avStreamIndex: stream.index,
+                        isDefault: stream.isDefault == true
+                    )
+                }
+                if let matchedIdx = SubtitleTrackMatcher.bestMatchIndex(in: candidates, for: remembered) {
+                    selectedSubtitleIndex = subtitleStreams[matchedIdx].index
+                    return
+                }
+            }
             selectedSubtitleIndex = (subtitleStreams.first(where: { $0.isDefault == true }) ?? subtitleStreams.first)?.index
         }
     }

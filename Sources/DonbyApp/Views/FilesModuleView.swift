@@ -7,12 +7,19 @@ import DonbyNetwork
 // MARK: - Files Module View
 public struct FilesModuleView: View {
     @EnvironmentObject private var appState: AppState
+    @ObservedObject private var downloadManager = DonbyDownloadManager.shared
     @State private var isDropTargeted: Bool = false
     @State private var showDirectURLSheet: Bool = false
     @State private var directURLInput: String = ""
     @State private var directNameInput: String = ""
-    @State private var folderVideosById: [UUID: [LocalVideoFileInfo]] = [:]
+    @State private var folderHierarchyByPath: [String: (subfolders: [LocalMediaFolder], videos: [LocalVideoFileInfo])] = [:]
     @State private var folderCountsById: [UUID: Int] = [:]
+    @State private var folderNavStack: [LocalMediaFolder] = []
+
+    @State private var searchQuery: String = ""
+    @State private var filterChip: String = "全部"
+    @State private var offlineGroups: [OfflineLibraryGroup] = []
+    private let filterChips = ["全部", "剧集", "电影", "文件夹与直链"]
 
     private let supportedTypes: [UTType] = [
         .movie, .video, .quickTimeMovie, .mpeg4Movie,
@@ -26,18 +33,56 @@ public struct FilesModuleView: View {
 
     public init() {}
 
+    private var activeBrowseFolder: LocalMediaFolder? {
+        folderNavStack.last ?? appState.browsingFolder
+    }
+
+    private var filteredOfflineGroups: [OfflineLibraryGroup] {
+        guard filterChip != "文件夹与直链" else { return [] }
+        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return offlineGroups.filter { group in
+            if filterChip == "剧集" && !group.isSeries { return false }
+            if filterChip == "电影" && group.isSeries { return false }
+            if q.isEmpty { return true }
+            let item = group.displayItem
+            return item.name.lowercased().contains(q)
+                || (item.originalTitle?.lowercased().contains(q) ?? false)
+                || (item.overview?.lowercased().contains(q) ?? false)
+                || (item.genres?.contains(where: { $0.lowercased().contains(q) }) ?? false)
+        }
+    }
+
+    private var filteredFolders: [LocalMediaFolder] {
+        guard filterChip == "全部" || filterChip == "文件夹与直链" else { return [] }
+        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if q.isEmpty { return appState.localFolders }
+        return appState.localFolders.filter {
+            $0.name.lowercased().contains(q) || $0.path.lowercased().contains(q)
+        }
+    }
+
+    private var filteredRecentItems: [LocalOrURLMediaItem] {
+        guard filterChip == "全部" || filterChip == "文件夹与直链" else { return [] }
+        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if q.isEmpty { return appState.urlMediaItems }
+        return appState.urlMediaItems.filter {
+            $0.name.lowercased().contains(q) || $0.urlString.lowercased().contains(q)
+        }
+    }
+
     public var body: some View {
         ZStack {
             VStack(alignment: .leading, spacing: 0) {
-                if let folder = appState.browsingFolder {
+                if let folder = activeBrowseFolder {
                     folderDetailHeader(folder)
                 } else {
                     filesMainTopBar
+                    filesSearchAndFilterBar
                 }
 
-                Divider().opacity(0.12)
+                Divider().opacity(appState.isLightMode ? 0.35 : 0.12)
 
-                if let folder = appState.browsingFolder {
+                if let folder = activeBrowseFolder {
                     folderDetailContent(folder)
                 } else {
                     filesOverviewContent
@@ -55,6 +100,16 @@ public struct FilesModuleView: View {
         }
         .sheet(isPresented: $showDirectURLSheet) {
             directURLSheetContent
+        }
+        .onChange(of: appState.browsingFolder?.id) { _, _ in
+            folderNavStack = []
+        }
+        .task(id: downloadManager.statusIndex) {
+            let entries = downloadManager.entries
+            let scanned = await Task.detached(priority: .userInitiated) {
+                DonbyOfflineLibraryStorage.scanOfflineLibrary(entries: entries)
+            }.value
+            self.offlineGroups = scanned
         }
         .task(id: appState.localFolders.map(\.id)) {
             let folders = appState.localFolders
@@ -74,15 +129,17 @@ public struct FilesModuleView: View {
             }.value
             folderCountsById = counts
         }
-        .task(id: appState.browsingFolder?.id) {
-            guard let folder = appState.browsingFolder else { return }
+        .task(id: activeBrowseFolder?.path) {
+            guard let folder = activeBrowseFolder else { return }
             let folderId = folder.id
             let folderPath = folder.path
-            let videos = await Task.detached(priority: .userInitiated) {
-                AppState.scanFolderVideos(path: folderPath)
+            let result = await Task.detached(priority: .userInitiated) {
+                (AppState.scanFolderHierarchy(path: folderPath), AppState.countFolderVideos(path: folderPath))
             }.value
-            folderVideosById[folderId] = videos
-            folderCountsById[folderId] = videos.count
+            folderHierarchyByPath[folderPath] = result.0
+            if folderNavStack.isEmpty {
+                folderCountsById[folderId] = result.1
+            }
         }
     }
 
@@ -101,10 +158,10 @@ public struct FilesModuleView: View {
             }
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("本地与文件夹")
+                Text("文件与离线媒体库")
                     .font(.system(size: 19, weight: .bold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                Text("管理本地与外接硬盘媒体目录，支持 4K 原画直解与秒开")
+                Text("离线影片按剧/季/集归档至 ~/Movies/Donby，并保存海报与外挂字幕元数据")
                     .font(.system(size: 11.5))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }
@@ -167,18 +224,111 @@ public struct FilesModuleView: View {
         }
         .padding(.horizontal, 28)
         .padding(.top, 22)
-        .padding(.bottom, 18)
+        .padding(.bottom, 14)
+    }
+
+    private var filesSearchAndFilterBar: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+
+                TextField("检索已下载影视海报库、本地文件夹或最近播放流...", text: $searchQuery)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14.5))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+
+                if !searchQuery.isEmpty {
+                    Button { searchQuery = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 13))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 40)
+            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
+            )
+
+            HStack(spacing: 8) {
+                ForEach(filterChips, id: \.self) { chip in
+                    let isSel = (filterChip == chip)
+                    Button {
+                        filterChip = chip
+                    } label: {
+                        Text(chip)
+                            .font(.system(size: 12, weight: isSel ? .bold : .medium))
+                            .foregroundStyle(isSel ? appState.accentTextColor : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 6)
+                            .background(isSel ? appState.accentColor : (appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.06)))
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Spacer()
+
+                Button {
+                    appState.selectSidebarModule(.downloads)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.down.circle")
+                            .font(.system(size: 11.5))
+                        Text("下载队列")
+                            .font(.system(size: 11.5, weight: .medium))
+                    }
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(appState.isLightMode ? Color.black.opacity(0.04) : Color.white.opacity(0.06))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    DonbyOfflineLibraryStorage.ensureRootDirectories()
+                    NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: DonbyOfflineLibraryStorage.moviesDonbyRootURL.path)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "folder")
+                            .font(.system(size: 11.5))
+                        Text("~/Movies/Donby")
+                            .font(.system(size: 11.5, design: .monospaced))
+                    }
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(appState.isLightMode ? Color.black.opacity(0.04) : Color.white.opacity(0.06))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 28)
+        .padding(.bottom, 14)
     }
 
     private func folderDetailHeader(_ folder: LocalMediaFolder) -> some View {
         HStack(alignment: .center, spacing: 14) {
             Button {
-                appState.browsingFolder = nil
+                if !folderNavStack.isEmpty {
+                    folderNavStack.removeLast()
+                } else {
+                    appState.browsingFolder = nil
+                }
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 12, weight: .semibold))
-                    Text("全部文件夹")
+                    Text(folderNavStack.isEmpty ? "返回媒体库" : "上一级文件夹")
                         .font(.system(size: 13, weight: .medium))
                 }
                 .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
@@ -195,7 +345,7 @@ public struct FilesModuleView: View {
                         .font(.system(size: 19, weight: .bold))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
-                    if folder.id.uuidString == appState.defaultFilesFolderId {
+                    if folderNavStack.isEmpty && folder.id.uuidString == appState.defaultFilesFolderId {
                         HStack(spacing: 3) {
                             Image(systemName: "star.fill")
                                 .font(.system(size: 9))
@@ -210,31 +360,34 @@ public struct FilesModuleView: View {
                         .clipShape(Capsule())
                     }
                 }
-                Text(folder.path)
-                    .font(.system(size: 11.5))
+                Text(folder.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                    .font(.system(size: 11.5, design: .monospaced))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     .lineLimit(1)
+                    .truncationMode(.middle)
             }
 
             Spacer()
 
-            Button {
-                appState.setPresetDefaultFolder(id: folder.id)
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: folder.id.uuidString == appState.defaultFilesFolderId ? "star.slash" : "star.fill")
-                        .font(.system(size: 12))
-                    Text(folder.id.uuidString == appState.defaultFilesFolderId ? "取消默认" : "设为默认打开")
-                        .font(.system(size: 12, weight: .medium))
+            if folderNavStack.isEmpty, appState.localFolders.contains(where: { $0.id == folder.id }) {
+                Button {
+                    appState.setPresetDefaultFolder(id: folder.id)
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: folder.id.uuidString == appState.defaultFilesFolderId ? "star.slash" : "star.fill")
+                            .font(.system(size: 12))
+                        Text(folder.id.uuidString == appState.defaultFilesFolderId ? "取消默认" : "设为默认打开")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.08))
+                    .clipShape(Capsule())
                 }
-                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.08))
-                .clipShape(Capsule())
+                .buttonStyle(.plain)
+                .help("设为此模块或启动时默认打开的文件夹")
             }
-            .buttonStyle(.plain)
-            .help("设为此模块或启动时默认打开的文件夹")
 
             Button {
                 NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: folder.path)
@@ -259,25 +412,21 @@ public struct FilesModuleView: View {
     }
 
     private func folderDetailContent(_ folder: LocalMediaFolder) -> some View {
-        let videos = folderVideosById[folder.id]
+        let hierarchy = folderHierarchyByPath[folder.path]
+        let subfolders = hierarchy?.subfolders ?? []
+        let videos = hierarchy?.videos ?? []
         return ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack {
-                    Text("包含视频")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    Text(videos.map { "共 \($0.count) 个文件" } ?? "正在扫描...")
-                        .font(.system(size: 12))
-                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                    Spacer()
-                }
-
-                if let videos, videos.isEmpty {
+            VStack(alignment: .leading, spacing: 20) {
+                if hierarchy == nil {
+                    ProgressView()
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 60)
+                } else if subfolders.isEmpty && videos.isEmpty {
                     VStack(spacing: 12) {
                         Image(systemName: "film.stack")
                             .font(.system(size: 40))
                             .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode).opacity(0.6))
-                        Text("此文件夹内暂未扫描到视频文件")
+                        Text("此文件夹内暂未扫描到子目录或视频文件")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                         Text("支持 MP4、MKV、MOV、WebM、AVI、TS、FLV、ISO 等常见格式")
@@ -286,16 +435,41 @@ public struct FilesModuleView: View {
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 60)
-                } else if let videos {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 14)], spacing: 14) {
-                        ForEach(videos) { video in
-                            folderVideoCard(video)
+                } else {
+                    if !subfolders.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                Text("子目录 (\(subfolders.count))")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                                Spacer()
+                            }
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 250), spacing: 14)], spacing: 14) {
+                                ForEach(subfolders) { sub in
+                                    subfolderNavigationCard(sub)
+                                }
+                            }
                         }
                     }
-                } else {
-                    ProgressView()
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 60)
+
+                    if !videos.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                Text("视频文件")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                                Text("共 \(videos.count) 个文件")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                                Spacer()
+                            }
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 14)], spacing: 14) {
+                                ForEach(videos) { video in
+                                    folderVideoCard(video)
+                                }
+                            }
+                        }
+                    }
                 }
             }
             .padding(.horizontal, 28)
@@ -303,19 +477,84 @@ public struct FilesModuleView: View {
         }
     }
 
-    private func folderVideoCard(_ video: LocalVideoFileInfo) -> some View {
-        Button {
-            let url = URL(fileURLWithPath: video.path)
-            appState.playDirectURL(url: url, title: video.name)
+    private func subfolderNavigationCard(_ subfolder: LocalMediaFolder) -> some View {
+        let posterFile = URL(fileURLWithPath: subfolder.path).appendingPathComponent("poster.jpg")
+        let hasLocalPoster = FileManager.default.fileExists(atPath: posterFile.path)
+        return Button {
+            folderNavStack.append(subfolder)
         } label: {
             HStack(spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08))
-                        .frame(width: 44, height: 44)
-                    Image(systemName: "play.circle.fill")
-                        .font(.system(size: 22))
-                        .foregroundStyle(appState.isLightMode ? Color(white: 0.25) : Color(white: 0.85))
+                if hasLocalPoster, let img = NSImage(contentsOf: posterFile) {
+                    Image(nsImage: img)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 40, height: 56)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                } else {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.08))
+                            .frame(width: 44, height: 44)
+                        Image(systemName: "folder.fill")
+                            .font(.system(size: 20))
+                            .foregroundStyle(appState.accentColor)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(subfolder.name)
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        .lineLimit(1)
+                    Text("点击打开下级目录")
+                        .font(.system(size: 11))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+            }
+            .padding(12)
+            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.65)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func folderVideoCard(_ video: LocalVideoFileInfo) -> some View {
+        let videoURL = URL(fileURLWithPath: video.path)
+        let stem = videoURL.deletingPathExtension().lastPathComponent
+        let thumbURL = videoURL.deletingLastPathComponent().appendingPathComponent("\(stem)-thumb.jpg")
+        let matchingOffline = downloadManager.entries.first { $0.localVideoFilePath == video.path && $0.status == .completed }
+
+        return Button {
+            if let offlineEntry = matchingOffline {
+                appState.playOfflineDownload(offlineEntry)
+            } else {
+                appState.playDirectURL(url: videoURL, title: video.name)
+            }
+        } label: {
+            HStack(spacing: 12) {
+                if FileManager.default.fileExists(atPath: thumbURL.path), let nsImg = NSImage(contentsOf: thumbURL) {
+                    Image(nsImage: nsImg)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 68, height: 42)
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                } else {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08))
+                            .frame(width: 44, height: 44)
+                        Image(systemName: "play.circle.fill")
+                            .font(.system(size: 22))
+                            .foregroundStyle(appState.isLightMode ? Color(white: 0.25) : Color(white: 0.85))
+                    }
                 }
 
                 VStack(alignment: .leading, spacing: 3) {
@@ -336,6 +575,16 @@ public struct FilesModuleView: View {
                         Text(formatByteCount(video.fileSizeBytes))
                             .font(.system(size: 11))
                             .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+
+                        if matchingOffline != nil {
+                            Text("已离线")
+                                .font(.system(size: 9.5, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1.5)
+                                .background(Color(red: 0.16, green: 0.68, blue: 0.34))
+                                .clipShape(Capsule())
+                        }
                     }
                 }
                 Spacer()
@@ -349,66 +598,159 @@ public struct FilesModuleView: View {
             )
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            if let offlineEntry = matchingOffline {
+                Button {
+                    appState.openDetail(for: offlineEntry.hydratedItemSnapshot)
+                } label: {
+                    Label("查看详情与字幕", systemImage: "info.circle")
+                }
+            }
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([videoURL])
+            } label: {
+                Label("在访达中显示视频文件", systemImage: "folder")
+            }
+        }
     }
 
     private var filesOverviewContent: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                // Folders Section
-                HStack(alignment: .firstTextBaseline) {
-                    Text("媒体文件夹")
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    Text("共 \(appState.localFolders.count) 个目录")
-                        .font(.system(size: 12))
-                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                    Spacer()
-                    Button {
-                        openAddFolderDialog()
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "plus")
-                                .font(.system(size: 11))
-                            Text("添加文件夹")
+            VStack(alignment: .leading, spacing: 24) {
+                // 1. Offline Downloaded Media Poster Grid (Search Page Aesthetic)
+                if filterChip != "文件夹与直链" {
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text("已下载影视库 (\(filteredOfflineGroups.count))")
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                            Text("包含本地海报、分季结构与外挂字幕")
                                 .font(.system(size: 12))
+                                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                            Spacer()
+                            Button("浏览 ~/Movies/Donby 目录") {
+                                DonbyOfflineLibraryStorage.ensureRootDirectories()
+                                appState.browsingFolder = LocalMediaFolder(
+                                    name: "Donby 离线影视库",
+                                    path: DonbyOfflineLibraryStorage.moviesDonbyRootURL.path
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(appState.accentColor)
                         }
-                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(.top, 4)
 
-                if appState.localFolders.isEmpty {
-                    emptyFolderPlaceholderCard
-                } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 280), spacing: 14)], spacing: 14) {
-                        ForEach(appState.localFolders) { folder in
-                            localFolderCard(folder)
+                        if filteredOfflineGroups.isEmpty {
+                            HStack(spacing: 14) {
+                                Image(systemName: "film.stack")
+                                    .font(.system(size: 24))
+                                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode).opacity(0.65))
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(searchQuery.isEmpty ? "暂无已下载离线影视" : "未找到匹配的已下载影视")
+                                        .font(.system(size: 13.5, weight: .semibold))
+                                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                                    Text("在影片详情页点击下载后，视频、海报、背景图与字幕将按 剧/季/集 结构自动保存至此，并以海报墙展示")
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                                }
+                                Spacer()
+                            }
+                            .padding(16)
+                            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.7)
+                            )
+                        } else {
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 16)], spacing: 16) {
+                                ForEach(filteredOfflineGroups) { group in
+                                    PosterCardView(
+                                        item: group.displayItem,
+                                        width: 150,
+                                        appearance: appState.cardAppearance,
+                                        onSelect: { appState.openDetail(for: group.displayItem) },
+                                        onPlay: { Task { await appState.startPlayback(item: group.displayItem) } }
+                                    )
+                                    .equatable()
+                                    .contextMenu {
+                                        Button {
+                                            appState.openDetail(for: group.displayItem)
+                                        } label: {
+                                            Label("打开详情与选集", systemImage: "info.circle")
+                                        }
+                                        Button {
+                                            Task { await appState.startPlayback(item: group.displayItem) }
+                                        } label: {
+                                            Label("离线播放", systemImage: "play.fill")
+                                        }
+                                        Button {
+                                            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: group.folderURL.path)
+                                        } label: {
+                                            Label("在访达中打开所在目录", systemImage: "folder")
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
 
-                // Drag & Drop Hero Zone (restrained SenPlayer aesthetic)
-                dropZoneCard
+                // 2. Local Folders Section (including auto-linked ~/Movies/Donby)
+                if filterChip == "全部" || filterChip == "文件夹与直链" {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("媒体文件夹")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        Text("共 \(filteredFolders.count) 个目录")
+                            .font(.system(size: 12))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                        Spacer()
+                        Button {
+                            openAddFolderDialog()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "plus")
+                                    .font(.system(size: 11))
+                                Text("添加文件夹")
+                                    .font(.system(size: 12))
+                            }
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.top, 4)
 
-                // Recent Items Section
-                HStack(alignment: .firstTextBaseline) {
-                    Text("最近播放与直链")
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    Text("共 \(appState.urlMediaItems.count) 项")
-                        .font(.system(size: 12))
-                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                    Spacer()
-                }
-                .padding(.top, 6)
+                    if filteredFolders.isEmpty {
+                        emptyFolderPlaceholderCard
+                    } else {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 280), spacing: 14)], spacing: 14) {
+                            ForEach(filteredFolders) { folder in
+                                localFolderCard(folder)
+                            }
+                        }
+                    }
 
-                if appState.urlMediaItems.isEmpty {
-                    emptyFilesPlaceholder
-                } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 310), spacing: 16)], spacing: 16) {
-                        ForEach(appState.urlMediaItems) { media in
-                            fileMediaCard(media)
+                    dropZoneCard
+
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("最近播放与直链")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        Text("共 \(filteredRecentItems.count) 项")
+                            .font(.system(size: 12))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                        Spacer()
+                    }
+                    .padding(.top, 6)
+
+                    if filteredRecentItems.isEmpty {
+                        emptyFilesPlaceholder
+                    } else {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 310), spacing: 16)], spacing: 16) {
+                            ForEach(filteredRecentItems) { media in
+                                fileMediaCard(media)
+                            }
                         }
                     }
                 }

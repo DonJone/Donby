@@ -51,6 +51,8 @@ public struct MainWindowView: View {
                                     IPTVModuleView()
                                 case .records:
                                     RecordsView()
+                                case .downloads:
+                                    DownloadsView()
                                 case .search:
                                     GlobalSearchView()
                                 case .settings:

@@ -18,6 +18,8 @@ public struct ServerIconView: View {
             switch server.type {
             case .emby:
                 EmbyVectorMark(size: size)
+            case .uhdNative:
+                UHDNowVectorLogo(size: size)
             case .jellyfin:
                 JellyfinVectorMark(size: size)
             case .plex:

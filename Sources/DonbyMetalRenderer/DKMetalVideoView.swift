@@ -195,6 +195,91 @@ public final class DKMetalLayerView: NSView {
     private var subtitleTexWidth: Int = 0
     private var subtitleTexHeight: Int = 0
     private var hasActiveSubtitle: Bool = false
+    private var subtitleBoundsY0: Int32 = 0
+    private var subtitleBoundsY1: Int32 = 0
+    private var subtitleCanvasH: Int32 = 0
+    private var currentSubtitleLiftNDC: Float = 0.0
+    private var _subtitleHDRPeakNits: Float = 203.0
+    private var _controlsOcclusionHeightPoints: CGFloat = 0.0
+    private var _antiOcclusionEnabled: Bool = true
+    private var cachedViewPointSize: CGSize = .zero
+
+    public var subtitleHDRPeakNits: Float {
+        get { sizeLock.lock(); defer { sizeLock.unlock() }; return _subtitleHDRPeakNits }
+        set {
+            sizeLock.lock()
+            let changed = abs(_subtitleHDRPeakNits - newValue) > 0.5
+            _subtitleHDRPeakNits = newValue
+            if changed { _needsRedrawOnSameFrame = true }
+            sizeLock.unlock()
+            if changed { renderLastPixelBuffer() }
+        }
+    }
+
+    public var controlsOcclusionHeightPoints: CGFloat {
+        get { sizeLock.lock(); defer { sizeLock.unlock() }; return _controlsOcclusionHeightPoints }
+        set {
+            sizeLock.lock()
+            let changed = abs(_controlsOcclusionHeightPoints - newValue) > 0.5
+            _controlsOcclusionHeightPoints = newValue
+            if changed { _needsRedrawOnSameFrame = true }
+            sizeLock.unlock()
+        }
+    }
+
+    public var antiOcclusionEnabled: Bool {
+        get { sizeLock.lock(); defer { sizeLock.unlock() }; return _antiOcclusionEnabled }
+        set {
+            sizeLock.lock()
+            let changed = (_antiOcclusionEnabled != newValue)
+            _antiOcclusionEnabled = newValue
+            if changed { _needsRedrawOnSameFrame = true }
+            sizeLock.unlock()
+        }
+    }
+
+    public func updateSubtitleVerticalBounds(y0: Int32, y1: Int32, canvasH: Int32) {
+        sizeLock.lock()
+        subtitleBoundsY0 = y0
+        subtitleBoundsY1 = y1
+        subtitleCanvasH = canvasH
+        sizeLock.unlock()
+    }
+
+    public func stepSubtitleLiftAnimation(dt: Float) -> Bool {
+        sizeLock.lock()
+        defer { sizeLock.unlock() }
+        let targetNDC: Float
+        let viewH = Float(max(1.0, cachedViewPointSize.height))
+        if !_antiOcclusionEnabled || _controlsOcclusionHeightPoints <= 0.5 || subtitleCanvasH <= 0 || subtitleBoundsY1 <= subtitleBoundsY0 {
+            targetNDC = 0.0
+        } else {
+            let subBottomRatio = Float(subtitleBoundsY1) / Float(subtitleCanvasH)
+            let subTopRatio = Float(subtitleBoundsY0) / Float(subtitleCanvasH)
+            let subBottomNDC = 1.0 - 2.0 * subBottomRatio
+            let subTopNDC = 1.0 - 2.0 * subTopRatio
+            let controlsTopNDC = -1.0 + 2.0 * (Float(_controlsOcclusionHeightPoints) / viewH)
+            if subBottomNDC < controlsTopNDC {
+                let rawLift = controlsTopNDC - subBottomNDC
+                let maxLift = max(0.0, 0.92 - subTopNDC)
+                targetNDC = min(maxLift, max(0.0, rawLift))
+            } else {
+                targetNDC = 0.0
+            }
+        }
+        let diff = targetNDC - currentSubtitleLiftNDC
+        if abs(diff) > 0.0005 {
+            let alpha = min(1.0, max(0.08, dt * 16.0))
+            currentSubtitleLiftNDC += diff * alpha
+            _needsRedrawOnSameFrame = true
+            return true
+        } else if currentSubtitleLiftNDC != targetNDC {
+            currentSubtitleLiftNDC = targetNDC
+            _needsRedrawOnSameFrame = true
+            return true
+        }
+        return false
+    }
 
     public private(set) var lastPixelBuffer: CVPixelBuffer?
     public static weak var activeInstance: DKMetalLayerView?
@@ -360,6 +445,7 @@ public final class DKMetalLayerView: NSView {
 
         sizeLock.lock()
         cachedDrawableSize = targetSize
+        cachedViewPointSize = size
         layoutGeneration &+= 1
         sizeLock.unlock()
     }
@@ -377,6 +463,7 @@ public final class DKMetalLayerView: NSView {
     struct VertexOut {
         float4 position [[position]];
         float2 texCoord;
+        float2 subParams;
     };
 
     struct DKGpuColorUniformsMSL {
@@ -423,8 +510,9 @@ public final class DKMetalLayerView: NSView {
             float2(vu.uvRect.z, vu.uvRect.y)
         };
         VertexOut out;
-        out.position = float4(positions[vertexID] * vu.scale, 0.0f, 1.0f);
+        out.position = float4(positions[vertexID] * vu.scale + float2(0.0f, vu.pad.y), 0.0f, 1.0f);
         out.texCoord = texCoords[vertexID];
+        out.subParams = vu.pad;
         return out;
     }
 
@@ -696,9 +784,15 @@ public final class DKMetalLayerView: NSView {
             return float4(0.0f);
         }
         float3 srgb = clamp(sub.rgb / max(sub.a, 1.0f / 255.0f), 0.0f, 1.0f);
-        float paperWhite = (u.transfer_fn != 0)
-            ? mix(0.90f, 0.98f, clamp((max(u.edr_headroom, 1.0f) - 1.0f) / 1.5f, 0.0f, 1.0f))
-            : 0.88f;
+        float targetNits = (in.subParams.x >= 100.0f) ? in.subParams.x : 203.0f;
+        float headroom = max(u.edr_headroom, 1.0f);
+        float paperWhite;
+        if (u.transfer_fn != 0 && headroom > 1.01f) {
+            float requestedGain = clamp(targetNits / 203.0f, 0.90f, 2.50f);
+            paperWhite = min(requestedGain, headroom * 0.96f);
+        } else {
+            paperWhite = 0.88f;
+        }
         float3 lin = srgb_to_linear(srgb) * paperWhite;
         float3 p3 = gamut_map_to_linear_p3(lin, 0);
         return float4(p3 * sub.a, sub.a);
@@ -918,7 +1012,15 @@ public final class DKMetalLayerView: NSView {
               let subTex = subtitleTexture else {
             return
         }
-        var subVU = DKVertexUniforms(scale: scale, uvRect: SIMD4<Float>(0, 0, 1, 1))
+        sizeLock.lock()
+        let peakNits = _subtitleHDRPeakNits
+        let liftNDC = currentSubtitleLiftNDC * scale.y
+        sizeLock.unlock()
+        var subVU = DKVertexUniforms(
+            scale: scale,
+            pad: SIMD2<Float>(peakNits, liftNDC),
+            uvRect: SIMD4<Float>(0, 0, 1, 1)
+        )
         encoder.setRenderPipelineState(subPipe)
         encoder.setVertexBytes(&subVU, length: MemoryLayout<DKVertexUniforms>.stride, index: 0)
         encoder.setFragmentTexture(subTex, index: 0)
@@ -1229,13 +1331,27 @@ public final class DKMetalLayerView: NSView {
 
 public struct DKMetalVideoView: NSViewRepresentable {
     public let playerHandle: OpaquePointer?
+    public let controlsOcclusionHeight: CGFloat
+    public let subtitleHDRPeakNits: Float
+    public let antiOcclusionEnabled: Bool
 
-    public init(playerHandle: OpaquePointer?) {
+    public init(
+        playerHandle: OpaquePointer?,
+        controlsOcclusionHeight: CGFloat = 0,
+        subtitleHDRPeakNits: Float = 203.0,
+        antiOcclusionEnabled: Bool = true
+    ) {
         self.playerHandle = playerHandle
+        self.controlsOcclusionHeight = controlsOcclusionHeight
+        self.subtitleHDRPeakNits = subtitleHDRPeakNits
+        self.antiOcclusionEnabled = antiOcclusionEnabled
     }
 
     public func makeNSView(context: Context) -> DKMetalLayerView {
         let view = DKMetalLayerView()
+        view.controlsOcclusionHeightPoints = controlsOcclusionHeight
+        view.subtitleHDRPeakNits = subtitleHDRPeakNits
+        view.antiOcclusionEnabled = antiOcclusionEnabled
         let coordinator = context.coordinator
         view.onDetachFromWindow = { [weak coordinator] in
             coordinator?.stopDisplayLink()
@@ -1245,6 +1361,9 @@ public struct DKMetalVideoView: NSViewRepresentable {
     }
 
     public func updateNSView(_ nsView: DKMetalLayerView, context: Context) {
+        nsView.controlsOcclusionHeightPoints = controlsOcclusionHeight
+        nsView.subtitleHDRPeakNits = subtitleHDRPeakNits
+        nsView.antiOcclusionEnabled = antiOcclusionEnabled
         if context.coordinator.player != playerHandle {
             context.coordinator.updatePlayer(playerHandle)
         }
@@ -1342,7 +1461,8 @@ public struct DKMetalVideoView: NSViewRepresentable {
             playerLock.unlock()
             guard let p = p, let v = v else { return }
 
-            let needsRedraw = v.needsRedrawOnSameFrame
+            let liftAnimating = v.stepSubtitleLiftAnimation(dt: Float(1.0 / 60.0))
+            let needsRedraw = v.needsRedrawOnSameFrame || liftAnimating
             let state = dk_player_get_state(p)
             if !needsRedraw && lastBufferPtr != nil && (state == DK_STATE_PAUSED || state == DK_STATE_ENDED) {
                 let now = ProcessInfo.processInfo.systemUptime
@@ -1378,6 +1498,17 @@ public struct DKMetalVideoView: NSViewRepresentable {
                 }
             }, boxPtr)
             let subtitleChanged = syncBox.changed
+            if subtitleChanged {
+                var by0: Int32 = 0
+                var by1: Int32 = 0
+                var bch: Int32 = 0
+                if dk_player_get_subtitle_vertical_bounds(p, &by0, &by1, &bch) {
+                    v.updateSubtitleVerticalBounds(y0: by0, y1: by1, canvasH: bch)
+                } else {
+                    v.updateSubtitleVerticalBounds(y0: 0, y1: 0, canvasH: 0)
+                }
+                _ = v.stepSubtitleLiftAnimation(dt: Float(1.0 / 60.0))
+            }
 
             // Deduplication: if PTS and pointer match the last displayed frame and the view
             // has not resized and subtitle overlay has not changed, avoid redundant GPU load

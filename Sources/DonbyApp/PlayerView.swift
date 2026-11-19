@@ -8,6 +8,38 @@ import DonbyNetwork
 import DonbyKernelC
 import DonbyMetalRenderer
 
+private func dkTurboReadCB(
+    _ opaque: UnsafeMutableRawPointer?,
+    _ buf: UnsafeMutablePointer<UInt8>?,
+    _ size: Int32
+) -> Int32 {
+    guard let opaque, let buf, size > 0 else { return -1 }
+    let handle = Unmanaged<TurboStreamByteHandle>.fromOpaque(opaque).takeUnretainedValue()
+    return Int32(handle.read(into: buf, count: Int(size)))
+}
+
+private func dkTurboSeekCB(
+    _ opaque: UnsafeMutableRawPointer?,
+    _ offset: Int64,
+    _ whence: Int32
+) -> Int64 {
+    guard let opaque else { return -1 }
+    let handle = Unmanaged<TurboStreamByteHandle>.fromOpaque(opaque).takeUnretainedValue()
+    return handle.seek(offset: offset, whence: whence)
+}
+
+private func dkTurboAbortCB(_ opaque: UnsafeMutableRawPointer?) {
+    guard let opaque else { return }
+    let handle = Unmanaged<TurboStreamByteHandle>.fromOpaque(opaque).takeUnretainedValue()
+    handle.abort()
+}
+
+private func dkTurboCloseCB(_ opaque: UnsafeMutableRawPointer?) {
+    guard let opaque else { return }
+    let handle = Unmanaged<TurboStreamByteHandle>.fromOpaque(opaque).takeRetainedValue()
+    handle.close()
+}
+
 public struct PlayerView: View {
     @EnvironmentObject private var appState: AppState
     public let session: ActivePlaybackSession
@@ -49,6 +81,19 @@ public struct PlayerView: View {
     @State private var lastMouseMoveTimestamp: TimeInterval = 0
     @State private var activePlaybackGeneration: Int = 0
     @State private var displayDownloadSpeedMBs: Double = 0.0
+    @State private var bottomControlBarHeight: CGFloat = 96
+    @State private var activeTurboHandle: TurboStreamByteHandle? = nil
+    @State private var activeSecondarySubtitleSelection: PlayerSubtitleSelection = .off
+    @State private var secondaryLocalSubtitleName: String? = nil
+    @State private var explicitSubtitleOff: Bool = false
+    @State private var kernelChapters: [PlaybackChapterItem] = []
+    @State private var healthPolicy = PlaybackHealthPolicy()
+    @State private var seekGeneration: Int = 0
+    @State private var skipBannerLabel: String? = nil
+    @State private var skipBannerTargetSec: Double = 0
+    @State private var skipBannerIsOutro: Bool = false
+    @State private var didAutoSkipIntroForCurrentItem: Bool = false
+    @State private var didAutoSkipOutroForCurrentItem: Bool = false
 
     private let progressTimer = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
     private let embySyncTimer = Timer.publish(every: 10.0, on: .main, in: .common).autoconnect()
@@ -71,6 +116,7 @@ public struct PlayerView: View {
         self._currentResource = State(initialValue: session.resource)
         self._selectedAudioIdx = State(initialValue: session.selectedAudioIndex)
         self._selectedSubIdx = State(initialValue: session.selectedSubtitleIndex)
+        self._explicitSubtitleOff = State(initialValue: session.subtitleExplicitlyOff)
     }
 
     public var body: some View {
@@ -78,7 +124,12 @@ public struct PlayerView: View {
             Color.black.ignoresSafeArea()
 
             // C++ / Metal Native Engine Video Surface
-            DKMetalVideoView(playerHandle: playerHandle)
+            DKMetalVideoView(
+                playerHandle: playerHandle,
+                controlsOcclusionHeight: showControls ? bottomControlBarHeight : 0,
+                subtitleHDRPeakNits: Float(appState.subtitleStyle.hdrPeakNits.rawValue),
+                antiOcclusionEnabled: appState.subtitleStyle.antiOcclusionEnabled
+            )
                 .ignoresSafeArea()
                 .onContinuousHover { _ in
                     showControlsAndResetTimer()
@@ -107,7 +158,52 @@ public struct PlayerView: View {
                     topOSDBar
                         .onContinuousHover { _ in showControlsAndResetTimer() }
                     Spacer()
+                    if let bannerTitle = skipBannerLabel {
+                        HStack {
+                            Spacer()
+                            Button {
+                                if skipBannerIsOutro,
+                                   let idx = session.episodesQueue.firstIndex(where: { $0.id == currentItem.id }),
+                                   session.episodesQueue.indices.contains(idx + 1) {
+                                    switchToEpisode(session.episodesQueue[idx + 1])
+                                } else {
+                                    seekTo(skipBannerTargetSec)
+                                }
+                                skipBannerLabel = nil
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: skipBannerIsOutro ? "forward.end.fill" : "forward.fill")
+                                    Text(bannerTitle)
+                                }
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(
+                                    ZStack {
+                                        Capsule().fill(.ultraThinMaterial)
+                                        Capsule().fill(Color.black.opacity(0.55))
+                                        Capsule().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.7)
+                                    }
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.trailing, 24)
+                            .padding(.bottom, 8)
+                        }
+                    }
                     bottomControlBar
+                        .background(
+                            GeometryReader { geo in
+                                Color.clear
+                                    .onAppear { bottomControlBarHeight = geo.size.height }
+                                    .onChange(of: geo.size.height) { _, newH in
+                                        if abs(bottomControlBarHeight - newH) > 0.5 {
+                                            bottomControlBarHeight = newH
+                                        }
+                                    }
+                            }
+                        )
                         .onContinuousHover { _ in showControlsAndResetTimer() }
                 }
                 .transition(.opacity)
@@ -318,7 +414,11 @@ public struct PlayerView: View {
                     abs(kernelStats.video_bitrate_mbps - freshStats.video_bitrate_mbps) > 0.1 {
                     kernelStats = freshStats
                 }
-                if abs(displayDownloadSpeedMBs - freshStats.download_speed_mbs) > 0.05 {
+                if let turboSpeed = activeTurboHandle?.currentWireSpeedMBs, turboSpeed > 0.01 {
+                    if abs(displayDownloadSpeedMBs - turboSpeed) > 0.05 {
+                        displayDownloadSpeedMBs = turboSpeed
+                    }
+                } else if abs(displayDownloadSpeedMBs - freshStats.download_speed_mbs) > 0.05 {
                     displayDownloadSpeedMBs = freshStats.download_speed_mbs
                 }
             }
@@ -327,6 +427,15 @@ public struct PlayerView: View {
             if pState == DK_STATE_ENDED && !didHandlePlaybackEnded {
                 didHandlePlaybackEnded = true
                 isPlaying = false
+                if session.server.type == .uhdNative && !session.server.accessToken.isEmpty {
+                    let srv = session.server
+                    let itm = currentItem
+                    let assetId = currentResource.mediaSource.id
+                    let endPos = currentTime
+                    Task {
+                        await UHDStreamClient.shared.reportPlayback(server: srv, kind: .finished, item: itm, assetId: assetId, positionSeconds: endPos)
+                    }
+                }
                 if let idx = session.episodesQueue.firstIndex(where: { $0.id == currentItem.id }),
                    session.episodesQueue.indices.contains(idx + 1) {
                     let nextEp = session.episodesQueue[idx + 1]
@@ -340,6 +449,35 @@ public struct PlayerView: View {
                 DonbyLogger.shared.log("播放内核报告流读取异常中断 (DK_STATE_ERROR)", level: .error, subsystem: "Player")
             }
 
+            // Stall health check & auto-recovery
+            let healthEval = healthPolicy.evaluate(
+                now: Date().timeIntervalSinceReferenceDate,
+                position: currentTime,
+                bufferedAhead: bufferedAheadSeconds,
+                isPaused: !isPlaying,
+                isOpening: isOpeningMedia,
+                isEnded: didHandlePlaybackEnded,
+                isScrubbing: isScrubbing,
+                seekGeneration: seekGeneration
+            )
+            switch healthEval {
+            case .none, .progressed:
+                break
+            case .recover:
+                DonbyLogger.shared.log("触发播放卡顿自动恢复 at \(String(format: "%.1fs", currentTime))", level: .warning, subsystem: "PlaybackHealth")
+                appState.showToast("缓冲停滞，正在自动重连当前位置...", icon: "arrow.clockwise")
+                startNativeKernelPlayback(startSeconds: currentTime)
+                return
+            case .fail(let reason):
+                isPlaying = false
+                openingErrorMessage = "媒体流连续恢复失败，请尝试切换线路 (\(reason))"
+                DonbyLogger.shared.log("播放健康检查终止: \(reason)", level: .error, subsystem: "PlaybackHealth")
+                return
+            }
+
+            // Intro / outro chapter + per-season skip detector
+            evaluateIntroOutroSkipWindow()
+
             // Update watch history periodically (every 5s) to avoid UI frame drops
             if abs(currentTime - lastRecordedPosition) >= 5.0 {
                 lastRecordedPosition = currentTime
@@ -351,17 +489,34 @@ public struct PlayerView: View {
                 dk_player_set_buffer_limit_mb(handle, Int32(newValue))
             }
         }
+        .onChange(of: appState.subtitleStyle) { _, _ in
+            applyKernelSubtitleStyle()
+        }
+        .onChange(of: appState.turboConnectionBudget) { _, _ in
+            let budget = appState.effectiveConnectionBudget(for: session.server)
+            activeTurboHandle?.updateTuning(connectionBudget: budget, prefetchAheadChunks: 12)
+        }
         .onReceive(embySyncTimer) { _ in
             guard !session.server.host.isEmpty && !session.server.accessToken.isEmpty else { return }
-            Task {
-                await EmbyClient.shared.reportPlaybackProgress(
-                    server: session.server,
-                    itemId: currentItem.id,
-                    mediaSourceId: currentResource.mediaSource.id,
-                    playSessionId: currentResource.playSessionId,
-                    positionSeconds: currentTime,
-                    isPaused: !isPlaying
-                )
+            if session.server.type == .uhdNative {
+                let srv = session.server
+                let itm = currentItem
+                let assetId = currentResource.mediaSource.id
+                let pos = currentTime
+                Task {
+                    await UHDStreamClient.shared.reportPlayback(server: srv, kind: .progress, item: itm, assetId: assetId, positionSeconds: pos)
+                }
+            } else {
+                Task {
+                    await EmbyClient.shared.reportPlaybackProgress(
+                        server: session.server,
+                        itemId: currentItem.id,
+                        mediaSourceId: currentResource.mediaSource.id,
+                        playSessionId: currentResource.playSessionId,
+                        positionSeconds: currentTime,
+                        isPaused: !isPlaying
+                    )
+                }
             }
         }
         .environment(\.colorScheme, .dark)
@@ -772,10 +927,51 @@ public struct PlayerView: View {
             }
         }
         Divider()
-        Button("加载本地字幕文件 (.srt / .ass)...") {
-            promptLocalExternalSubtitleFile()
+        Menu("实时简繁转换 (\(appState.subtitleStyle.transform.shortTitle))") {
+            ForEach(SubtitleTextTransform.allCases) { tf in
+                Button {
+                    appState.subtitleStyle.transform = tf
+                } label: {
+                    if appState.subtitleStyle.transform == tf {
+                        Label(tf.title, systemImage: "checkmark")
+                    } else {
+                        Text(tf.title)
+                    }
+                }
+            }
         }
-        Button("打开字幕管理面板...") {
+        Menu("双语副字幕") {
+            Button {
+                disableSecondarySubtitle()
+            } label: {
+                if activeSecondarySubtitleSelection == .off {
+                    Label("关闭副字幕", systemImage: "checkmark")
+                } else {
+                    Text("关闭副字幕")
+                }
+            }
+            Divider()
+            ForEach(subOpts) { option in
+                Button {
+                    selectSecondarySubtitleOption(option)
+                } label: {
+                    if activeSecondarySubtitleSelection == option.selection {
+                        Label(option.label, systemImage: "checkmark")
+                    } else {
+                        Text(option.label)
+                    }
+                }
+            }
+            Divider()
+            Button("加载本地副字幕文件...") {
+                promptLocalExternalSubtitleFile(asSecondary: true)
+            }
+        }
+        Divider()
+        Button("加载本地字幕文件 (.srt / .ass)...") {
+            promptLocalExternalSubtitleFile(asSecondary: false)
+        }
+        Button("打开字幕样式与双语面板...") {
             withAnimation(.easeInOut(duration: 0.18)) { activeDrawer = .tracks }
         }
     }
@@ -829,14 +1025,33 @@ public struct PlayerView: View {
 
     @ViewBuilder
     private var moreMenuContent: some View {
-        Section("快捷操作") {
-            Button("跳过片头 (+\(appState.opSeconds)s)") {
-                seekRelative(Double(appState.opSeconds))
-                appState.showToast("跳过片头 +\(appState.opSeconds)秒", icon: "forward.end.alt.fill")
+        Section("片头片尾与按季记忆") {
+            let skipPref = appState.effectiveSkipPreference(serverId: session.server.id, item: currentItem)
+            Button("跳过片头 (+\(Int(skipPref.introSeconds))s)") {
+                seekTo(skipPref.introSeconds)
+                appState.showToast("已跳至片头结束点 \(formatTime(skipPref.introSeconds))", icon: "forward.end.alt.fill")
             }
-            Button("跳过片尾 (-90s)") {
-                seekRelative(-90)
-                appState.showToast("快退片尾 -90秒", icon: "backward.end.alt.fill")
+            Button("设当前位置为本季片头结束 (\(formatTime(currentTime)))") {
+                appState.updateSeasonSkipPreference(serverId: session.server.id, item: currentItem) { pref in
+                    pref.introSeconds = currentTime
+                    pref.hasUserMarkedIntro = true
+                }
+                appState.showToast("已记忆本季片头长度：\(formatTime(currentTime))", icon: "checkmark.circle.fill")
+            }
+            Button("设当前位置为本季片尾开始 (剩余 \(formatTime(max(0, duration - currentTime))))") {
+                let tailLen = max(0, duration - currentTime)
+                appState.updateSeasonSkipPreference(serverId: session.server.id, item: currentItem) { pref in
+                    pref.outroSeconds = tailLen
+                    pref.hasUserMarkedOutro = true
+                }
+                appState.showToast("已记忆本季片尾长度：\(formatTime(tailLen))", icon: "checkmark.circle.fill")
+            }
+            Menu("本季跳过模式：\(skipPref.mode.title)") {
+                ForEach(SeasonSkipMode.allCases) { m in
+                    Button(m.title) {
+                        appState.updateSeasonSkipPreference(serverId: session.server.id, item: currentItem) { $0.mode = m }
+                    }
+                }
             }
         }
         Divider()
@@ -952,7 +1167,10 @@ public struct PlayerView: View {
                 embyIndex: matchedEmby?.index,
                 label: label,
                 badge: codecTag,
-                externalItem: nil
+                externalItem: nil,
+                language: matchedEmby?.language ?? kStream.language,
+                codec: matchedEmby?.codec ?? kStream.codec,
+                isDefault: (matchedEmby?.isDefault ?? kStream.isDefault) == true
             ))
         }
 
@@ -969,7 +1187,10 @@ public struct PlayerView: View {
                 embyIndex: ext.streamIndex,
                 label: ext.name,
                 badge: "外挂",
-                externalItem: ext
+                externalItem: ext,
+                language: nil,
+                codec: ext.codec,
+                isDefault: false
             ))
         }
 
@@ -981,7 +1202,10 @@ public struct PlayerView: View {
                 embyIndex: nil,
                 label: localExternalSubtitleName ?? localURL.lastPathComponent,
                 badge: "本地",
-                externalItem: nil
+                externalItem: nil,
+                language: nil,
+                codec: localURL.pathExtension.lowercased(),
+                isDefault: true
             ))
         }
 
@@ -1123,7 +1347,7 @@ public struct PlayerView: View {
                         }
 
                         Button {
-                            promptLocalExternalSubtitleFile()
+                            promptLocalExternalSubtitleFile(asSecondary: false)
                         } label: {
                             HStack(spacing: 8) {
                                 Image(systemName: "doc.badge.plus").font(.system(size: 12, weight: .semibold))
@@ -1142,6 +1366,91 @@ public struct PlayerView: View {
                             )
                         }
                         .buttonStyle(.plain)
+
+                        Divider().opacity(0.2)
+
+                        Text("副字幕 / 双语对照").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
+                        Menu {
+                            Button("关闭副字幕") { disableSecondarySubtitle() }
+                            Divider()
+                            ForEach(subOptions) { opt in
+                                Button(opt.label) { selectSecondarySubtitleOption(opt) }
+                            }
+                            Divider()
+                            Button("加载本地副字幕文件...") { promptLocalExternalSubtitleFile(asSecondary: true) }
+                        } label: {
+                            HStack {
+                                Image(systemName: "captions.bubble")
+                                Text(secondarySubtitleStatusTitle(options: subOptions))
+                                    .font(.system(size: 12, weight: .medium))
+                                    .lineLimit(1)
+                                Spacer()
+                                Image(systemName: "chevron.up.chevron.down").font(.system(size: 10))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(10)
+                            .background(Color.white.opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+
+                        Divider().opacity(0.2)
+
+                        Text("字幕实时调节与 HDR 校准").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Picker("简繁转换", selection: $appState.subtitleStyle.transform) {
+                                ForEach(SubtitleTextTransform.allCases) { tf in
+                                    Text(tf.shortTitle).tag(tf)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(String(format: "缩放 %.2fx · 位置 %d%%", appState.subtitleStyle.scale, Int(appState.subtitleStyle.verticalPositionPercent)))
+                                    .font(.system(size: 11)).foregroundStyle(.white.opacity(0.8))
+                                Slider(value: $appState.subtitleStyle.scale, in: 0.6...1.8, step: 0.05)
+                                Slider(value: $appState.subtitleStyle.verticalPositionPercent, in: 60...100, step: 1)
+                            }
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(String(format: "描边宽度 %.1f", appState.subtitleStyle.borderWidth))
+                                    .font(.system(size: 11)).foregroundStyle(.white.opacity(0.8))
+                                Slider(value: $appState.subtitleStyle.borderWidth, in: 0...6, step: 0.25)
+                            }
+
+                            HStack {
+                                Text("主延迟 \(String(format: "%.1fs", appState.subtitleStyle.primaryDelaySeconds))")
+                                    .font(.system(size: 11))
+                                Spacer()
+                                Button("-0.5s") { appState.subtitleStyle.primaryDelaySeconds = max(-30, appState.subtitleStyle.primaryDelaySeconds - 0.5) }.controlSize(.mini)
+                                Button("0") { appState.subtitleStyle.primaryDelaySeconds = 0 }.controlSize(.mini)
+                                Button("+0.5s") { appState.subtitleStyle.primaryDelaySeconds = min(30, appState.subtitleStyle.primaryDelaySeconds + 0.5) }.controlSize(.mini)
+                            }
+
+                            HStack {
+                                Text("副延迟 \(String(format: "%.1fs", appState.subtitleStyle.secondaryDelaySeconds))")
+                                    .font(.system(size: 11))
+                                Spacer()
+                                Button("-0.5s") { appState.subtitleStyle.secondaryDelaySeconds = max(-30, appState.subtitleStyle.secondaryDelaySeconds - 0.5) }.controlSize(.mini)
+                                Button("0") { appState.subtitleStyle.secondaryDelaySeconds = 0 }.controlSize(.mini)
+                                Button("+0.5s") { appState.subtitleStyle.secondaryDelaySeconds = min(30, appState.subtitleStyle.secondaryDelaySeconds + 0.5) }.controlSize(.mini)
+                            }
+
+                            Picker("HDR 亮度", selection: $appState.subtitleStyle.hdrPeakNits) {
+                                ForEach(SubtitleHDRPeakNits.allCases) { nits in
+                                    Text(nits.title).tag(nits)
+                                }
+                            }
+                            .pickerStyle(.menu)
+
+                            Toggle("覆盖内封 ASS 样式", isOn: $appState.subtitleStyle.overrideASSStyle)
+                            Toggle("仅保留强制字幕 (Forced)", isOn: $appState.subtitleStyle.forcedOnly)
+                            Toggle("控制栏防遮挡平滑上移", isOn: $appState.subtitleStyle.antiOcclusionEnabled)
+                        }
+                        .font(.system(size: 11.5))
+                        .padding(10)
+                        .background(Color.white.opacity(0.05))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
 
                 case .mediaInfo:
@@ -1151,6 +1460,7 @@ public struct PlayerView: View {
                         osdInfoRow("实时下载速率", String(format: "%.1f MB/s", max(0.0, displayDownloadSpeedMBs)))
                         osdInfoRow("超前缓冲时长", String(format: "+%.1f 秒", bufferedAheadSeconds))
                         osdInfoRow("流预读缓存", "\(kernelStats.cached_bytes / 1024 / 1024) MB")
+                        osdInfoRow("传输引擎", activeTurboHandle != nil ? "Turbo Range (\(appState.effectiveConnectionBudget(for: session.server)) 线程)" : "原生顺序读取")
                         osdInfoRow("分辨率", "\(kernelStats.width) × \(kernelStats.height)")
                         osdInfoRow("帧率", String(format: "%.3f fps", kernelStats.fps))
                         osdInfoRow("视频编码", Self.cString(from: kernelStats.video_codec))
@@ -1158,6 +1468,23 @@ public struct PlayerView: View {
                         osdInfoRow("播放线路", session.server.activeLineName)
 
                         Divider().opacity(0.2).padding(.vertical, 4)
+
+                        Button {
+                            exportRedactedDiagnostics()
+                        } label: {
+                            HStack {
+                                Image(systemName: "doc.on.clipboard")
+                                Text("复制脱敏诊断报告")
+                                Spacer()
+                                Image(systemName: "checkmark.shield").font(.system(size: 11)).foregroundStyle(.green)
+                            }
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.white)
+                            .padding(10)
+                            .background(Color.white.opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
 
                         Button {
                             showLogSheet = true
@@ -1242,6 +1569,14 @@ public struct PlayerView: View {
         bufferedAheadSeconds = 0
         displayDownloadSpeedMBs = 0.0
         localExternalSubtitleName = nil
+        secondaryLocalSubtitleName = nil
+        activeSecondarySubtitleSelection = .off
+        kernelChapters = []
+        skipBannerLabel = nil
+        didAutoSkipIntroForCurrentItem = false
+        didAutoSkipOutroForCurrentItem = false
+        seekGeneration += 1
+        healthPolicy.reset()
 
         let urlStr: String
         if currentResource.streamURL.isFileURL {
@@ -1263,28 +1598,70 @@ public struct PlayerView: View {
         let muted = isMuted
         let audioIdx = selectedAudioIdx
         let subIdx = selectedSubIdx
-        let hasEmbyStreamCatalog = !(currentResource.mediaSource.mediaStreams ?? []).isEmpty
+        let isExplicitSubOff = explicitSubtitleOff
         let openBox = OpeningPlayerBox()
         self.openingBox = openBox
 
-        DonbyLogger.shared.log("启动原生播放内核 (URL: \(urlStr))", level: .info, subsystem: "Player")
+        // Prepare Turbo Multi-Connection Range Engine for remote HTTP(S) VOD streams
+        let lowerURL = urlStr.lowercased()
+        let isRemoteHTTPVOD = (lowerURL.hasPrefix("http://") || lowerURL.hasPrefix("https://"))
+            && !lowerURL.contains(".m3u8")
+            && !lowerURL.contains(".mpd")
+        let preparedTurboHandle: TurboStreamByteHandle?
+        if appState.turboEnabled && isRemoteHTTPVOD {
+            let assetKey = DonbyTurboCacheEngine.makeAssetKey(
+                serverId: session.server.id,
+                itemId: currentItem.id,
+                mediaSourceId: currentResource.mediaSource.id
+            )
+            let store = DonbyTurboCacheEngine.shared.store(
+                for: assetKey,
+                maxMemoryBytes: max(64, appState.turboMemoryCacheMB) * 1024 * 1024,
+                persistDisk: true
+            )
+            if let knownSize = currentResource.mediaSource.size, knownSize > 0 {
+                store.setTotalSize(knownSize, sourceURL: urlStr)
+            }
+            let budget = appState.effectiveConnectionBudget(for: session.server)
+            preparedTurboHandle = TurboStreamByteHandle(
+                assetKey: assetKey,
+                streamURL: currentResource.streamURL,
+                headers: currentResource.headers,
+                store: store,
+                knownTotalSize: currentResource.mediaSource.size,
+                connectionBudget: budget,
+                prefetchAheadChunks: max(12, Int(appState.turboPrefetchSeconds * 0.6))
+            )
+        } else {
+            preparedTurboHandle = nil
+        }
+        self.activeTurboHandle = preparedTurboHandle
+
+        DonbyLogger.shared.log("启动原生播放内核 (URL: \(PlaybackDiagnosticsRedactor.redact(urlStr)), Turbo: \(preparedTurboHandle != nil))", level: .info, subsystem: "Player")
 
         Task.detached(priority: .userInitiated) {
             let handle = dk_player_create()
             guard let handle else {
+                preparedTurboHandle?.close()
                 await MainActor.run {
                     if self.openingBox === openBox { self.openingBox = nil }
                     guard self.activePlaybackGeneration == thisGeneration else { return }
+                    self.activeTurboHandle = nil
                     self.openingErrorMessage = "初始化原生播放内核失败"
                     self.isOpeningMedia = false
                 }
                 return
             }
             guard openBox.setHandle(handle) else {
+                preparedTurboHandle?.close()
                 dk_player_destroy(handle)
                 return
             }
             dk_player_set_buffer_limit_mb(handle, cachePoolMB)
+            if let turboHandle = preparedTurboHandle {
+                let opaque = Unmanaged.passRetained(turboHandle).toOpaque()
+                dk_player_set_custom_io(handle, opaque, dkTurboReadCB, dkTurboSeekCB, dkTurboAbortCB, dkTurboCloseCB)
+            }
             let ret = dk_player_open(handle, urlStr, headersStr, startSeconds, hwDecode)
             openBox.clear()
             let addr = UInt(bitPattern: handle)
@@ -1301,6 +1678,7 @@ public struct PlayerView: View {
                 }
                 if ret != 0 {
                     DonbyLogger.shared.log("内核打开视频流失败 (错误码: \(ret))", level: .error, subsystem: "Player")
+                    self.activeTurboHandle = nil
                     self.openingErrorMessage = "解析流媒体格式失败 (错误码: \(ret))，请检查网络连接或更换线路"
                     self.isOpeningMedia = false
                     Task.detached(priority: .userInitiated) {
@@ -1314,10 +1692,12 @@ public struct PlayerView: View {
 
                 dk_player_set_rate(validHandle, speed)
                 dk_player_set_volume(validHandle, vol, muted)
+                self.applyKernelSubtitleStyle()
 
                 let discovered = Self.queryKernelTracks(handle: validHandle)
                 self.kernelAudioTracks = discovered.audio
                 self.kernelSubtitleTracks = discovered.subtitles
+                self.kernelChapters = Self.queryKernelChapters(handle: validHandle)
 
                 // Resolve initial audio track (mapping Emby MediaStream.index -> FFmpeg AVStream index via ordinal)
                 let audioOpts = self.resolvedAudioOptions
@@ -1332,9 +1712,15 @@ public struct PlayerView: View {
                     self.activeAudioAVIndex = autoAudio
                 }
 
-                // Resolve initial subtitle track (respecting explicit "Off", external URLs, or embedded ordinal)
+                // Resolve initial subtitle track using explicit override -> per-item/series memory -> global preference -> smart default
                 let subOpts = self.resolvedSubtitleOptions
-                if let requestedEmbySub = subIdx, requestedEmbySub >= 0 {
+                let candidates = subOpts.map(\.trackCandidate)
+                if isExplicitSubOff {
+                    self.activeSubtitleSelection = .off
+                    if discovered.selectedSubIndex != nil {
+                        dk_player_select_track(validHandle, 2, -1)
+                    }
+                } else if let requestedEmbySub = subIdx, requestedEmbySub >= 0 {
                     if let matchedOpt = subOpts.first(where: { $0.embyIndex == requestedEmbySub })
                         ?? subOpts.first(where: {
                             if case .embedded(let avIdx) = $0.selection { return avIdx == requestedEmbySub }
@@ -1344,32 +1730,89 @@ public struct PlayerView: View {
                     } else if let autoSub = discovered.selectedSubIndex {
                         self.activeSubtitleSelection = .embedded(avStreamIndex: autoSub)
                     }
-                } else if hasEmbyStreamCatalog {
-                    // User explicitly chose "关闭字幕" (nil) on an Emby item
-                    self.activeSubtitleSelection = .off
-                    if discovered.selectedSubIndex != nil {
-                        dk_player_select_track(validHandle, 2, -1)
+                } else if let remembered = self.appState.resolvedPrimarySubtitleMemory(serverId: self.session.server.id, item: self.currentItem) {
+                    if remembered.isDisabled {
+                        self.activeSubtitleSelection = .off
+                        if discovered.selectedSubIndex != nil {
+                            dk_player_select_track(validHandle, 2, -1)
+                        }
+                    } else if let localPath = remembered.localFilePath,
+                              FileManager.default.fileExists(atPath: localPath) {
+                        self.loadLocalExternalSubtitleURL(
+                            URL(fileURLWithPath: localPath),
+                            asSecondary: false,
+                            silentToast: true,
+                            persist: false
+                        )
+                    } else if let matchedIdx = SubtitleTrackMatcher.bestMatchIndex(in: candidates, for: remembered) {
+                        self.applySubtitleOptionOnStartup(subOpts[matchedIdx], handle: validHandle, defaultSelectedAV: discovered.selectedSubIndex)
+                    } else if let autoSub = discovered.selectedSubIndex {
+                        self.activeSubtitleSelection = .embedded(avStreamIndex: autoSub)
+                    } else if let fallbackIdx = SubtitleTrackMatcher.defaultPreferredIndex(in: candidates) {
+                        self.applySubtitleOptionOnStartup(subOpts[fallbackIdx], handle: validHandle, defaultSelectedAV: discovered.selectedSubIndex)
+                    } else {
+                        self.activeSubtitleSelection = .off
                     }
                 } else if let autoSub = discovered.selectedSubIndex {
-                    // Direct URL / local file without pre-playback selector: keep default subtitle
                     self.activeSubtitleSelection = .embedded(avStreamIndex: autoSub)
+                } else if let fallbackIdx = SubtitleTrackMatcher.defaultPreferredIndex(in: candidates) {
+                    self.applySubtitleOptionOnStartup(subOpts[fallbackIdx], handle: validHandle, defaultSelectedAV: discovered.selectedSubIndex)
                 } else {
                     self.activeSubtitleSelection = .off
                 }
+
+                // Restore secondary bilingual subtitle if remembered
+                if let rememberedSecondary = self.appState.resolvedSecondarySubtitleMemory(serverId: self.session.server.id, item: self.currentItem),
+                   !rememberedSecondary.isDisabled {
+                    if let localPath = rememberedSecondary.localFilePath,
+                       FileManager.default.fileExists(atPath: localPath) {
+                        self.loadLocalExternalSubtitleURL(
+                            URL(fileURLWithPath: localPath),
+                            asSecondary: true,
+                            silentToast: true,
+                            persist: false
+                        )
+                    } else if let secIdx = SubtitleTrackMatcher.bestMatchIndex(in: candidates, for: rememberedSecondary) {
+                        let secOpt = subOpts[secIdx]
+                        switch secOpt.selection {
+                        case .embedded(let avIdx):
+                            self.secondaryLocalSubtitleName = nil
+                            self.activeSecondarySubtitleSelection = .embedded(avStreamIndex: avIdx)
+                            dk_player_select_secondary_subtitle_track(validHandle, Int32(avIdx))
+                        case .remoteExternal:
+                            if let ext = secOpt.externalItem {
+                                self.loadRemoteExternalSubtitle(item: ext, embyStreamIndex: secOpt.embyIndex, silentToast: true, asSecondary: true)
+                            }
+                        case .off, .localExternal:
+                            break
+                        }
+                    }
+                } else {
+                    self.activeSecondarySubtitleSelection = .off
+                }
+                self.applyKernelSubtitleStyle()
                 self.isPlaying = true
-                DonbyLogger.shared.log("原生播放器配置就绪，画面启动渲染", level: .info, subsystem: "Player")
+                DonbyLogger.shared.log("原生播放器配置就绪，画面启动渲染 (章节: \(self.kernelChapters.count))", level: .info, subsystem: "Player")
             }
         }
 
         guard !session.server.host.isEmpty && !session.server.accessToken.isEmpty else { return }
+        let srv = session.server
+        let itm = currentItem
+        let msId = currentResource.mediaSource.id
+        let psId = currentResource.playSessionId
         Task {
-            await EmbyClient.shared.reportPlaybackStart(
-                server: session.server,
-                itemId: currentItem.id,
-                mediaSourceId: currentResource.mediaSource.id,
-                playSessionId: currentResource.playSessionId,
-                positionSeconds: startSeconds
-            )
+            if srv.type == .uhdNative {
+                await UHDStreamClient.shared.reportPlayback(server: srv, kind: .progress, item: itm, assetId: msId, positionSeconds: startSeconds)
+            } else {
+                await EmbyClient.shared.reportPlaybackStart(
+                    server: srv,
+                    itemId: itm.id,
+                    mediaSourceId: msId,
+                    playSessionId: psId,
+                    positionSeconds: startSeconds
+                )
+            }
         }
     }
 
@@ -1377,10 +1820,14 @@ public struct PlayerView: View {
         activePlaybackGeneration &+= 1
         openingBox?.abort()
         openingBox = nil
+        activeTurboHandle?.abort()
+        activeTurboHandle?.close()
+        activeTurboHandle = nil
         episodeSwitchTask?.cancel()
         episodeSwitchTask = nil
         displayDownloadSpeedMBs = 0.0
         bufferedAheadSeconds = 0
+        skipBannerLabel = nil
         guard let handle = playerHandle else { return }
         self.playerHandle = nil
         dk_player_request_abort(handle)
@@ -1418,10 +1865,142 @@ public struct PlayerView: View {
 
     private func seekTo(_ seconds: Double) {
         didHandlePlaybackEnded = false
+        seekGeneration += 1
         currentTime = seconds
         if let handle = playerHandle {
             dk_player_seek(handle, seconds, true)
         }
+    }
+
+    private func applyKernelSubtitleStyle() {
+        guard let handle = playerHandle else { return }
+        let s = appState.subtitleStyle
+        var cfg = DKSubtitleStyleConfig(
+            scale: Float(s.scale),
+            border_width: Float(s.borderWidth),
+            vertical_pos_percent: Float(s.verticalPositionPercent),
+            primary_delay_sec: s.primaryDelaySeconds,
+            secondary_delay_sec: s.secondaryDelaySeconds,
+            text_transform: Int32(s.transform.rawValue),
+            override_ass_style: s.overrideASSStyle,
+            forced_only: s.forcedOnly
+        )
+        dk_player_set_subtitle_style(handle, &cfg)
+    }
+
+    private static func queryKernelChapters(handle: OpaquePointer) -> [PlaybackChapterItem] {
+        let count = dk_player_get_chapter_count(handle)
+        guard count > 0 else { return [] }
+        var chapters: [PlaybackChapterItem] = []
+        chapters.reserveCapacity(Int(count))
+        for ord in 0..<count {
+            var info = DKChapterInfo()
+            if dk_player_get_chapter_info(handle, ord, &info) {
+                chapters.append(PlaybackChapterItem(
+                    id: Int(info.index),
+                    startSeconds: info.start_sec,
+                    endSeconds: info.end_sec,
+                    title: cString(from: info.title)
+                ))
+            }
+        }
+        return chapters
+    }
+
+    private func evaluateIntroOutroSkipWindow() {
+        guard duration > 60 else {
+            skipBannerLabel = nil
+            return
+        }
+        let pref = appState.effectiveSkipPreference(serverId: session.server.id, item: currentItem)
+        let chapterIntroEnd = pref.chapterDetection
+            ? ChapterSkipDetector.detectIntroEndSeconds(chapters: kernelChapters, duration: duration)
+            : nil
+        let chapterOutroStart = pref.chapterDetection
+            ? ChapterSkipDetector.detectOutroStartSeconds(chapters: kernelChapters, duration: duration)
+            : nil
+
+        let introEnd: Double? = {
+            guard pref.introEnabled else { return nil }
+            if pref.hasUserMarkedIntro { return pref.introSeconds > 5 ? pref.introSeconds : nil }
+            if let ch = chapterIntroEnd { return ch }
+            return pref.introSeconds > 5 ? pref.introSeconds : nil
+        }()
+
+        let outroStart: Double? = {
+            guard pref.outroEnabled else { return nil }
+            if pref.hasUserMarkedOutro && pref.outroSeconds > 5 { return max(60, duration - pref.outroSeconds) }
+            if let ch = chapterOutroStart { return ch }
+            return pref.outroSeconds > 5 ? max(60, duration - pref.outroSeconds) : nil
+        }()
+
+        let hasNextEp: Bool = {
+            if let idx = session.episodesQueue.firstIndex(where: { $0.id == currentItem.id }) {
+                return session.episodesQueue.indices.contains(idx + 1)
+            }
+            return false
+        }()
+
+        if let introEnd, currentTime >= 1.5, currentTime < introEnd - 1.5 {
+            if pref.mode == .automatic && !didAutoSkipIntroForCurrentItem && session.startPositionSeconds < introEnd {
+                didAutoSkipIntroForCurrentItem = true
+                seekTo(introEnd)
+                appState.showToast("已自动跳过片头 (\(formatTime(introEnd)))", icon: "forward.fill")
+                skipBannerLabel = nil
+                return
+            }
+            if !skipBannerIsOutro || skipBannerLabel != "跳过片头" {
+                skipBannerLabel = "跳过片头"
+                skipBannerTargetSec = introEnd
+                skipBannerIsOutro = false
+            }
+            return
+        }
+
+        if let outroStart, currentTime >= outroStart, currentTime < duration - 2.0, hasNextEp {
+            if pref.mode == .automatic && appState.autoNextEpisode && !didAutoSkipOutroForCurrentItem {
+                didAutoSkipOutroForCurrentItem = true
+                if let idx = session.episodesQueue.firstIndex(where: { $0.id == currentItem.id }),
+                   session.episodesQueue.indices.contains(idx + 1) {
+                    let nextEp = session.episodesQueue[idx + 1]
+                    appState.showToast("片尾自动连播下一集: \(nextEp.name)", icon: "forward.end.fill")
+                    switchToEpisode(nextEp)
+                }
+                skipBannerLabel = nil
+                return
+            }
+            if skipBannerLabel != "跳过片尾 · 下一集" {
+                skipBannerLabel = "跳过片尾 · 下一集"
+                skipBannerTargetSec = duration
+                skipBannerIsOutro = true
+            }
+            return
+        }
+
+        if skipBannerLabel != nil {
+            skipBannerLabel = nil
+        }
+    }
+
+    private func exportRedactedDiagnostics() {
+        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.21"
+        var lines: [String] = []
+        lines.append("Donby Diagnostics Report (v\(appVer))")
+        lines.append("Time: \(ISO8601DateFormatter().string(from: Date()))")
+        lines.append("Server Type: \(session.server.type.rawValue) | Line: \(session.server.activeLineName)")
+        lines.append("Item: \(currentItem.name) | Route: \(currentResource.routeNote)")
+        lines.append("Stream URL: \(currentResource.streamURL.absoluteString)")
+        lines.append("Decoder: \(kernelStats.is_hw_accelerated ? "VideoToolbox HW" : "Software") | \(kernelStats.width)x\(kernelStats.height) @ \(String(format: "%.3f", kernelStats.fps))fps")
+        lines.append("HDR: DoVi=\(kernelStats.is_dolby_vision) HDR=\(kernelStats.is_hdr) | Codec: \(Self.cString(from: kernelStats.video_codec)) / \(Self.cString(from: kernelStats.audio_codec))")
+        lines.append("Position: \(String(format: "%.2f", currentTime)) / \(String(format: "%.2f", duration)) | BufferedAhead: \(String(format: "%.2f", bufferedAheadSeconds))s | Turbo: \(activeTurboHandle != nil)")
+        lines.append("Recent Logs:")
+        let allLogs = DonbyLogger.shared.exportAllText().components(separatedBy: .newlines).suffix(80)
+        lines.append(contentsOf: allLogs)
+
+        let redacted = PlaybackDiagnosticsRedactor.redact(lines.joined(separator: "\n"))
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(redacted, forType: .string)
+        appState.showToast("已复制脱敏诊断报告到剪贴板", icon: "checkmark.shield.fill")
     }
 
     private static func cString<T>(from tuple: T) -> String {
@@ -1484,7 +2063,8 @@ public struct PlayerView: View {
                 codec: codec.isEmpty ? nil : codec,
                 language: lang.isEmpty ? nil : lang,
                 title: title.isEmpty ? nil : title,
-                isDefault: info.is_default
+                isDefault: info.is_default,
+                isForced: info.is_forced
             ))
         }
 
@@ -1500,10 +2080,19 @@ public struct PlayerView: View {
         }
     }
 
-    private func disableSubtitles(showFeedback: Bool) {
+    private func disableSubtitles(showFeedback: Bool, persist: Bool = true) {
+        explicitSubtitleOff = true
         selectedSubIdx = nil
         activeSubtitleSelection = .off
         localExternalSubtitleName = nil
+        if persist {
+            appState.recordPrimarySubtitleChoice(
+                serverId: session.server.id,
+                item: currentItem,
+                preference: .disabled,
+                updateGlobal: false
+            )
+        }
         if let handle = playerHandle {
             dk_player_select_track(handle, 2, -1)
             if showFeedback {
@@ -1513,15 +2102,18 @@ public struct PlayerView: View {
     }
 
     private func applySubtitleOptionOnStartup(_ option: PlayerSubtitleTrackOption, handle: OpaquePointer, defaultSelectedAV: Int?) {
+        explicitSubtitleOff = false
         switch option.selection {
         case .off:
             activeSubtitleSelection = .off
             dk_player_select_track(handle, 2, -1)
         case .embedded(let avIdx):
             activeSubtitleSelection = .embedded(avStreamIndex: avIdx)
+            selectedSubIdx = option.embyIndex ?? avIdx
             if defaultSelectedAV != avIdx {
                 dk_player_select_track(handle, 2, Int32(avIdx))
             }
+            applyKernelSubtitleStyle()
         case .remoteExternal:
             if let ext = option.externalItem {
                 loadRemoteExternalSubtitle(item: ext, embyStreamIndex: option.embyIndex, silentToast: true)
@@ -1532,6 +2124,7 @@ public struct PlayerView: View {
     }
 
     private func selectSubtitleOption(_ option: PlayerSubtitleTrackOption) {
+        explicitSubtitleOff = false
         selectedSubIdx = option.embyIndex
         switch option.selection {
         case .off:
@@ -1539,13 +2132,24 @@ public struct PlayerView: View {
         case .embedded(let avIdx):
             localExternalSubtitleName = nil
             activeSubtitleSelection = .embedded(avStreamIndex: avIdx)
+            appState.recordPrimarySubtitleChoice(
+                serverId: session.server.id,
+                item: currentItem,
+                preference: option.toPreference()
+            )
             if let handle = playerHandle {
                 dk_player_select_track(handle, 2, Int32(avIdx))
+                applyKernelSubtitleStyle()
                 appState.showToast("已切换字幕: \(option.label)", icon: "captions.bubble.fill")
             }
         case .remoteExternal:
             if let ext = option.externalItem {
                 localExternalSubtitleName = nil
+                appState.recordPrimarySubtitleChoice(
+                    serverId: session.server.id,
+                    item: currentItem,
+                    preference: option.toPreference()
+                )
                 loadRemoteExternalSubtitle(item: ext, embyStreamIndex: option.embyIndex, silentToast: false)
             }
         case .localExternal:
@@ -1553,42 +2157,115 @@ public struct PlayerView: View {
         }
     }
 
-    private func loadRemoteExternalSubtitle(item: SubtitleResourceItem, embyStreamIndex: Int?, silentToast: Bool) {
-        selectedSubIdx = embyStreamIndex
-        activeSubtitleSelection = .remoteExternal(url: item.url)
+    private func secondarySubtitleStatusTitle(options: [PlayerSubtitleTrackOption]) -> String {
+        switch activeSecondarySubtitleSelection {
+        case .off:
+            return "关闭副字幕"
+        case .localExternal(let url):
+            return "副: \(secondaryLocalSubtitleName ?? url.lastPathComponent)"
+        default:
+            if let matched = options.first(where: { $0.selection == activeSecondarySubtitleSelection }) {
+                return "副: \(matched.label)"
+            }
+            return "关闭副字幕"
+        }
+    }
+
+    private func disableSecondarySubtitle() {
+        activeSecondarySubtitleSelection = .off
+        secondaryLocalSubtitleName = nil
+        appState.recordSecondarySubtitleChoice(
+            serverId: session.server.id,
+            item: currentItem,
+            preference: .disabled
+        )
+        if let handle = playerHandle {
+            dk_player_select_secondary_subtitle_track(handle, -1)
+        }
+        appState.showToast("已关闭副字幕", icon: "captions.bubble")
+    }
+
+    private func selectSecondarySubtitleOption(_ option: PlayerSubtitleTrackOption) {
+        switch option.selection {
+        case .off:
+            disableSecondarySubtitle()
+        case .embedded(let avIdx):
+            secondaryLocalSubtitleName = nil
+            activeSecondarySubtitleSelection = .embedded(avStreamIndex: avIdx)
+            appState.recordSecondarySubtitleChoice(
+                serverId: session.server.id,
+                item: currentItem,
+                preference: option.toPreference()
+            )
+            if let handle = playerHandle {
+                dk_player_select_secondary_subtitle_track(handle, Int32(avIdx))
+                applyKernelSubtitleStyle()
+                appState.showToast("已开启双语副字幕: \(option.label)", icon: "captions.bubble.fill")
+            }
+        case .remoteExternal:
+            if let ext = option.externalItem {
+                appState.recordSecondarySubtitleChoice(
+                    serverId: session.server.id,
+                    item: currentItem,
+                    preference: option.toPreference()
+                )
+                loadRemoteExternalSubtitle(item: ext, embyStreamIndex: option.embyIndex, silentToast: false, asSecondary: true)
+            }
+        case .localExternal:
+            break
+        }
+    }
+
+    private func loadRemoteExternalSubtitle(
+        item: SubtitleResourceItem,
+        embyStreamIndex: Int?,
+        silentToast: Bool,
+        asSecondary: Bool = false
+    ) {
+        if asSecondary {
+            activeSecondarySubtitleSelection = .remoteExternal(url: item.url)
+        } else {
+            selectedSubIdx = embyStreamIndex
+            activeSubtitleSelection = .remoteExternal(url: item.url)
+        }
         let expectedGeneration = activePlaybackGeneration
         let headers = currentResource.headers
         let url = item.url
         let label = item.name
+        let ext = url.pathExtension.lowercased()
         Task.detached(priority: .userInitiated) {
             var req = URLRequest(url: url, timeoutInterval: 15)
             for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
             guard let (data, _) = try? await URLSession.shared.data(for: req),
-                  let text = String(data: data, encoding: .utf8)
-                      ?? String(data: data, encoding: .utf16)
-                      ?? String(data: data, encoding: String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)))) else {
+                  let decoded = SubtitleTextDecoder.decode(data: data, fileExtension: ext) else {
                 await MainActor.run {
                     appState.showToast("下载外挂字幕失败", icon: "exclamationmark.triangle.fill", isError: true)
                 }
                 return
             }
-            let ext = url.pathExtension.lowercased()
+            let text = decoded.text
             let isAss = (ext == "ass" || ext == "ssa" || text.contains("[Script Info]"))
             await MainActor.run {
                 guard self.activePlaybackGeneration == expectedGeneration else { return }
                 if let handle = self.playerHandle {
-                    dk_player_load_external_subtitle(handle, text, isAss)
+                    if asSecondary {
+                        dk_player_load_secondary_external_subtitle(handle, text, isAss)
+                    } else {
+                        dk_player_load_external_subtitle(handle, text, isAss)
+                    }
+                    self.applyKernelSubtitleStyle()
                     if !silentToast {
-                        self.appState.showToast("已加载外挂字幕: \(label)", icon: "captions.bubble.fill")
+                        let prefix = asSecondary ? "已加载副字幕" : "已加载外挂字幕"
+                        self.appState.showToast("\(prefix): \(label) (\(decoded.encoding.rawValue))", icon: "captions.bubble.fill")
                     }
                 }
             }
         }
     }
 
-    private func promptLocalExternalSubtitleFile() {
+    private func promptLocalExternalSubtitleFile(asSecondary: Bool = false) {
         let panel = NSOpenPanel()
-        panel.title = "选择外挂字幕文件 (.srt / .ass / .ssa / .vtt)"
+        panel.title = asSecondary ? "选择双语副字幕文件 (.srt / .ass / .ssa / .vtt)" : "选择外挂字幕文件 (.srt / .ass / .ssa / .vtt)"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
@@ -1598,21 +2275,58 @@ public struct PlayerView: View {
         }
         panel.allowedContentTypes = types
         if panel.runModal() == .OK, let url = panel.url {
-            guard let data = try? Data(contentsOf: url),
-                  let text = String(data: data, encoding: .utf8)
-                      ?? String(data: data, encoding: .utf16)
-                      ?? String(data: data, encoding: String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)))) else {
+            loadLocalExternalSubtitleURL(url, asSecondary: asSecondary, silentToast: false, persist: true)
+        }
+    }
+
+    private func loadLocalExternalSubtitleURL(
+        _ url: URL,
+        asSecondary: Bool,
+        silentToast: Bool,
+        persist: Bool
+    ) {
+        let ext = url.pathExtension.lowercased()
+        guard let data = try? Data(contentsOf: url),
+              let decoded = SubtitleTextDecoder.decode(data: data, fileExtension: ext) else {
+            if !silentToast {
                 appState.showToast("读取字幕文件失败", icon: "exclamationmark.triangle.fill", isError: true)
-                return
             }
-            let ext = url.pathExtension.lowercased()
-            let isAss = (ext == "ass" || ext == "ssa" || text.contains("[Script Info]"))
-            if let handle = playerHandle {
+            return
+        }
+        let text = decoded.text
+        let isAss = (ext == "ass" || ext == "ssa" || text.contains("[Script Info]"))
+        if let handle = playerHandle {
+            if asSecondary {
+                secondaryLocalSubtitleName = url.lastPathComponent
+                activeSecondarySubtitleSelection = .localExternal(url: url)
+                dk_player_load_secondary_external_subtitle(handle, text, isAss)
+            } else {
+                explicitSubtitleOff = false
                 selectedSubIdx = nil
                 localExternalSubtitleName = url.lastPathComponent
                 activeSubtitleSelection = .localExternal(url: url)
                 dk_player_load_external_subtitle(handle, text, isAss)
-                appState.showToast("已加载本地字幕: \(url.lastPathComponent)", icon: "captions.bubble.fill")
+            }
+            applyKernelSubtitleStyle()
+            if persist {
+                let pref = SubtitleTrackPreference(
+                    isDisabled: false,
+                    language: nil,
+                    titleHint: url.lastPathComponent,
+                    codec: ext,
+                    isExternal: true,
+                    embyStreamIndex: nil,
+                    localFilePath: url.path
+                )
+                if asSecondary {
+                    appState.recordSecondarySubtitleChoice(serverId: session.server.id, item: currentItem, preference: pref, updateGlobal: false)
+                } else {
+                    appState.recordPrimarySubtitleChoice(serverId: session.server.id, item: currentItem, preference: pref, updateGlobal: false)
+                }
+            }
+            if !silentToast {
+                let tag = asSecondary ? "已加载本地副字幕" : "已加载本地字幕"
+                appState.showToast("\(tag): \(url.lastPathComponent) (\(decoded.encoding.rawValue))", icon: "captions.bubble.fill")
             }
         }
     }
@@ -1632,36 +2346,56 @@ public struct PlayerView: View {
         let server = session.server
         let preset = appState.preferredVersionPreset
         let audioIdx = selectedAudioIdx
-        let subIdx = selectedSubIdx
         let enable302 = appState.enable302Cache
-        let prevItemId = currentItem.id
+        let prevItem = currentItem
         let prevSourceId = currentResource.mediaSource.id
         let prevSessionId = currentResource.playSessionId
         let prevPos = currentTime
         saveCurrentWatchProgress(isFinal: true)
         episodeSwitchTask = Task {
             do {
-                let res = try await EmbyClient.shared.resolvePlaybackResource(
-                    server: server,
-                    item: nextEp,
-                    preferredPreset: preset,
-                    audioStreamIndex: audioIdx,
-                    subtitleStreamIndex: subIdx,
-                    enable302Cache: enable302
-                )
+                let res: ResolvedPlaybackResource
+                if let offlineEntry = DonbyDownloadManager.shared.completedEntry(
+                    for: nextEp.id,
+                    serverId: server.id
+                ) ?? DonbyDownloadManager.shared.completedEntry(for: nextEp.id),
+                   let offlineRes = DonbyDownloadManager.shared.offlinePlayableResource(for: offlineEntry) {
+                    res = offlineRes
+                } else if server.type == .uhdNative {
+                    res = try await UHDStreamClient.shared.resolvePlaybackResource(
+                        server: server,
+                        item: nextEp,
+                        preferredPreset: preset
+                    )
+                } else {
+                    res = try await EmbyClient.shared.resolvePlaybackResource(
+                        server: server,
+                        item: nextEp,
+                        preferredPreset: preset,
+                        audioStreamIndex: audioIdx,
+                        subtitleStreamIndex: nil,
+                        enable302Cache: enable302
+                    )
+                }
                 guard !Task.isCancelled else { return }
                 if !server.host.isEmpty && !server.accessToken.isEmpty {
                     Task {
-                        await EmbyClient.shared.reportPlaybackStopped(
-                            server: server,
-                            itemId: prevItemId,
-                            mediaSourceId: prevSourceId,
-                            playSessionId: prevSessionId,
-                            positionSeconds: prevPos
-                        )
+                        if server.type == .uhdNative {
+                            await UHDStreamClient.shared.reportPlayback(server: server, kind: .stopped, item: prevItem, assetId: prevSourceId, positionSeconds: prevPos)
+                        } else {
+                            await EmbyClient.shared.reportPlaybackStopped(
+                                server: server,
+                                itemId: prevItem.id,
+                                mediaSourceId: prevSourceId,
+                                playSessionId: prevSessionId,
+                                positionSeconds: prevPos
+                            )
+                        }
                     }
                 }
                 episodeSwitchTask = nil
+                explicitSubtitleOff = false
+                selectedSubIdx = nil
                 currentItem = nextEp
                 currentResource = res
                 startNativeKernelPlayback(startSeconds: nextEp.resumePositionSeconds)
@@ -1684,18 +2418,22 @@ public struct PlayerView: View {
 
         if !session.server.host.isEmpty && !session.server.accessToken.isEmpty {
             let srv = session.server
-            let cId = currentItem.id
+            let itm = currentItem
             let msId = currentResource.mediaSource.id
             let psId = currentResource.playSessionId
             let pos = currentTime
             Task {
-                await EmbyClient.shared.reportPlaybackStopped(
-                    server: srv,
-                    itemId: cId,
-                    mediaSourceId: msId,
-                    playSessionId: psId,
-                    positionSeconds: pos
-                )
+                if srv.type == .uhdNative {
+                    await UHDStreamClient.shared.reportPlayback(server: srv, kind: .stopped, item: itm, assetId: msId, positionSeconds: pos)
+                } else {
+                    await EmbyClient.shared.reportPlaybackStopped(
+                        server: srv,
+                        itemId: itm.id,
+                        mediaSourceId: msId,
+                        playSessionId: psId,
+                        positionSeconds: pos
+                    )
+                }
             }
         }
 

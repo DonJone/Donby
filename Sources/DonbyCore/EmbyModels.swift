@@ -105,6 +105,7 @@ public struct EmbyCountsResponse: Codable, Sendable {
 
 public enum ServerType: String, Codable, CaseIterable, Identifiable, Sendable {
     case emby = "emby"
+    case uhdNative = "uhdNative"
     case jellyfin = "jellyfin"
     case feiniu = "feiniu"
     case plex = "plex"
@@ -115,6 +116,7 @@ public enum ServerType: String, Codable, CaseIterable, Identifiable, Sendable {
     public var displayName: String {
         switch self {
         case .emby: return "Emby / UHDNow"
+        case .uhdNative: return "UHDNow 原生 API"
         case .jellyfin: return "Jellyfin"
         case .feiniu: return "飞牛影视 (fnOS)"
         case .plex: return "Plex"
@@ -125,6 +127,7 @@ public enum ServerType: String, Codable, CaseIterable, Identifiable, Sendable {
     public var assetIconName: String {
         switch self {
         case .emby: return "emby"
+        case .uhdNative: return "uhd"
         case .jellyfin: return "jellyfin"
         case .feiniu: return "feiniu"
         case .plex: return "plex"
@@ -138,12 +141,13 @@ public struct ServerLineInfo: Codable, Identifiable, Hashable, Sendable {
     public var id: UUID
     public var name: String
     public var url: String
+    public var domainId: String?
     public var isAutoSynced: Bool
     public var latencyMs: Int?
     public var lastCheckedAt: Date?
 
-    public init(id: UUID = UUID(), name: String, url: String, isAutoSynced: Bool = false, latencyMs: Int? = nil, lastCheckedAt: Date? = nil) {
-        self.id = id; self.name = name; self.url = Self.normalizeBaseURL(url); self.isAutoSynced = isAutoSynced; self.latencyMs = latencyMs; self.lastCheckedAt = lastCheckedAt
+    public init(id: UUID = UUID(), name: String, url: String, domainId: String? = nil, isAutoSynced: Bool = false, latencyMs: Int? = nil, lastCheckedAt: Date? = nil) {
+        self.id = id; self.name = name; self.url = Self.normalizeBaseURL(url); self.domainId = domainId; self.isAutoSynced = isAutoSynced; self.latencyMs = latencyMs; self.lastCheckedAt = lastCheckedAt
     }
 
     public static func normalizeBaseURL(_ raw: String) -> String {
@@ -270,6 +274,7 @@ public struct EmbyServerConfig: Codable, Identifiable, Hashable, Sendable {
     }
 
     public var usesUHDLogo: Bool {
+        if type == .uhdNative { return true }
         if iconURL == "emby" { return false }
         return iconURL == "uhd" || name.uppercased().contains("UHD") || host.lowercased().contains("uhd")
     }
@@ -411,15 +416,20 @@ public struct EmbyItem: Codable, Identifiable, Hashable, Sendable {
     public let providerIds: [String: String]?
     public let chapters: [EmbyChapterInfo]?
     public let dateCreated: String?
+    public let uhdPosterURL: String?
+    public let uhdBackdropURL: String?
+    public let uhdLogoURL: String?
+    public let uhdThumbURL: String?
+    public let uhdMediaType: String?
 
     enum CodingKeys: String, CodingKey {
-        case id = "Id"; case name = "Name"; case originalTitle = "OriginalTitle"; case serverId = "ServerId"; case type = "Type"; case collectionType = "CollectionType"; case overview = "Overview"; case taglines = "Taglines"; case genres = "Genres"; case communityRating = "CommunityRating"; case criticRating = "CriticRating"; case officialRating = "OfficialRating"; case productionYear = "ProductionYear"; case premiereDate = "PremiereDate"; case endDate = "EndDate"; case status = "Status"; case runTimeTicks = "RunTimeTicks"; case container = "Container"; case path = "Path"; case isFolder = "IsFolder"; case parentId = "ParentId"; case seriesId = "SeriesId"; case seriesName = "SeriesName"; case seasonId = "SeasonId"; case seasonName = "SeasonName"; case indexNumber = "IndexNumber"; case parentIndexNumber = "ParentIndexNumber"; case childCount = "ChildCount"; case recursiveItemCount = "RecursiveItemCount"; case imageTags = "ImageTags"; case backdropImageTags = "BackdropImageTags"; case parentBackdropItemId = "ParentBackdropItemId"; case parentBackdropImageTags = "ParentBackdropImageTags"; case seriesPrimaryImageTag = "SeriesPrimaryImageTag"; case primaryImageAspectRatio = "PrimaryImageAspectRatio"; case userData = "UserData"; case mediaSources = "MediaSources"; case mediaStreams = "MediaStreams"; case people = "People"; case studios = "Studios"; case providerIds = "ProviderIds"; case chapters = "Chapters"; case dateCreated = "DateCreated"
+        case id = "Id"; case name = "Name"; case originalTitle = "OriginalTitle"; case serverId = "ServerId"; case type = "Type"; case collectionType = "CollectionType"; case overview = "Overview"; case taglines = "Taglines"; case genres = "Genres"; case communityRating = "CommunityRating"; case criticRating = "CriticRating"; case officialRating = "OfficialRating"; case productionYear = "ProductionYear"; case premiereDate = "PremiereDate"; case endDate = "EndDate"; case status = "Status"; case runTimeTicks = "RunTimeTicks"; case container = "Container"; case path = "Path"; case isFolder = "IsFolder"; case parentId = "ParentId"; case seriesId = "SeriesId"; case seriesName = "SeriesName"; case seasonId = "SeasonId"; case seasonName = "SeasonName"; case indexNumber = "IndexNumber"; case parentIndexNumber = "ParentIndexNumber"; case childCount = "ChildCount"; case recursiveItemCount = "RecursiveItemCount"; case imageTags = "ImageTags"; case backdropImageTags = "BackdropImageTags"; case parentBackdropItemId = "ParentBackdropItemId"; case parentBackdropImageTags = "ParentBackdropImageTags"; case seriesPrimaryImageTag = "SeriesPrimaryImageTag"; case primaryImageAspectRatio = "PrimaryImageAspectRatio"; case userData = "UserData"; case mediaSources = "MediaSources"; case mediaStreams = "MediaStreams"; case people = "People"; case studios = "Studios"; case providerIds = "ProviderIds"; case chapters = "Chapters"; case dateCreated = "DateCreated"; case uhdPosterURL = "UhdPosterURL"; case uhdBackdropURL = "UhdBackdropURL"; case uhdLogoURL = "UhdLogoURL"; case uhdThumbURL = "UhdThumbURL"; case uhdMediaType = "UhdMediaType"
     }
 
     public init(
-        id: String, name: String, originalTitle: String? = nil, serverId: String? = nil, type: String? = nil, collectionType: String? = nil, overview: String? = nil, taglines: [String]? = nil, genres: [String]? = nil, communityRating: Double? = nil, criticRating: Double? = nil, officialRating: String? = nil, productionYear: Int? = nil, premiereDate: String? = nil, endDate: String? = nil, status: String? = nil, runTimeTicks: Int64? = nil, container: String? = nil, path: String? = nil, isFolder: Bool? = nil, parentId: String? = nil, seriesId: String? = nil, seriesName: String? = nil, seasonId: String? = nil, seasonName: String? = nil, indexNumber: Int? = nil, parentIndexNumber: Int? = nil, childCount: Int? = nil, recursiveItemCount: Int? = nil, imageTags: [String: String]? = nil, backdropImageTags: [String]? = nil, parentBackdropItemId: String? = nil, parentBackdropImageTags: [String]? = nil, seriesPrimaryImageTag: String? = nil, primaryImageAspectRatio: Double? = nil, userData: EmbyUserData? = nil, mediaSources: [MediaSourceInfo]? = nil, mediaStreams: [MediaStream]? = nil, people: [EmbyPerson]? = nil, studios: [EmbyNameIdPair]? = nil, providerIds: [String: String]? = nil, chapters: [EmbyChapterInfo]? = nil, dateCreated: String? = nil
+        id: String, name: String, originalTitle: String? = nil, serverId: String? = nil, type: String? = nil, collectionType: String? = nil, overview: String? = nil, taglines: [String]? = nil, genres: [String]? = nil, communityRating: Double? = nil, criticRating: Double? = nil, officialRating: String? = nil, productionYear: Int? = nil, premiereDate: String? = nil, endDate: String? = nil, status: String? = nil, runTimeTicks: Int64? = nil, container: String? = nil, path: String? = nil, isFolder: Bool? = nil, parentId: String? = nil, seriesId: String? = nil, seriesName: String? = nil, seasonId: String? = nil, seasonName: String? = nil, indexNumber: Int? = nil, parentIndexNumber: Int? = nil, childCount: Int? = nil, recursiveItemCount: Int? = nil, imageTags: [String: String]? = nil, backdropImageTags: [String]? = nil, parentBackdropItemId: String? = nil, parentBackdropImageTags: [String]? = nil, seriesPrimaryImageTag: String? = nil, primaryImageAspectRatio: Double? = nil, userData: EmbyUserData? = nil, mediaSources: [MediaSourceInfo]? = nil, mediaStreams: [MediaStream]? = nil, people: [EmbyPerson]? = nil, studios: [EmbyNameIdPair]? = nil, providerIds: [String: String]? = nil, chapters: [EmbyChapterInfo]? = nil, dateCreated: String? = nil, uhdPosterURL: String? = nil, uhdBackdropURL: String? = nil, uhdLogoURL: String? = nil, uhdThumbURL: String? = nil, uhdMediaType: String? = nil
     ) {
-        self.id = id; self.name = name; self.originalTitle = originalTitle; self.serverId = serverId; self.type = type; self.collectionType = collectionType; self.overview = overview; self.taglines = taglines; self.genres = genres; self.communityRating = communityRating; self.criticRating = criticRating; self.officialRating = officialRating; self.productionYear = productionYear; self.premiereDate = premiereDate; self.endDate = endDate; self.status = status; self.runTimeTicks = runTimeTicks; self.container = container; self.path = path; self.isFolder = isFolder; self.parentId = parentId; self.seriesId = seriesId; self.seriesName = seriesName; self.seasonId = seasonId; self.seasonName = seasonName; self.indexNumber = indexNumber; self.parentIndexNumber = parentIndexNumber; self.childCount = childCount; self.recursiveItemCount = recursiveItemCount; self.imageTags = imageTags; self.backdropImageTags = backdropImageTags; self.parentBackdropItemId = parentBackdropItemId; self.parentBackdropImageTags = parentBackdropImageTags; self.seriesPrimaryImageTag = seriesPrimaryImageTag; self.primaryImageAspectRatio = primaryImageAspectRatio; self.userData = userData; self.mediaSources = mediaSources; self.mediaStreams = mediaStreams; self.people = people; self.studios = studios; self.providerIds = providerIds; self.chapters = chapters; self.dateCreated = dateCreated
+        self.id = id; self.name = name; self.originalTitle = originalTitle; self.serverId = serverId; self.type = type; self.collectionType = collectionType; self.overview = overview; self.taglines = taglines; self.genres = genres; self.communityRating = communityRating; self.criticRating = criticRating; self.officialRating = officialRating; self.productionYear = productionYear; self.premiereDate = premiereDate; self.endDate = endDate; self.status = status; self.runTimeTicks = runTimeTicks; self.container = container; self.path = path; self.isFolder = isFolder; self.parentId = parentId; self.seriesId = seriesId; self.seriesName = seriesName; self.seasonId = seasonId; self.seasonName = seasonName; self.indexNumber = indexNumber; self.parentIndexNumber = parentIndexNumber; self.childCount = childCount; self.recursiveItemCount = recursiveItemCount; self.imageTags = imageTags; self.backdropImageTags = backdropImageTags; self.parentBackdropItemId = parentBackdropItemId; self.parentBackdropImageTags = parentBackdropImageTags; self.seriesPrimaryImageTag = seriesPrimaryImageTag; self.primaryImageAspectRatio = primaryImageAspectRatio; self.userData = userData; self.mediaSources = mediaSources; self.mediaStreams = mediaStreams; self.people = people; self.studios = studios; self.providerIds = providerIds; self.chapters = chapters; self.dateCreated = dateCreated; self.uhdPosterURL = uhdPosterURL; self.uhdBackdropURL = uhdBackdropURL; self.uhdLogoURL = uhdLogoURL; self.uhdThumbURL = uhdThumbURL; self.uhdMediaType = uhdMediaType
     }
 
     public var isSeries: Bool {
@@ -473,7 +483,18 @@ public struct EmbyItem: Codable, Identifiable, Hashable, Sendable {
             studios: studios,
             providerIds: providerIds,
             chapters: chapters,
-            dateCreated: dateCreated
+            dateCreated: dateCreated,
+            uhdPosterURL: uhdPosterURL,
+            uhdBackdropURL: uhdBackdropURL,
+            uhdLogoURL: uhdLogoURL,
+            uhdThumbURL: uhdThumbURL,
+            uhdMediaType: uhdMediaType
+        )
+    }
+
+    public func withDetailEnrichment(mediaSources: [MediaSourceInfo]? = nil, people: [EmbyPerson]? = nil) -> EmbyItem {
+        EmbyItem(
+            id: id, name: name, originalTitle: originalTitle, serverId: serverId, type: type, collectionType: collectionType, overview: overview, taglines: taglines, genres: genres, communityRating: communityRating, criticRating: criticRating, officialRating: officialRating, productionYear: productionYear, premiereDate: premiereDate, endDate: endDate, status: status, runTimeTicks: runTimeTicks, container: container, path: path, isFolder: isFolder, parentId: parentId, seriesId: seriesId, seriesName: seriesName, seasonId: seasonId, seasonName: seasonName, indexNumber: indexNumber, parentIndexNumber: parentIndexNumber, childCount: childCount, recursiveItemCount: recursiveItemCount, imageTags: imageTags, backdropImageTags: backdropImageTags, parentBackdropItemId: parentBackdropItemId, parentBackdropImageTags: parentBackdropImageTags, seriesPrimaryImageTag: seriesPrimaryImageTag, primaryImageAspectRatio: primaryImageAspectRatio, userData: userData, mediaSources: mediaSources ?? self.mediaSources, mediaStreams: mediaStreams, people: people ?? self.people, studios: studios, providerIds: providerIds, chapters: chapters, dateCreated: dateCreated, uhdPosterURL: uhdPosterURL, uhdBackdropURL: uhdBackdropURL, uhdLogoURL: uhdLogoURL, uhdThumbURL: uhdThumbURL, uhdMediaType: uhdMediaType
         )
     }
 
@@ -796,12 +817,13 @@ public struct EmbyPerson: Codable, Identifiable, Hashable, Sendable {
     public let role: String?
     public let type: String?
     public let primaryImageTag: String?
+    public let uhdImageURL: String?
 
     enum CodingKeys: String, CodingKey {
-        case id = "Id"; case name = "Name"; case role = "Role"; case type = "Type"; case primaryImageTag = "PrimaryImageTag"
+        case id = "Id"; case name = "Name"; case role = "Role"; case type = "Type"; case primaryImageTag = "PrimaryImageTag"; case uhdImageURL = "UhdImageURL"
     }
-    public init(id: String, name: String, role: String? = nil, type: String? = "Actor", primaryImageTag: String? = nil) {
-        self.id = id; self.name = name; self.role = role; self.type = type; self.primaryImageTag = primaryImageTag
+    public init(id: String, name: String, role: String? = nil, type: String? = "Actor", primaryImageTag: String? = nil, uhdImageURL: String? = nil) {
+        self.id = id; self.name = name; self.role = role; self.type = type; self.primaryImageTag = primaryImageTag; self.uhdImageURL = uhdImageURL
     }
 }
 

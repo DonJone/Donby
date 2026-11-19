@@ -912,8 +912,29 @@ public struct MediaArtworkView: View {
     }
 
     nonisolated public static func candidateURLs(server: EmbyServerConfig?, item: EmbyItem, kind: EmbyImageKind, maxWidth: Int) -> [URL] {
-        guard let server, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
         var urls: [URL] = []
+
+        func appendDirectItemURL(_ raw: String?) {
+            guard let raw, !raw.isEmpty, let u = URL(string: raw), !urls.contains(u) else { return }
+            urls.append(u)
+        }
+
+        switch kind {
+        case .primary:
+            appendDirectItemURL(item.uhdPosterURL)
+        case .backdrop:
+            appendDirectItemURL(item.uhdBackdropURL)
+        case .thumb:
+            appendDirectItemURL(item.uhdThumbURL)
+            appendDirectItemURL(item.uhdBackdropURL)
+            appendDirectItemURL(item.uhdPosterURL)
+        case .logo:
+            appendDirectItemURL(item.uhdLogoURL)
+        }
+
+        guard let server, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return urls
+        }
         if kind == .backdrop {
             // For backdrops, prioritize series fanart for episodes before low-res thumbnails
             if item.isEpisode {
@@ -1033,10 +1054,32 @@ public struct MediaArtworkView: View {
                 return diskImg
             }
 
-            guard let server, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
             let urls = candidateURLs(server: server, item: item, kind: kind, maxWidth: maxWidth)
             for url in urls {
                 if Task.isCancelled { return nil }
+                if url.isFileURL {
+                    if let data = try? Data(contentsOf: url), data.count > 128 {
+                        var aliases = [url.absoluteString]
+                        if kind == .backdrop {
+                            if item.isEpisode, let sId = item.seriesId {
+                                aliases.append("series_\(sId)_backdrop")
+                            }
+                        } else {
+                            aliases.append(contentsOf: [item.id, "item_\(item.id)"])
+                        }
+                        if let decoded = await ArtworkImageCache.shared.storeRawDataCGAsync(
+                            data,
+                            for: primaryKey,
+                            maxPixelSize: targetPixelSize,
+                            aliases: aliases,
+                            priority: priority
+                        ) {
+                            return decoded
+                        }
+                    }
+                    continue
+                }
+                guard let server, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
                 do {
                     let req = EmbyClient.shared.makeImageRequest(url: url, server: server)
                     let (data, resp) = try await ArtworkDownloadManager.shared.download(for: req, priority: priority)
@@ -1456,8 +1499,11 @@ public struct ClearLogoHeaderView: View {
     }
 
     private var candidateLogoURLs: [URL] {
-        guard let server, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
         var urls: [URL] = []
+        if let raw = item.uhdLogoURL, !raw.isEmpty, let u = URL(string: raw) {
+            urls.append(u)
+        }
+        guard let server, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return urls }
         if item.isEpisode {
             if let sId = item.seriesId,
                let sLogo = EmbyClient.shared.imageURL(server: server, itemId: sId, kind: .logo, maxWidth: 800) {
@@ -1521,9 +1567,19 @@ public struct ClearLogoHeaderView: View {
                 return
             }
 
-            guard let server else { return }
             for url in candidateLogoURLs {
                 if Task.isCancelled { return }
+                if url.isFileURL {
+                    if let data = try? Data(contentsOf: url), data.count > 100,
+                       let decoded = await ArtworkImageCache.shared.storeRawDataAsync(data, for: cacheKey, maxPixelSize: 800) {
+                        await MainActor.run {
+                            self.logoImage = decoded
+                        }
+                        return
+                    }
+                    continue
+                }
+                guard let server else { continue }
                 do {
                     let req = EmbyClient.shared.makeImageRequest(url: url, server: server)
                     let (data, resp) = try await ArtworkDownloadManager.shared.download(for: req)

@@ -690,6 +690,27 @@ enum NativeCardLayerCache {
             verticalPadding: 2.5
         )
     }
+
+    static func downloadedBadgeImage(text: String, isCompleted: Bool, accentColor: NSColor, accentKey: String? = nil) -> CGImage? {
+        let key = "dl|\(text)|\(isCompleted ? "done" : (accentKey ?? colorKey(accentColor)))"
+        if let cached = pillCache[key] { return cached }
+        let bg = isCompleted
+            ? NSColor(srgbRed: 0.14, green: 0.66, blue: 0.32, alpha: 0.92)
+            : accentColor.withAlphaComponent(0.92)
+        return cachedPillImage(
+            cacheKey: key,
+            text: text,
+            font: runtimeFont,
+            textColor: .white,
+            backgroundColor: bg,
+            cornerRadius: nil,
+            horizontalPadding: 5.5,
+            verticalPadding: 2.0,
+            leadingSymbol: isCompleted ? "arrow.down.circle.fill" : "arrow.down.circle",
+            symbolPointSize: 8.5,
+            symbolColor: .white
+        )
+    }
 }
 
 final class CardTextBitmapCache: @unchecked Sendable {
@@ -884,6 +905,7 @@ final class NativePosterCollectionItem: NSCollectionViewItem, HoverableCollectio
     private let unplayedBadgeLayer = CALayer()
     private let playedIconLayer = CALayer()
     private let ratingPillLayer = CALayer()
+    private let downloadedBadgeLayer = CALayer()
     private let favoriteIconLayer = CALayer()
     private let progressTrack = CALayer()
     private let progressFill = CALayer()
@@ -944,6 +966,7 @@ final class NativePosterCollectionItem: NSCollectionViewItem, HoverableCollectio
         cardContainerLayer.addSublayer(unplayedBadgeLayer)
         cardContainerLayer.addSublayer(playedIconLayer)
         cardContainerLayer.addSublayer(ratingPillLayer)
+        cardContainerLayer.addSublayer(downloadedBadgeLayer)
         cardContainerLayer.addSublayer(favoriteIconLayer)
 
         progressTrack.cornerRadius = 1.5
@@ -1160,6 +1183,23 @@ final class NativePosterCollectionItem: NSCollectionViewItem, HoverableCollectio
             favoriteIconLayer.isHidden = true
         }
 
+        if let dlText = appearance.downloadStatusIndex.badgeText(for: item) {
+            let isDone = appearance.downloadStatusIndex.isItemDownloaded(item)
+            configureBadgeLayer(
+                downloadedBadgeLayer,
+                with: NativeCardLayerCache.downloadedBadgeImage(
+                    text: dlText,
+                    isCompleted: isDone,
+                    accentColor: accentInfo.ns,
+                    accentKey: accentInfo.key
+                )
+            )
+            downloadedBadgeLayer.isHidden = false
+        } else {
+            downloadedBadgeLayer.isHidden = true
+        }
+        needsCardLayout = true
+
         let progress = item.progressFraction
         if progress > 0 && progress < 0.99 {
             progressTrack.isHidden = false
@@ -1275,10 +1315,17 @@ final class NativePosterCollectionItem: NSCollectionViewItem, HoverableCollectio
             progressFill.frame = CGRect(x: 0, y: 0, width: trackW * fraction, height: 3)
         }
 
+        var dlStartX: CGFloat = 7
         if !ratingPillLayer.isHidden, let cg = ratingPillLayer.contents as! CGImage? {
             let pillW = CGFloat(cg.width) * 0.5
             let pillH = CGFloat(cg.height) * 0.5
             ratingPillLayer.frame = CGRect(x: 7, y: posterHeight - bottomInset - pillH, width: pillW, height: pillH)
+            dlStartX = 7 + pillW + 4
+        }
+        if !downloadedBadgeLayer.isHidden, let cg = downloadedBadgeLayer.contents as! CGImage? {
+            let dlW = CGFloat(cg.width) * 0.5
+            let dlH = CGFloat(cg.height) * 0.5
+            downloadedBadgeLayer.frame = CGRect(x: dlStartX, y: posterHeight - bottomInset - dlH, width: dlW, height: dlH)
         }
         if !favoriteIconLayer.isHidden {
             favoriteIconLayer.frame = CGRect(x: width - 7 - 14, y: posterHeight - bottomInset - 14, width: 14, height: 14)
@@ -1305,6 +1352,7 @@ final class NativeLandscapeCollectionItem: NSCollectionViewItem, HoverableCollec
     private let playLayer = CALayer()
 
     private let topLeftBadgeLayer = CALayer()
+    private let downloadedBadgeLayer = CALayer()
     private let runtimeBadgeLayer = CALayer()
     private let progressTrack = CALayer()
     private let progressFill = CALayer()
@@ -1363,6 +1411,7 @@ final class NativeLandscapeCollectionItem: NSCollectionViewItem, HoverableCollec
         cardContainerLayer.addSublayer(hoverDimLayer)
 
         cardContainerLayer.addSublayer(topLeftBadgeLayer)
+        cardContainerLayer.addSublayer(downloadedBadgeLayer)
         cardContainerLayer.addSublayer(runtimeBadgeLayer)
 
         progressTrack.frame = CGRect(x: 8, y: Self.thumbHeight - 11.5, width: Self.itemSize.width - 16, height: 3.5)
@@ -1495,22 +1544,44 @@ final class NativeLandscapeCollectionItem: NSCollectionViewItem, HoverableCollec
         }
         lastIsLightMode = appearance.isLightMode
 
+        var dlX: CGFloat = 7
         if let epCode = item.episodeCodeString {
             let cg = NativeCardLayerCache.resolutionBadgeImage(text: epCode, monospaced: true)
             configureBadgeLayer(topLeftBadgeLayer, with: cg)
             if let cg {
-                topLeftBadgeLayer.frame = CGRect(x: 7, y: 7, width: CGFloat(cg.width) * 0.5, height: CGFloat(cg.height) * 0.5)
+                let bw = CGFloat(cg.width) * 0.5
+                topLeftBadgeLayer.frame = CGRect(x: 7, y: 7, width: bw, height: CGFloat(cg.height) * 0.5)
+                dlX = 7 + bw + 5
             }
             topLeftBadgeLayer.isHidden = false
         } else if let res = item.resolutionBadge {
             let cg = NativeCardLayerCache.resolutionBadgeImage(text: res)
             configureBadgeLayer(topLeftBadgeLayer, with: cg)
             if let cg {
-                topLeftBadgeLayer.frame = CGRect(x: 7, y: 7, width: CGFloat(cg.width) * 0.5, height: CGFloat(cg.height) * 0.5)
+                let bw = CGFloat(cg.width) * 0.5
+                topLeftBadgeLayer.frame = CGRect(x: 7, y: 7, width: bw, height: CGFloat(cg.height) * 0.5)
+                dlX = 7 + bw + 5
             }
             topLeftBadgeLayer.isHidden = false
         } else {
             topLeftBadgeLayer.isHidden = true
+        }
+
+        if let dlText = appearance.downloadStatusIndex.badgeText(for: item) {
+            let isDone = appearance.downloadStatusIndex.isItemDownloaded(item)
+            let cg = NativeCardLayerCache.downloadedBadgeImage(
+                text: dlText,
+                isCompleted: isDone,
+                accentColor: accentInfo.ns,
+                accentKey: accentInfo.key
+            )
+            configureBadgeLayer(downloadedBadgeLayer, with: cg)
+            if let cg {
+                downloadedBadgeLayer.frame = CGRect(x: dlX, y: 7, width: CGFloat(cg.width) * 0.5, height: CGFloat(cg.height) * 0.5)
+            }
+            downloadedBadgeLayer.isHidden = false
+        } else {
+            downloadedBadgeLayer.isHidden = true
         }
 
         if let runtime = item.runtimeMinutesString,

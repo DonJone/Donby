@@ -387,6 +387,13 @@ public struct ServerLinePickSheet: View {
     @Environment(\.dismiss) private var dismiss
     public let serverId: UUID
 
+    @State private var trafficSummary: UHDTrafficSummary? = nil
+    @State private var isSpeedTesting: Bool = false
+    @State private var speedTestProgress: Double = 0
+    @State private var liveSpeedMbps: Double = 0
+    @State private var speedTestResult: UHDSpeedTestResult? = nil
+    @State private var speedTestError: String? = nil
+
     private var server: EmbyServerConfig? { appState.servers.first(where: { $0.id == serverId }) }
 
     public init(serverId: UUID) { self.serverId = serverId }
@@ -439,6 +446,10 @@ public struct ServerLinePickSheet: View {
                     }
                 }
 
+                if server.type == .uhdNative {
+                    uhdCapabilityBanner(server: server)
+                }
+
                 Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
 
                 let rowCount = 1 + server.backupLines.count
@@ -449,6 +460,7 @@ public struct ServerLinePickSheet: View {
                         ServerLineOptionRow(
                             title: "默认主线路",
                             url: server.mainLineURL,
+                            latencyMs: server.mainLineLatencyMs,
                             isAutoSynced: false,
                             isSelected: server.selectedLineId == nil,
                             accentColor: appState.accentColor
@@ -460,6 +472,7 @@ public struct ServerLinePickSheet: View {
                             ServerLineOptionRow(
                                 title: line.name,
                                 url: line.url,
+                                latencyMs: line.latencyMs,
                                 isAutoSynced: line.isAutoSynced,
                                 isSelected: server.selectedLineId == line.id,
                                 accentColor: appState.accentColor
@@ -472,6 +485,31 @@ public struct ServerLinePickSheet: View {
                     .padding(.vertical, 2)
                 }
                 .frame(height: listHeight)
+
+                if let res = speedTestResult {
+                    HStack(spacing: 10) {
+                        Image(systemName: "speedometer").foregroundStyle(.green)
+                        Text(String(format: "测速完成 · 平均 %.1f Mbps / 峰值 %.1f Mbps · %@ · %@", res.averageMbps, res.peakMbps, res.location, res.isp))
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    }
+                    .padding(9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.green.opacity(0.10))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                } else if isSpeedTesting {
+                    VStack(alignment: .leading, spacing: 5) {
+                        ProgressView(value: speedTestProgress)
+                            .tint(appState.accentColor)
+                        Text(String(format: "正在运行 32 MiB 线路下载测速… %.1f Mbps", liveSpeedMbps))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    }
+                } else if let speedTestError {
+                    Text(speedTestError)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.red)
+                }
 
                 Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
 
@@ -496,6 +534,26 @@ public struct ServerLinePickSheet: View {
                     }
                     .buttonStyle(.plain)
 
+                    if server.type == .uhdNative,
+                       let activeDomainId = (server.backupLines.first(where: { $0.id == server.selectedLineId }) ?? server.backupLines.first)?.domainId {
+                        Button {
+                            guard !isSpeedTesting else { return }
+                            Task { await startUHDSpeedTest(server: server, domainId: activeDomainId) }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "speedometer")
+                                Text("32MiB 测速")
+                            }
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .donbyLiquidGlassCapsule()
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isSpeedTesting)
+                    }
+
                     Spacer()
 
                     Button {
@@ -515,10 +573,18 @@ public struct ServerLinePickSheet: View {
                     }
                     .buttonStyle(.plain)
                 }
+                .task(id: server.id) {
+                    if server.type == .uhdNative {
+                        await appState.refreshServerCapabilities(for: server)
+                        if let t = try? await UHDStreamClient.shared.fetchTraffic(server: server) {
+                            trafficSummary = t
+                        }
+                    }
+                }
             }
         }
         .padding(22)
-        .frame(width: 530)
+        .frame(width: 560)
         .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
@@ -526,12 +592,66 @@ public struct ServerLinePickSheet: View {
                 .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
         )
     }
+
+    @ViewBuilder
+    private func uhdCapabilityBanner(server: EmbyServerConfig) -> some View {
+        let cap = appState.serverCapabilities[server.id]
+        HStack(spacing: 10) {
+            if let plan = cap?.planName {
+                Text("套餐: \(plan)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(appState.accentColor)
+            }
+            if let cap {
+                Text("并发上限: \(cap.activeVideoDeliveryLimit) · \(cap.allowDownload ? "允许下载" : "仅在线播放")")
+                    .font(.system(size: 11))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+            }
+            Spacer()
+            if let trafficSummary {
+                if trafficSummary.displayUnlimitedTraffic {
+                    Text("已用流量: \(ByteCountFormatter.string(fromByteCount: trafficSummary.usedBytes, countStyle: .file)) / 不限")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                } else {
+                    Text("已用: \(ByteCountFormatter.string(fromByteCount: trafficSummary.usedBytes, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: trafficSummary.limitBytes, countStyle: .file))")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+
+    private func startUHDSpeedTest(server: EmbyServerConfig, domainId: String) async {
+        speedTestError = nil
+        speedTestResult = nil
+        speedTestProgress = 0
+        liveSpeedMbps = 0
+        isSpeedTesting = true
+        defer { isSpeedTesting = false }
+        do {
+            let res = try await UHDStreamClient.shared.runSpeedTest(server: server, domainId: domainId, sizeMiB: 32) { pct, mbps in
+                Task { @MainActor in
+                    self.speedTestProgress = pct
+                    self.liveSpeedMbps = mbps
+                }
+            }
+            self.speedTestResult = res
+        } catch {
+            self.speedTestError = "测速失败: \(error.localizedDescription)"
+        }
+    }
 }
 
 private struct ServerLineOptionRow: View {
     @EnvironmentObject private var appState: AppState
     let title: String
     let url: String
+    let latencyMs: Int?
     let isAutoSynced: Bool
     let isSelected: Bool
     let accentColor: Color
@@ -604,6 +724,11 @@ private struct ServerLineOptionRow: View {
                         .lineLimit(1)
                 }
                 Spacer()
+                if let latencyMs {
+                    Text("\(latencyMs) ms")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(latencyMs < 150 ? .green : (latencyMs < 350 ? .orange : .red))
+                }
             }
             .padding(.horizontal, 13)
             .padding(.vertical, 10)

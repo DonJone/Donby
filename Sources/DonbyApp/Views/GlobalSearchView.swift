@@ -254,8 +254,15 @@ public struct GlobalSearchView: View {
             isSearchingRemote = true
             try? await Task.sleep(nanoseconds: 250_000_000)
             guard !Task.isCancelled else { return }
-            if let resp = try? await EmbyClient.shared.fetchItems(server: server, searchTerm: q, limit: 48),
-               !Task.isCancelled {
+            if server.type == .uhdNative {
+                if let items = try? await UHDStreamClient.shared.search(server: server, query: q, limit: 48),
+                   !Task.isCancelled {
+                    remoteResults = items
+                } else if !Task.isCancelled {
+                    remoteResults = []
+                }
+            } else if let resp = try? await EmbyClient.shared.fetchItems(server: server, searchTerm: q, limit: 48),
+                      !Task.isCancelled {
                 remoteResults = resp.items
             } else if !Task.isCancelled {
                 remoteResults = []

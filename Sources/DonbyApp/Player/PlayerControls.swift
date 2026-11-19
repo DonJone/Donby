@@ -31,6 +31,84 @@ struct PlayerSubtitleTrackOption: Identifiable, Equatable {
     let label: String
     let badge: String?
     let externalItem: SubtitleResourceItem?
+    let language: String?
+    let codec: String?
+    let isDefault: Bool
+
+    init(
+        id: String,
+        selection: PlayerSubtitleSelection,
+        embyIndex: Int?,
+        label: String,
+        badge: String?,
+        externalItem: SubtitleResourceItem?,
+        language: String? = nil,
+        codec: String? = nil,
+        isDefault: Bool = false
+    ) {
+        self.id = id
+        self.selection = selection
+        self.embyIndex = embyIndex
+        self.label = label
+        self.badge = badge
+        self.externalItem = externalItem
+        self.language = language
+        self.codec = codec
+        self.isDefault = isDefault
+    }
+
+    var trackCandidate: SubtitleTrackCandidate {
+        let isExt: Bool
+        let avIdx: Int?
+        switch selection {
+        case .embedded(let idx):
+            isExt = false
+            avIdx = idx
+        case .remoteExternal, .localExternal:
+            isExt = true
+            avIdx = nil
+        case .off:
+            isExt = false
+            avIdx = nil
+        }
+        return SubtitleTrackCandidate(
+            id: id,
+            language: language,
+            title: label,
+            codec: codec ?? externalItem?.codec,
+            isExternal: isExt,
+            embyIndex: embyIndex,
+            avStreamIndex: avIdx,
+            isDefault: isDefault
+        )
+    }
+
+    func toPreference() -> SubtitleTrackPreference {
+        let localPath: String?
+        let isExt: Bool
+        switch selection {
+        case .off:
+            return .disabled
+        case .localExternal(let url):
+            localPath = url.path
+            isExt = true
+        case .remoteExternal:
+            localPath = nil
+            isExt = true
+        case .embedded:
+            localPath = nil
+            isExt = false
+        }
+        return SubtitleTrackPreference(
+            isDisabled: false,
+            language: language,
+            titleHint: label,
+            codec: codec ?? externalItem?.codec,
+            isExternal: isExt,
+            embyStreamIndex: embyIndex,
+            localFilePath: localPath
+        )
+    }
 }
 
 /// Sleek mini volume slider with white track and circular thumb

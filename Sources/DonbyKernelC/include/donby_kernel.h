@@ -42,10 +42,34 @@ typedef struct {
     int32_t channels;
     bool    is_selected;
     bool    is_default;
+    bool    is_forced;
     char    codec[32];
     char    language[32];
     char    title[128];
 } DKTrackInfo;
+
+typedef struct {
+    int32_t index;
+    double  start_sec;
+    double  end_sec;
+    char    title[128];
+} DKChapterInfo;
+
+typedef struct {
+    float   scale;
+    float   border_width;
+    float   vertical_pos_percent;
+    double  primary_delay_sec;
+    double  secondary_delay_sec;
+    int32_t text_transform;       // 0 = off, 1 = Hant-Hans (Simplified), 2 = Hans-Hant (Traditional)
+    bool    override_ass_style;
+    bool    forced_only;
+} DKSubtitleStyleConfig;
+
+typedef int     (*DKCustomIOReadCallback)(void* opaque, uint8_t* buf, int buf_size);
+typedef int64_t (*DKCustomIOSeekCallback)(void* opaque, int64_t offset, int whence);
+typedef void    (*DKCustomIOAbortCallback)(void* opaque);
+typedef void    (*DKCustomIOCloseCallback)(void* opaque);
 
 typedef struct {
     int32_t x;
@@ -108,6 +132,14 @@ DKPlayer* dk_player_create(void);
 void      dk_player_destroy(DKPlayer* player);
 
 int       dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, double start_sec, bool hw_decode);
+void      dk_player_set_custom_io(
+    DKPlayer* player,
+    void* opaque,
+    DKCustomIOReadCallback read_cb,
+    DKCustomIOSeekCallback seek_cb,
+    DKCustomIOAbortCallback abort_cb,
+    DKCustomIOCloseCallback close_cb
+);
 void      dk_player_request_abort(DKPlayer* player);
 void      dk_player_close(DKPlayer* player);
 void      dk_player_play(DKPlayer* player);
@@ -121,6 +153,13 @@ int       dk_player_get_track_count(DKPlayer* player, int track_type);
 bool      dk_player_get_track_info(DKPlayer* player, int track_type, int ordinal, DKTrackInfo* out_info);
 void      dk_player_select_track(DKPlayer* player, int track_type, int stream_index);
 void      dk_player_load_external_subtitle(DKPlayer* player, const char* content_utf8, bool is_ass);
+void      dk_player_set_subtitle_style(DKPlayer* player, const DKSubtitleStyleConfig* config);
+void      dk_player_select_secondary_subtitle_track(DKPlayer* player, int stream_index);
+void      dk_player_load_secondary_external_subtitle(DKPlayer* player, const char* content_utf8, bool is_ass);
+bool      dk_player_get_subtitle_vertical_bounds(DKPlayer* player, int32_t* out_y0, int32_t* out_y1, int32_t* out_canvas_h);
+
+int       dk_player_get_chapter_count(DKPlayer* player);
+bool      dk_player_get_chapter_info(DKPlayer* player, int ordinal, DKChapterInfo* out_info);
 
 CVPixelBufferRef dk_player_acquire_frame_for_host_time(DKPlayer* player, double* out_pts);
 CVPixelBufferRef dk_player_acquire_frame(DKPlayer* player, double* out_pts, DKGpuColorUniforms* out_color);

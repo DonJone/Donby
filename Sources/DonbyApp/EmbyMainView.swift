@@ -86,8 +86,15 @@ public struct EmbyMainView: View {
                     isSearchingInline = true
                     try? await Task.sleep(nanoseconds: 250_000_000)
                     guard !Task.isCancelled else { return }
-                    if let resp = try? await EmbyClient.shared.fetchItems(server: server, searchTerm: q, limit: 60),
-                       !Task.isCancelled {
+                    if server.type == .uhdNative {
+                        if let items = try? await UHDStreamClient.shared.search(server: server, query: q, limit: 60),
+                           !Task.isCancelled {
+                            remoteInlineSearchResults = items
+                        } else if !Task.isCancelled {
+                            remoteInlineSearchResults = []
+                        }
+                    } else if let resp = try? await EmbyClient.shared.fetchItems(server: server, searchTerm: q, limit: 60),
+                              !Task.isCancelled {
                         remoteInlineSearchResults = resp.items
                     } else if !Task.isCancelled {
                         remoteInlineSearchResults = []
@@ -536,6 +543,7 @@ public struct MLibListView: View {
     @State private var isLoadingMore: Bool = false
     @State private var hasMoreItems: Bool = false
     @State private var startIndex: Int = 0
+    @State private var nextCursor: String? = nil
     @State private var loadGeneration: Int = 0
     @State private var seenIds: Set<String> = []
     @State private var sortField: EmbySortField = .dateCreated
@@ -670,6 +678,51 @@ public struct MLibListView: View {
 
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
+            if server.type == .uhdNative {
+                if !q.isEmpty {
+                    let found = try await UHDStreamClient.shared.search(server: server, query: q, limit: 50)
+                    guard !Task.isCancelled, currentGen == loadGeneration else { return }
+                    self.items = found
+                    self.seenIds = Set(found.map(\.id))
+                    self.itemsRevision &+= 1
+                    self.totalCount = found.count
+                    self.nextCursor = nil
+                    self.hasMoreItems = false
+                    return
+                }
+                let uhdSortBy: String = switch sortField {
+                case .premiereDate: "release_date"
+                case .communityRating: "rating"
+                case .sortName: "title"
+                default: "asset_updated_at"
+                }
+                let pageRes = try await UHDStreamClient.shared.fetchCollectionItems(
+                    server: server,
+                    collectionId: library.id,
+                    sortBy: uhdSortBy,
+                    sortOrder: ascending ? "asc" : "desc",
+                    limit: 50,
+                    cursor: reset ? nil : nextCursor
+                )
+                guard !Task.isCancelled, currentGen == loadGeneration else { return }
+                var fetched = pageRes.items
+                if filterUnwatchedOnly { fetched = fetched.filter { $0.userData?.played != true } }
+                if filterFavoritesOnly { fetched = fetched.filter { $0.userData?.isFavorite == true } }
+                if reset {
+                    self.items = fetched
+                    self.seenIds = Set(fetched.map(\.id))
+                } else {
+                    var added: [EmbyItem] = []
+                    for it in fetched where seenIds.insert(it.id).inserted { added.append(it) }
+                    self.items.append(contentsOf: added)
+                }
+                self.itemsRevision &+= 1
+                self.nextCursor = pageRes.nextCursor
+                self.hasMoreItems = pageRes.nextCursor != nil
+                self.totalCount = max(self.items.count, library.childCount ?? self.items.count)
+                return
+            }
+
             let resp = try await EmbyClient.shared.fetchItems(
                 server: server,
                 parentId: library.id,

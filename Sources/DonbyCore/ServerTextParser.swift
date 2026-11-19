@@ -31,8 +31,14 @@ public enum ServerTextParser {
         guard !rawAddress.isEmpty else { return nil }
 
         var result = ParsedServerImportResult()
-        if let typeStr = params["type"]?.lowercased(), typeStr == "jellyfin" {
-            result.type = .jellyfin
+        if let typeStr = params["type"]?.lowercased() {
+            if typeStr == "jellyfin" {
+                result.type = .jellyfin
+            } else if typeStr.contains("uhdnative") || typeStr == "uhd" {
+                result.type = .uhdNative
+            } else {
+                result.type = .emby
+            }
         } else {
             result.type = .emby
         }
@@ -83,8 +89,12 @@ public enum ServerTextParser {
             result.password = (dict["password"] as? String) ?? (dict["pw"] as? String) ?? (dict["pass"] as? String) ?? ""
             result.accessToken = (dict["accessToken"] as? String) ?? (dict["api_key"] as? String) ?? (dict["token"] as? String) ?? (dict["apiKey"] as? String) ?? ""
             result.userId = (dict["userId"] as? String) ?? (dict["user_id"] as? String) ?? ""
-            if let typeStr = (dict["type"] as? String)?.lowercased(), typeStr.contains("jellyfin") {
-                result.type = .jellyfin
+            if let typeStr = (dict["type"] as? String)?.lowercased() {
+                if typeStr.contains("jellyfin") {
+                    result.type = .jellyfin
+                } else if typeStr.contains("uhd") {
+                    result.type = .uhdNative
+                }
             }
             let rawAddr = (dict["address"] as? String) ?? (dict["host"] as? String) ?? (dict["url"] as? String) ?? (dict["server"] as? String) ?? ""
             if !rawAddr.isEmpty {

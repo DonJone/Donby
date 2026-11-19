@@ -5,6 +5,7 @@ public enum MainNavigationTab: String, CaseIterable, Identifiable, Sendable {
     case servers = "servers"
     case iptv = "iptv"
     case records = "records"
+    case downloads = "downloads"
     case search = "search"
     case settings = "settings"
 
@@ -16,6 +17,7 @@ public enum MainNavigationTab: String, CaseIterable, Identifiable, Sendable {
         case .servers: return "服务器"
         case .iptv: return "IPTV"
         case .records: return "记录"
+        case .downloads: return "下载"
         case .search: return "搜索"
         case .settings: return "设置"
         }
@@ -27,6 +29,7 @@ public enum MainNavigationTab: String, CaseIterable, Identifiable, Sendable {
         case .servers: return "externaldrive.connected.to.line.below"
         case .iptv: return "sparkles.tv"
         case .records: return "play.rectangle"
+        case .downloads: return "arrow.down.circle"
         case .search: return "magnifyingglass"
         case .settings: return "gearshape"
         }
@@ -53,9 +56,26 @@ public struct ActivePlaybackSession: Identifiable, Equatable, Sendable {
     public let startPositionSeconds: Double
     public let selectedAudioIndex: Int?
     public let selectedSubtitleIndex: Int?
+    public let subtitleExplicitlyOff: Bool
 
-    public init(server: EmbyServerConfig, item: EmbyItem, episodesQueue: [EmbyItem], resource: ResolvedPlaybackResource, startPositionSeconds: Double, selectedAudioIndex: Int? = nil, selectedSubtitleIndex: Int? = nil) {
-        self.server = server; self.item = item; self.episodesQueue = episodesQueue; self.resource = resource; self.startPositionSeconds = startPositionSeconds; self.selectedAudioIndex = selectedAudioIndex; self.selectedSubtitleIndex = selectedSubtitleIndex
+    public init(
+        server: EmbyServerConfig,
+        item: EmbyItem,
+        episodesQueue: [EmbyItem],
+        resource: ResolvedPlaybackResource,
+        startPositionSeconds: Double,
+        selectedAudioIndex: Int? = nil,
+        selectedSubtitleIndex: Int? = nil,
+        subtitleExplicitlyOff: Bool = false
+    ) {
+        self.server = server
+        self.item = item
+        self.episodesQueue = episodesQueue
+        self.resource = resource
+        self.startPositionSeconds = startPositionSeconds
+        self.selectedAudioIndex = selectedAudioIndex
+        self.selectedSubtitleIndex = selectedSubtitleIndex
+        self.subtitleExplicitlyOff = subtitleExplicitlyOff
     }
 }
 
@@ -399,5 +419,67 @@ public struct MediaTitleParser: Sendable {
 
         let formatted = clean.replacingOccurrences(of: ".", with: " ").trimmingCharacters(in: CharacterSet(charactersIn: " ._-"))
         return Result(mainTitle: formatted.isEmpty ? rawName : formatted, subTitle: "本地媒体文件", episodeCode: nil)
+    }
+}
+
+public struct DonbyDownloadStatusIndex: Equatable, Sendable {
+    public let revision: Int
+    public let completedItemIds: Set<String>
+    public let inProgressByItemId: [String: Double]
+    public let completedCountBySeriesId: [String: Int]
+    public let completedCountBySeriesName: [String: Int]
+
+    public static let empty = DonbyDownloadStatusIndex(
+        revision: 0,
+        completedItemIds: [],
+        inProgressByItemId: [:],
+        completedCountBySeriesId: [:],
+        completedCountBySeriesName: [:]
+    )
+
+    public init(
+        revision: Int = 0,
+        completedItemIds: Set<String>,
+        inProgressByItemId: [String: Double],
+        completedCountBySeriesId: [String: Int],
+        completedCountBySeriesName: [String: Int]
+    ) {
+        self.revision = revision
+        self.completedItemIds = completedItemIds
+        self.inProgressByItemId = inProgressByItemId
+        self.completedCountBySeriesId = completedCountBySeriesId
+        self.completedCountBySeriesName = completedCountBySeriesName
+    }
+
+    public func downloadedCount(forSeries item: EmbyItem) -> Int {
+        if let byId = completedCountBySeriesId[item.id], byId > 0 {
+            return byId
+        }
+        let lower = item.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !lower.isEmpty, let byName = completedCountBySeriesName[lower], byName > 0 {
+            return byName
+        }
+        return 0
+    }
+
+    public func isItemDownloaded(_ item: EmbyItem) -> Bool {
+        if item.isSeries {
+            return downloadedCount(forSeries: item) > 0
+        }
+        return completedItemIds.contains(item.id)
+    }
+
+    public func badgeText(for item: EmbyItem) -> String? {
+        if item.isSeries {
+            let cnt = downloadedCount(forSeries: item)
+            return cnt > 0 ? "已下\(cnt)集" : nil
+        }
+        if completedItemIds.contains(item.id) {
+            return "已下载"
+        }
+        if let prog = inProgressByItemId[item.id] {
+            return String(format: "%.0f%%", max(0, min(1, prog)) * 100)
+        }
+        return nil
     }
 }

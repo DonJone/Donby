@@ -10,6 +10,7 @@ public struct DonbyCardAppearance: Equatable, Sendable {
     public let showResolutionBadge: Bool
     public let showRatingBadge: Bool
     public let isMonochromeTheme: Bool
+    public let downloadStatusIndex: DonbyDownloadStatusIndex
 
     public init(
         server: EmbyServerConfig?,
@@ -18,7 +19,8 @@ public struct DonbyCardAppearance: Equatable, Sendable {
         accentTextColor: Color,
         showResolutionBadge: Bool,
         showRatingBadge: Bool,
-        isMonochromeTheme: Bool = false
+        isMonochromeTheme: Bool = false,
+        downloadStatusIndex: DonbyDownloadStatusIndex = .empty
     ) {
         self.server = server
         self.isLightMode = isLightMode
@@ -27,6 +29,7 @@ public struct DonbyCardAppearance: Equatable, Sendable {
         self.showResolutionBadge = showResolutionBadge
         self.showRatingBadge = showRatingBadge
         self.isMonochromeTheme = isMonochromeTheme
+        self.downloadStatusIndex = downloadStatusIndex
     }
 
     public var hidesLibraryTextOverlay: Bool {
@@ -43,7 +46,8 @@ public struct DonbyCardAppearance: Equatable, Sendable {
         lhs.accentTextColor == rhs.accentTextColor &&
         lhs.showResolutionBadge == rhs.showResolutionBadge &&
         lhs.showRatingBadge == rhs.showRatingBadge &&
-        lhs.isMonochromeTheme == rhs.isMonochromeTheme
+        lhs.isMonochromeTheme == rhs.isMonochromeTheme &&
+        lhs.downloadStatusIndex == rhs.downloadStatusIndex
     }
 }
 
@@ -201,7 +205,7 @@ public struct PosterCardView: View, Equatable {
                     Spacer()
 
                     VStack(alignment: .leading, spacing: 4) {
-                        HStack {
+                        HStack(spacing: 4) {
                             if appearance.showRatingBadge, let rating = item.communityRating, rating > 0 {
                                 HStack(spacing: 3) {
                                     Image(systemName: "star.fill")
@@ -214,6 +218,21 @@ public struct PosterCardView: View, Equatable {
                                 .padding(.horizontal, 5.5)
                                 .padding(.vertical, 2)
                                 .background(Color.black.opacity(0.62))
+                                .clipShape(Capsule())
+                            }
+
+                            if let dlBadge = appearance.downloadStatusIndex.badgeText(for: item) {
+                                let isDone = appearance.downloadStatusIndex.isItemDownloaded(item)
+                                HStack(spacing: 2.5) {
+                                    Image(systemName: isDone ? "arrow.down.circle.fill" : "arrow.down.circle")
+                                        .font(.system(size: 8.5, weight: .bold))
+                                    Text(dlBadge)
+                                        .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                                }
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 5.5)
+                                .padding(.vertical, 2)
+                                .background(isDone ? Color(red: 0.16, green: 0.68, blue: 0.34).opacity(0.92) : appearance.accentColor.opacity(0.92))
                                 .clipShape(Capsule())
                             }
 
@@ -312,7 +331,7 @@ public struct LandscapeCardView: View, Equatable {
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
                 VStack {
-                    HStack {
+                    HStack(spacing: 5) {
                         if let epCode = item.episodeCodeString {
                             Text(epCode)
                                 .font(.system(size: 10, weight: .bold, design: .monospaced))
@@ -329,6 +348,20 @@ public struct LandscapeCardView: View, Equatable {
                                 .padding(.vertical, 2)
                                 .background(Color.black.opacity(0.65))
                                 .clipShape(RoundedRectangle(cornerRadius: 4))
+                        }
+                        if let dlBadge = appearance.downloadStatusIndex.badgeText(for: item) {
+                            let isDone = appearance.downloadStatusIndex.isItemDownloaded(item)
+                            HStack(spacing: 2.5) {
+                                Image(systemName: isDone ? "arrow.down.circle.fill" : "arrow.down.circle")
+                                    .font(.system(size: 8.5, weight: .bold))
+                                Text(dlBadge)
+                                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 5.5)
+                            .padding(.vertical, 2)
+                            .background(isDone ? Color(red: 0.16, green: 0.68, blue: 0.34).opacity(0.92) : appearance.accentColor.opacity(0.92))
+                            .clipShape(Capsule())
                         }
                         Spacer()
                         if let runtime = item.runtimeMinutesString {
