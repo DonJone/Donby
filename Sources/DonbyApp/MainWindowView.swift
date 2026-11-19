@@ -7,6 +7,7 @@ import DonbyStorage
 
 public struct MainWindowView: View {
     @EnvironmentObject private var appState: AppState
+    @ObservedObject private var updater = AppUpdateManager.shared
     @State private var showDelayedResolvePill: Bool = false
 
     public init() {}
@@ -147,6 +148,20 @@ public struct MainWindowView: View {
                 .environmentObject(appState)
                 .preferredColorScheme(appState.colorScheme)
         }
+        .sheet(isPresented: $updater.showUpdatePromptSheet) {
+            AppUpdatePromptSheet(
+                updater: updater,
+                isLightMode: appState.isLightMode,
+                accentColor: appState.accentColor,
+                accentTextColor: appState.accentTextColor,
+                onOpenAboutTab: {
+                    updater.showUpdatePromptSheet = false
+                    appState.preferredSettingsTabRaw = "关于与文档"
+                    appState.selectSidebarModule(.settings)
+                }
+            )
+            .preferredColorScheme(appState.colorScheme)
+        }
     }
 
     private var appSidebarView: some View {
@@ -199,6 +214,7 @@ public struct MainWindowView: View {
 // MARK: - Sidebar Item Helpers
 private struct SidebarTabItemButton: View {
     @EnvironmentObject private var appState: AppState
+    @ObservedObject private var updater = AppUpdateManager.shared
     let tab: MainNavigationTab
     let isSelected: Bool
     @State private var isHovered: Bool = false
@@ -218,6 +234,12 @@ private struct SidebarTabItemButton: View {
                     .foregroundStyle(isSelected ? (appState.isMonochromeTheme ? .white : appState.accentTextColor) : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
                 Spacer()
+
+                if tab == .settings && updater.availableRelease != nil {
+                    Circle()
+                        .fill(isSelected ? (appState.isMonochromeTheme ? .white : appState.accentTextColor) : appState.accentColor)
+                        .frame(width: 7, height: 7)
+                }
             }
             .padding(.horizontal, 12)
             .frame(height: 35)
@@ -240,6 +262,130 @@ private struct SidebarTabItemButton: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
+    }
+}
+
+private struct AppUpdatePromptSheet: View {
+    @ObservedObject var updater: AppUpdateManager
+    let isLightMode: Bool
+    let accentColor: Color
+    let accentTextColor: Color
+    let onOpenAboutTab: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if let release = updater.availableRelease {
+                HStack(spacing: 12) {
+                    Image(systemName: "arrow.down.app.fill")
+                        .font(.system(size: 28))
+                        .foregroundStyle(accentColor)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("发现 Donby 新版本 v\(release.version)")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: isLightMode))
+                        Text("当前版本 v\(AppUpdateManager.currentVersion) -> 最新版本 v\(release.version)")
+                            .font(.system(size: 12))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))
+                    }
+                    Spacer()
+                }
+
+                if !release.body.isEmpty {
+                    ScrollView {
+                        Text(release.body)
+                            .font(.system(size: 12))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: isLightMode))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 160)
+                    .padding(12)
+                    .background(DonbyGlassPalette.cardBackground(isLight: isLightMode))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+
+                switch updater.state {
+                case .downloading(_, let progress, let dlBytes, let totalBytes):
+                    VStack(alignment: .leading, spacing: 6) {
+                        ProgressView(value: progress)
+                            .tint(accentColor)
+                        HStack {
+                            Text("正在下载安装包 (\(Int(progress * 100))%)")
+                            Spacer()
+                            Text("\(ByteCountFormatter.string(fromByteCount: dlBytes, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file))")
+                        }
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))
+                    }
+                case .verifying:
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("正在校验 SHA-256 签名完整性...")
+                            .font(.system(size: 12))
+                    }
+                case .installing:
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("正在应用更新并准备重启...")
+                            .font(.system(size: 12))
+                    }
+                case .error(let msg):
+                    Text(msg)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.red)
+                default:
+                    EmptyView()
+                }
+
+                HStack(spacing: 10) {
+                    Button("跳过此版本") {
+                        updater.skipVersion(release)
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button("查看详情") {
+                        onOpenAboutTab()
+                    }
+                    .buttonStyle(.bordered)
+
+                    Spacer()
+
+                    if case .downloading = updater.state {
+                        Button("取消下载") {
+                            updater.cancelDownload()
+                        }
+                        .buttonStyle(.bordered)
+                    } else {
+                        Button("稍后提醒") {
+                            updater.showUpdatePromptSheet = false
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button {
+                            updater.startDownloadAndInstall(release)
+                        } label: {
+                            Text("立即更新")
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(accentTextColor)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 6)
+                                .background(accentColor)
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(updater.isBusy)
+                    }
+                }
+            } else {
+                HStack {
+                    Spacer()
+                    Button("关闭") { updater.showUpdatePromptSheet = false }
+                    Spacer()
+                }
+            }
+        }
+        .padding(22)
+        .frame(width: 460)
+        .background(DonbyGlassPalette.canvas(isLight: isLightMode))
     }
 }
 

@@ -95,6 +95,16 @@ public struct DonbyApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 960, height: 690)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("检查更新…") {
+                    appState.preferredSettingsTabRaw = "关于与文档"
+                    appState.selectSidebarModule(.settings)
+                    Task {
+                        await AppUpdateManager.shared.checkForUpdates(manual: true)
+                    }
+                }
+            }
+
             CommandMenu("服务器与线路") {
                 Button("新增 Emby / UHDNow 服务器…") {
                     appState.editingServer = nil

@@ -26,6 +26,7 @@ public enum SettingsSectionTab: String, CaseIterable, Identifiable {
 
 public struct SettingsView: View {
     @EnvironmentObject private var appState: AppState
+    @ObservedObject private var updater = AppUpdateManager.shared
     @State private var currentTab: SettingsSectionTab = .general
 
     public init() {}
@@ -56,8 +57,13 @@ public struct SettingsView: View {
 
                 ForEach(SettingsSectionTab.allCases) { tab in
                     let isSel = (currentTab == tab)
-                    SettingsTabRowButton(tab: tab, isSelected: isSel) {
+                    SettingsTabRowButton(
+                        tab: tab,
+                        isSelected: isSel,
+                        showBadgeDot: tab == .about && updater.availableRelease != nil
+                    ) {
                         currentTab = tab
+                        appState.preferredSettingsTabRaw = tab.rawValue
                     }
                 }
 
@@ -95,6 +101,16 @@ public struct SettingsView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+            }
+        }
+        .onAppear {
+            if let matched = SettingsSectionTab(rawValue: appState.preferredSettingsTabRaw) {
+                currentTab = matched
+            }
+        }
+        .onChange(of: appState.preferredSettingsTabRaw) { _, newRaw in
+            if let matched = SettingsSectionTab(rawValue: newRaw), currentTab != matched {
+                currentTab = matched
             }
         }
     }
@@ -562,7 +578,7 @@ public struct SettingsView: View {
                     Text("Donby")
                         .font(.system(size: 20, weight: .heavy, design: .rounded))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    let currentVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.23"
+                    let currentVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.24"
                     Text("版本 \(currentVer) (Build 2026.11) · macOS Apple Silicon")
                         .font(.system(size: 12))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
@@ -582,6 +598,9 @@ public struct SettingsView: View {
                 RoundedRectangle(cornerRadius: 12)
                     .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
             )
+
+            // Software Update Card
+            softwareUpdateCard
 
             // UHDNow Support
             VStack(alignment: .leading, spacing: 8) {
@@ -668,13 +687,229 @@ public struct SettingsView: View {
         }
         .padding(.vertical, 2)
     }
-}
 
+    private var softwareUpdateCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("应用更新与版本检查")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    if let checkedAt = updater.lastCheckedDate {
+                        Text("上次检查：\(Self.updateDateFormatter.string(from: checkedAt))")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    } else {
+                        Text("通过 GitHub Releases (DonJone/Donby) 获取官方安装包并校验 SHA-256")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    }
+                }
+
+                Spacer()
+
+                if case .downloading = updater.state {
+                    Button("取消下载") {
+                        updater.cancelDownload()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                } else {
+                    Button {
+                        Task { await updater.checkForUpdates(manual: true) }
+                    } label: {
+                        HStack(spacing: 5) {
+                            if case .checking = updater.state {
+                                ProgressView()
+                                    .controlSize(.mini)
+                            } else {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                            }
+                            Text("检查更新")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .foregroundStyle(appState.accentTextColor)
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 6)
+                        .background(appState.accentColor)
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(updater.isBusy)
+                }
+            }
+
+            updateStateBanner
+
+            Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("自动检查更新（启动时静默检查新版本）", isOn: $updater.autoCheckEnabled)
+                    .font(.system(size: 13))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                Text("开启后启动 Donby 时会自动向 GitHub Releases 查询新版本并提示更新；关闭后仅通过上方按钮手动检查。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+            }
+        }
+        .padding(18)
+        .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+        )
+    }
+
+    @ViewBuilder
+    private var updateStateBanner: some View {
+        switch updater.state {
+        case .idle:
+            EmptyView()
+        case .checking:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("正在查询 GitHub Releases 最新版本...")
+                    .font(.system(size: 12))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+            }
+        case .upToDate(let curVer):
+            HStack(spacing: 7) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.green)
+                Text("当前已是最新版本 (v\(curVer))")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+            }
+        case .available(let release):
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(appState.accentColor)
+                    Text("发现新版本 v\(release.version)")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    if let pub = release.publishedAt {
+                        Text(Self.updateDateFormatter.string(from: pub))
+                            .font(.system(size: 11))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    }
+                    Spacer()
+                }
+                if !release.body.isEmpty {
+                    ScrollView {
+                        Text(release.body)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 110)
+                    .padding(10)
+                    .background(appState.isLightMode ? Color.black.opacity(0.035) : Color.white.opacity(0.05))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                HStack(spacing: 10) {
+                    Button {
+                        updater.startDownloadAndInstall(release)
+                    } label: {
+                        Label("下载并更新", systemImage: "arrow.down.circle.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(appState.accentTextColor)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(appState.accentColor)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+
+                    Button("跳过此版本") {
+                        updater.skipVersion(release)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button("在 GitHub 查看") {
+                        NSWorkspace.shared.open(release.htmlURL)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+            .padding(12)
+            .background(appState.accentColor.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        case .downloading(_, let progress, let downloaded, let total):
+            VStack(alignment: .leading, spacing: 6) {
+                ProgressView(value: progress)
+                    .tint(appState.accentColor)
+                HStack {
+                    Text("正在下载安装包 (\(Int(progress * 100))%)")
+                    Spacer()
+                    Text("\(ByteCountFormatter.string(fromByteCount: downloaded, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: total, countStyle: .file))")
+                }
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+            }
+        case .verifying:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("正在校验安装包 SHA-256 完整性...")
+                    .font(.system(size: 12))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+            }
+        case .readyToInstall(let release, let dmgURL, let canSelfReplace):
+            HStack(spacing: 10) {
+                Image(systemName: "checkmark.shield.fill")
+                    .foregroundStyle(.green)
+                Text(canSelfReplace ? "v\(release.version) 安装包已就绪" : "已打开 v\(release.version) DMG，请拖入「应用程序」完成覆盖")
+                    .font(.system(size: 12, weight: .medium))
+                Spacer()
+                Button(canSelfReplace ? "立即安装并重启" : "再次打开 DMG") {
+                    updater.installReadyUpdate(release: release, dmgURL: dmgURL)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+        case .installing:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("正在挂载并替换更新包，即将重启 Donby...")
+                    .font(.system(size: 12))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+            }
+        case .error(let msg):
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(msg)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    .lineLimit(2)
+                Spacer()
+                Button("前往 Releases") {
+                    NSWorkspace.shared.open(AppUpdateManager.githubReleasesPageURL)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private static let updateDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm"
+        return f
+    }()
+}
 
 private struct SettingsTabRowButton: View {
     @EnvironmentObject private var appState: AppState
     let tab: SettingsSectionTab
     let isSelected: Bool
+    var showBadgeDot: Bool = false
     let action: () -> Void
     @State private var isHovered: Bool = false
 
@@ -689,6 +924,11 @@ private struct SettingsTabRowButton: View {
                     .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
                     .foregroundStyle(isSelected ? appState.accentTextColor : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                 Spacer()
+                if showBadgeDot {
+                    Circle()
+                        .fill(isSelected ? appState.accentTextColor : appState.accentColor)
+                        .frame(width: 6, height: 6)
+                }
             }
             .padding(.horizontal, 14)
             .frame(height: 34)

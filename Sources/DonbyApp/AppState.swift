@@ -17,6 +17,7 @@ public final class AppState: ObservableObject {
     @Published public var detailStack: [EmbyItem] = []
     @Published public var detailOfflineFocusIds: Set<String> = []
     @Published public var activePlayback: ActivePlaybackSession? = nil
+    @Published public var preferredSettingsTabRaw: String = "基础设置"
     @Published public var isSidebarCollapsed: Bool = false
 
     @Published public var showAddServerSheet: Bool = false
@@ -332,6 +333,11 @@ public final class AppState: ObservableObject {
             Task { @MainActor in
                 AppState.sharedInstance?.handleFullyCachedAssetNotification(meta)
             }
+        }
+
+        Task {
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            await AppUpdateManager.shared.checkForUpdatesIfAutoEnabled()
         }
 
         dk_set_log_callback { level, message in
