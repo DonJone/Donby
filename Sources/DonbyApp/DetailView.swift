@@ -21,6 +21,11 @@ public struct DetailView: View {
     @State private var focusedEpisodeId: String? = nil
     @State private var selectedEpisodeForInfo: EmbyItem? = nil
     @State private var didUserDisableSubtitle: Bool = false
+    @State private var userDidPickEpisodeLocally: Bool = false
+
+    private var detailSeriesKey: String {
+        AppState.detailSeriesKey(for: item)
+    }
 
     public init(item: EmbyItem, preferOfflineFocus: Bool = false) {
         self.initialItem = item
@@ -135,7 +140,7 @@ public struct DetailView: View {
 
                         Button {
                             withAnimation(.easeOut(duration: 0.18)) {
-                                appState.detailStack.removeAll()
+                                appState.popToRootDetail()
                             }
                         } label: {
                             Image(systemName: "house")
@@ -188,7 +193,7 @@ public struct DetailView: View {
                             Button {
                                 playHighestSpecification()
                             } label: {
-                                Label("以最高规格直解播放", systemImage: "sparkles")
+                                Label("播放最高画质版本", systemImage: "sparkles")
                             }
 
                             Button {
@@ -196,7 +201,7 @@ public struct DetailView: View {
                                     await appState.copyStreamDirectURL(item: item, preferredSourceId: selectedSourceId)
                                 }
                             } label: {
-                                Label("复制原画直链", systemImage: "link")
+                                Label("复制播放链接", systemImage: "link")
                             }
                         } label: {
                             HStack(spacing: 3) {
@@ -250,7 +255,7 @@ public struct DetailView: View {
 
                                 LiquidGlassCircleButton(
                                     systemImage: (item.userData?.played == true) ? "checkmark.circle.fill" : "checkmark",
-                                    iconColor: (item.userData?.played == true) ? Color(red: 0.22, green: 0.86, blue: 0.38) : nil,
+                                    iconColor: (item.userData?.played == true) ? appState.accentColor : nil,
                                     size: 38,
                                     tooltip: "标记已看 / 未看"
                                 ) {
@@ -378,6 +383,13 @@ public struct DetailView: View {
                                 fontSize: 13.5
                             ) {
                                 let playTarget = heroResolvedPlayTarget
+                                if playTarget.isEpisode {
+                                    appState.rememberDetailFocusedEpisode(
+                                        seriesKey: detailSeriesKey,
+                                        seasonNumber: playTarget.parentIndexNumber ?? selectedSeasonIndex,
+                                        episodeId: playTarget.id
+                                    )
+                                }
                                 Task {
                                     await appState.startPlayback(
                                         item: playTarget,
@@ -410,17 +422,12 @@ public struct DetailView: View {
                                 }
 
                                 if let dlSummary = heroDownloadedBadgeText {
-                                    HStack(spacing: 3.5) {
-                                        Image(systemName: "arrow.down.circle.fill")
-                                            .font(.system(size: 10.5, weight: .bold))
-                                        Text(dlSummary)
-                                            .font(.system(size: 11, weight: .bold, design: .rounded))
-                                    }
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 2.5)
-                                    .background(Color(red: 0.16, green: 0.68, blue: 0.34).opacity(0.92))
-                                    .clipShape(Capsule())
+                                    DonbyDownloadedBadgePill(
+                                        text: dlSummary,
+                                        isCompleted: downloadManager.completedEntry(for: item.id) != nil || item.isSeries,
+                                        accentColor: appState.accentColor,
+                                        fontSize: 10.5
+                                    )
                                 }
                             }
 
@@ -497,7 +504,7 @@ public struct DetailView: View {
         let tintCol: Color? = {
             if !serverAllows { return .secondary }
             switch matchingEntry?.status {
-            case .completed: return Color(red: 0.22, green: 0.86, blue: 0.38)
+            case .completed: return Color(red: 0.18, green: 0.72, blue: 0.50)
             case .downloading, .queued: return appState.accentColor
             default: return (cachedSummary != nil) ? appState.accentColor : nil
             }
@@ -588,6 +595,13 @@ public struct DetailView: View {
 
     private func startPlaybackFromBeginning() {
         let playTarget = heroResolvedPlayTarget
+        if playTarget.isEpisode {
+            appState.rememberDetailFocusedEpisode(
+                seriesKey: detailSeriesKey,
+                seasonNumber: playTarget.parentIndexNumber ?? selectedSeasonIndex,
+                episodeId: playTarget.id
+            )
+        }
         Task {
             await appState.startPlayback(
                 item: playTarget,
@@ -895,7 +909,14 @@ public struct DetailView: View {
         guard !episodes.isEmpty else { return }
         let cur = currentFocusedIndex ?? 0
         let nextIdx = max(0, min(episodes.count - 1, cur + direction))
-        focusedEpisodeId = episodes[nextIdx].id
+        let nextEp = episodes[nextIdx]
+        userDidPickEpisodeLocally = true
+        focusedEpisodeId = nextEp.id
+        appState.rememberDetailFocusedEpisode(
+            seriesKey: detailSeriesKey,
+            seasonNumber: nextEp.parentIndexNumber ?? selectedSeasonIndex,
+            episodeId: nextEp.id
+        )
     }
 
     private func episodeCardItem(_ ep: EmbyItem, isSelected: Bool) -> some View {
@@ -934,36 +955,23 @@ public struct DetailView: View {
                                 .clipShape(Capsule())
                         }
                         if isEpDownloaded {
-                            HStack(spacing: 3) {
-                                Image(systemName: "arrow.down.circle.fill")
-                                    .font(.system(size: 9.5, weight: .bold))
-                                Text("已下载")
-                                    .font(.system(size: 10, weight: .bold, design: .rounded))
-                            }
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            .background(Color(red: 0.16, green: 0.68, blue: 0.34).opacity(0.92))
-                            .clipShape(Capsule())
+                            DonbyDownloadedBadgePill(
+                                text: "已下载",
+                                isCompleted: true,
+                                accentColor: appState.accentColor,
+                                fontSize: 9.5
+                            )
                         } else if isEpDownloading, let entry = epDownloadEntry {
-                            HStack(spacing: 3) {
-                                Image(systemName: "arrow.down.circle")
-                                    .font(.system(size: 9.5, weight: .bold))
-                                Text(String(format: "%.0f%%", entry.progressFraction * 100))
-                                    .font(.system(size: 10, weight: .bold, design: .rounded))
-                            }
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            .background(appState.accentColor.opacity(0.92))
-                            .clipShape(Capsule())
+                            DonbyDownloadedBadgePill(
+                                text: String(format: "%.0f%%", entry.progressFraction * 100),
+                                isCompleted: false,
+                                accentColor: appState.accentColor,
+                                fontSize: 9.5
+                            )
                         }
                         Spacer()
                         if isEpWatched {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 13.5, weight: .bold))
-                                .foregroundStyle(Color(red: 0.22, green: 0.86, blue: 0.38))
-                                .background(Circle().fill(Color.black.opacity(0.65)).padding(-1))
+                            DonbyWatchedBadgeView(size: 19)
                         }
                         if let duration = ep.runtimeMinutesString {
                             Text(duration)
@@ -1012,7 +1020,13 @@ public struct DetailView: View {
             )
             .contentShape(Rectangle())
             .onTapGesture {
+                userDidPickEpisodeLocally = true
                 focusedEpisodeId = ep.id
+                appState.rememberDetailFocusedEpisode(
+                    seriesKey: detailSeriesKey,
+                    seasonNumber: ep.parentIndexNumber ?? selectedSeasonIndex,
+                    episodeId: ep.id
+                )
                 let targetEp = (ep.seriesName == nil || ep.seriesName!.isEmpty) ? ep.withSeriesName(item.name) : ep
                 Task {
                     await appState.startPlayback(
@@ -1026,6 +1040,13 @@ public struct DetailView: View {
             }
             .contextMenu {
                 Button {
+                    userDidPickEpisodeLocally = true
+                    focusedEpisodeId = ep.id
+                    appState.rememberDetailFocusedEpisode(
+                        seriesKey: detailSeriesKey,
+                        seasonNumber: ep.parentIndexNumber ?? selectedSeasonIndex,
+                        episodeId: ep.id
+                    )
                     let targetEp = (ep.seriesName == nil || ep.seriesName!.isEmpty) ? ep.withSeriesName(item.name) : ep
                     Task {
                         await appState.startPlayback(
@@ -1224,7 +1245,7 @@ public struct DetailView: View {
                     subtitleExplicitlyOff: didUserDisableSubtitle
                 )
                 if appState.activePlayback != nil {
-                    appState.showToast("已启动原画最高规格直解: \(best.displayVersionName)", icon: "sparkles")
+                    appState.showToast("正在播放最高画质：\(best.displayVersionName)", icon: "sparkles")
                 }
             }
         } else {
@@ -1237,7 +1258,7 @@ public struct DetailView: View {
                     subtitleExplicitlyOff: didUserDisableSubtitle
                 )
                 if appState.activePlayback != nil {
-                    appState.showToast("已启动原画规格直解播放", icon: "sparkles")
+                    appState.showToast("正在播放最高画质版本", icon: "sparkles")
                 }
             }
         }
@@ -1318,16 +1339,30 @@ public struct DetailView: View {
         // Hydrate from local offline library first so offline items / slow networks show immediately
         if let localGroup {
             self.item = localGroup.displayItem
+            let remembered = appState.detailFocusedEpisode(forSeriesKey: AppState.detailSeriesKey(for: localGroup.displayItem))
             if localGroup.isSeries && !localGroup.seasonItems.isEmpty {
                 self.seasons = localGroup.seasonItems
-                if preferOfflineFocus {
+                if let remembered,
+                   let rSeason = remembered.seasonNumber,
+                   let localEps = localGroup.episodesBySeason[rSeason],
+                   !localEps.isEmpty {
+                    self.selectedSeasonIndex = rSeason
+                    self.episodes = localEps
+                    if localEps.contains(where: { $0.id == remembered.episodeId }) {
+                        self.focusedEpisodeId = remembered.episodeId
+                    } else if !userDidPickEpisodeLocally {
+                        self.focusedEpisodeId = preferredFocusEpisodeId(in: localEps)
+                    }
+                } else if preferOfflineFocus {
                     let allDownloaded = downloadedEpisodesIn(localGroup)
                     let targetEp = allDownloaded.first(where: { !isEpisodeWatched($0) }) ?? allDownloaded.first
                     let preferredSeasonNum = targetEp?.parentIndexNumber ?? localGroup.seasonItems.first?.indexNumber ?? 1
                     let localEps = localGroup.episodesBySeason[preferredSeasonNum] ?? []
                     self.selectedSeasonIndex = preferredSeasonNum
                     self.episodes = localEps
-                    self.focusedEpisodeId = targetEp?.id ?? preferredFocusEpisodeId(in: localEps)
+                    if !userDidPickEpisodeLocally {
+                        self.focusedEpisodeId = targetEp?.id ?? preferredFocusEpisodeId(in: localEps)
+                    }
                 } else {
                     let preferredSeasonNum = initialItem.isEpisode
                         ? (initialItem.parentIndexNumber ?? localGroup.seasonItems.first?.indexNumber ?? 1)
@@ -1335,7 +1370,11 @@ public struct DetailView: View {
                     let localEps = localGroup.episodesBySeason[preferredSeasonNum] ?? []
                     self.selectedSeasonIndex = preferredSeasonNum
                     self.episodes = localEps
-                    self.focusedEpisodeId = preferredFocusEpisodeId(in: localEps)
+                    if let remembered, localEps.contains(where: { $0.id == remembered.episodeId }) {
+                        self.focusedEpisodeId = remembered.episodeId
+                    } else if !userDidPickEpisodeLocally {
+                        self.focusedEpisodeId = preferredFocusEpisodeId(in: localEps)
+                    }
                 }
             }
             syncDefaultTracks()
@@ -1410,7 +1449,12 @@ public struct DetailView: View {
                     await applyInitialSeasonAndFocus(seasons: builtSeasons, localGroup: localGroup, preloadedAllEpisodes: allEps)
                 } else {
                     self.episodes = allEps
-                    self.focusedEpisodeId = preferredFocusEpisodeId(in: allEps)
+                    let remembered = appState.detailFocusedEpisode(forSeriesKey: detailSeriesKey)
+                    if let remembered, allEps.contains(where: { $0.id == remembered.episodeId }) {
+                        self.focusedEpisodeId = remembered.episodeId
+                    } else if !userDidPickEpisodeLocally || !allEps.contains(where: { $0.id == focusedEpisodeId }) {
+                        self.focusedEpisodeId = preferredFocusEpisodeId(in: allEps)
+                    }
                 }
             }
         } else if item.isEpisode, let sId = item.seriesId {
@@ -1423,10 +1467,11 @@ public struct DetailView: View {
             guard !Task.isCancelled else { return }
             if let loadedSeasons, !loadedSeasons.isEmpty {
                 self.seasons = loadedSeasons
-                let sNum = item.parentIndexNumber ?? 1
+                let remembered = appState.detailFocusedEpisode(forSeriesKey: detailSeriesKey)
+                let sNum = remembered?.seasonNumber ?? item.parentIndexNumber ?? 1
                 selectedSeasonIndex = sNum
                 if let currentSeason = loadedSeasons.first(where: { ($0.indexNumber ?? 1) == sNum }) ?? loadedSeasons.first {
-                    await loadEpisodesForSeason(currentSeason, seasonNumber: sNum)
+                    await loadEpisodesForSeason(currentSeason, seasonNumber: sNum, preferredOverrideEpisodeId: remembered?.episodeId)
                 }
             }
         }
@@ -1442,6 +1487,20 @@ public struct DetailView: View {
         localGroup: OfflineLibraryGroup?,
         preloadedAllEpisodes: [EmbyItem]? = nil
     ) async {
+        let remembered = appState.detailFocusedEpisode(forSeriesKey: detailSeriesKey)
+        if let remembered {
+            let targetSeasonNum = remembered.seasonNumber ?? (item.isEpisode ? (item.parentIndexNumber ?? 1) : (loadedSeasons.first(where: { ($0.indexNumber ?? 1) > 0 })?.indexNumber ?? 1))
+            if let matchedSeason = loadedSeasons.first(where: { ($0.indexNumber ?? 1) == targetSeasonNum }) ?? loadedSeasons.first {
+                await loadEpisodesForSeason(
+                    matchedSeason,
+                    seasonNumber: targetSeasonNum,
+                    preloadedAllEpisodes: preloadedAllEpisodes,
+                    preferredOverrideEpisodeId: remembered.episodeId
+                )
+                return
+            }
+        }
+
         if item.isEpisode, let epSeason = loadedSeasons.first(where: { ($0.indexNumber ?? 1) == (item.parentIndexNumber ?? 1) }) ?? loadedSeasons.first {
             let sNum = item.parentIndexNumber ?? epSeason.indexNumber ?? 1
             await loadEpisodesForSeason(epSeason, seasonNumber: sNum, preloadedAllEpisodes: preloadedAllEpisodes)
@@ -1532,14 +1591,25 @@ public struct DetailView: View {
         return localEps
     }
 
-    private func loadEpisodesForSeason(_ season: EmbyItem, seasonNumber: Int? = nil, preloadedAllEpisodes: [EmbyItem]? = nil) async {
+    private func loadEpisodesForSeason(
+        _ season: EmbyItem,
+        seasonNumber: Int? = nil,
+        preloadedAllEpisodes: [EmbyItem]? = nil,
+        preferredOverrideEpisodeId: String? = nil
+    ) async {
         let sNum = seasonNumber ?? season.indexNumber ?? 1
         selectedSeasonIndex = sNum
         let localGroup = offlineGroupForCurrentItem()
         let merged = await fetchMergedEpisodesForSeason(season, seasonNumber: sNum, localGroup: localGroup, preloadedAllEpisodes: preloadedAllEpisodes)
         guard !Task.isCancelled else { return }
         self.episodes = merged
-        self.focusedEpisodeId = preferredFocusEpisodeId(in: merged)
+        if let ovId = preferredOverrideEpisodeId, merged.contains(where: { $0.id == ovId }) {
+            self.focusedEpisodeId = ovId
+        } else if userDidPickEpisodeLocally, let curId = focusedEpisodeId, merged.contains(where: { $0.id == curId }) {
+            self.focusedEpisodeId = curId
+        } else {
+            self.focusedEpisodeId = preferredFocusEpisodeId(in: merged)
+        }
     }
 
     private func syncDefaultTracks() {

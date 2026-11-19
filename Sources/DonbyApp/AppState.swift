@@ -43,6 +43,9 @@ public final class AppState: ObservableObject {
     private var playbackStartGeneration: UInt64 = 0
     private var pendingPlaybackKey: String? = nil
     private var pendingPlaybackTimestamp: TimeInterval = 0
+    private var lastCompletedPlaybackKey: String? = nil
+    private var lastCompletedPlaybackTimestamp: TimeInterval = 0
+    private var detailFocusedEpisodeMemory: [String: (seasonNumber: Int?, episodeId: String)] = [:]
 
     @Published public var isLoadingHome: Bool = false
     @Published public var homeErrorMessage: String? = nil
@@ -928,6 +931,7 @@ public final class AppState: ObservableObject {
         selectedLibrary = nil
         detailStack.removeAll()
         detailOfflineFocusIds.removeAll()
+        detailFocusedEpisodeMemory.removeAll()
         homeErrorMessage = nil
         inFlightSeriesNameTasks.removeAll()
 
@@ -959,6 +963,7 @@ public final class AppState: ObservableObject {
         selectedLibrary = nil
         detailStack.removeAll()
         detailOfflineFocusIds.removeAll()
+        detailFocusedEpisodeMemory.removeAll()
         selectedTab = tab
 
         if tab == .files {
@@ -1198,6 +1203,7 @@ public final class AppState: ObservableObject {
         selectedLibrary = nil
         detailStack.removeAll()
         detailOfflineFocusIds.removeAll()
+        detailFocusedEpisodeMemory.removeAll()
 
         let syncedCount = server.autoSyncedLineCount
         if syncedCount > 0 {
@@ -1580,6 +1586,26 @@ public final class AppState: ObservableObject {
         }
     }
 
+    public static func detailSeriesKey(for item: EmbyItem) -> String {
+        item.isSeries ? item.id : (item.seriesId ?? item.id)
+    }
+
+    public func rememberDetailFocusedEpisode(seriesKey: String, seasonNumber: Int?, episodeId: String) {
+        guard !seriesKey.isEmpty, !episodeId.isEmpty else { return }
+        detailFocusedEpisodeMemory[seriesKey] = (seasonNumber: seasonNumber, episodeId: episodeId)
+    }
+
+    public func detailFocusedEpisode(forSeriesKey seriesKey: String) -> (seasonNumber: Int?, episodeId: String)? {
+        detailFocusedEpisodeMemory[seriesKey]
+    }
+
+    public func updateDetailFocusedEpisodeIfActive(forItem item: EmbyItem) {
+        let key = Self.detailSeriesKey(for: item)
+        let hasActiveSeriesDetail = detailStack.contains { Self.detailSeriesKey(for: $0) == key }
+        guard hasActiveSeriesDetail, item.isEpisode else { return }
+        detailFocusedEpisodeMemory[key] = (seasonNumber: item.parentIndexNumber, episodeId: item.id)
+    }
+
     public func openDetail(for item: EmbyItem, preferOfflineFocus: Bool = false) {
         cancelPendingPlaybackStart()
         if preferOfflineFocus {
@@ -1588,6 +1614,12 @@ public final class AppState: ObservableObject {
             detailOfflineFocusIds.remove(item.id)
         }
         if let last = detailStack.last, last.id == item.id { return }
+        let key = Self.detailSeriesKey(for: item)
+        if item.isEpisode {
+            detailFocusedEpisodeMemory[key] = (seasonNumber: item.parentIndexNumber, episodeId: item.id)
+        } else {
+            detailFocusedEpisodeMemory.removeValue(forKey: key)
+        }
         detailStack.append(item)
     }
 
@@ -1595,7 +1627,15 @@ public final class AppState: ObservableObject {
         cancelPendingPlaybackStart()
         if let popped = detailStack.popLast() {
             detailOfflineFocusIds.remove(popped.id)
+            detailFocusedEpisodeMemory.removeValue(forKey: Self.detailSeriesKey(for: popped))
         }
+    }
+
+    public func popToRootDetail() {
+        cancelPendingPlaybackStart()
+        detailStack.removeAll()
+        detailOfflineFocusIds.removeAll()
+        detailFocusedEpisodeMemory.removeAll()
     }
 
     public func isItemWatchedOfflineOrLocal(_ item: EmbyItem, localVideoPath: String? = nil) -> Bool {
@@ -1658,6 +1698,11 @@ public final class AppState: ObservableObject {
         if isStartingPlayback,
            pendingPlaybackKey == startKey,
            nowUptime - pendingPlaybackTimestamp < 2.5 {
+            return
+        }
+        if activePlayback != nil,
+           lastCompletedPlaybackKey == startKey,
+           nowUptime - lastCompletedPlaybackTimestamp < 1.5 {
             return
         }
 
@@ -1809,6 +1854,8 @@ public final class AppState: ObservableObject {
                 resolutionTag: targetItem.resolutionBadge ?? "4K UHD"
             )
             DonbyLogger.shared.log("媒体流解析成功: \(resource.streamURL.absoluteString)", level: .info, subsystem: "Playback")
+            lastCompletedPlaybackKey = startKey
+            lastCompletedPlaybackTimestamp = ProcessInfo.processInfo.systemUptime
             self.activePlayback = ActivePlaybackSession(
                 server: server,
                 item: targetItem,
@@ -1831,7 +1878,7 @@ public final class AppState: ObservableObject {
         let isLocal = url.isFileURL || url.scheme == "file" || url.path.hasPrefix("/")
         let parsed = MediaTitleParser.parse(rawName: title)
         let resolvedTitle = isLocal ? parsed.mainTitle : title
-        let resolvedSubtitle = isLocal ? parsed.subTitle : (url.isFileURL ? "本地文件直解" : "网络直链播放")
+        let resolvedSubtitle = isLocal ? parsed.subTitle : (url.isFileURL ? "本地文件" : "网络链接")
 
         let server = activeServer ?? DemoServerData.makeDefaultUHDServer()
         let dummySource = MediaSourceInfo(
@@ -1854,7 +1901,7 @@ public final class AppState: ObservableObject {
             mediaSource: dummySource,
             subtitleURLs: [],
             isDirectStream: true,
-            routeNote: isLocal ? "本地文件直解" : "网络直链播放"
+            routeNote: isLocal ? "本地文件" : "网络链接"
         )
         addRecentMedia(name: resolvedTitle, urlString: isLocal ? url.path : url.absoluteString, isLocal: isLocal)
         recordWatch(

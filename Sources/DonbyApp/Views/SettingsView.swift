@@ -6,10 +6,10 @@ import DonbyNetwork
 // MARK: - Settings View (Preferences)
 public enum SettingsSectionTab: String, CaseIterable, Identifiable {
     case general = "基础设置"
-    case player = "播放器设置"
-    case network = "线路与网络"
+    case player = "播放"
+    case network = "网络与缓存"
     case logs = "运行日志"
-    case about = "关于与文档"
+    case about = "关于"
 
     public var id: String { rawValue }
 
@@ -118,28 +118,23 @@ public struct SettingsView: View {
     // 1. 基础设置
     private var generalSettingsTab: some View {
         VStack(alignment: .leading, spacing: 24) {
-            settingsHeader(title: "基础设置", subtitle: "个性化外观、主题强调色与主窗口布局")
+            settingsHeader(title: "基础设置", subtitle: "启动页面、外观主题与界面显示")
 
-            // 启动与默认打开行为
+            // 启动页面
             VStack(alignment: .leading, spacing: 14) {
-                Text("启动与默认打开行为")
+                Text("启动页面")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
                 HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("默认打开模块")
-                            .font(.system(size: 13))
-                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                        Text("启动播放器或点击对应区域时的默认定位")
-                            .font(.system(size: 11))
-                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                    }
+                    Text("默认打开")
+                        .font(.system(size: 13))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
                     Picker("", selection: $appState.defaultStartupModule) {
                         Text("服务器 (Emby / Jellyfin)").tag("servers")
-                        Text("本地媒体文件夹").tag("files")
-                        Text("IPTV 电视直播").tag("iptv")
+                        Text("本地文件").tag("files")
+                        Text("IPTV 直播").tag("iptv")
                         Text("观看记录").tag("records")
                     }
                     .pickerStyle(.menu)
@@ -150,16 +145,16 @@ public struct SettingsView: View {
                     Divider().opacity(0.12)
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("默认进入服务器")
+                            Text("默认服务器")
                                 .font(.system(size: 13))
                                 .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                            Text("若选择具体服务器，启动时直接进入该服务器媒体库；未选择则停留在左侧服务器选区")
+                            Text("启动后直接打开选定服务器媒体库")
                                 .font(.system(size: 11))
                                 .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                         }
                         Spacer()
                         Picker("", selection: $appState.defaultStartupServerId) {
-                            Text("全部服务器列表 (停留选择)").tag("")
+                            Text("服务器列表").tag("")
                             ForEach(appState.servers) { s in
                                 Text(s.name.isEmpty ? "未命名服务器" : s.name).tag(s.id.uuidString)
                             }
@@ -172,16 +167,16 @@ public struct SettingsView: View {
                 Divider().opacity(0.12)
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("默认打开文件夹")
+                        Text("默认文件夹")
                             .font(.system(size: 13))
                             .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                        Text("点击侧边栏「文件」或默认启动时，自动进入该文件夹（未设置则展示全部文件夹）")
+                        Text("进入「文件」页面时默认打开的目录")
                             .font(.system(size: 11))
                             .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     }
                     Spacer()
                     Picker("", selection: $appState.defaultFilesFolderId) {
-                        Text("全部文件夹列表 (总览)").tag("")
+                        Text("全部文件夹").tag("")
                         ForEach(appState.localFolders) { f in
                             Text(f.name).tag(f.id.uuidString)
                         }
@@ -275,15 +270,15 @@ public struct SettingsView: View {
 
             // Sidebar and Glass
             VStack(alignment: .leading, spacing: 16) {
-                Text("界面与布局")
+                Text("界面与显示")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
                 Toggle("默认折叠侧边栏", isOn: $appState.defaultSidebarCollapsed)
-                Toggle("启用毛玻璃效果 (Aero Glass Material)", isOn: $appState.displayAeroGlass)
-                Toggle("在影视卡片上展示分辨率徽标 (4K UHD / 1080P)", isOn: $appState.showResolutionBadge)
-                Toggle("展示评分徽标 (IMDb / 豆瓣评分)", isOn: $appState.showRatingBadge)
-                Toggle("展示流媒体解码统计信息 (FPS / 码率)", isOn: $appState.displayMediaStatistics)
+                Toggle("界面透明材质", isOn: $appState.displayAeroGlass)
+                Toggle("卡片显示分辨率标签", isOn: $appState.showResolutionBadge)
+                Toggle("卡片显示评分", isOn: $appState.showRatingBadge)
+                Toggle("显示媒体规格统计", isOn: $appState.displayMediaStatistics)
             }
             .padding(18)
             .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
@@ -295,14 +290,14 @@ public struct SettingsView: View {
         }
     }
 
-    // 2. 播放器设置
+    // 2. 播放
     private var playerSettingsTab: some View {
         VStack(alignment: .leading, spacing: 24) {
-            settingsHeader(title: "播放器设置", subtitle: "硬件解码管线、倍速控制与片头片尾自动化")
+            settingsHeader(title: "播放", subtitle: "解码、控制栏、片头片尾与字幕偏好")
 
             VStack(alignment: .leading, spacing: 16) {
-                Toggle("启用 Apple VideoToolbox 硬件解码", isOn: $appState.enableHardwareDecode)
-                Text("利用 Apple Silicon 专有硬解芯片直解 10-bit HEVC/H.264/ProRes，显著降低 CPU 负载并提升发热与电池表现。")
+                Toggle("使用硬件解码", isOn: $appState.enableHardwareDecode)
+                Text("通过 VideoToolbox 硬件加速解码 HEVC / H.264 视频")
                     .font(.system(size: 11.5))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
 
@@ -374,9 +369,9 @@ public struct SettingsView: View {
                     Stepper("\(appState.edSeconds) 秒", value: $appState.edSeconds, in: 0...300, step: 5)
                 }
 
-                Toggle("自动执行片头 / 片尾跳过 (支持按季独立记忆)", isOn: $appState.autoSkipIntroOutro)
-                Toggle("片尾自动连播下一集", isOn: $appState.autoNextEpisode)
-                Toggle("开启弹幕支持 (Danmaku Layer)", isOn: $appState.enableDanmaku)
+                Toggle("自动跳过片头片尾", isOn: $appState.autoSkipIntroOutro)
+                Toggle("片尾自动播放下一集", isOn: $appState.autoNextEpisode)
+                Toggle("启用弹幕", isOn: $appState.enableDanmaku)
             }
             .padding(18)
             .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
@@ -387,12 +382,12 @@ public struct SettingsView: View {
             )
 
             VStack(alignment: .leading, spacing: 14) {
-                Text("字幕渲染与简繁转换默认值")
+                Text("字幕偏好")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
                 HStack {
-                    Text("默认简繁实时转换")
+                    Text("简繁转换")
                         .font(.system(size: 13))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
@@ -406,7 +401,7 @@ public struct SettingsView: View {
                 }
 
                 HStack {
-                    Text("HDR 字幕峰值亮度校准")
+                    Text("HDR 字幕亮度")
                         .font(.system(size: 13))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
@@ -431,9 +426,9 @@ public struct SettingsView: View {
                     Slider(value: $appState.subtitleStyle.verticalPositionPercent, in: 60...100, step: 1)
                 }
 
-                Toggle("覆盖内封 ASS 默认样式", isOn: $appState.subtitleStyle.overrideASSStyle)
-                Toggle("控制栏弹出时平滑上移防遮挡", isOn: $appState.subtitleStyle.antiOcclusionEnabled)
-                Toggle("自动记住主/副字幕轨道及外挂字幕选择", isOn: $appState.rememberSubtitleSelection)
+                Toggle("覆盖 ASS 默认样式", isOn: $appState.subtitleStyle.overrideASSStyle)
+                Toggle("控制栏显示时上移字幕", isOn: $appState.subtitleStyle.antiOcclusionEnabled)
+                Toggle("记忆剧集字幕选择", isOn: $appState.rememberSubtitleSelection)
             }
             .padding(18)
             .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
@@ -445,33 +440,33 @@ public struct SettingsView: View {
         }
     }
 
-    // 3. 线路与网络
+    // 3. 网络与缓存
     private var networkSettingsTab: some View {
         VStack(alignment: .leading, spacing: 24) {
-            settingsHeader(title: "线路与网络", subtitle: "ServerDomains 多线路热备、Turbo 多连接分片加速与分层磁盘缓存")
+            settingsHeader(title: "网络与缓存", subtitle: "线路同步、并发缓冲与缓存管理")
 
             VStack(alignment: .leading, spacing: 16) {
-                Toggle("ServerDomains 云端线路自动同步", isOn: $appState.autoSyncDomains)
-                Text("连接服务端时自动同步扩展域名与多线路矩阵，确保网络故障时能够平滑热备切换。")
+                Toggle("自动同步服务器线路", isOn: $appState.autoSyncDomains)
+                Text("连接时获取服务端扩展线路列表")
                     .font(.system(size: 11.5))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
 
                 Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
 
-                Toggle("启用 302 重定向直连缓存", isOn: $appState.enable302Cache)
-                Text("解析影视直链时智能预热直连 CDN 地址，跳过 Emby 反向代理二次中转，提升 4K 播放起播速度。")
+                Toggle("缓存 302 重定向地址", isOn: $appState.enable302Cache)
+                Text("记住重定向后的媒体节点地址，减少重复跳转耗时")
                     .font(.system(size: 11.5))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
 
                 Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
 
-                Toggle("启用 Turbo 多连接分片加速引擎 (Custom AVIO)", isOn: $appState.turboEnabled)
-                Text("开启多连接 HTTP Range 并发预取、落后分片竞速救援与 429 退避，并严格遵守 UHDNow 配额连接上限。")
+                Toggle("多线程并发加载 (Turbo)", isOn: $appState.turboEnabled)
+                Text("分段并发拉取媒体数据，受服务器账户并发配额限制")
                     .font(.system(size: 11.5))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
 
                 HStack {
-                    Text("单流并发连接上限 (按服务器配额自动裁剪)")
+                    Text("单流最大并发数")
                         .font(.system(size: 13))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
@@ -479,7 +474,7 @@ public struct SettingsView: View {
                 }
 
                 HStack {
-                    Text("Turbo 内存热分片池")
+                    Text("内存分片缓存")
                         .font(.system(size: 13))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
@@ -493,7 +488,7 @@ public struct SettingsView: View {
                 }
 
                 HStack {
-                    Text("磁盘临时分片预算 (LRU 自动清理)")
+                    Text("磁盘临时缓存上限")
                         .font(.system(size: 13))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
@@ -507,15 +502,15 @@ public struct SettingsView: View {
                     .frame(width: 185)
                 }
 
-                Toggle("完整播放缓存自动转存至离线媒体库", isOn: $appState.autoSaveFullCacheToOffline)
-                Text("在线观看期间若单集或影片已 100% 写入 Turbo 分片缓存，自动整理转存至 ~/Movies/Donby 离线库（需服务器账户允许下载）。")
+                Toggle("完整缓存后自动归档到离线库", isOn: $appState.autoSaveFullCacheToOffline)
+                Text("单集或影片缓存至 100% 时保存至 ~/Movies/Donby（需账户允许下载）")
                     .font(.system(size: 11.5))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Toggle("播放完毕后自动删除自动归档文件（保留手动下载）", isOn: $appState.autoDeleteAutoArchivedAfterPlayback)
+                    Toggle("播放结束后清理自动归档", isOn: $appState.autoDeleteAutoArchivedAfterPlayback)
                         .disabled(!appState.autoSaveFullCacheToOffline)
-                    Text("仅清理经「完整播放缓存自动转存」生成的剧集与影片文件（含对应外挂字幕与空目录）；手动点击下载的内容不会被自动删除。")
+                    Text("仅清理自动归档文件及关联字幕，保留手动离线下载的内容")
                         .font(.system(size: 11))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
@@ -524,13 +519,13 @@ public struct SettingsView: View {
 
                 HStack {
                     let usage = DonbyTurboCacheEngine.shared.calculateDiskUsage()
-                    Text("当前临时缓存占用：\(ByteCountFormatter.string(fromByteCount: usage.unpinnedCacheBytes, countStyle: .file)) · 已锁定离线：\(ByteCountFormatter.string(fromByteCount: usage.pinnedDownloadBytes, countStyle: .file))")
+                    Text("临时缓存：\(ByteCountFormatter.string(fromByteCount: usage.unpinnedCacheBytes, countStyle: .file)) · 离线文件：\(ByteCountFormatter.string(fromByteCount: usage.pinnedDownloadBytes, countStyle: .file))")
                         .font(.system(size: 11.5))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     Spacer()
-                    Button("清理临时分片缓存") {
+                    Button("清理临时缓存") {
                         DonbyTurboCacheEngine.shared.clearAllUnpinnedCache()
-                        appState.showToast("已清理临时播放分片缓存", icon: "sparkles")
+                        appState.showToast("已清理临时缓存", icon: "checkmark.circle.fill")
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -539,7 +534,7 @@ public struct SettingsView: View {
                 Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
 
                 HStack {
-                    Text("流媒体预读缓存")
+                    Text("解码预读缓冲")
                         .font(.system(size: 13))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
@@ -547,12 +542,12 @@ public struct SettingsView: View {
                         Text("128 MB").tag(128)
                         Text("256 MB (推荐)").tag(256)
                         Text("512 MB").tag(512)
-                        Text("1024 MB (超大缓冲)").tag(1024)
+                        Text("1024 MB").tag(1024)
                     }
                     .pickerStyle(.menu)
                     .frame(width: 150)
                 }
-                Text("分配专有环形内存池预读 4K HEVC/H.264 码流切片，大幅降低起播卡顿与快进缓冲等待。")
+                Text("播放期间的前向码流预读内存大小")
                     .font(.system(size: 11.5))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }
@@ -566,29 +561,27 @@ public struct SettingsView: View {
         }
     }
 
-    // 4. 关于与文档
+    // 4. 关于
     private var aboutSettingsTab: some View {
         VStack(alignment: .leading, spacing: 24) {
-            settingsHeader(title: "关于与文档", subtitle: "Donby 版本信息、UHDNow 开发者支持与快捷键一览")
+            settingsHeader(title: "关于", subtitle: "版本信息、软件更新与快捷键")
 
-            VStack(alignment: .center, spacing: 14) {
+            VStack(alignment: .center, spacing: 12) {
                 DonbyAppLogoView(size: 64)
 
                 VStack(spacing: 4) {
                     Text("Donby")
                         .font(.system(size: 20, weight: .heavy, design: .rounded))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    let currentVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.27"
-                    Text("版本 \(currentVer) (Build 2026.11) · macOS Apple Silicon")
+                    let currentVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.28"
+                    Text("版本 \(currentVer) · macOS (Apple Silicon)")
                         .font(.system(size: 12))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
 
-                Text("专为 4K 原画与流媒体打造的 macOS 原生专业播放器。支持 Apple VideoToolbox 硬件解码、Metal 高动态范围渲染、Dolby Vision 与 ServerDomains 多线路热备。")
+                Text("原生 macOS Emby 与媒体播放器")
                     .font(.system(size: 12.5))
-                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 24)
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }
             .frame(maxWidth: .infinity)
             .padding(22)
@@ -602,51 +595,34 @@ public struct SettingsView: View {
             // Software Update Card
             softwareUpdateCard
 
-            // UHDNow Support
-            VStack(alignment: .leading, spacing: 8) {
-                Text("UHDNow 开发者支持说明")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                Text("Donby 官方原生深度支持 UHDNow 服务端生态协议，包括 ServerDomains 动态负载均衡、专属 302 直连通道与高规格 4K 媒体流直解。")
-                    .font(.system(size: 12))
-                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-            }
-            .padding(18)
-            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
-            )
-
-            // Design Inspiration & Open Source Acknowledgements
-            VStack(alignment: .leading, spacing: 8) {
-                Text("设计灵感与开源致谢")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                Text("部分界面交互与毛玻璃视觉体验在设计上参考并致敬了 Apple TV、SenPlayer 与 Infuse 等优秀的生态应用；底层音视频与字幕能力构建于 FFmpeg 与 libass 之上。Donby 全部源码、图形资源与 Metal 色彩管线均为独立从零实现，与上述第三方商业软件无官方隶属或背书关系。")
-                    .font(.system(size: 12))
-                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-            }
-            .padding(18)
-            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
-            )
-
             // Keyboard Shortcuts Sheet
             VStack(alignment: .leading, spacing: 10) {
-                Text("播放器全局快捷键")
+                Text("播放快捷键")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
-                shortcutRow(key: "Space 空格键", desc: "播放 / 暂停视频")
-                shortcutRow(key: "← / → 方向键", desc: "快退 10 秒 / 快进 10 秒")
-                shortcutRow(key: "↑ / ↓ 方向键", desc: "调高 / 调低播放音量 (±5%)")
-                shortcutRow(key: "F 键", desc: "进入 / 退出全屏模式")
-                shortcutRow(key: "Esc 键", desc: "退出播放器返回主界面")
+                shortcutRow(key: "Space", desc: "播放 / 暂停")
+                shortcutRow(key: "← / →", desc: "快退 / 快进 10 秒")
+                shortcutRow(key: "↑ / ↓", desc: "音量调节")
+                shortcutRow(key: "F", desc: "切换全屏")
+                shortcutRow(key: "Esc", desc: "退出播放")
+            }
+            .padding(18)
+            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+            )
+
+            // Open Source Acknowledgements
+            VStack(alignment: .leading, spacing: 6) {
+                Text("开源组件")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                Text("支持 Emby、Jellyfin 与 UHDNow 服务，音视频解码及字幕渲染基于 FFmpeg 与 libass。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }
             .padding(18)
             .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
@@ -692,7 +668,7 @@ public struct SettingsView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("应用更新与版本检查")
+                    Text("软件更新")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     if let checkedAt = updater.lastCheckedDate {
@@ -700,7 +676,7 @@ public struct SettingsView: View {
                             .font(.system(size: 11.5))
                             .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     } else {
-                        Text("通过 GitHub Releases (DonJone/Donby) 获取官方安装包并校验 SHA-256")
+                        Text("当前版本 v\(AppUpdateManager.currentVersion)")
                             .font(.system(size: 11.5))
                             .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     }
@@ -744,14 +720,9 @@ public struct SettingsView: View {
 
             Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Toggle("自动检查更新（启动时静默检查新版本）", isOn: $updater.autoCheckEnabled)
-                    .font(.system(size: 13))
-                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                Text("开启后启动 Donby 时会自动向 GitHub Releases 查询新版本并提示更新；关闭后仅通过上方按钮手动检查。")
-                    .font(.system(size: 11))
-                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-            }
+            Toggle("自动检查更新", isOn: $updater.autoCheckEnabled)
+                .font(.system(size: 13))
+                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
         }
         .padding(18)
         .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
@@ -770,7 +741,7 @@ public struct SettingsView: View {
         case .checking:
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text("正在查询 GitHub Releases 最新版本...")
+                Text("正在检查更新...")
                     .font(.system(size: 12))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }
@@ -786,7 +757,7 @@ public struct SettingsView: View {
         case .available(let release):
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
-                    Image(systemName: "sparkles")
+                    Image(systemName: "arrow.down.circle.fill")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(appState.accentColor)
                     Text("发现新版本 v\(release.version)")
@@ -831,7 +802,7 @@ public struct SettingsView: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
 
-                    Button("在 GitHub 查看") {
+                    Button("查看发行说明") {
                         NSWorkspace.shared.open(release.htmlURL)
                     }
                     .buttonStyle(.bordered)
@@ -846,7 +817,7 @@ public struct SettingsView: View {
                 ProgressView(value: progress)
                     .tint(appState.accentColor)
                 HStack {
-                    Text("正在下载安装包 (\(Int(progress * 100))%)")
+                    Text("正在下载 (\(Int(progress * 100))%)")
                     Spacer()
                     Text("\(ByteCountFormatter.string(fromByteCount: downloaded, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: total, countStyle: .file))")
                 }
@@ -856,7 +827,7 @@ public struct SettingsView: View {
         case .verifying:
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text("正在校验安装包 SHA-256 完整性...")
+                Text("正在验证更新...")
                     .font(.system(size: 12))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }
@@ -864,10 +835,10 @@ public struct SettingsView: View {
             HStack(spacing: 10) {
                 Image(systemName: "checkmark.shield.fill")
                     .foregroundStyle(.green)
-                Text(canSelfReplace ? "v\(release.version) 安装包已就绪" : "已解压 v\(release.version) 更新包，请拖入「应用程序」完成替换")
+                Text(canSelfReplace ? "v\(release.version) 更新已准备就绪" : "v\(release.version) 已下载，请拖入「应用程序」替换")
                     .font(.system(size: 12, weight: .medium))
                 Spacer()
-                Button(canSelfReplace ? "立即安装并重启" : "在访达中查看") {
+                Button(canSelfReplace ? "安装并重启" : "在访达中查看") {
                     updater.installReadyUpdate(release: release, packageURL: packageURL)
                 }
                 .buttonStyle(.borderedProminent)
@@ -876,7 +847,7 @@ public struct SettingsView: View {
         case .installing:
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text("正在解压并替换更新包，即将重启 Donby...")
+                Text("正在安装更新并重启...")
                     .font(.system(size: 12))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }

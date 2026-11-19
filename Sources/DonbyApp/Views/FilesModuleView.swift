@@ -577,13 +577,12 @@ public struct FilesModuleView: View {
                             .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
 
                         if matchingOffline != nil {
-                            Text("已离线")
-                                .font(.system(size: 9.5, weight: .bold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1.5)
-                                .background(Color(red: 0.16, green: 0.68, blue: 0.34))
-                                .clipShape(Capsule())
+                            DonbyDownloadedBadgePill(
+                                text: "已离线",
+                                isCompleted: true,
+                                accentColor: appState.accentColor,
+                                fontSize: 9.0
+                            )
                         }
                     }
                 }
@@ -777,7 +776,7 @@ public struct FilesModuleView: View {
                     Text("暂未添加媒体文件夹")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    Text("点击添加本地影视、下载或外接硬盘目录，自动归类并支持一键预设默认打开")
+                    Text("添加本地视频目录，浏览并直接播放")
                         .font(.system(size: 11.5))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
@@ -938,7 +937,7 @@ public struct FilesModuleView: View {
                     Text("拖拽视频文件至此，或点击直接选取")
                         .font(.system(size: 14, weight: .bold))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    Text("支持 MP4、MKV、MOV、WebM、AVI、HLS m3u8 等超清原画直解")
+                    Text("支持 MP4、MKV、MOV、WebM、AVI、M3U8 等常见格式")
                         .font(.system(size: 11.5))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }

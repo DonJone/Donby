@@ -194,10 +194,7 @@ public struct PosterCardView: View, Equatable {
                                 .background(appearance.accentColor)
                                 .clipShape(Capsule())
                         } else if item.userData?.played == true {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 13, weight: .bold))
-                                .foregroundStyle(appearance.accentColor)
-                                .background(Circle().fill(Color.black.opacity(0.6)))
+                            DonbyWatchedBadgeView(size: 18)
                         }
                     }
                     .padding(7)
@@ -223,17 +220,12 @@ public struct PosterCardView: View, Equatable {
 
                             if let dlBadge = appearance.downloadStatusIndex.badgeText(for: item) {
                                 let isDone = appearance.downloadStatusIndex.isItemDownloaded(item)
-                                HStack(spacing: 2.5) {
-                                    Image(systemName: isDone ? "arrow.down.circle.fill" : "arrow.down.circle")
-                                        .font(.system(size: 8.5, weight: .bold))
-                                    Text(dlBadge)
-                                        .font(.system(size: 9.5, weight: .bold, design: .rounded))
-                                }
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 5.5)
-                                .padding(.vertical, 2)
-                                .background(isDone ? Color(red: 0.16, green: 0.68, blue: 0.34).opacity(0.92) : appearance.accentColor.opacity(0.92))
-                                .clipShape(Capsule())
+                                DonbyDownloadedBadgePill(
+                                    text: dlBadge,
+                                    isCompleted: isDone,
+                                    accentColor: appearance.accentColor,
+                                    fontSize: 9.5
+                                )
                             }
 
                             Spacer()
@@ -351,17 +343,12 @@ public struct LandscapeCardView: View, Equatable {
                         }
                         if let dlBadge = appearance.downloadStatusIndex.badgeText(for: item) {
                             let isDone = appearance.downloadStatusIndex.isItemDownloaded(item)
-                            HStack(spacing: 2.5) {
-                                Image(systemName: isDone ? "arrow.down.circle.fill" : "arrow.down.circle")
-                                    .font(.system(size: 8.5, weight: .bold))
-                                Text(dlBadge)
-                                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
-                            }
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 5.5)
-                            .padding(.vertical, 2)
-                            .background(isDone ? Color(red: 0.16, green: 0.68, blue: 0.34).opacity(0.92) : appearance.accentColor.opacity(0.92))
-                            .clipShape(Capsule())
+                            DonbyDownloadedBadgePill(
+                                text: dlBadge,
+                                isCompleted: isDone,
+                                accentColor: appearance.accentColor,
+                                fontSize: 9.5
+                            )
                         }
                         Spacer()
                         if let runtime = item.runtimeMinutesString {

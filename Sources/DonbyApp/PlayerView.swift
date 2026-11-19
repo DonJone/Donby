@@ -1029,8 +1029,8 @@ public struct PlayerView: View {
 
     @ViewBuilder
     private var decoderMenuContent: some View {
-        Section("流媒体规格") {
-            Text("解码: \(kernelStats.is_hw_accelerated ? "VideoToolbox 硬件解码" : "CPU 软件解码")")
+        Section("媒体信息") {
+            Text("解码: \(kernelStats.is_hw_accelerated ? "硬件解码" : "软件解码")")
             Text("动态范围: \(kernelStats.is_dolby_vision ? "Dolby Vision" : (kernelStats.is_hdr ? "HDR10" : "SDR"))")
             Text("分辨率: \(specResolutionString)")
             Text("帧率: \(specFpsString)")
@@ -1039,8 +1039,8 @@ public struct PlayerView: View {
             }
         }
         Divider()
-        Section("解码与线路控制") {
-            Button(appState.enableHardwareDecode ? "切换为 CPU 软件解码" : "启用 Apple 硬件加速解码") {
+        Section("解码与线路") {
+            Button(appState.enableHardwareDecode ? "切换为软件解码" : "启用硬件解码") {
                 appState.enableHardwareDecode.toggle()
                 startNativeKernelPlayback(startSeconds: currentTime)
             }
@@ -1446,7 +1446,7 @@ public struct PlayerView: View {
 
                         Divider().opacity(0.2)
 
-                        Text("字幕实时调节与 HDR 校准").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
+                        Text("字幕外观与同步").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
 
                         VStack(alignment: .leading, spacing: 10) {
                             Picker("简繁转换", selection: $appState.subtitleStyle.transform) {
@@ -1496,7 +1496,7 @@ public struct PlayerView: View {
 
                             Toggle("覆盖内封 ASS 样式", isOn: $appState.subtitleStyle.overrideASSStyle)
                             Toggle("仅保留强制字幕 (Forced)", isOn: $appState.subtitleStyle.forcedOnly)
-                            Toggle("控制栏防遮挡平滑上移", isOn: $appState.subtitleStyle.antiOcclusionEnabled)
+                            Toggle("控制栏显示时上移字幕", isOn: $appState.subtitleStyle.antiOcclusionEnabled)
                         }
                         .font(.system(size: 11.5))
                         .padding(10)
@@ -1506,12 +1506,12 @@ public struct PlayerView: View {
 
                 case .mediaInfo:
                     VStack(alignment: .leading, spacing: 10) {
-                        osdInfoRow("解码方式", kernelStats.is_hw_accelerated ? "Apple VideoToolbox 硬件解码" : "CPU 软件解码")
+                        osdInfoRow("解码方式", kernelStats.is_hw_accelerated ? "硬件解码" : "软件解码")
                         osdInfoRow("动态范围", kernelStats.is_dolby_vision ? "Dolby Vision" : (kernelStats.is_hdr ? "HDR10" : "SDR"))
-                        osdInfoRow("实时下载速率", String(format: "%.1f MB/s", max(0.0, displayDownloadSpeedMBs)))
-                        osdInfoRow("超前缓冲时长", String(format: "+%.1f 秒", bufferedAheadSeconds))
-                        osdInfoRow("流预读缓存", "\(kernelStats.cached_bytes / 1024 / 1024) MB")
-                        osdInfoRow("传输引擎", activeTurboHandle != nil ? "Turbo Range (\(appState.effectiveConnectionBudget(for: session.server)) 线程)" : "原生顺序读取")
+                        osdInfoRow("当前速率", String(format: "%.1f MB/s", max(0.0, displayDownloadSpeedMBs)))
+                        osdInfoRow("缓冲时长", String(format: "+%.1f 秒", bufferedAheadSeconds))
+                        osdInfoRow("预读缓存", "\(kernelStats.cached_bytes / 1024 / 1024) MB")
+                        osdInfoRow("加载方式", activeTurboHandle != nil ? "多线程并发 (\(appState.effectiveConnectionBudget(for: session.server)) 线程)" : "顺序读取")
                         osdInfoRow("分辨率", "\(kernelStats.width) × \(kernelStats.height)")
                         osdInfoRow("帧率", String(format: "%.3f fps", kernelStats.fps))
                         osdInfoRow("视频编码", Self.cString(from: kernelStats.video_codec))
@@ -2076,7 +2076,7 @@ public struct PlayerView: View {
     }
 
     private func exportRedactedDiagnostics() {
-        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.27"
+        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.28"
         var lines: [String] = []
         lines.append("Donby Diagnostics Report (v\(appVer))")
         lines.append("Time: \(ISO8601DateFormatter().string(from: Date()))")
@@ -2500,6 +2500,7 @@ public struct PlayerView: View {
                 selectedSubIdx = nil
                 currentItem = nextEp
                 currentResource = res
+                appState.updateDetailFocusedEpisodeIfActive(forItem: nextEp)
                 startNativeKernelPlayback(startSeconds: nextEp.resumePositionSeconds)
                 if prevWasFinished {
                     appState.cleanupAutoArchivedEntryIfFinished(itemId: prevItem.id, mediaSourceId: prevSourceId)
@@ -2550,6 +2551,7 @@ public struct PlayerView: View {
             }
         }
 
+        appState.updateDetailFocusedEpisodeIfActive(forItem: currentItem)
         stopNativeKernel()
         if exitingWasFinished {
             appState.cleanupAutoArchivedEntryIfFinished(itemId: exitingItemId, mediaSourceId: exitingSourceId)

@@ -156,7 +156,7 @@ public struct MainWindowView: View {
                 accentTextColor: appState.accentTextColor,
                 onOpenAboutTab: {
                     updater.showUpdatePromptSheet = false
-                    appState.preferredSettingsTabRaw = "关于与文档"
+                    appState.preferredSettingsTabRaw = "关于"
                     appState.selectSidebarModule(.settings)
                 }
             )
@@ -309,7 +309,7 @@ private struct AppUpdatePromptSheet: View {
                         ProgressView(value: progress)
                             .tint(accentColor)
                         HStack {
-                            Text("正在下载安装包 (\(Int(progress * 100))%)")
+                            Text("正在下载 (\(Int(progress * 100))%)")
                             Spacer()
                             Text("\(ByteCountFormatter.string(fromByteCount: dlBytes, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file))")
                         }
@@ -319,13 +319,13 @@ private struct AppUpdatePromptSheet: View {
                 case .verifying:
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("正在校验 SHA-256 签名完整性...")
+                        Text("正在验证更新...")
                             .font(.system(size: 12))
                     }
                 case .installing:
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("正在应用更新并准备重启...")
+                        Text("正在安装更新并重启...")
                             .font(.system(size: 12))
                     }
                 case .error(let msg):

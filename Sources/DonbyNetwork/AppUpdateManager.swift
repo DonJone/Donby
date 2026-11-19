@@ -27,6 +27,7 @@ public final class AppUpdateManager: ObservableObject {
     @Published public private(set) var state: AppUpdateState = .idle
     @Published public private(set) var availableRelease: AppReleaseInfo? = nil
     @Published public var showUpdatePromptSheet: Bool = false
+    public private(set) var isTerminatingForUpdate: Bool = false
 
     @AppStorage("donby.autoCheckForUpdates") public var autoCheckEnabled: Bool = true
     @AppStorage("donby.lastUpdateCheckTimestamp") private var lastCheckTimestamp: Double = 0
@@ -39,7 +40,7 @@ public final class AppUpdateManager: ObservableObject {
     private init() {}
 
     public static var currentVersion: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.3.27"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.3.28"
     }
 
     public var lastCheckedDate: Date? {
@@ -296,6 +297,7 @@ public final class AppUpdateManager: ObservableObject {
     }
 
     private func performGracefulExitForUpdate() {
+        isTerminatingForUpdate = true
         showUpdatePromptSheet = false
         onBeforeTerminationForUpdate?()
         for win in NSApp.windows {
@@ -307,14 +309,18 @@ public final class AppUpdateManager: ObservableObject {
             }
         }
         NSApp.stopModal()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
             for win in NSApp.windows {
                 win.orderOut(nil)
+                win.close()
             }
+            // Drop Dock icon immediately while main runloop still pumps IPC to WindowServer
+            NSApp.setActivationPolicy(.accessory)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
             NSApp.terminate(nil)
         }
-        // AppKit may still delay or veto terminate when sheets were closing; guarantee process exit before relaunch
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.80) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.00) {
             Darwin.exit(0)
         }
     }
@@ -439,7 +445,7 @@ public final class AppUpdateManager: ObservableObject {
                     return
                 }
                 let tempCopy = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("donby-dl-\(UUID().uuidString).dmg")
+                    .appendingPathComponent("donby-dl-\(UUID().uuidString).pkg")
                 do {
                     if FileManager.default.fileExists(atPath: tempCopy.path) {
                         try FileManager.default.removeItem(at: tempCopy)
@@ -544,6 +550,13 @@ public final class AppUpdateManager: ObservableObject {
         proc.arguments = ["detach", mountPoint.path, "-quiet"]
         try? proc.run()
         proc.waitUntilExit()
+        if proc.terminationStatus != 0 {
+            let forceProc = Process()
+            forceProc.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+            forceProc.arguments = ["detach", mountPoint.path, "-force", "-quiet"]
+            try? forceProc.run()
+            forceProc.waitUntilExit()
+        }
     }
 
     nonisolated private static func spawnDetachedAppReplacer(
@@ -555,23 +568,21 @@ public final class AppUpdateManager: ObservableObject {
     ) throws {
         let pid = ProcessInfo.processInfo.processIdentifier
         let targetPath = targetAppURL.standardizedFileURL.path
-        let backupPath = targetPath + ".update_backup"
         let sourceAppPath = sourceAppURL.standardizedFileURL.path
         let mountPath = mountPointToDetach?.standardizedFileURL.path ?? ""
         let packagePath = packageURL.standardizedFileURL.path
         let cleanupPath = cleanupDirURL?.standardizedFileURL.path ?? ""
 
-        let script = """
+        let workerScript = """
         PID="$1"
         SOURCE_APP="$2"
         TARGET_APP="$3"
-        BACKUP_APP="$4"
-        MOUNT_POINT="$5"
-        PACKAGE_FILE="$6"
-        CLEANUP_DIR="$7"
+        MOUNT_POINT="$4"
+        PACKAGE_FILE="$5"
+        CLEANUP_DIR="$6"
 
         i=0
-        while kill -0 "$PID" 2>/dev/null && [ "$i" -lt 20 ]; do
+        while kill -0 "$PID" 2>/dev/null && [ "$i" -lt 24 ]; do
             sleep 0.25
             i=$((i + 1))
         done
@@ -582,34 +593,121 @@ public final class AppUpdateManager: ObservableObject {
                 sleep 0.25
                 j=$((j + 1))
             done
+            kill -KILL "$PID" >/dev/null 2>&1 || true
         fi
 
-        rm -rf "$BACKUP_APP"
-        if [ -e "$TARGET_APP" ]; then
-            mv "$TARGET_APP" "$BACKUP_APP" || exit 1
+        # Also reap any leftover Donby instances (exact process name "Donby", never shell workers)
+        OTHER_PIDS="$(pgrep -x Donby 2>/dev/null || true)"
+        if [ -n "$OTHER_PIDS" ]; then
+            for opid in $OTHER_PIDS; do
+                [ "$opid" = "$$" ] && continue
+                kill -TERM "$opid" >/dev/null 2>&1 || true
+            done
+            sleep 0.5
+            for opid in $OTHER_PIDS; do
+                [ "$opid" = "$$" ] && continue
+                kill -0 "$opid" 2>/dev/null && kill -KILL "$opid" >/dev/null 2>&1 || true
+            done
         fi
+
+        # Give WindowServer & Dock time to retire all exiting Dock tiles before replacing and relaunching
+        sleep 0.6
+
+        BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/donby-backup.XXXXXX" 2>/dev/null || echo "/tmp/donby-backup-$$")"
+        mkdir -p "$BACKUP_DIR" 2>/dev/null || true
+        BACKUP_APP="${BACKUP_DIR}/Donby.app"
+
+        if [ -e "$TARGET_APP" ]; then
+            mv "$TARGET_APP" "$BACKUP_APP" || {
+                rm -rf "$BACKUP_DIR"
+                exit 1
+            }
+        fi
+
+        LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+        detach_dmg() {
+            [ -z "$MOUNT_POINT" ] && return 0
+            hdiutil detach "$MOUNT_POINT" -quiet >/dev/null 2>&1 || hdiutil detach "$MOUNT_POINT" -force -quiet >/dev/null 2>&1 || true
+        }
+        cleanup_ls() {
+            [ ! -x "$LSREG" ] && return 0
+            "$LSREG" -u "$BACKUP_APP" >/dev/null 2>&1 || true
+            [ -n "$SOURCE_APP" ] && "$LSREG" -u "$SOURCE_APP" >/dev/null 2>&1 || true
+            for vol in /Volumes/Donby*; do
+                [ -e "${vol}/Donby.app" ] && "$LSREG" -u "${vol}/Donby.app" >/dev/null 2>&1 || true
+            done
+            for tr in "${HOME}/.Trash"/Donby*.app; do
+                [ -e "$tr" ] && "$LSREG" -u "$tr" >/dev/null 2>&1 || true
+            done
+        }
+
         if ditto "$SOURCE_APP" "$TARGET_APP"; then
-            rm -rf "$BACKUP_APP"
-            LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+            xattr -rd com.apple.quarantine "$TARGET_APP" >/dev/null 2>&1 || true
+            cleanup_ls
             [ -x "$LSREG" ] && "$LSREG" -f "$TARGET_APP" >/dev/null 2>&1 || true
-            [ -n "$MOUNT_POINT" ] && hdiutil detach "$MOUNT_POINT" -quiet >/dev/null 2>&1 || true
+            rm -rf "$BACKUP_DIR" >/dev/null 2>&1 || true
+            detach_dmg
             [ -n "$CLEANUP_DIR" ] && rm -rf "$CLEANUP_DIR" >/dev/null 2>&1 || true
             rm -f "$PACKAGE_FILE" >/dev/null 2>&1 || true
+            [ -n "$PACKAGE_FILE" ] && rmdir "$(dirname "$PACKAGE_FILE")" >/dev/null 2>&1 || true
             sleep 0.35
-            open "$TARGET_APP"
+            /usr/bin/open -F "$TARGET_APP"
         else
             rm -rf "$TARGET_APP"
             [ -e "$BACKUP_APP" ] && mv "$BACKUP_APP" "$TARGET_APP"
-            [ -n "$MOUNT_POINT" ] && hdiutil detach "$MOUNT_POINT" -quiet >/dev/null 2>&1 || true
-            open "$TARGET_APP"
+            rm -rf "$BACKUP_DIR" >/dev/null 2>&1 || true
+            detach_dmg
+            /usr/bin/open -F "$TARGET_APP"
         fi
         """
 
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/sh")
-        proc.arguments = ["-c", script, "donby-updater", "\(pid)", sourceAppPath, targetPath, backupPath, mountPath, packagePath, cleanupPath]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        try proc.run()
+        // Double-fork inside a fresh POSIX session (SETSID + CLOEXEC) so Dock/LaunchServices has zero lingering child linkage
+        let trampolineScript = """
+        (nohup /bin/sh -c "$1" donby-updater-worker "$2" "$3" "$4" "$5" "$6" "$7" </dev/null >/dev/null 2>&1 &)
+        """
+        try spawnSessionDetachedShell(
+            arguments: ["/bin/sh", "-c", trampolineScript, "donby-trampoline", workerScript, "\(pid)", sourceAppPath, targetPath, mountPath, packagePath, cleanupPath]
+        )
+    }
+
+    nonisolated private static func spawnSessionDetachedShell(arguments: [String]) throws {
+        var fileActions: posix_spawn_file_actions_t? = nil
+        posix_spawn_file_actions_init(&fileActions)
+        defer { posix_spawn_file_actions_destroy(&fileActions) }
+        posix_spawn_file_actions_addopen(&fileActions, STDIN_FILENO, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_addopen(&fileActions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0)
+        posix_spawn_file_actions_addopen(&fileActions, STDERR_FILENO, "/dev/null", O_WRONLY, 0)
+
+        var attr: posix_spawnattr_t? = nil
+        posix_spawnattr_init(&attr)
+        defer { posix_spawnattr_destroy(&attr) }
+        let spawnFlags = Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT)
+        posix_spawnattr_setflags(&attr, spawnFlags)
+
+        var cStrings: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) }
+        cStrings.append(nil)
+        defer {
+            for ptr in cStrings {
+                if let ptr { free(ptr) }
+            }
+        }
+
+        var envCStrings: [UnsafeMutablePointer<CChar>?] = ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") }
+        envCStrings.append(nil)
+        defer {
+            for ptr in envCStrings {
+                if let ptr { free(ptr) }
+            }
+        }
+
+        var childPid: pid_t = 0
+        let rc = posix_spawn(&childPid, "/bin/sh", &fileActions, &attr, &cStrings, &envCStrings)
+        guard rc == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(rc), userInfo: [
+                NSLocalizedDescriptionKey: "启动更新安装进程失败 (posix_spawn \(rc))"
+            ])
+        }
+        var status: Int32 = 0
+        _ = waitpid(childPid, &status, 0)
     }
 }

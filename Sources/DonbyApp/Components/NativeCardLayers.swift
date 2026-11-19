@@ -524,12 +524,23 @@ enum NativeCardLayerCache {
     }
 
     static func playedCheckImage(accentColor: NSColor, colorKey overrideKey: String? = nil) -> CGImage? {
-        let key = "played|\(overrideKey ?? colorKey(accentColor))"
+        let key = "played_glass_v2"
         if let cached = iconCache[key] { return cached }
-        let image = renderCGImage(widthPt: 16, heightPt: 16) { ctx, rect in
-            ctx.setFillColor(NSColor.black.withAlphaComponent(0.6).cgColor)
-            ctx.fillEllipse(in: rect.insetBy(dx: 1, dy: 1))
-            drawTintedSymbol(name: "checkmark.circle.fill", pointSize: 12.5, weight: .bold, color: accentColor, in: rect)
+        let image = renderCGImage(widthPt: 18, heightPt: 18) { ctx, rect in
+            let circleRect = rect.insetBy(dx: 0.75, dy: 0.75)
+            ctx.setFillColor(NSColor.black.withAlphaComponent(0.64).cgColor)
+            ctx.fillEllipse(in: circleRect)
+            ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.26).cgColor)
+            ctx.setLineWidth(0.75)
+            ctx.strokeEllipse(in: circleRect)
+            drawTintedSymbol(
+                name: "checkmark",
+                pointSize: 9.0,
+                weight: .bold,
+                color: NSColor.white.withAlphaComponent(0.95),
+                in: rect.insetBy(dx: 4.2, dy: 4.2),
+                ctx: ctx
+            )
         }
         if let image { iconCache[key] = image }
         return image
@@ -547,7 +558,9 @@ enum NativeCardLayerCache {
         minWidth: CGFloat = 0,
         leadingSymbol: String? = nil,
         symbolPointSize: CGFloat = 0,
-        symbolColor: NSColor? = nil
+        symbolColor: NSColor? = nil,
+        borderColor: NSColor? = nil,
+        borderWidth: CGFloat = 0.65
     ) -> CGImage? {
         if let cached = pillCache[cacheKey] {
             return cached
@@ -573,6 +586,16 @@ enum NativeCardLayerCache {
             ctx.addPath(path)
             ctx.setFillColor(backgroundColor.cgColor)
             ctx.fillPath()
+
+            if let borderColor {
+                let strokeRect = rect.insetBy(dx: borderWidth * 0.5, dy: borderWidth * 0.5)
+                let strokeRadius = cornerRadius ?? (strokeRect.height * 0.5)
+                let strokePath = CGPath(roundedRect: strokeRect, cornerWidth: strokeRadius, cornerHeight: strokeRadius, transform: nil)
+                ctx.addPath(strokePath)
+                ctx.setStrokeColor(borderColor.cgColor)
+                ctx.setLineWidth(borderWidth)
+                ctx.strokePath()
+            }
 
             var textX = horizontalPadding
             if let leadingSymbol {
@@ -692,23 +715,28 @@ enum NativeCardLayerCache {
     }
 
     static func downloadedBadgeImage(text: String, isCompleted: Bool, accentColor: NSColor, accentKey: String? = nil) -> CGImage? {
-        let key = "dl|\(text)|\(isCompleted ? "done" : (accentKey ?? colorKey(accentColor)))"
+        let key = "dl_glass_v2|\(text)|\(isCompleted ? "done" : (accentKey ?? colorKey(accentColor)))"
         if let cached = pillCache[key] { return cached }
-        let bg = isCompleted
-            ? NSColor(srgbRed: 0.14, green: 0.66, blue: 0.32, alpha: 0.92)
-            : accentColor.withAlphaComponent(0.92)
+        let bg = NSColor.black.withAlphaComponent(0.66)
+        let border = isCompleted
+            ? NSColor.white.withAlphaComponent(0.22)
+            : accentColor.withAlphaComponent(0.55)
+        let symColor = isCompleted
+            ? NSColor(srgbRed: 0.42, green: 0.88, blue: 0.68, alpha: 0.96)
+            : accentColor
         return cachedPillImage(
             cacheKey: key,
             text: text,
             font: runtimeFont,
-            textColor: .white,
+            textColor: NSColor.white.withAlphaComponent(0.95),
             backgroundColor: bg,
             cornerRadius: nil,
-            horizontalPadding: 5.5,
+            horizontalPadding: 6.0,
             verticalPadding: 2.0,
-            leadingSymbol: isCompleted ? "arrow.down.circle.fill" : "arrow.down.circle",
+            leadingSymbol: isCompleted ? "arrow.down.to.line" : "arrow.down",
             symbolPointSize: 8.5,
-            symbolColor: .white
+            symbolColor: symColor,
+            borderColor: border
         )
     }
 }
@@ -1303,7 +1331,7 @@ final class NativePosterCollectionItem: NSCollectionViewItem, HoverableCollectio
             unplayedBadgeLayer.frame = CGRect(x: width - 7 - badgeW, y: 7, width: badgeW, height: badgeH)
         }
         if !playedIconLayer.isHidden {
-            playedIconLayer.frame = CGRect(x: width - 7 - 16, y: 7, width: 16, height: 16)
+            playedIconLayer.frame = CGRect(x: width - 7 - 18, y: 7, width: 18, height: 18)
         }
 
         let hasProgress = !progressTrack.isHidden

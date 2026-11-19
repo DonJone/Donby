@@ -577,7 +577,7 @@ public final class UHDStreamClient: Sendable {
     }
 
     public var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.27"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.28"
     }
 
     private func normalizedAPIBase(_ raw: String) -> String {

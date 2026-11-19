@@ -16,12 +16,36 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let bundlePath = Bundle.main.bundlePath
         let bundleID = Bundle.main.bundleIdentifier ?? "com.don.Donby"
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        let currentVersion = AppUpdateManager.currentVersion
         let userApps = (NSHomeDirectory() as NSString).appendingPathComponent("Applications")
         let canonicalPaths: Set<String> = [
             "/Applications/Donby.app",
             (userApps as NSString).appendingPathComponent("Donby.app")
         ]
-        guard canonicalPaths.contains(bundlePath) else { return }
+
+        // Close stale running copies (e.g., after manual DMG drag-and-drop replace while an older version stayed open in Dock)
+        let isCanonical = canonicalPaths.contains(bundlePath)
+        let otherInstances = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.processIdentifier != currentPID }
+        for other in otherInstances {
+            let otherPath = other.bundleURL?.path ?? ""
+            let otherVer = Bundle(path: otherPath)?.infoDictionary?["CFBundleShortVersionString"] as? String
+            let shouldCloseOther = isCanonical
+                || otherPath.contains("/Volumes/Donby")
+                || otherPath.contains("/.Trash/")
+                || (otherVer.map { AppVersionComparator.isVersion(currentVersion, newerThan: $0) } ?? false)
+            guard shouldCloseOther else { continue }
+            other.terminate()
+            let pid = other.processIdentifier
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                if let stillAlive = NSRunningApplication(processIdentifier: pid), !stillAlive.isTerminated {
+                    stillAlive.forceTerminate()
+                }
+            }
+        }
+
+        guard isCanonical else { return }
 
         DispatchQueue.global(qos: .utility).async {
             let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
@@ -43,8 +67,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             for extraName in ["Donby 2.app", "Donby 3.app"] {
                 let extra = (parentDir as NSString).appendingPathComponent(extraName)
                 if fileMgr.fileExists(atPath: extra) {
-                    runLsregister(["-u", extra])
-                    try? fileMgr.removeItem(atPath: extra)
+                    let extraVer = Bundle(path: extra)?.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+                    if !AppVersionComparator.isVersion(extraVer, newerThan: currentVersion) {
+                        runLsregister(["-u", extra])
+                        try? fileMgr.removeItem(atPath: extra)
+                    }
                 }
             }
 
@@ -56,6 +83,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 runLsregister(["-u", "/Volumes/Donby/Donby.app"])
             }
 
+            let trashDir = (NSHomeDirectory() as NSString).appendingPathComponent(".Trash")
+            if let trashEntries = try? fileMgr.contentsOfDirectory(atPath: trashDir) {
+                for name in trashEntries where name.hasPrefix("Donby") && name.hasSuffix(".app") {
+                    runLsregister(["-u", (trashDir as NSString).appendingPathComponent(name)])
+                }
+            }
+
             let registeredPaths = NSWorkspace.shared.urlsForApplications(withBundleIdentifier: bundleID).map(\.path)
             for candidate in registeredPaths where candidate != bundlePath {
                 runLsregister(["-u", candidate])
@@ -63,6 +97,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
             runLsregister(["-f", bundlePath])
         }
+    }
+
+    public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if AppUpdateManager.shared.isTerminatingForUpdate {
+            MainActor.assumeIsolated {
+                AppState.sharedInstance?.prepareForTermination()
+            }
+            return .terminateNow
+        }
+        return .terminateNow
     }
 
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -97,7 +141,7 @@ public struct DonbyApp: App {
         .commands {
             CommandGroup(after: .appInfo) {
                 Button("检查更新…") {
-                    appState.preferredSettingsTabRaw = "关于与文档"
+                    appState.preferredSettingsTabRaw = "关于"
                     appState.selectSidebarModule(.settings)
                     Task {
                         await AppUpdateManager.shared.checkForUpdates(manual: true)

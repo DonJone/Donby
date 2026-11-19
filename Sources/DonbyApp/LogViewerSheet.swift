@@ -57,7 +57,7 @@ public struct LogViewerSheet: View {
                     .foregroundStyle(appState.accentColor)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("运行日志与核心诊断")
+                    Text("运行日志")
                         .font(.system(size: isModal ? 14 : 16, weight: .bold))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Text(logger.logFileURL.path)

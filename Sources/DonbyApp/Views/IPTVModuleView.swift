@@ -50,7 +50,7 @@ public struct IPTVModuleView: View {
                     Text("IPTV 电视直播")
                         .font(.system(size: 19, weight: .bold))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    Text("超清 4K HLS 直播源 · 智能低延迟预读")
+                    Text("HLS 直播源与 M3U 频道管理")
                         .font(.system(size: 11.5))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }

@@ -566,3 +566,61 @@ public struct LiquidGlassSelectorCard<MenuItems: View>: View {
         .onHover { isHovered = $0 }
     }
 }
+
+/// Smoked dark glass badge for watched checkmarks matching media card overlays
+public struct DonbyWatchedBadgeView: View {
+    public var size: CGFloat = 19
+
+    public init(size: CGFloat = 19) {
+        self.size = size
+    }
+
+    public var body: some View {
+        ZStack {
+            Circle()
+                .fill(Color.black.opacity(0.64))
+            Circle()
+                .strokeBorder(Color.white.opacity(0.24), lineWidth: 0.7)
+            Image(systemName: "checkmark")
+                .font(.system(size: max(8.5, size * 0.47), weight: .bold))
+                .foregroundStyle(Color.white.opacity(0.95))
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// Smoked dark glass badge for downloaded / downloading state matching media card pills
+public struct DonbyDownloadedBadgePill: View {
+    public let text: String
+    public let isCompleted: Bool
+    public let accentColor: Color
+    public var fontSize: CGFloat = 9.5
+
+    public init(text: String, isCompleted: Bool, accentColor: Color, fontSize: CGFloat = 9.5) {
+        self.text = text
+        self.isCompleted = isCompleted
+        self.accentColor = accentColor
+        self.fontSize = fontSize
+    }
+
+    public var body: some View {
+        let symbolTint = isCompleted ? Color(red: 0.42, green: 0.88, blue: 0.68) : accentColor
+        let borderTint = isCompleted ? Color.white.opacity(0.20) : accentColor.opacity(0.50)
+        HStack(spacing: 3) {
+            Image(systemName: isCompleted ? "arrow.down.to.line" : "arrow.down")
+                .font(.system(size: max(8.0, fontSize - 1.0), weight: .bold))
+                .foregroundStyle(symbolTint)
+            Text(text)
+                .font(.system(size: fontSize, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color.white.opacity(0.94))
+        }
+        .padding(.horizontal, 6.5)
+        .padding(.vertical, 2.5)
+        .background(Color.black.opacity(0.66))
+        .clipShape(Capsule())
+        .overlay(
+            Capsule()
+                .strokeBorder(borderTint, lineWidth: 0.65)
+        )
+    }
+}

@@ -49,7 +49,7 @@ public struct ServerListView: View {
                 Spacer()
 
                 ToolbarVectorButton(
-                    tooltip: "刷新全部服务器与同步线路",
+                    tooltip: "刷新服务器",
                     action: {
                         guard !isRefreshingAllServers else { return }
                         Task {
@@ -63,7 +63,7 @@ public struct ServerListView: View {
                                     }
                                 }
                             }
-                            appState.showToast("已刷新所有服务器状态与云端线路", icon: "checkmark.circle.fill")
+                            appState.showToast("已刷新服务器状态", icon: "checkmark.circle.fill")
                         }
                     }
                 ) { hovered in
@@ -139,7 +139,7 @@ public struct ServerListView: View {
                                     .font(.system(size: 13))
                                     .foregroundStyle(appState.accentColor)
                                     .frame(width: 20)
-                                Text("从剪贴板智能拉取")
+                                Text("从剪贴板导入")
                                     .font(.system(size: 12.5, weight: .semibold))
                                     .foregroundStyle(appState.accentColor)
                                 Spacer()
@@ -767,11 +767,11 @@ public struct ServerConfigSheet: View {
                     Text(draft.host.isEmpty ? "新增服务器" : "服务配置 · \(draft.name)")
                         .font(.system(size: 18, weight: .bold))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    Text("支持 Emby / UHDNow / Jellyfin，自动同步 ServerDomains").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text("支持 Emby、Jellyfin 与 UHDNow 服务").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button { pasteFromClipboard() } label: {
-                    HStack(spacing: 5) { Image(systemName: "doc.on.clipboard"); Text("从剪贴板识别填充") }
+                    HStack(spacing: 5) { Image(systemName: "doc.on.clipboard"); Text("从剪贴板识别") }
                         .font(.system(size: 12, weight: .semibold)).foregroundStyle(appState.accentColor)
                         .padding(.horizontal, 12).padding(.vertical, 6).background(appState.accentColor.opacity(0.14)).clipShape(Capsule())
                 }

@@ -300,8 +300,8 @@ public enum PreferredVersionPreset: String, Codable, CaseIterable, Identifiable,
 
     public var subtitle: String {
         switch self {
-        case .higherBitrate: return "默认自动选择原盘或最高码率/分辨率资源版本"
-        case .lowerBitrate: return "默认自动选择更低码率资源版本，兼顾带宽与起播流畅度"
+        case .higherBitrate: return "自动选择最高码率或高分辨率版本"
+        case .lowerBitrate: return "优先选择较小码率版本以加快加载"
         }
     }
 }

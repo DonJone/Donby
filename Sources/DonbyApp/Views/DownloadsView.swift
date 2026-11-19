@@ -401,14 +401,14 @@ public struct DownloadsView: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 14) {
-                    Text("离线影视库 (~/Movies/Donby): \(formatBytes(pinnedDownloadBytes))")
+                    Text("离线媒体库 (~/Movies/Donby)：\(formatBytes(pinnedDownloadBytes))")
                         .font(.system(size: 12.5, weight: .semibold))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    Text("临时播放分片缓存: \(formatBytes(unpinnedCacheBytes)) / \(appState.turboDiskCacheMB) MB 上限")
+                    Text("临时缓存：\(formatBytes(unpinnedCacheBytes)) / \(appState.turboDiskCacheMB) MB")
                         .font(.system(size: 12))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
-                Text("播放时自动写入 Turbo 临时缓存，发起下载可从已缓存分片秒级续传并整理至 ~/Movies/Donby（离线文件免疫 LRU 清理）")
+                Text("离线内容保存在 ~/Movies/Donby，下载时优先复用已缓存分片")
                     .font(.system(size: 11))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }
