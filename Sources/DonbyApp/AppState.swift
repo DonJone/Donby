@@ -41,6 +41,8 @@ public final class AppState: ObservableObject {
     @Published public var isPingingLines: Bool = false
     private var homeLoadGeneration: UInt64 = 0
     private var playbackStartGeneration: UInt64 = 0
+    private var pendingPlaybackKey: String? = nil
+    private var pendingPlaybackTimestamp: TimeInterval = 0
 
     @Published public var isLoadingHome: Bool = false
     @Published public var homeErrorMessage: String? = nil
@@ -915,6 +917,7 @@ public final class AppState: ObservableObject {
     public func cancelPendingPlaybackStart() {
         guard isStartingPlayback else { return }
         playbackStartGeneration &+= 1
+        pendingPlaybackKey = nil
         isStartingPlayback = false
     }
 
@@ -1291,6 +1294,7 @@ public final class AppState: ObservableObject {
     public func switchLineImmediate(to lineId: UUID?, for serverId: UUID, triggerReload: Bool = true) {
         guard let idx = servers.firstIndex(where: { $0.id == serverId }) else { return }
         servers[idx].selectedLineId = lineId
+        Task { await UHDStreamClient.shared.invalidateResolvedDomainCache(serverId: serverId) }
         let newLineName = servers[idx].activeLineName
         showToast("已切换至线路：\(newLineName)", icon: "checkmark.circle.fill")
 
@@ -1649,8 +1653,18 @@ public final class AppState: ObservableObject {
             return
         }
         var server = resolvedServer
+        let startKey = "\(server.id.uuidString)|\(item.id)|\(preferredSourceId ?? "")|\(fromBeginning)"
+        let nowUptime = ProcessInfo.processInfo.systemUptime
+        if isStartingPlayback,
+           pendingPlaybackKey == startKey,
+           nowUptime - pendingPlaybackTimestamp < 2.5 {
+            return
+        }
+
         playbackStartGeneration &+= 1
         let currentStartGen = playbackStartGeneration
+        pendingPlaybackKey = startKey
+        pendingPlaybackTimestamp = nowUptime
         if !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             server.lastWatchedDate = Date()
             updateServerInList(server)
@@ -1660,6 +1674,7 @@ public final class AppState: ObservableObject {
         defer {
             if currentStartGen == playbackStartGeneration {
                 isStartingPlayback = false
+                pendingPlaybackKey = nil
             }
         }
 
@@ -1737,7 +1752,8 @@ public final class AppState: ObservableObject {
                     preferredPreset: preferredVersionPreset,
                     audioStreamIndex: audioStreamIndex,
                     subtitleStreamIndex: subtitleStreamIndex,
-                    enable302Cache: enable302Cache
+                    enable302Cache: enable302Cache,
+                    defer302ProbeWhenTurbo: turboEnabled
                 )
             }
             guard currentStartGen == playbackStartGeneration else { return }
@@ -1753,14 +1769,21 @@ public final class AppState: ObservableObject {
                     sName = cachedSeriesNames[targetItem.id] ?? cachedSeriesNames[targetItem.seriesId ?? ""]
                 }
                 if (sName == nil || sName!.isEmpty), let sid = targetItem.seriesId, !sid.isEmpty {
-                    if let seriesDetail = server.type == .uhdNative
-                        ? (try? await UHDStreamClient.shared.fetchItemDetail(server: server, item: EmbyItem(id: sid, name: "", type: "Series", uhdMediaType: "tv")))
-                        : (try? await EmbyClient.shared.fetchItemDetail(server: server, itemId: sid)) {
-                        sName = seriesDetail.name
+                    let capturedTarget = targetItem
+                    let capturedServer = server
+                    Task { [weak self] in
+                        if let seriesDetail = capturedServer.type == .uhdNative
+                            ? (try? await UHDStreamClient.shared.fetchItemDetail(server: capturedServer, item: EmbyItem(id: sid, name: "", type: "Series", uhdMediaType: "tv")))
+                            : (try? await EmbyClient.shared.fetchItemDetail(server: capturedServer, itemId: sid)),
+                           !seriesDetail.name.isEmpty {
+                            await MainActor.run {
+                                self?.cachedSeriesNames[capturedTarget.id] = seriesDetail.name
+                                self?.cachedSeriesNames[sid] = seriesDetail.name
+                                self?.saveCachedSeriesNamesToDisk()
+                            }
+                        }
                     }
-                    guard currentStartGen == playbackStartGeneration else { return }
-                }
-                if let s = sName, !s.isEmpty {
+                } else if let s = sName, !s.isEmpty {
                     cachedSeriesNames[targetItem.id] = s
                     if let sid = targetItem.seriesId { cachedSeriesNames[sid] = s }
                     saveCachedSeriesNamesToDisk()

@@ -118,9 +118,9 @@ public struct MainWindowView: View {
         .task(id: appState.isStartingPlayback) {
             if appState.isStartingPlayback {
                 showDelayedResolvePill = false
-                try? await Task.sleep(nanoseconds: 650_000_000)
+                try? await Task.sleep(nanoseconds: 120_000_000)
                 if !Task.isCancelled && appState.isStartingPlayback && appState.activePlayback == nil {
-                    withAnimation(.easeOut(duration: 0.18)) {
+                    withAnimation(.easeOut(duration: 0.14)) {
                         showDelayedResolvePill = true
                     }
                 }

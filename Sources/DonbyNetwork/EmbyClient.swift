@@ -44,7 +44,7 @@ public final class EmbyClient: Sendable {
 
     public let clientName = "Donby"
     public var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.26"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.27"
     }
     public let deviceName: String
     public let deviceId: String
@@ -58,11 +58,7 @@ public final class EmbyClient: Sendable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         self.deviceName = host.isEmpty ? "Mac" : host
 
-        let apiConfig = URLSessionConfiguration.default
-        apiConfig.httpMaximumConnectionsPerHost = 12
-        apiConfig.timeoutIntervalForRequest = 15
-        apiConfig.timeoutIntervalForResource = 30
-        self.apiSession = URLSession(configuration: apiConfig)
+        self.apiSession = TurboStreamingSessionHub.shared.sharedURLSession
 
         let redirectConfig = URLSessionConfiguration.ephemeral
         redirectConfig.timeoutIntervalForRequest = 4.0
@@ -586,6 +582,15 @@ public final class EmbyClient: Sendable {
         return try await requestJSON(EmbyPlaybackInfoResponse.self, for: req, priority: .playback)
     }
 
+    public static func redirectCacheKey(
+        serverId: UUID,
+        itemId: String,
+        mediaSourceId: String,
+        baseURL: String
+    ) -> String {
+        "\(serverId.uuidString)|\(itemId)|\(mediaSourceId)|\(baseURL)"
+    }
+
     public func resolvePlaybackResource(
         server: EmbyServerConfig,
         item: EmbyItem,
@@ -593,7 +598,8 @@ public final class EmbyClient: Sendable {
         preferredPreset: PreferredVersionPreset = .higherBitrate,
         audioStreamIndex: Int? = nil,
         subtitleStreamIndex: Int? = nil,
-        enable302Cache: Bool = true
+        enable302Cache: Bool = true,
+        defer302ProbeWhenTurbo: Bool = false
     ) async throws -> ResolvedPlaybackResource {
         guard !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw EmbyClientError.noPlayableStream
@@ -663,12 +669,18 @@ public final class EmbyClient: Sendable {
         }
 
         var resolvedURL = initialURL
-        let cacheKey = "\(server.id.uuidString)|\(item.id)|\(selectedSource.id)|\(baseURL)"
+        let cacheKey = Self.redirectCacheKey(
+            serverId: server.id,
+            itemId: item.id,
+            mediaSourceId: selectedSource.id,
+            baseURL: baseURL
+        )
         if enable302Cache && server.cache302Request {
             if let cached = await RedirectCacheStore.shared.cachedRedirect(for: cacheKey) {
                 resolvedURL = cached
                 routeNote += " · 302缓存命中"
-            } else if let redirected = await probe302Redirect(url: initialURL, headers: headers) {
+            } else if !defer302ProbeWhenTurbo,
+                      let redirected = await probe302Redirect(url: initialURL, headers: headers) {
                 resolvedURL = redirected
                 await RedirectCacheStore.shared.storeRedirect(redirected, for: cacheKey)
                 routeNote += " · 302直连"

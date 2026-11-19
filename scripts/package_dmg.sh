@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-VERSION="${DONBY_VERSION:-1.3.26}"
+VERSION="${DONBY_VERSION:-1.3.27}"
 ARCH="$(uname -m)"
 APP_NAME="Donby"
 DIST_DIR="dist"
@@ -23,6 +23,13 @@ fi
 
 echo "==> [1/4] Building standalone ${APP_DIR} (v${VERSION}, ${ARCH})..."
 DONBY_VERSION="$VERSION" DONBY_APP_DIR="$APP_DIR" BUNDLE_DYLIBS=1 ./build_app.sh
+
+echo "==> [1.5/4] Verifying standalone dylib closure & signature..."
+codesign --verify --deep --strict "$APP_DIR"
+if otool -L "${APP_DIR}/Contents/MacOS/Donby" "${APP_DIR}/Contents/Frameworks/"*.dylib | grep -E "(/opt/homebrew|/usr/local)"; then
+    echo "ERROR: Found unbundled external Homebrew dylib paths!" >&2
+    exit 1
+fi
 
 echo "==> [2/4] Preparing .app.zip & DMG staging folder..."
 mkdir -p "$DIST_DIR"

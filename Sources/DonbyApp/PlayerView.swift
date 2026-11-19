@@ -535,7 +535,10 @@ public struct PlayerView: View {
         }
         .onChange(of: appState.turboConnectionBudget) { _, _ in
             let budget = appState.effectiveConnectionBudget(for: session.server)
-            activeTurboHandle?.updateTuning(connectionBudget: budget, prefetchAheadChunks: 12)
+            activeTurboHandle?.updateTuning(
+                connectionBudget: budget,
+                prefetchAheadChunks: max(24, min(360, Int(appState.turboPrefetchSeconds * 1.2)))
+            )
         }
         .onReceive(embySyncTimer) { _ in
             guard !session.server.host.isEmpty && !session.server.accessToken.isEmpty else { return }
@@ -1686,6 +1689,17 @@ public struct PlayerView: View {
                 mediaSourceSnapshot: currentResource.mediaSource
             )
             let budget = appState.effectiveConnectionBudget(for: session.server)
+            let enableRedirectCache = appState.enable302Cache && session.server.cache302Request
+            let redirectKey = EmbyClient.redirectCacheKey(
+                serverId: session.server.id,
+                itemId: currentItem.id,
+                mediaSourceId: currentResource.mediaSource.id,
+                baseURL: session.server.activeBaseURL
+            )
+            let prefetchChunks = max(24, min(360, Int(appState.turboPrefetchSeconds * 1.2)))
+            let redirectCallback: (@Sendable (URL) -> Void)? = enableRedirectCache
+                ? Self.makeRedirectStoreHandler(key: redirectKey)
+                : nil
             preparedTurboHandle = TurboStreamByteHandle(
                 assetKey: assetKey,
                 streamURL: currentResource.streamURL,
@@ -1693,7 +1707,8 @@ public struct PlayerView: View {
                 store: store,
                 knownTotalSize: currentResource.mediaSource.size,
                 connectionBudget: budget,
-                prefetchAheadChunks: max(12, Int(appState.turboPrefetchSeconds * 0.6))
+                prefetchAheadChunks: prefetchChunks,
+                onResolvedRedirectURL: redirectCallback
             )
         } else {
             preparedTurboHandle = nil
@@ -1726,6 +1741,9 @@ public struct PlayerView: View {
                 dk_player_set_custom_io(handle, opaque, dkTurboReadCB, dkTurboSeekCB, dkTurboAbortCB, dkTurboCloseCB)
             }
             let ret = dk_player_open(handle, urlStr, headersStr, startSeconds, hwDecode)
+            if ret == 0 {
+                preparedTurboHandle?.markInitialOpenCompleted()
+            }
             openBox.clear()
             let addr = UInt(bitPattern: handle)
 
@@ -1879,8 +1897,21 @@ public struct PlayerView: View {
         }
     }
 
+    private nonisolated static func makeRedirectStoreHandler(key: String) -> @Sendable (URL) -> Void {
+        { finalURL in
+            Task {
+                await RedirectCacheStore.shared.storeRedirect(finalURL, for: key)
+            }
+        }
+    }
+
     private func stopNativeKernel() {
         activePlaybackGeneration &+= 1
+        let activeHandle = playerHandle
+        self.playerHandle = nil
+        if let activeHandle {
+            dk_player_request_abort(activeHandle)
+        }
         openingBox?.abort()
         openingBox = nil
         activeTurboHandle?.abort()
@@ -1891,9 +1922,7 @@ public struct PlayerView: View {
         displayDownloadSpeedMBs = 0.0
         bufferedAheadSeconds = 0
         skipBannerLabel = nil
-        guard let handle = playerHandle else { return }
-        self.playerHandle = nil
-        dk_player_request_abort(handle)
+        guard let handle = activeHandle else { return }
         Task.detached(priority: .userInitiated) {
             dk_player_close(handle)
             dk_player_destroy(handle)
@@ -2047,7 +2076,7 @@ public struct PlayerView: View {
     }
 
     private func exportRedactedDiagnostics() {
-        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.26"
+        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.27"
         var lines: [String] = []
         lines.append("Donby Diagnostics Report (v\(appVer))")
         lines.append("Time: \(ISO8601DateFormatter().string(from: Date()))")
@@ -2446,7 +2475,8 @@ public struct PlayerView: View {
                         preferredPreset: preset,
                         audioStreamIndex: audioIdx,
                         subtitleStreamIndex: nil,
-                        enable302Cache: enable302
+                        enable302Cache: enable302,
+                        defer302ProbeWhenTurbo: appState.turboEnabled
                     )
                 }
                 guard !Task.isCancelled else { return }

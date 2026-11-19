@@ -543,21 +543,41 @@ private struct UHDSpeedTestSessionDTO: Decodable {
     }
 }
 
+private actor UHDResolvedDomainCache {
+    static let shared = UHDResolvedDomainCache()
+    private var entries: [String: (url: URL, expiresAt: Date)] = [:]
+
+    func get(serverId: UUID, domainId: String) -> URL? {
+        let key = "\(serverId.uuidString)|\(domainId)"
+        if let hit = entries[key], hit.expiresAt > Date() {
+            return hit.url
+        }
+        entries.removeValue(forKey: key)
+        return nil
+    }
+
+    func set(_ url: URL, serverId: UUID, domainId: String, ttlSeconds: TimeInterval = 60) {
+        let key = "\(serverId.uuidString)|\(domainId)"
+        entries[key] = (url: url, expiresAt: Date().addingTimeInterval(ttlSeconds))
+    }
+
+    func invalidate(serverId: UUID) {
+        let prefix = "\(serverId.uuidString)|"
+        entries = entries.filter { !$0.key.hasPrefix(prefix) }
+    }
+}
+
 public final class UHDStreamClient: Sendable {
     public static let shared = UHDStreamClient()
 
     private let apiSession: URLSession
 
     private init() {
-        let cfg = URLSessionConfiguration.default
-        cfg.httpMaximumConnectionsPerHost = 12
-        cfg.timeoutIntervalForRequest = 15
-        cfg.timeoutIntervalForResource = 45
-        self.apiSession = URLSession(configuration: cfg)
+        self.apiSession = TurboStreamingSessionHub.shared.sharedURLSession
     }
 
     public var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.26"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.27"
     }
 
     private func normalizedAPIBase(_ raw: String) -> String {
@@ -761,7 +781,12 @@ public final class UHDStreamClient: Sendable {
         guard let url = URL(string: clean) else {
             throw EmbyClientError.invalidServerURL(dto.domain)
         }
+        await UHDResolvedDomainCache.shared.set(url, serverId: server.id, domainId: domainId)
         return url
+    }
+
+    public func invalidateResolvedDomainCache(serverId: UUID) async {
+        await UHDResolvedDomainCache.shared.invalidate(serverId: serverId)
     }
 
     public func pingLine(server: EmbyServerConfig, line: ServerLineInfo?) async -> Int? {
@@ -1151,27 +1176,50 @@ public final class UHDStreamClient: Sendable {
             token: server.accessToken,
             timeout: 15
         )
-        let assets = try await performRequest(UHDAssetResponseDTO.self, request: assetReq, priority: .playback)
+
+        // Resolve parent domainId locally if already known so /assets and /resolve run concurrently.
+        let knownDomainId: String? = {
+            if let selectedId = server.selectedLineId,
+               let line = server.backupLines.first(where: { $0.id == selectedId }),
+               let id = line.domainId, !id.isEmpty {
+                return id
+            }
+            if let firstDomain = server.backupLines.first(where: { $0.domainId?.isEmpty == false })?.domainId {
+                return firstDomain
+            }
+            return nil
+        }()
+
+        async let assetsTask = performRequest(UHDAssetResponseDTO.self, request: assetReq, priority: .playback)
+        async let knownDomainURLTask: URL? = {
+            guard let knownDomainId else { return nil }
+            if let cached = await UHDResolvedDomainCache.shared.get(serverId: server.id, domainId: knownDomainId) {
+                return cached
+            }
+            return try? await resolvePlaybackDomain(server: server, domainId: knownDomainId)
+        }()
+
+        let assets = try await assetsTask
         guard !assets.videos.isEmpty else {
             throw EmbyClientError.noPlayableStream
         }
 
-        // Resolve fresh domain URL from parent domain ID per UHD OpenAPI requirement
-        let domainId: String
-        if let selectedId = server.selectedLineId,
-           let line = server.backupLines.first(where: { $0.id == selectedId }),
-           let id = line.domainId, !id.isEmpty {
-            domainId = id
-        } else if let firstDomain = server.backupLines.first(where: { $0.domainId?.isEmpty == false })?.domainId {
-            domainId = firstDomain
+        let resolvedBase: String
+        if let resolved = await knownDomainURLTask {
+            resolvedBase = resolved.absoluteString
         } else {
-            let fetched = try await fetchPlaybackDomains(server: server)
-            guard let first = fetched.first?.domainId, !first.isEmpty else {
-                throw EmbyClientError.noPlayableStream
+            let domainId: String
+            if let knownDomainId {
+                domainId = knownDomainId
+            } else {
+                let fetched = try await fetchPlaybackDomains(server: server)
+                guard let first = fetched.first?.domainId, !first.isEmpty else {
+                    throw EmbyClientError.noPlayableStream
+                }
+                domainId = first
             }
-            domainId = first
+            resolvedBase = try await resolvePlaybackDomain(server: server, domainId: domainId).absoluteString
         }
-        let resolvedBase = try await resolvePlaybackDomain(server: server, domainId: domainId).absoluteString
 
         let mediaSources = assets.videos.map { mapVideoAsset($0, resolvedBase: resolvedBase) }
         let selectedVideoDTO: UHDVideoAssetDTO
@@ -1207,7 +1255,10 @@ public final class UHDStreamClient: Sendable {
             )
         }
 
-        let headers = server.accessToken.isEmpty ? [:] : ["Authorization": server.accessToken]
+        var headers = ["User-Agent": "Donby/\(appVersion) (macOS; UHDNow Client)"]
+        if !server.accessToken.isEmpty {
+            headers["Authorization"] = server.accessToken
+        }
         return ResolvedPlaybackResource(
             streamURL: streamURL,
             downloadURL: downloadURL,

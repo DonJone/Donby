@@ -1474,6 +1474,16 @@ static void dk_apply_style_to_ass_track_locked(DKPlayer* player, ASS_Track* trac
 
 static void dk_ensure_ass_track_header_for(DKPlayer* player, ASS_Track* track, bool is_secondary) {
     if (!player || !player->ass_lib || !track) return;
+    if (is_secondary && !player->secondary_ass_renderer) {
+        player->secondary_ass_renderer = ass_renderer_init(player->ass_lib);
+        if (player->secondary_ass_renderer) {
+            ass_set_fonts(player->secondary_ass_renderer, nullptr, "PingFang SC", 1, nullptr, 1);
+            if (player->ass_canvas_w > 0 && player->ass_canvas_h > 0) {
+                ass_set_frame_size(player->secondary_ass_renderer, player->ass_canvas_w, player->ass_canvas_h);
+                ass_set_storage_size(player->secondary_ass_renderer, player->ass_canvas_w, player->ass_canvas_h);
+            }
+        }
+    }
     if (track->event_format != nullptr) {
         dk_apply_style_to_ass_track_locked(player, track, is_secondary);
         return;
@@ -2062,10 +2072,6 @@ DKPlayer* dk_player_create(void) {
         if (player->ass_renderer) {
             ass_set_fonts(player->ass_renderer, nullptr, "PingFang SC", 1, nullptr, 1);
         }
-        player->secondary_ass_renderer = ass_renderer_init(player->ass_lib);
-        if (player->secondary_ass_renderer) {
-            ass_set_fonts(player->secondary_ass_renderer, nullptr, "PingFang SC", 1, nullptr, 1);
-        }
     }
     {
         std::lock_guard<std::mutex> lk(dk_registry_mutex());
@@ -2289,9 +2295,16 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
     }
 
     AVDictionary* opts = nullptr;
+    const bool has_start_seek = (start_sec > 0.5);
+    const bool is_mpeg_ts = (normalized_url.find(".ts") != std::string::npos ||
+                             normalized_url.find(".m2ts") != std::string::npos);
+    const char* probe_bytes = is_mpeg_ts ? "4194304" : (has_start_seek ? "1048576" : "2097152");
+    const char* analyze_us = is_mpeg_ts ? "2000000" : (has_start_seek ? "800000" : "1200000");
+
     if (is_local_file || use_custom_io) {
-        av_dict_set(&opts, "probesize", "10485760", 0);
-        av_dict_set(&opts, "analyzeduration", "5000000", 0);
+        av_dict_set(&opts, "probesize", probe_bytes, 0);
+        av_dict_set(&opts, "analyzeduration", analyze_us, 0);
+        av_dict_set(&opts, "fpsprobesize", "4", 0);
         av_dict_set(&opts, "buffer_size", "2097152", 0);
     } else {
         av_dict_set(&opts, "reconnect", "1", 0);
@@ -2302,8 +2315,9 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
         av_dict_set(&opts, "multiple_requests", "1", 0);
         av_dict_set(&opts, "rw_timeout", "10000000", 0);
         av_dict_set(&opts, "timeout", "10000000", 0);
-        av_dict_set(&opts, "probesize", "10485760", 0);
-        av_dict_set(&opts, "analyzeduration", "5000000", 0);
+        av_dict_set(&opts, "probesize", probe_bytes, 0);
+        av_dict_set(&opts, "analyzeduration", analyze_us, 0);
+        av_dict_set(&opts, "fpsprobesize", "4", 0);
         av_dict_set(&opts, "tcp_nodelay", "1", 0);
         av_dict_set(&opts, "buffer_size", "2097152", 0);
         if (headers_crlf && std::strlen(headers_crlf) > 0) {
@@ -2352,6 +2366,7 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
         &opts
     );
     av_dict_free(&opts);
+    auto after_open_input = std::chrono::steady_clock::now();
     if (open_ret < 0 || player->abort_requested.load(std::memory_order_seq_cst) || player->external_abort_requested.load(std::memory_order_seq_cst)) {
         char errbuf[256];
         av_strerror(open_ret, errbuf, sizeof(errbuf));
@@ -2375,6 +2390,19 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
         return -1;
     }
 
+    // Bound FPS probing and discard font attachments/data streams before find_stream_info
+    // so MKV font attachments never force exhausting the full analyzeduration window.
+    player->format_ctx->fps_probe_size = 4;
+    player->format_ctx->max_probe_packets = 600;
+    for (unsigned int i = 0; i < player->format_ctx->nb_streams; i++) {
+        AVStream* st = player->format_ctx->streams[i];
+        if (st && st->codecpar &&
+            (st->codecpar->codec_type == AVMEDIA_TYPE_ATTACHMENT ||
+             st->codecpar->codec_type == AVMEDIA_TYPE_DATA)) {
+            st->discard = AVDISCARD_ALL;
+        }
+    }
+
     if (avformat_find_stream_info(player->format_ctx, nullptr) < 0 ||
         player->abort_requested.load(std::memory_order_seq_cst) ||
         player->external_abort_requested.load(std::memory_order_seq_cst)) {
@@ -2392,8 +2420,12 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
         return -1;
     }
 
-    auto open_elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
-    dk_log(0, "DKEngine: Stream connected and parsed in %.1fms (nb_streams=%u)", open_elapsed, player->format_ctx->nb_streams);
+    auto after_find_stream = std::chrono::steady_clock::now();
+    auto open_input_ms = std::chrono::duration<double, std::milli>(after_open_input - start_time).count();
+    auto find_stream_ms = std::chrono::duration<double, std::milli>(after_find_stream - after_open_input).count();
+    auto open_elapsed = std::chrono::duration<double, std::milli>(after_find_stream - start_time).count();
+    dk_log(0, "DKEngine: Stream connected and parsed in %.1fms (open_input=%.1fms, find_stream=%.1fms, nb_streams=%u)",
+           open_elapsed, open_input_ms, find_stream_ms, player->format_ctx->nb_streams);
 
     if (player->format_ctx->duration > 0) {
         player->duration_sec = static_cast<double>(player->format_ctx->duration) / AV_TIME_BASE;
