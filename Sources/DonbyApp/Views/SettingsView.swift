@@ -578,7 +578,7 @@ public struct SettingsView: View {
                     Text("Donby")
                         .font(.system(size: 20, weight: .heavy, design: .rounded))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    let currentVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.24"
+                    let currentVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.25"
                     Text("版本 \(currentVer) (Build 2026.11) · macOS Apple Silicon")
                         .font(.system(size: 12))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
@@ -860,15 +860,15 @@ public struct SettingsView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }
-        case .readyToInstall(let release, let dmgURL, let canSelfReplace):
+        case .readyToInstall(let release, let packageURL, let canSelfReplace):
             HStack(spacing: 10) {
                 Image(systemName: "checkmark.shield.fill")
                     .foregroundStyle(.green)
-                Text(canSelfReplace ? "v\(release.version) 安装包已就绪" : "已打开 v\(release.version) DMG，请拖入「应用程序」完成覆盖")
+                Text(canSelfReplace ? "v\(release.version) 安装包已就绪" : "已解压 v\(release.version) 更新包，请拖入「应用程序」完成替换")
                     .font(.system(size: 12, weight: .medium))
                 Spacer()
-                Button(canSelfReplace ? "立即安装并重启" : "再次打开 DMG") {
-                    updater.installReadyUpdate(release: release, dmgURL: dmgURL)
+                Button(canSelfReplace ? "立即安装并重启" : "在访达中查看") {
+                    updater.installReadyUpdate(release: release, packageURL: packageURL)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
@@ -876,7 +876,7 @@ public struct SettingsView: View {
         case .installing:
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text("正在挂载并替换更新包，即将重启 Donby...")
+                Text("正在解压并替换更新包，即将重启 Donby...")
                     .font(.system(size: 12))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }

@@ -11,7 +11,7 @@ public enum AppUpdateState: Equatable, Sendable {
     case available(AppReleaseInfo)
     case downloading(release: AppReleaseInfo, progress: Double, downloadedBytes: Int64, totalBytes: Int64)
     case verifying(release: AppReleaseInfo)
-    case readyToInstall(release: AppReleaseInfo, dmgURL: URL, canSelfReplace: Bool)
+    case readyToInstall(release: AppReleaseInfo, packageURL: URL, canSelfReplace: Bool)
     case installing(release: AppReleaseInfo)
     case error(message: String)
 }
@@ -20,6 +20,7 @@ public enum AppUpdateState: Equatable, Sendable {
 public final class AppUpdateManager: ObservableObject {
     public static let shared = AppUpdateManager()
     public static let githubLatestReleaseAPI = URL(string: "https://api.github.com/repos/DonJone/Donby/releases/latest")!
+    public static let githubStaticManifestURL = URL(string: "https://github.com/DonJone/Donby/releases/latest/download/latest.json")!
     public static let githubReleasesPageURL = URL(string: "https://github.com/DonJone/Donby/releases")!
 
     @Published public private(set) var state: AppUpdateState = .idle
@@ -36,7 +37,7 @@ public final class AppUpdateManager: ObservableObject {
     private init() {}
 
     public static var currentVersion: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.3.24"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.3.25"
     }
 
     public var lastCheckedDate: Date? {
@@ -66,35 +67,12 @@ public final class AppUpdateManager: ObservableObject {
         }
 
         do {
-            var req = URLRequest(url: Self.githubLatestReleaseAPI, timeoutInterval: 12)
-            req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-            req.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
-            req.setValue("Donby/\(Self.currentVersion)", forHTTPHeaderField: "User-Agent")
-
-            let (data, response) = try await URLSession.shared.data(for: req)
-            guard let http = response as? HTTPURLResponse else {
-                throw URLError(.badServerResponse)
-            }
-            if http.statusCode == 404 {
+            guard let release = try await fetchLatestReleaseInfo() else {
                 lastCheckTimestamp = Date().timeIntervalSince1970
                 availableRelease = nil
                 state = .upToDate(currentVersion: Self.currentVersion)
                 return
             }
-            guard (200...299).contains(http.statusCode) else {
-                throw NSError(domain: "DonbyUpdater", code: http.statusCode, userInfo: [
-                    NSLocalizedDescriptionKey: "GitHub 接口返回状态码 \(http.statusCode)"
-                ])
-            }
-
-            let preferredArch: String = {
-                #if arch(arm64)
-                return "arm64"
-                #else
-                return "x86_64"
-                #endif
-            }()
-            let release = try AppVersionComparator.parseGitHubLatestRelease(data: data, preferredArch: preferredArch)
             lastCheckTimestamp = Date().timeIntervalSince1970
 
             if AppVersionComparator.isVersion(release.version, newerThan: Self.currentVersion) {
@@ -119,6 +97,49 @@ public final class AppUpdateManager: ObservableObject {
         }
     }
 
+    private func fetchLatestReleaseInfo() async throws -> AppReleaseInfo? {
+        let preferredArch: String = {
+            #if arch(arm64)
+            return "arm64"
+            #else
+            return "x86_64"
+            #endif
+        }()
+
+        var req = URLRequest(url: Self.githubLatestReleaseAPI, timeoutInterval: 10)
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        req.setValue("Donby/\(Self.currentVersion)", forHTTPHeaderField: "User-Agent")
+
+        if let (data, response) = try? await URLSession.shared.data(for: req),
+           let http = response as? HTTPURLResponse {
+            if http.statusCode == 404 {
+                return nil
+            }
+            if (200...299).contains(http.statusCode),
+               let parsed = try? AppVersionComparator.parseGitHubLatestRelease(data: data, preferredArch: preferredArch) {
+                return parsed
+            }
+        }
+
+        // Static release manifest fallback avoids REST API rate limits (403/429) and transient API issues
+        var staticReq = URLRequest(url: Self.githubStaticManifestURL, timeoutInterval: 12)
+        staticReq.setValue("Donby/\(Self.currentVersion)", forHTTPHeaderField: "User-Agent")
+        let (manifestData, manifestResp) = try await URLSession.shared.data(for: staticReq)
+        guard let http = manifestResp as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+        if http.statusCode == 404 {
+            return nil
+        }
+        guard (200...299).contains(http.statusCode) else {
+            throw NSError(domain: "DonbyUpdater", code: http.statusCode, userInfo: [
+                NSLocalizedDescriptionKey: "GitHub 更新源返回状态码 \(http.statusCode)"
+            ])
+        }
+        return try AppVersionComparator.parseStaticManifestJSON(data: manifestData)
+    }
+
     public func skipVersion(_ release: AppReleaseInfo) {
         skippedVersion = release.version
         showUpdatePromptSheet = false
@@ -140,13 +161,13 @@ public final class AppUpdateManager: ObservableObject {
 
     public func startDownloadAndInstall(_ release: AppReleaseInfo) {
         guard !isBusy || matchesDownloading(release) == false else { return }
-        guard let dmgAsset = release.dmgAsset else {
+        guard let asset = release.preferredUpdateAsset else {
             NSWorkspace.shared.open(release.htmlURL)
             return
         }
 
         activeDownloadTask?.cancel()
-        state = .downloading(release: release, progress: 0, downloadedBytes: 0, totalBytes: dmgAsset.size)
+        state = .downloading(release: release, progress: 0, downloadedBytes: 0, totalBytes: asset.size)
 
         activeDownloadTask = Task { [weak self] in
             guard let self else { return }
@@ -157,18 +178,18 @@ public final class AppUpdateManager: ObservableObject {
                     ?? URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("DonbyUpdates/\(release.tagName)", isDirectory: true)
 
                 try FileManager.default.createDirectory(at: updatesDir, withIntermediateDirectories: true)
-                let destDMG = updatesDir.appendingPathComponent(dmgAsset.name)
+                let destPackage = updatesDir.appendingPathComponent(asset.name)
 
-                if !Self.verifyExistingCachedDMG(destDMG, expectedSize: dmgAsset.size) {
-                    try? FileManager.default.removeItem(at: destDMG)
+                if !Self.verifyExistingCachedPackage(destPackage, expectedSize: asset.size) {
+                    try? FileManager.default.removeItem(at: destPackage)
                     try await Self.downloadFileStreaming(
-                        from: dmgAsset.browserDownloadURL,
-                        to: destDMG,
-                        expectedSize: dmgAsset.size
+                        from: asset.browserDownloadURL,
+                        to: destPackage,
+                        expectedSize: asset.size
                     ) { downloaded, total in
                         Task { @MainActor in
                             guard case .downloading = self.state else { return }
-                            let denom = max(1, total > 0 ? total : dmgAsset.size)
+                            let denom = max(1, total > 0 ? total : asset.size)
                             let frac = min(1.0, max(0.0, Double(downloaded) / Double(denom)))
                             self.state = .downloading(release: release, progress: frac, downloadedBytes: downloaded, totalBytes: denom)
                         }
@@ -178,23 +199,25 @@ public final class AppUpdateManager: ObservableObject {
                 guard !Task.isCancelled else { return }
                 state = .verifying(release: release)
 
-                if let checksumAsset = release.checksumAsset {
+                var expectedSHA = asset.expectedSHA256
+                if expectedSHA == nil, let checksumAsset = release.checksumAsset {
                     let checksumText = try await Self.fetchChecksumText(from: checksumAsset.browserDownloadURL)
-                    if let expectedSHA = AppVersionComparator.parseSHA256Checksum(from: checksumText, matchingFileName: dmgAsset.name) {
-                        let actualSHA = try Self.computeFileSHA256(url: destDMG)
-                        guard actualSHA == expectedSHA else {
-                            try? FileManager.default.removeItem(at: destDMG)
-                            throw NSError(domain: "DonbyUpdater", code: -2, userInfo: [
-                                NSLocalizedDescriptionKey: "安装包 SHA-256 校验未通过，已自动删除损坏文件"
-                            ])
-                        }
+                    expectedSHA = AppVersionComparator.parseSHA256Checksum(from: checksumText, matchingFileName: asset.name)
+                }
+                if let expectedSHA {
+                    let actualSHA = try Self.computeFileSHA256(url: destPackage)
+                    guard actualSHA == expectedSHA else {
+                        try? FileManager.default.removeItem(at: destPackage)
+                        throw NSError(domain: "DonbyUpdater", code: -2, userInfo: [
+                            NSLocalizedDescriptionKey: "安装包 SHA-256 校验未通过，已自动删除损坏文件"
+                        ])
                     }
                 }
 
                 guard !Task.isCancelled else { return }
                 let writableApp = Self.currentWritableAppBundleURL()
-                state = .readyToInstall(release: release, dmgURL: destDMG, canSelfReplace: writableApp != nil)
-                installReadyUpdate(release: release, dmgURL: destDMG)
+                state = .readyToInstall(release: release, packageURL: destPackage, canSelfReplace: writableApp != nil)
+                installReadyUpdate(release: release, packageURL: destPackage)
             } catch is CancellationError {
                 self.cancelDownload()
             } catch {
@@ -204,44 +227,67 @@ public final class AppUpdateManager: ObservableObject {
         }
     }
 
-    public func installReadyUpdate(release: AppReleaseInfo, dmgURL: URL) {
-        guard FileManager.default.fileExists(atPath: dmgURL.path) else {
+    public func installReadyUpdate(release: AppReleaseInfo, packageURL: URL) {
+        guard FileManager.default.fileExists(atPath: packageURL.path) else {
             state = .error(message: "未找到已下载的安装包，请重新检查下载")
             return
         }
 
+        let isZipPackage = packageURL.pathExtension.lowercased() == "zip"
+
         guard let targetAppURL = Self.currentWritableAppBundleURL() else {
-            NSWorkspace.shared.open(dmgURL)
-            state = .readyToInstall(release: release, dmgURL: dmgURL, canSelfReplace: false)
+            if isZipPackage {
+                let stageDir = packageURL.deletingLastPathComponent().appendingPathComponent("extracted", isDirectory: true)
+                if let extractedApp = try? Self.extractAppBundleWithDitto(zipURL: packageURL, into: stageDir) {
+                    NSWorkspace.shared.activateFileViewerSelecting([extractedApp])
+                } else {
+                    NSWorkspace.shared.activateFileViewerSelecting([packageURL])
+                }
+            } else {
+                NSWorkspace.shared.open(packageURL)
+            }
+            state = .readyToInstall(release: release, packageURL: packageURL, canSelfReplace: false)
             return
         }
 
         state = .installing(release: release)
         Task.detached(priority: .userInitiated) {
             do {
-                let mountPoint = try Self.attachDMGReadOnly(dmgURL: dmgURL)
-                let mountedApp = mountPoint.appendingPathComponent("Donby.app", isDirectory: true)
-                guard FileManager.default.fileExists(atPath: mountedApp.path) else {
-                    Self.detachDMG(mountPoint: mountPoint)
-                    throw NSError(domain: "DonbyUpdater", code: -3, userInfo: [
-                        NSLocalizedDescriptionKey: "DMG 镜像中未找到 Donby.app"
-                    ])
+                if isZipPackage {
+                    let stageDir = packageURL.deletingLastPathComponent().appendingPathComponent("extracted", isDirectory: true)
+                    let extractedApp = try Self.extractAppBundleWithDitto(zipURL: packageURL, into: stageDir)
+                    try Self.spawnDetachedAppReplacer(
+                        sourceAppURL: extractedApp,
+                        mountPointToDetach: nil,
+                        targetAppURL: targetAppURL,
+                        packageURL: packageURL,
+                        cleanupDirURL: stageDir
+                    )
+                } else {
+                    let mountPoint = try Self.attachDMGReadOnly(dmgURL: packageURL)
+                    let mountedApp = mountPoint.appendingPathComponent("Donby.app", isDirectory: true)
+                    guard FileManager.default.fileExists(atPath: mountedApp.path) else {
+                        Self.detachDMG(mountPoint: mountPoint)
+                        throw NSError(domain: "DonbyUpdater", code: -3, userInfo: [
+                            NSLocalizedDescriptionKey: "DMG 镜像中未找到 Donby.app"
+                        ])
+                    }
+                    try Self.spawnDetachedAppReplacer(
+                        sourceAppURL: mountedApp,
+                        mountPointToDetach: mountPoint,
+                        targetAppURL: targetAppURL,
+                        packageURL: packageURL,
+                        cleanupDirURL: nil
+                    )
                 }
-
-                try Self.spawnDetachedAppReplacer(
-                    mountedAppURL: mountedApp,
-                    mountPointURL: mountPoint,
-                    targetAppURL: targetAppURL,
-                    dmgURL: dmgURL
-                )
 
                 await MainActor.run {
                     NSApp.terminate(nil)
                 }
             } catch {
                 await MainActor.run {
-                    NSWorkspace.shared.open(dmgURL)
-                    self.state = .error(message: "自动覆盖失败，已打开 DMG 请手动拖入替换：\(error.localizedDescription)")
+                    NSWorkspace.shared.activateFileViewerSelecting([packageURL])
+                    self.state = .error(message: "自动更新失败，已定位安装包：\(error.localizedDescription)")
                 }
             }
         }
@@ -263,13 +309,47 @@ public final class AppUpdateManager: ObservableObject {
         return FileManager.default.isWritableFile(atPath: parentDir) ? bundleURL : nil
     }
 
-    nonisolated private static func verifyExistingCachedDMG(_ url: URL, expectedSize: Int64) -> Bool {
+    nonisolated private static func verifyExistingCachedPackage(_ url: URL, expectedSize: Int64) -> Bool {
         guard expectedSize > 0,
               let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let size = attrs[.size] as? NSNumber else {
             return false
         }
         return size.int64Value == expectedSize
+    }
+
+    nonisolated private static func extractAppBundleWithDitto(zipURL: URL, into stageDir: URL) throws -> URL {
+        let fm = FileManager.default
+        try? fm.removeItem(at: stageDir)
+        try fm.createDirectory(at: stageDir, withIntermediateDirectories: true)
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        proc.arguments = ["-x", "-k", zipURL.path, stageDir.path]
+        let errPipe = Pipe()
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = errPipe
+        try proc.run()
+        proc.waitUntilExit()
+
+        guard proc.terminationStatus == 0 else {
+            let errStr = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            throw NSError(domain: "DonbyUpdater", code: Int(proc.terminationStatus), userInfo: [
+                NSLocalizedDescriptionKey: errStr.isEmpty ? "解压 .app.zip 更新包失败" : errStr
+            ])
+        }
+
+        let candidateApp = stageDir.appendingPathComponent("Donby.app", isDirectory: true)
+        if fm.fileExists(atPath: candidateApp.appendingPathComponent("Contents/MacOS/Donby").path) {
+            return candidateApp
+        }
+        if let children = try? fm.contentsOfDirectory(at: stageDir, includingPropertiesForKeys: nil),
+           let firstApp = children.first(where: { $0.pathExtension.lowercased() == "app" }) {
+            return firstApp
+        }
+        throw NSError(domain: "DonbyUpdater", code: -5, userInfo: [
+            NSLocalizedDescriptionKey: "更新包解压后未包含 Donby.app"
+        ])
     }
 
     nonisolated private static func downloadFileStreaming(
@@ -441,25 +521,28 @@ public final class AppUpdateManager: ObservableObject {
     }
 
     nonisolated private static func spawnDetachedAppReplacer(
-        mountedAppURL: URL,
-        mountPointURL: URL,
+        sourceAppURL: URL,
+        mountPointToDetach: URL?,
         targetAppURL: URL,
-        dmgURL: URL
+        packageURL: URL,
+        cleanupDirURL: URL?
     ) throws {
         let pid = ProcessInfo.processInfo.processIdentifier
         let targetPath = targetAppURL.standardizedFileURL.path
         let backupPath = targetPath + ".update_backup"
-        let mountedAppPath = mountedAppURL.standardizedFileURL.path
-        let mountPath = mountPointURL.standardizedFileURL.path
-        let dmgPath = dmgURL.standardizedFileURL.path
+        let sourceAppPath = sourceAppURL.standardizedFileURL.path
+        let mountPath = mountPointToDetach?.standardizedFileURL.path ?? ""
+        let packagePath = packageURL.standardizedFileURL.path
+        let cleanupPath = cleanupDirURL?.standardizedFileURL.path ?? ""
 
         let script = """
         PID="$1"
-        MOUNTED_APP="$2"
+        SOURCE_APP="$2"
         TARGET_APP="$3"
         BACKUP_APP="$4"
         MOUNT_POINT="$5"
-        DMG_FILE="$6"
+        PACKAGE_FILE="$6"
+        CLEANUP_DIR="$7"
 
         i=0
         while kill -0 "$PID" 2>/dev/null && [ "$i" -lt 40 ]; do
@@ -471,24 +554,25 @@ public final class AppUpdateManager: ObservableObject {
         if [ -e "$TARGET_APP" ]; then
             mv "$TARGET_APP" "$BACKUP_APP" || exit 1
         fi
-        if ditto "$MOUNTED_APP" "$TARGET_APP"; then
+        if ditto "$SOURCE_APP" "$TARGET_APP"; then
             rm -rf "$BACKUP_APP"
             LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
             [ -x "$LSREG" ] && "$LSREG" -f "$TARGET_APP" >/dev/null 2>&1 || true
-            hdiutil detach "$MOUNT_POINT" -quiet >/dev/null 2>&1 || true
-            rm -f "$DMG_FILE" >/dev/null 2>&1 || true
+            [ -n "$MOUNT_POINT" ] && hdiutil detach "$MOUNT_POINT" -quiet >/dev/null 2>&1 || true
+            [ -n "$CLEANUP_DIR" ] && rm -rf "$CLEANUP_DIR" >/dev/null 2>&1 || true
+            rm -f "$PACKAGE_FILE" >/dev/null 2>&1 || true
             open -n "$TARGET_APP"
         else
             rm -rf "$TARGET_APP"
             [ -e "$BACKUP_APP" ] && mv "$BACKUP_APP" "$TARGET_APP"
-            hdiutil detach "$MOUNT_POINT" -quiet >/dev/null 2>&1 || true
+            [ -n "$MOUNT_POINT" ] && hdiutil detach "$MOUNT_POINT" -quiet >/dev/null 2>&1 || true
             open "$TARGET_APP"
         fi
         """
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/sh")
-        proc.arguments = ["-c", script, "donby-updater", "\(pid)", mountedAppPath, targetPath, backupPath, mountPath, dmgPath]
+        proc.arguments = ["-c", script, "donby-updater", "\(pid)", sourceAppPath, targetPath, backupPath, mountPath, packagePath, cleanupPath]
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
         try proc.run()

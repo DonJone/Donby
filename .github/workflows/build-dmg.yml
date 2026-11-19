@@ -89,6 +89,8 @@ jobs:
           name: Donby-${{ steps.meta.outputs.version }}-macOS-arm64
           path: |
             dist/*.dmg
+            dist/*.app.zip
+            dist/latest.json
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
@@ -99,6 +101,8 @@ jobs:
         with:
           files: |
             dist/*.dmg
+            dist/*.app.zip
+            dist/latest.json
             dist/SHA256SUMS.txt
           generate_release_notes: true
           body: |

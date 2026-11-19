@@ -3,12 +3,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-VERSION="${DONBY_VERSION:-1.3.24}"
+VERSION="${DONBY_VERSION:-1.3.25}"
 ARCH="$(uname -m)"
 APP_NAME="Donby"
 DIST_DIR="dist"
 DMG_NAME="${APP_NAME}-${VERSION}-macOS-${ARCH}.dmg"
 DMG_PATH="${DIST_DIR}/${DMG_NAME}"
+ZIP_NAME="${APP_NAME}-${VERSION}-macOS-${ARCH}.app.zip"
+ZIP_PATH="${DIST_DIR}/${ZIP_NAME}"
 
 STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/donby-dmg.XXXXXX")"
 trap 'rm -rf "$STAGING_DIR"' EXIT
@@ -22,7 +24,12 @@ fi
 echo "==> [1/4] Building standalone ${APP_DIR} (v${VERSION}, ${ARCH})..."
 DONBY_VERSION="$VERSION" DONBY_APP_DIR="$APP_DIR" BUNDLE_DYLIBS=1 ./build_app.sh
 
-echo "==> [2/4] Preparing DMG staging folder..."
+echo "==> [2/4] Preparing .app.zip & DMG staging folder..."
+mkdir -p "$DIST_DIR"
+rm -f "$ZIP_PATH"
+ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$ZIP_PATH"
+unzip -tq "$ZIP_PATH" >/dev/null
+
 if [ "$APP_DIR" != "${STAGING_DIR}/${APP_NAME}.app" ]; then
     cp -R "$APP_DIR" "${STAGING_DIR}/${APP_NAME}.app"
 fi
@@ -60,7 +67,7 @@ until hdiutil create \
     sleep 2
 done
 
-echo "==> [4/4] Verifying DMG & generating SHA256 checksum..."
+echo "==> [4/4] Verifying DMG & generating SHA256/latest.json..."
 sync
 sleep 2
 verify_attempt=1
@@ -75,9 +82,41 @@ until hdiutil verify "$DMG_PATH" >/dev/null; do
 done
 (
     cd "$DIST_DIR"
-    shasum -a 256 "$DMG_NAME" > SHA256SUMS.txt
+    shasum -a 256 "$DMG_NAME" "$ZIP_NAME" > SHA256SUMS.txt
 )
 
-echo "==> Successfully packaged DMG:"
-ls -lh "$DMG_PATH" "${DIST_DIR}/SHA256SUMS.txt"
+python3 - "$VERSION" "$ARCH" "$DMG_PATH" "$ZIP_PATH" "$DIST_DIR/latest.json" <<'PY'
+import hashlib, json, os, sys
+from datetime import datetime, timezone
+
+version, arch, dmg_path, zip_path, out_path = sys.argv[1:6]
+
+def file_info(p):
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        while chunk := f.read(262144):
+            h.update(chunk)
+    return h.hexdigest(), os.path.getsize(p)
+
+dmg_sha, dmg_size = file_info(dmg_path)
+zip_sha, zip_size = file_info(zip_path)
+manifest = {
+    "version": version,
+    "tag_name": f"v{version}",
+    "published_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "arch": arch,
+    "dmg_name": os.path.basename(dmg_path),
+    "dmg_sha256": dmg_sha,
+    "dmg_size": dmg_size,
+    "zip_name": os.path.basename(zip_path),
+    "zip_sha256": zip_sha,
+    "zip_size": zip_size,
+}
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(manifest, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+PY
+
+echo "==> Successfully packaged DMG & .app.zip:"
+ls -lh "$DMG_PATH" "$ZIP_PATH" "${DIST_DIR}/SHA256SUMS.txt" "${DIST_DIR}/latest.json"
 cat "${DIST_DIR}/SHA256SUMS.txt"

@@ -4,11 +4,13 @@ public struct AppReleaseAsset: Codable, Equatable, Sendable {
     public let name: String
     public let browserDownloadURL: URL
     public let size: Int64
+    public let expectedSHA256: String?
 
-    public init(name: String, browserDownloadURL: URL, size: Int64) {
+    public init(name: String, browserDownloadURL: URL, size: Int64, expectedSHA256: String? = nil) {
         self.name = name
         self.browserDownloadURL = browserDownloadURL
         self.size = size
+        self.expectedSHA256 = expectedSHA256
     }
 }
 
@@ -20,8 +22,13 @@ public struct AppReleaseInfo: Codable, Equatable, Identifiable, Sendable {
     public let body: String
     public let htmlURL: URL
     public let publishedAt: Date?
+    public let zipAsset: AppReleaseAsset?
     public let dmgAsset: AppReleaseAsset?
     public let checksumAsset: AppReleaseAsset?
+
+    public var preferredUpdateAsset: AppReleaseAsset? {
+        zipAsset ?? dmgAsset
+    }
 
     public init(
         tagName: String,
@@ -30,6 +37,7 @@ public struct AppReleaseInfo: Codable, Equatable, Identifiable, Sendable {
         body: String,
         htmlURL: URL,
         publishedAt: Date?,
+        zipAsset: AppReleaseAsset? = nil,
         dmgAsset: AppReleaseAsset?,
         checksumAsset: AppReleaseAsset?
     ) {
@@ -39,6 +47,7 @@ public struct AppReleaseInfo: Codable, Equatable, Identifiable, Sendable {
         self.body = body
         self.htmlURL = htmlURL
         self.publishedAt = publishedAt
+        self.zipAsset = zipAsset
         self.dmgAsset = dmgAsset
         self.checksumAsset = checksumAsset
     }
@@ -126,8 +135,16 @@ public enum AppVersionComparator {
             return AppReleaseAsset(name: asset.name, browserDownloadURL: url, size: max(0, asset.size ?? 0))
         }
 
-        let dmgCandidates = assets.filter { $0.name.lowercased().hasSuffix(".dmg") }
+        let zipCandidates = assets.filter {
+            let lower = $0.name.lowercased()
+            return lower.hasSuffix(".app.zip") || lower.hasSuffix(".zip")
+        }
         let archLower = preferredArch.lowercased()
+        let selectedZip = zipCandidates.first(where: { $0.name.lowercased().contains(archLower) && $0.name.lowercased().hasSuffix(".app.zip") })
+            ?? zipCandidates.first(where: { $0.name.lowercased().hasSuffix(".app.zip") })
+            ?? zipCandidates.first
+
+        let dmgCandidates = assets.filter { $0.name.lowercased().hasSuffix(".dmg") }
         let selectedDmg = dmgCandidates.first(where: { $0.name.lowercased().contains(archLower) })
             ?? dmgCandidates.first
 
@@ -138,15 +155,7 @@ public enum AppVersionComparator {
 
         var parsedDate: Date? = nil
         if let pub = dto.published_at {
-            let isoFrac = ISO8601DateFormatter()
-            isoFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            if let d = isoFrac.date(from: pub) {
-                parsedDate = d
-            } else {
-                let iso = ISO8601DateFormatter()
-                iso.formatOptions = [.withInternetDateTime]
-                parsedDate = iso.date(from: pub)
-            }
+            parsedDate = parseISO8601Date(pub)
         }
 
         let normalized = normalizeVersion(dto.tag_name)
@@ -161,9 +170,73 @@ public enum AppVersionComparator {
             body: (dto.body ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
             htmlURL: htmlURL,
             publishedAt: parsedDate,
+            zipAsset: selectedZip,
             dmgAsset: selectedDmg,
             checksumAsset: checksumAsset
         )
+    }
+
+    private struct StaticManifestDTO: Decodable {
+        let version: String
+        let tag_name: String
+        let published_at: String?
+        let dmg_name: String?
+        let dmg_sha256: String?
+        let dmg_size: Int64?
+        let zip_name: String?
+        let zip_sha256: String?
+        let zip_size: Int64?
+        let notes: String?
+    }
+
+    public static func parseStaticManifestJSON(
+        data: Data,
+        releaseBaseURL: URL = URL(string: "https://github.com/DonJone/Donby/releases")!
+    ) throws -> AppReleaseInfo {
+        guard let dto = try? JSONDecoder().decode(StaticManifestDTO.self, from: data) else {
+            throw AppUpdateParseError.invalidPayload
+        }
+        let norm = normalizeVersion(dto.version.isEmpty ? dto.tag_name : dto.version)
+        let tag = dto.tag_name.isEmpty ? "v\(norm)" : dto.tag_name
+        let downloadBase = releaseBaseURL.appendingPathComponent("download").appendingPathComponent(tag)
+        let htmlURL = releaseBaseURL.appendingPathComponent("tag").appendingPathComponent(tag)
+
+        let zipAsset: AppReleaseAsset? = dto.zip_name.flatMap { name in
+            AppReleaseAsset(
+                name: name,
+                browserDownloadURL: downloadBase.appendingPathComponent(name),
+                size: max(0, dto.zip_size ?? 0),
+                expectedSHA256: dto.zip_sha256
+            )
+        }
+        let dmgAsset: AppReleaseAsset? = dto.dmg_name.flatMap { name in
+            AppReleaseAsset(
+                name: name,
+                browserDownloadURL: downloadBase.appendingPathComponent(name),
+                size: max(0, dto.dmg_size ?? 0),
+                expectedSHA256: dto.dmg_sha256
+            )
+        }
+        return AppReleaseInfo(
+            tagName: tag,
+            version: norm,
+            name: "v\(norm)",
+            body: (dto.notes ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+            htmlURL: htmlURL,
+            publishedAt: dto.published_at.flatMap { parseISO8601Date($0) },
+            zipAsset: zipAsset,
+            dmgAsset: dmgAsset,
+            checksumAsset: nil
+        )
+    }
+
+    private static func parseISO8601Date(_ raw: String) -> Date? {
+        let isoFrac = ISO8601DateFormatter()
+        isoFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = isoFrac.date(from: raw) { return d }
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime]
+        return iso.date(from: raw)
     }
 
     public static func parseSHA256Checksum(from content: String, matchingFileName fileName: String) -> String? {
