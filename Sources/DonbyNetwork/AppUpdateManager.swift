@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import AppKit
 import SwiftUI
 import CryptoKit
@@ -33,11 +34,12 @@ public final class AppUpdateManager: ObservableObject {
 
     private var activeDownloadTask: Task<Void, Never>? = nil
     private var didAutoCheckThisSession: Bool = false
+    public var onBeforeTerminationForUpdate: (@MainActor () -> Void)? = nil
 
     private init() {}
 
     public static var currentVersion: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.3.25"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.3.26"
     }
 
     public var lastCheckedDate: Date? {
@@ -282,7 +284,7 @@ public final class AppUpdateManager: ObservableObject {
                 }
 
                 await MainActor.run {
-                    NSApp.terminate(nil)
+                    self.performGracefulExitForUpdate()
                 }
             } catch {
                 await MainActor.run {
@@ -290,6 +292,30 @@ public final class AppUpdateManager: ObservableObject {
                     self.state = .error(message: "自动更新失败，已定位安装包：\(error.localizedDescription)")
                 }
             }
+        }
+    }
+
+    private func performGracefulExitForUpdate() {
+        showUpdatePromptSheet = false
+        onBeforeTerminationForUpdate?()
+        for win in NSApp.windows {
+            if let sheet = win.attachedSheet {
+                win.endSheet(sheet)
+            }
+            for child in win.sheets {
+                win.endSheet(child)
+            }
+        }
+        NSApp.stopModal()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            for win in NSApp.windows {
+                win.orderOut(nil)
+            }
+            NSApp.terminate(nil)
+        }
+        // AppKit may still delay or veto terminate when sheets were closing; guarantee process exit before relaunch
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.80) {
+            Darwin.exit(0)
         }
     }
 
@@ -545,10 +571,18 @@ public final class AppUpdateManager: ObservableObject {
         CLEANUP_DIR="$7"
 
         i=0
-        while kill -0 "$PID" 2>/dev/null && [ "$i" -lt 40 ]; do
+        while kill -0 "$PID" 2>/dev/null && [ "$i" -lt 20 ]; do
             sleep 0.25
             i=$((i + 1))
         done
+        if kill -0 "$PID" 2>/dev/null; then
+            kill -TERM "$PID" >/dev/null 2>&1 || true
+            j=0
+            while kill -0 "$PID" 2>/dev/null && [ "$j" -lt 16 ]; do
+                sleep 0.25
+                j=$((j + 1))
+            done
+        fi
 
         rm -rf "$BACKUP_APP"
         if [ -e "$TARGET_APP" ]; then
@@ -561,7 +595,8 @@ public final class AppUpdateManager: ObservableObject {
             [ -n "$MOUNT_POINT" ] && hdiutil detach "$MOUNT_POINT" -quiet >/dev/null 2>&1 || true
             [ -n "$CLEANUP_DIR" ] && rm -rf "$CLEANUP_DIR" >/dev/null 2>&1 || true
             rm -f "$PACKAGE_FILE" >/dev/null 2>&1 || true
-            open -n "$TARGET_APP"
+            sleep 0.35
+            open "$TARGET_APP"
         else
             rm -rf "$TARGET_APP"
             [ -e "$BACKUP_APP" ] && mv "$BACKUP_APP" "$TARGET_APP"

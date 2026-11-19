@@ -340,6 +340,10 @@ public final class AppState: ObservableObject {
             await AppUpdateManager.shared.checkForUpdatesIfAutoEnabled()
         }
 
+        AppUpdateManager.shared.onBeforeTerminationForUpdate = { [weak self] in
+            self?.prepareForTermination()
+        }
+
         dk_set_log_callback { level, message in
             guard let message = message else { return }
             let msg = String(cString: message)

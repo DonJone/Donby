@@ -167,13 +167,23 @@ public enum AppVersionComparator {
             tagName: dto.tag_name,
             version: normalized,
             name: cleanTitle,
-            body: (dto.body ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+            body: cleanReleaseNotes(dto.body ?? ""),
             htmlURL: htmlURL,
             publishedAt: parsedDate,
             zipAsset: selectedZip,
             dmgAsset: selectedDmg,
             checksumAsset: checksumAsset
         )
+    }
+
+    public static func cleanReleaseNotes(_ raw: String) -> String {
+        var text = raw.replacingOccurrences(of: "\r\n", with: "\n")
+        if let markerRange = text.range(of: "\n### 安装说明") {
+            text = String(text[..<markerRange.lowerBound])
+        } else if text.hasPrefix("### 安装说明") {
+            text = ""
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private struct StaticManifestDTO: Decodable {
