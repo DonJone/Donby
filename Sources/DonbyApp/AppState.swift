@@ -15,6 +15,7 @@ public final class AppState: ObservableObject {
     @Published public var openedServerId: UUID? = nil
     @Published public var selectedLibrary: EmbyItem? = nil
     @Published public var detailStack: [EmbyItem] = []
+    @Published public var detailOfflineFocusIds: Set<String> = []
     @Published public var activePlayback: ActivePlaybackSession? = nil
     @Published public var isSidebarCollapsed: Bool = false
 
@@ -167,6 +168,7 @@ public final class AppState: ObservableObject {
     @AppStorage("donby.turboPrefetchSeconds") public var turboPrefetchSeconds: Double = 60.0
     @AppStorage("donby.autoSkipIntroOutro") public var autoSkipIntroOutro: Bool = false
     @AppStorage("donby.autoNextEpisode") public var autoNextEpisode: Bool = true
+    @AppStorage("donby.autoSaveFullCacheToOffline") public var autoSaveFullCacheToOffline: Bool = false
     @Published public var serverCapabilities: [UUID: ServerDeliveryCapabilities] = [:]
 
     public static var appleMusicRed: Color {
@@ -323,6 +325,12 @@ public final class AppState: ObservableObject {
             let maxBytes = Int64(max(128, turboDiskCacheMB)) * 1024 * 1024
             DonbyTurboCacheEngine.shared.enforceDiskBudget(maxDiskBytes: maxBytes)
             await DonbyDownloadManager.shared.migrateLegacyCompletedDownloads(servers: self.servers)
+        }
+
+        DonbyTurboCacheEngine.shared.setOnAssetFullyCached { meta in
+            Task { @MainActor in
+                AppState.sharedInstance?.handleFullyCachedAssetNotification(meta)
+            }
         }
 
         dk_set_log_callback { level, message in
@@ -898,6 +906,7 @@ public final class AppState: ObservableObject {
         openedServerId = server.id
         selectedLibrary = nil
         detailStack.removeAll()
+        detailOfflineFocusIds.removeAll()
         homeErrorMessage = nil
         inFlightSeriesNameTasks.removeAll()
 
@@ -927,6 +936,7 @@ public final class AppState: ObservableObject {
         openedServerId = nil
         selectedLibrary = nil
         detailStack.removeAll()
+        detailOfflineFocusIds.removeAll()
         selectedTab = tab
 
         if tab == .files {
@@ -1165,6 +1175,7 @@ public final class AppState: ObservableObject {
         openedServerId = server.id
         selectedLibrary = nil
         detailStack.removeAll()
+        detailOfflineFocusIds.removeAll()
 
         let syncedCount = server.autoSyncedLineCount
         if syncedCount > 0 {
@@ -1546,13 +1557,46 @@ public final class AppState: ObservableObject {
         }
     }
 
-    public func openDetail(for item: EmbyItem) {
+    public func openDetail(for item: EmbyItem, preferOfflineFocus: Bool = false) {
+        if preferOfflineFocus {
+            detailOfflineFocusIds.insert(item.id)
+        } else {
+            detailOfflineFocusIds.remove(item.id)
+        }
         if let last = detailStack.last, last.id == item.id { return }
         detailStack.append(item)
     }
 
     public func popDetail() {
-        if !detailStack.isEmpty { detailStack.removeLast() }
+        if let popped = detailStack.popLast() {
+            detailOfflineFocusIds.remove(popped.id)
+        }
+    }
+
+    public func isItemWatchedOfflineOrLocal(_ item: EmbyItem, localVideoPath: String? = nil) -> Bool {
+        if item.userData?.played == true { return true }
+        if item.progressFraction >= 0.90 { return true }
+
+        let matchingEntry = DonbyDownloadManager.shared.entry(forItemId: item.id)
+        if let dlSnapshot = matchingEntry?.itemSnapshot {
+            if dlSnapshot.userData?.played == true || dlSnapshot.progressFraction >= 0.90 {
+                return true
+            }
+        }
+
+        let resolvedLocalPath = localVideoPath ?? matchingEntry?.localVideoFilePath
+        if let record = watchHistory.first(where: { rec in
+            if rec.embyItemId == item.id { return true }
+            if let lp = resolvedLocalPath, !lp.isEmpty,
+               let recURL = rec.streamURLString {
+                let norm = recURL.hasPrefix("file://") ? (URL(string: recURL)?.path ?? recURL) : recURL
+                if norm == lp { return true }
+            }
+            return false
+        }) {
+            return record.progressRatio >= 0.90
+        }
+        return false
     }
 
     public func startPlayback(
@@ -1562,7 +1606,8 @@ public final class AppState: ObservableObject {
         audioStreamIndex: Int? = nil,
         subtitleStreamIndex: Int? = nil,
         subtitleExplicitlyOff: Bool = false,
-        fromBeginning: Bool = false
+        fromBeginning: Bool = false,
+        preferOffline: Bool = false
     ) async {
         let directOfflineMatch = DonbyDownloadManager.shared.completedEntry(
             for: item.id,
@@ -1607,10 +1652,18 @@ public final class AppState: ObservableObject {
                     .first(where: { $0.displayItem.id == item.id || $0.displayItem.name == item.name })
 
                 let eps: [EmbyItem]
-                if server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                if (preferOffline || server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty),
                    let offlineGroup = offlineLibraryGroup {
-                    let allOfflineEps = offlineGroup.episodesBySeason.keys.sorted().flatMap { offlineGroup.episodesBySeason[$0] ?? [] }
+                    let allOfflineEps = offlineGroup.episodesBySeason.keys.sorted().flatMap { seasonKey in
+                        (offlineGroup.episodesBySeason[seasonKey] ?? []).sorted {
+                            ($0.indexNumber ?? 0) < ($1.indexNumber ?? 0)
+                        }
+                    }
                     eps = allOfflineEps
+                    if !allOfflineEps.isEmpty {
+                        resolvedQueue = allOfflineEps
+                        targetItem = allOfflineEps.first(where: { !isItemWatchedOfflineOrLocal($0) }) ?? allOfflineEps[0]
+                    }
                 } else if server.type == .uhdNative {
                     let seasons = try await UHDStreamClient.shared.fetchSeasons(server: server, tvId: item.id)
                     let preferredSeason = seasons.first(where: { ($0.indexNumber ?? 1) > 0 }) ?? seasons.first
@@ -1632,8 +1685,10 @@ public final class AppState: ObservableObject {
                 if resolvedQueue.isEmpty && !eps.isEmpty {
                     resolvedQueue = eps
                 }
-                if let firstUnwatched = eps.first(where: { $0.userData?.played != true }) ?? eps.first {
-                    targetItem = firstUnwatched
+                if !preferOffline || targetItem.id == item.id {
+                    if let firstUnwatched = eps.first(where: { !isItemWatchedOfflineOrLocal($0) }) ?? eps.first {
+                        targetItem = firstUnwatched
+                    }
                 }
             }
 
@@ -1832,7 +1887,6 @@ public final class AppState: ObservableObject {
     }
 
     public func togglePlayed(for item: EmbyItem) async -> EmbyItem {
-        guard let server = activeServer else { return item }
         var updated = item
         let newPlayed = !(item.userData?.played ?? false)
         var uData = updated.userData ?? EmbyUserData()
@@ -1840,10 +1894,20 @@ public final class AppState: ObservableObject {
         if newPlayed { uData.playbackPositionTicks = 0 }
         updated.userData = uData
 
-        if server.type == .uhdNative {
-            try? await UHDStreamClient.shared.setPlayed(server: server, item: item, isPlayed: newPlayed)
-        } else {
-            try? await EmbyClient.shared.setPlayed(server: server, itemId: item.id, played: newPlayed)
+        DonbyDownloadManager.shared.updateOfflinePlaybackProgress(
+            itemId: item.id,
+            played: newPlayed,
+            positionSeconds: newPlayed ? nil : 0,
+            durationSeconds: nil,
+            persistDiskNow: true
+        )
+
+        if let server = activeServer, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if server.type == .uhdNative {
+                try? await UHDStreamClient.shared.setPlayed(server: server, item: item, isPlayed: newPlayed)
+            } else {
+                try? await EmbyClient.shared.setPlayed(server: server, itemId: item.id, played: newPlayed)
+            }
         }
         showToast(newPlayed ? "已标记为已观看" : "已标记为未观看", icon: "checkmark.circle.fill")
         return updated
@@ -2131,6 +2195,162 @@ public final class AppState: ObservableObject {
             startPositionSeconds: startSec,
             selectedAudioIndex: nil,
             selectedSubtitleIndex: nil
+        )
+    }
+
+    public func handleFullyCachedAssetNotification(_ meta: ChunkStoreMeta) {
+        guard autoSaveFullCacheToOffline else { return }
+        guard DonbyDownloadManager.shared.entry(for: meta.assetKey) == nil else { return }
+        guard !meta.pinned, meta.isFullyCached else { return }
+        if let serverId = meta.serverId,
+           let srv = servers.first(where: { $0.id == serverId }),
+           !canDownload(from: srv) {
+            return
+        }
+        let summary = CachedMediaSummary(
+            assetKey: meta.assetKey,
+            serverId: meta.serverId,
+            itemId: meta.itemId ?? meta.itemSnapshot?.id,
+            mediaSourceId: meta.mediaSourceId ?? meta.mediaSourceSnapshot?.id,
+            displayTitle: meta.displayTitle ?? meta.itemSnapshot?.name ?? "已缓存媒体",
+            subtitle: meta.subtitle,
+            posterURLString: meta.posterURLString,
+            sourceURLString: meta.sourceURLString,
+            cachedBytes: meta.cachedBytes,
+            totalBytes: meta.totalSize,
+            lastAccess: meta.lastAccess,
+            isFullyCached: true,
+            itemSnapshot: meta.itemSnapshot,
+            mediaSourceSnapshot: meta.mediaSourceSnapshot
+        )
+        Task {
+            await promoteCachedAssetToOffline(summary, isAutoSave: true)
+        }
+    }
+
+    public func promoteCachedAssetToOffline(_ summary: CachedMediaSummary, isAutoSave: Bool = false) async {
+        let store = DonbyTurboCacheEngine.shared.store(for: summary.assetKey, persistDisk: true)
+        store.setPinned(true)
+
+        let server = servers.first(where: { $0.id == summary.serverId })
+            ?? activeServer
+            ?? DemoServerData.makeDefaultUHDServer()
+        if !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            await refreshServerCapabilities(for: server)
+            guard canDownload(from: server) else {
+                store.setPinned(false)
+                if !isAutoSave {
+                    showToast("当前账户订阅不允许转存离线下载", icon: "lock.fill", isError: true)
+                }
+                return
+            }
+        }
+
+        let targetItem = summary.itemSnapshot ?? EmbyItem(
+            id: summary.itemId ?? summary.assetKey,
+            name: summary.displayTitle,
+            serverId: server.id.uuidString,
+            type: "Movie",
+            uhdPosterURL: summary.posterURLString
+        )
+
+        var resolvedSeries: EmbyItem? = nil
+        if targetItem.isEpisode, let sid = targetItem.seriesId, !sid.isEmpty {
+            resolvedSeries = allLoadedMediaItems.first(where: { $0.id == sid })
+            if resolvedSeries == nil && !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                resolvedSeries = if server.type == .uhdNative {
+                    try? await UHDStreamClient.shared.fetchItemDetail(
+                        server: server,
+                        item: EmbyItem(id: sid, name: targetItem.seriesName ?? "", type: "Series", uhdMediaType: "tv")
+                    )
+                } else {
+                    try? await EmbyClient.shared.fetchItemDetail(server: server, itemId: sid)
+                }
+            }
+        }
+
+        let resolvedResource: ResolvedPlaybackResource
+        if !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           summary.itemSnapshot != nil,
+           let fresh = try? await (
+                server.type == .uhdNative
+                ? UHDStreamClient.shared.resolvePlaybackResource(
+                    server: server,
+                    item: targetItem,
+                    preferredSourceId: summary.mediaSourceId,
+                    preferredPreset: preferredVersionPreset
+                )
+                : EmbyClient.shared.resolvePlaybackResource(
+                    server: server,
+                    item: targetItem,
+                    preferredSourceId: summary.mediaSourceId,
+                    preferredPreset: preferredVersionPreset,
+                    enable302Cache: enable302Cache
+                )
+           ) {
+            resolvedResource = fresh
+        } else if let streamURL = URL(string: summary.sourceURLString) {
+            let ms = summary.mediaSourceSnapshot ?? MediaSourceInfo(
+                id: summary.mediaSourceId ?? summary.assetKey,
+                name: streamURL.pathExtension.isEmpty ? "Cached" : streamURL.pathExtension.uppercased(),
+                path: summary.sourceURLString,
+                container: streamURL.pathExtension.isEmpty ? "mkv" : streamURL.pathExtension,
+                size: summary.totalBytes > 0 ? summary.totalBytes : summary.cachedBytes
+            )
+            resolvedResource = ResolvedPlaybackResource(
+                streamURL: streamURL,
+                downloadURL: DownloadEntry.derivePreferredDownloadURL(from: streamURL),
+                headers: [:],
+                playSessionId: UUID().uuidString,
+                mediaSource: ms,
+                subtitleURLs: [],
+                isDirectStream: true,
+                routeNote: "从 Turbo 缓存转存"
+            )
+        } else {
+            store.setPinned(false)
+            if !isAutoSave {
+                showToast("缓存元数据缺少媒体链接，无法转存", icon: "exclamationmark.triangle.fill", isError: true)
+            }
+            return
+        }
+
+        let isUHD = server.type == .uhdNative
+        let itemPoster = EmbyClient.shared.imageURL(server: server, item: targetItem, kind: .primary, maxWidth: 800)
+            ?? (isUHD ? nil : EmbyClient.shared.imageURL(server: server, itemId: targetItem.id, kind: .primary, maxWidth: 800))
+            ?? summary.posterURLString.flatMap { URL(string: $0) }
+        let itemBackdrop = EmbyClient.shared.imageURL(server: server, item: targetItem, kind: .backdrop, maxWidth: 1920)
+            ?? (isUHD ? nil : EmbyClient.shared.imageURL(server: server, itemId: targetItem.id, kind: .backdrop, maxWidth: 1920))
+        let itemThumb = EmbyClient.shared.imageURL(server: server, item: targetItem, kind: .thumb, maxWidth: 800)
+            ?? (isUHD ? nil : EmbyClient.shared.imageURL(server: server, itemId: targetItem.id, kind: .thumb, maxWidth: 800))
+        let itemLogo = EmbyClient.shared.imageURL(server: server, item: targetItem, kind: .logo, maxWidth: 800)
+            ?? (isUHD ? nil : EmbyClient.shared.imageURL(server: server, itemId: targetItem.id, kind: .logo, maxWidth: 800))
+        let seasonPoster = isUHD ? nil : targetItem.seasonId.flatMap { EmbyClient.shared.imageURL(server: server, itemId: $0, kind: .primary, maxWidth: 600) }
+        let seriesPoster = resolvedSeries.flatMap { EmbyClient.shared.imageURL(server: server, item: $0, kind: .primary, maxWidth: 800) }
+            ?? (isUHD ? nil : targetItem.seriesId.flatMap { EmbyClient.shared.imageURL(server: server, itemId: $0, kind: .primary, maxWidth: 800) })
+            ?? itemPoster
+        let seriesBackdrop = resolvedSeries.flatMap { EmbyClient.shared.imageURL(server: server, item: $0, kind: .backdrop, maxWidth: 1920) }
+            ?? (isUHD ? nil : targetItem.seriesId.flatMap { EmbyClient.shared.imageURL(server: server, itemId: $0, kind: .backdrop, maxWidth: 1920) })
+        let seriesLogo = resolvedSeries.flatMap { EmbyClient.shared.imageURL(server: server, item: $0, kind: .logo, maxWidth: 800) }
+            ?? (isUHD ? nil : targetItem.seriesId.flatMap { EmbyClient.shared.imageURL(server: server, itemId: $0, kind: .logo, maxWidth: 800) })
+
+        let meta = formattedWatchRecordMetadata(for: targetItem, resolvedSeriesName: resolvedSeries?.name ?? targetItem.seriesName)
+        let budget = min(4, effectiveConnectionBudget(for: server))
+        DonbyDownloadManager.shared.enqueueDownload(
+            server: server,
+            item: targetItem,
+            seriesItem: resolvedSeries,
+            resource: resolvedResource,
+            title: meta.title,
+            subtitle: meta.subtitle,
+            posterURLString: (seriesPoster ?? itemPoster)?.absoluteString,
+            itemArtworkURLs: (poster: itemPoster, backdrop: itemBackdrop, thumb: itemThumb, logo: itemLogo, seasonPoster: seasonPoster),
+            seriesArtworkURLs: (poster: seriesPoster, backdrop: seriesBackdrop, logo: seriesLogo),
+            connectionBudgetPerTask: budget
+        )
+        showToast(
+            summary.isFullyCached ? "已将完整缓存保存至离线库：\(meta.title)" : "已从缓存继续下载 (\(Int(summary.progressFraction * 100))%)：\(meta.title)",
+            icon: "arrow.down.circle.fill"
         )
     }
 

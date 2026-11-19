@@ -37,8 +37,11 @@ public struct MainWindowView: View {
                     ZStack(alignment: .topLeading) {
                         Group {
                             if let detailItem = appState.currentDetailItem {
-                                DetailView(item: detailItem)
-                                    .id(detailItem.id)
+                                DetailView(
+                                    item: detailItem,
+                                    preferOfflineFocus: appState.detailOfflineFocusIds.contains(detailItem.id)
+                                )
+                                .id(detailItem.id)
                             } else if appState.openedServerId != nil {
                                 EmbyMainView()
                             } else {

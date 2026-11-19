@@ -491,6 +491,11 @@ public struct SettingsView: View {
                     .frame(width: 185)
                 }
 
+                Toggle("完整播放缓存自动转存至离线媒体库", isOn: $appState.autoSaveFullCacheToOffline)
+                Text("在线观看期间若单集或影片已 100% 写入 Turbo 分片缓存，自动整理转存至 ~/Movies/Donby 离线库（需服务器账户允许下载）。")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+
                 HStack {
                     let usage = DonbyTurboCacheEngine.shared.calculateDiskUsage()
                     Text("当前临时缓存占用：\(ByteCountFormatter.string(fromByteCount: usage.unpinnedCacheBytes, countStyle: .file)) · 已锁定离线：\(ByteCountFormatter.string(fromByteCount: usage.pinnedDownloadBytes, countStyle: .file))")
@@ -547,7 +552,7 @@ public struct SettingsView: View {
                     Text("Donby")
                         .font(.system(size: 20, weight: .heavy, design: .rounded))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    let currentVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.21"
+                    let currentVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.22"
                     Text("版本 \(currentVer) (Build 2026.11) · macOS Apple Silicon")
                         .font(.system(size: 12))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))

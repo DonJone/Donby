@@ -9,6 +9,7 @@ public struct DownloadsView: View {
 
     @State private var unpinnedCacheBytes: Int64 = 0
     @State private var pinnedDownloadBytes: Int64 = 0
+    @State private var cachedAssets: [CachedMediaSummary] = []
     @State private var statusFilter: DownloadTaskStatus? = nil
     @State private var displayMode: DownloadDisplayMode = .library
     @State private var offlineLibraryGroups: [OfflineLibraryGroup] = []
@@ -81,8 +82,8 @@ public struct DownloadsView: View {
                         hasMoreItems: false,
                         isLoadingMore: false,
                         appearance: appearance,
-                        onSelect: { item in appState.openDetail(for: item) },
-                        onPlay: { item in Task { await appState.startPlayback(item: item) } },
+                        onSelect: { item in appState.openDetail(for: item, preferOfflineFocus: true) },
+                        onPlay: { item in Task { await appState.startPlayback(item: item, preferOffline: true) } },
                         onLoadMore: {}
                     )
                 }
@@ -342,7 +343,7 @@ public struct DownloadsView: View {
                 .padding(.horizontal, 24)
                 .padding(.bottom, 12)
 
-            if filteredEntries.isEmpty {
+            if filteredEntries.isEmpty && (statusFilter != nil || cachedAssets.isEmpty) {
                 queueEmptyPlaceholder
             } else {
                 ScrollView {
@@ -355,7 +356,7 @@ public struct DownloadsView: View {
                                 isLightMode: appState.isLightMode,
                                 accentColor: appState.accentColor,
                                 accentTextColor: appState.accentTextColor,
-                                onOpenDetail: { appState.openDetail(for: entry.hydratedItemSnapshot) },
+                                onOpenDetail: { appState.openDetail(for: entry.hydratedItemSnapshot, preferOfflineFocus: true) },
                                 onPlayOffline: { appState.playOfflineDownload(entry) },
                                 onRevealInFinder: {
                                     let targetPath = entry.localVideoFilePath ?? entry.localFolderPath ?? DonbyOfflineLibraryStorage.moviesDonbyRootURL.path
@@ -375,6 +376,10 @@ public struct DownloadsView: View {
                                     refreshDiskUsage(runMigration: false)
                                 }
                             )
+                        }
+
+                        if statusFilter == nil && !cachedAssets.isEmpty {
+                            cachedAssetsSection
                         }
                     }
                     .padding(.horizontal, 24)
@@ -403,7 +408,7 @@ public struct DownloadsView: View {
                         .font(.system(size: 12))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
-                Text("剧集与电影统一归档于 ~/Movies/Donby（自动整理分季文件夹、海报、横版剧照与外挂字幕）")
+                Text("播放时自动写入 Turbo 临时缓存，发起下载可从已缓存分片秒级续传并整理至 ~/Movies/Donby（离线文件免疫 LRU 清理）")
                     .font(.system(size: 11))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }
@@ -511,6 +516,8 @@ public struct DownloadsView: View {
         let usage = DonbyTurboCacheEngine.shared.calculateDiskUsage()
         unpinnedCacheBytes = usage.unpinnedCacheBytes
         pinnedDownloadBytes = usage.pinnedDownloadBytes
+        let excludedKeys = Set(downloadManager.entries.map(\.assetKey))
+        cachedAssets = DonbyTurboCacheEngine.shared.listUnpinnedCachedAssets(excludingAssetKeys: excludedKeys)
 
         if runMigration {
             isRefreshing = true
@@ -525,6 +532,7 @@ public struct DownloadsView: View {
                     let latestUsage = DonbyTurboCacheEngine.shared.calculateDiskUsage()
                     self.unpinnedCacheBytes = latestUsage.unpinnedCacheBytes
                     self.pinnedDownloadBytes = latestUsage.pinnedDownloadBytes
+                    self.cachedAssets = DonbyTurboCacheEngine.shared.listUnpinnedCachedAssets(excludingAssetKeys: Set(entries.map(\.assetKey)))
                     self.offlineLibraryGroups = scanned
                     self.recomputeDisplayedItems()
                     self.isRefreshing = false
@@ -538,6 +546,41 @@ public struct DownloadsView: View {
                     self.offlineLibraryGroups = scanned
                     self.recomputeDisplayedItems()
                 }
+            }
+        }
+    }
+
+    private var cachedAssetsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("可转存的播放缓存 (\(cachedAssets.count))")
+                    .font(.system(size: 13.5, weight: .bold))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                Text("在线播放写入的分片缓存可直接从断点转为离线文件")
+                    .font(.system(size: 11))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                Spacer()
+            }
+            .padding(.top, 10)
+
+            ForEach(cachedAssets) { cached in
+                CachedAssetRowCard(
+                    summary: cached,
+                    server: appState.servers.first(where: { $0.id == cached.serverId }),
+                    isLightMode: appState.isLightMode,
+                    accentColor: appState.accentColor,
+                    accentTextColor: appState.accentTextColor,
+                    onPromoteToOffline: {
+                        Task {
+                            await appState.promoteCachedAssetToOffline(cached)
+                            refreshDiskUsage(runMigration: false)
+                        }
+                    },
+                    onRemoveCache: {
+                        DonbyTurboCacheEngine.shared.removeAsset(assetKey: cached.assetKey, forceIncludePinned: false)
+                        refreshDiskUsage(runMigration: false)
+                    }
+                )
             }
         }
     }
@@ -739,5 +782,109 @@ private struct DownloadEntryRowCard: View {
         case .completed: return .green
         case .failed: return .red
         }
+    }
+}
+
+private struct CachedAssetRowCard: View {
+    let summary: CachedMediaSummary
+    let server: EmbyServerConfig?
+    let isLightMode: Bool
+    let accentColor: Color
+    let accentTextColor: Color
+    let onPromoteToOffline: () -> Void
+    let onRemoveCache: () -> Void
+
+    var body: some View {
+        let previewItem = summary.itemSnapshot ?? EmbyItem(
+            id: summary.itemId ?? summary.assetKey,
+            name: summary.displayTitle,
+            type: "Movie",
+            uhdPosterURL: summary.posterURLString
+        )
+
+        HStack(spacing: 14) {
+            MediaArtworkView(server: server, item: previewItem, kind: .primary, maxWidth: 160)
+                .frame(width: 48, height: 68)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(DonbyGlassPalette.separator(isLight: isLightMode), lineWidth: 0.5)
+                )
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Text(summary.displayTitle)
+                        .font(.system(size: 13.5, weight: .bold))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: isLightMode))
+                        .lineLimit(1)
+                    Text(summary.isFullyCached ? "已完整缓存" : "播放缓存")
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .foregroundStyle(summary.isFullyCached ? Color.green : accentColor)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background((summary.isFullyCached ? Color.green : accentColor).opacity(0.12))
+                        .clipShape(Capsule())
+                    if let srvName = server?.name, !srvName.isEmpty {
+                        Text(srvName)
+                            .font(.system(size: 11))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))
+                    }
+                }
+
+                if let sub = summary.subtitle, !sub.isEmpty {
+                    Text(sub)
+                        .font(.system(size: 12))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))
+                        .lineLimit(1)
+                }
+
+                ProgressView(value: summary.progressFraction)
+                    .tint(summary.isFullyCached ? .green : accentColor)
+
+                HStack(spacing: 10) {
+                    Text(String(format: "%.0f%% 已缓存", summary.progressFraction * 100))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(summary.isFullyCached ? Color.green : accentColor)
+                    Text("\(ByteCountFormatter.string(fromByteCount: summary.cachedBytes, countStyle: .file)) / \(summary.totalBytes > 0 ? ByteCountFormatter.string(fromByteCount: summary.totalBytes, countStyle: .file) : "未知大小")")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))
+                }
+            }
+
+            Spacer()
+
+            HStack(spacing: 8) {
+                Button {
+                    onPromoteToOffline()
+                } label: {
+                    Label(summary.isFullyCached ? "转存离线" : "从缓存下载", systemImage: "arrow.down.circle.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(accentTextColor)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(accentColor)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+
+                Button(role: .destructive) {
+                    onRemoveCache()
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.red.opacity(0.85))
+                        .padding(7)
+                }
+                .buttonStyle(.plain)
+                .help("清理此项临时分片缓存")
+            }
+        }
+        .padding(14)
+        .background(DonbyGlassPalette.cardBackground(isLight: isLightMode))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(DonbyGlassPalette.separator(isLight: isLightMode), lineWidth: 0.7)
+        )
     }
 }

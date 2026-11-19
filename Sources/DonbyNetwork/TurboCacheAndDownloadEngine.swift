@@ -108,6 +108,14 @@ public struct ChunkStoreMeta: Codable, Equatable, Sendable {
     public var pinned: Bool
     public var sourceURLString: String
     public var estimatedBitrateBps: Int64
+    public var serverId: UUID?
+    public var itemId: String?
+    public var mediaSourceId: String?
+    public var displayTitle: String?
+    public var subtitle: String?
+    public var posterURLString: String?
+    public var itemSnapshot: EmbyItem?
+    public var mediaSourceSnapshot: MediaSourceInfo?
 
     public init(
         assetKey: String,
@@ -117,7 +125,15 @@ public struct ChunkStoreMeta: Codable, Equatable, Sendable {
         lastAccess: Date = Date(),
         pinned: Bool = false,
         sourceURLString: String = "",
-        estimatedBitrateBps: Int64 = 25_000_000
+        estimatedBitrateBps: Int64 = 25_000_000,
+        serverId: UUID? = nil,
+        itemId: String? = nil,
+        mediaSourceId: String? = nil,
+        displayTitle: String? = nil,
+        subtitle: String? = nil,
+        posterURLString: String? = nil,
+        itemSnapshot: EmbyItem? = nil,
+        mediaSourceSnapshot: MediaSourceInfo? = nil
     ) {
         self.assetKey = assetKey
         self.totalSize = totalSize
@@ -127,6 +143,14 @@ public struct ChunkStoreMeta: Codable, Equatable, Sendable {
         self.pinned = pinned
         self.sourceURLString = sourceURLString
         self.estimatedBitrateBps = estimatedBitrateBps
+        self.serverId = serverId
+        self.itemId = itemId
+        self.mediaSourceId = mediaSourceId
+        self.displayTitle = displayTitle
+        self.subtitle = subtitle
+        self.posterURLString = posterURLString
+        self.itemSnapshot = itemSnapshot
+        self.mediaSourceSnapshot = mediaSourceSnapshot
     }
 
     public var totalChunks: Int {
@@ -173,6 +197,8 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
     private var readHandle: FileHandle?
     private var writeHandle: FileHandle?
     private var dirtyMetaOps: Int = 0
+    private var activeReaders: Int = 0
+    private var didNotifyFullyCached: Bool = false
 
     public init(
         assetKey: String,
@@ -192,6 +218,7 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
         if let data = try? Data(contentsOf: metaFileURL),
            let loaded = try? JSONDecoder().decode(ChunkStoreMeta.self, from: data) {
             self.meta = loaded
+            self.didNotifyFullyCached = loaded.isFullyCached
         } else {
             self.meta = ChunkStoreMeta(assetKey: assetKey, chunkSize: chunkSize)
         }
@@ -208,6 +235,50 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return meta
+    }
+
+    public var activeReaderCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeReaders
+    }
+
+    public func retainReader() {
+        lock.lock()
+        activeReaders += 1
+        lock.unlock()
+    }
+
+    public func releaseReader() -> Int {
+        lock.lock()
+        activeReaders = max(0, activeReaders - 1)
+        let remaining = activeReaders
+        lock.unlock()
+        return remaining
+    }
+
+    public func updateCachedMetadata(
+        serverId: UUID?,
+        itemId: String?,
+        mediaSourceId: String?,
+        displayTitle: String?,
+        subtitle: String?,
+        posterURLString: String?,
+        itemSnapshot: EmbyItem?,
+        mediaSourceSnapshot: MediaSourceInfo?
+    ) {
+        lock.lock()
+        meta.serverId = serverId ?? meta.serverId
+        meta.itemId = itemId ?? meta.itemId
+        meta.mediaSourceId = mediaSourceId ?? meta.mediaSourceId
+        meta.displayTitle = displayTitle ?? meta.displayTitle
+        meta.subtitle = subtitle ?? meta.subtitle
+        meta.posterURLString = posterURLString ?? meta.posterURLString
+        if let itemSnapshot { meta.itemSnapshot = itemSnapshot }
+        if let mediaSourceSnapshot { meta.mediaSourceSnapshot = mediaSourceSnapshot }
+        meta.lastAccess = Date()
+        saveMetaLocked()
+        lock.unlock()
     }
 
     public func updateConfiguration(maxMemoryBytes: Int, persistDisk: Bool) {
@@ -258,8 +329,8 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
 
     public func storeChunk(index: Int, data: Data) {
         guard !data.isEmpty else { return }
+        var completedMetaForNotify: ChunkStoreMeta? = nil
         lock.lock()
-        defer { lock.unlock() }
 
         meta.lastAccess = Date()
         // 1. Store in L1 Memory cache
@@ -288,10 +359,19 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
                         dirtyMetaOps = 0
                         saveMetaLocked()
                     }
+                    if meta.isFullyCached && !meta.pinned && !didNotifyFullyCached {
+                        didNotifyFullyCached = true
+                        completedMetaForNotify = meta
+                    }
                 } catch {
                     // Ignore transient disk write error and keep L1 memory copy
                 }
             }
+        }
+        lock.unlock()
+
+        if let completedMetaForNotify {
+            DonbyTurboCacheEngine.shared.notifyAssetFullyCached(completedMetaForNotify)
         }
     }
 
@@ -451,6 +531,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         cfg.timeoutIntervalForResource = 45
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         self.urlSession = URLSession(configuration: cfg)
+        store.retainReader()
 
         startCoordinatorLoop()
     }
@@ -636,6 +717,13 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         coordinatorTask = nil
         urlSession.invalidateAndCancel()
         store.flushMeta()
+        let remainingReaders = store.releaseReader()
+        if remainingReaders == 0 {
+            let key = assetKey
+            Task { @MainActor in
+                DonbyDownloadManager.shared.cleanupRedundantCacheIfMaterialized(assetKey: key)
+            }
+        }
     }
 
     private func requestUrgentChunk(_ chunkIndex: Int) {
@@ -853,12 +941,81 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
 
 // MARK: - Task C & D: Global Turbo Cache Engine & Disk LRU Manager
 
+public struct CachedMediaSummary: Identifiable, Equatable, Sendable {
+    public var id: String { assetKey }
+    public let assetKey: String
+    public let serverId: UUID?
+    public let itemId: String?
+    public let mediaSourceId: String?
+    public let displayTitle: String
+    public let subtitle: String?
+    public let posterURLString: String?
+    public let sourceURLString: String
+    public let cachedBytes: Int64
+    public let totalBytes: Int64
+    public let lastAccess: Date
+    public let isFullyCached: Bool
+    public let itemSnapshot: EmbyItem?
+    public let mediaSourceSnapshot: MediaSourceInfo?
+
+    public init(
+        assetKey: String,
+        serverId: UUID?,
+        itemId: String?,
+        mediaSourceId: String?,
+        displayTitle: String,
+        subtitle: String?,
+        posterURLString: String?,
+        sourceURLString: String,
+        cachedBytes: Int64,
+        totalBytes: Int64,
+        lastAccess: Date,
+        isFullyCached: Bool,
+        itemSnapshot: EmbyItem?,
+        mediaSourceSnapshot: MediaSourceInfo?
+    ) {
+        self.assetKey = assetKey
+        self.serverId = serverId
+        self.itemId = itemId
+        self.mediaSourceId = mediaSourceId
+        self.displayTitle = displayTitle
+        self.subtitle = subtitle
+        self.posterURLString = posterURLString
+        self.sourceURLString = sourceURLString
+        self.cachedBytes = cachedBytes
+        self.totalBytes = totalBytes
+        self.lastAccess = lastAccess
+        self.isFullyCached = isFullyCached
+        self.itemSnapshot = itemSnapshot
+        self.mediaSourceSnapshot = mediaSourceSnapshot
+    }
+
+    public var progressFraction: Double {
+        guard totalBytes > 0 else { return isFullyCached ? 1.0 : 0.0 }
+        return min(1.0, max(0.0, Double(cachedBytes) / Double(totalBytes)))
+    }
+}
+
 public final class DonbyTurboCacheEngine: @unchecked Sendable {
     public static let shared = DonbyTurboCacheEngine()
 
     public let cacheRootDirectory: URL
     private let lock = NSLock()
     private var activeStores: [String: TieredAssetChunkStore] = [:]
+    private var fullCacheHandler: (@Sendable (ChunkStoreMeta) -> Void)?
+
+    public func setOnAssetFullyCached(_ handler: (@Sendable (ChunkStoreMeta) -> Void)?) {
+        lock.lock()
+        fullCacheHandler = handler
+        lock.unlock()
+    }
+
+    internal func notifyAssetFullyCached(_ meta: ChunkStoreMeta) {
+        lock.lock()
+        let handler = fullCacheHandler
+        lock.unlock()
+        handler?(meta)
+    }
 
     private init() {
         let cachesDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
@@ -1020,6 +1177,74 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
         for dir in dirs {
             removeAsset(assetKey: dir.lastPathComponent, forceIncludePinned: false)
         }
+    }
+
+    public func cachedProgress(
+        forItemId itemId: String,
+        serverId: UUID? = nil,
+        mediaSourceId: String? = nil
+    ) -> CachedMediaSummary? {
+        if let serverId, let mediaSourceId, !mediaSourceId.isEmpty {
+            let exactKey = Self.makeAssetKey(serverId: serverId, itemId: itemId, mediaSourceId: mediaSourceId)
+            if let hit = listUnpinnedCachedAssets().first(where: { $0.assetKey == exactKey }) {
+                return hit
+            }
+        }
+        return listUnpinnedCachedAssets().first { summary in
+            summary.itemId == itemId &&
+            (serverId == nil || summary.serverId == serverId) &&
+            (mediaSourceId == nil || mediaSourceId?.isEmpty == true || summary.mediaSourceId == mediaSourceId)
+        }
+    }
+
+    public func listUnpinnedCachedAssets(excludingAssetKeys: Set<String> = []) -> [CachedMediaSummary] {
+        guard let dirs = try? FileManager.default.contentsOfDirectory(
+            at: cacheRootDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        let decoder = JSONDecoder()
+        var results: [CachedMediaSummary] = []
+
+        for dir in dirs {
+            let key = dir.lastPathComponent
+            if excludingAssetKeys.contains(key) { continue }
+            let metaURL = dir.appendingPathComponent("meta.json")
+            let dataURL = dir.appendingPathComponent("media.bin")
+            guard let d = try? Data(contentsOf: metaURL),
+                  let meta = try? decoder.decode(ChunkStoreMeta.self, from: d) else {
+                continue
+            }
+            if meta.pinned { continue }
+            let diskSize = ((try? FileManager.default.attributesOfItem(atPath: dataURL.path))?[.size] as? NSNumber)?.int64Value ?? 0
+            let cachedBytes = max(meta.cachedBytes, diskSize > 0 && meta.completedChunks.isEmpty ? diskSize : meta.cachedBytes)
+            guard cachedBytes > 0 else { continue }
+
+            let fallbackTitle = meta.itemSnapshot?.name
+                ?? URL(string: meta.sourceURLString)?.lastPathComponent
+                ?? "未命名流媒体缓存"
+            let title = (meta.displayTitle?.isEmpty == false ? meta.displayTitle : nil) ?? fallbackTitle
+
+            results.append(CachedMediaSummary(
+                assetKey: meta.assetKey,
+                serverId: meta.serverId,
+                itemId: meta.itemId ?? meta.itemSnapshot?.id,
+                mediaSourceId: meta.mediaSourceId ?? meta.mediaSourceSnapshot?.id,
+                displayTitle: title,
+                subtitle: meta.subtitle,
+                posterURLString: meta.posterURLString,
+                sourceURLString: meta.sourceURLString,
+                cachedBytes: cachedBytes,
+                totalBytes: meta.totalSize,
+                lastAccess: meta.lastAccess,
+                isFullyCached: meta.isFullyCached,
+                itemSnapshot: meta.itemSnapshot,
+                mediaSourceSnapshot: meta.mediaSourceSnapshot
+            ))
+        }
+
+        return results.sorted { $0.lastAccess > $1.lastAccess }
     }
 }
 
@@ -1206,6 +1431,72 @@ public final class DonbyDownloadManager: ObservableObject {
 
     public func entry(for assetKey: String) -> DownloadEntry? {
         entries.first { $0.assetKey == assetKey }
+    }
+
+    public func entry(forItemId itemId: String, serverId: UUID? = nil) -> DownloadEntry? {
+        entries.first { entry in
+            entry.itemId == itemId && (serverId == nil || entry.serverId == serverId)
+        }
+    }
+
+    public func cleanupRedundantCacheIfMaterialized(assetKey: String) {
+        guard let existing = entry(for: assetKey),
+              existing.status == .completed,
+              let localPath = existing.localVideoFilePath,
+              FileManager.default.fileExists(atPath: localPath) else {
+            return
+        }
+        DonbyTurboCacheEngine.shared.removeAsset(assetKey: assetKey, forceIncludePinned: true)
+    }
+
+    public func updateOfflinePlaybackProgress(
+        itemId: String,
+        played: Bool? = nil,
+        positionSeconds: Double? = nil,
+        durationSeconds: Double? = nil,
+        persistDiskNow: Bool = true
+    ) {
+        var didChange = false
+        for idx in entries.indices where entries[idx].itemId == itemId {
+            var snapshot = entries[idx].itemSnapshot
+            var ud = snapshot.userData ?? EmbyUserData()
+            if let played {
+                ud.played = played
+                if played {
+                    ud.playedPercentage = 100.0
+                    ud.playbackPositionTicks = 0
+                }
+            }
+            if let pos = positionSeconds, pos >= 0 {
+                ud.playbackPositionTicks = Int64(pos * 10_000_000.0)
+                if let dur = durationSeconds, dur > 0 {
+                    let pct = min(100.0, max(0.0, (pos / dur) * 100.0))
+                    ud.playedPercentage = pct
+                    if pct >= 92.0 {
+                        ud.played = true
+                    }
+                }
+            }
+            snapshot.userData = ud
+            entries[idx].itemSnapshot = snapshot
+            didChange = true
+
+            if persistDiskNow, let localPath = entries[idx].localVideoFilePath {
+                let videoURL = URL(fileURLWithPath: localPath)
+                let stem = videoURL.deletingPathExtension().lastPathComponent
+                let sidecarURL = videoURL.deletingLastPathComponent().appendingPathComponent("\(stem).meta.json")
+                if let d = try? Data(contentsOf: sidecarURL),
+                   var sidecar = try? JSONDecoder().decode(OfflineEpisodeOrMovieSidecar.self, from: d) {
+                    sidecar.item = snapshot
+                    if let encoded = try? JSONEncoder().encode(sidecar) {
+                        try? encoded.write(to: sidecarURL, options: .atomic)
+                    }
+                }
+            }
+        }
+        if didChange && persistDiskNow {
+            saveToDisk()
+        }
     }
 
     public func completedEntry(for itemId: String, serverId: UUID? = nil, mediaSourceId: String? = nil) -> DownloadEntry? {
@@ -1408,11 +1699,9 @@ public final class DonbyDownloadManager: ObservableObject {
         if existingMeta.isFullyCached && !alreadyOnDisk {
             Task.detached(priority: .utility) {
                 let total = max(existingMeta.totalSize, 0)
-                if Self.materializeCompletedVideoFile(store: store, destinationURL: layout.videoFileURL, expectedSize: total) {
-                    DonbyTurboCacheEngine.shared.removeAsset(assetKey: assetKey, forceIncludePinned: true)
-                    await MainActor.run {
-                        DonbyDownloadManager.shared.markCompleted(assetKey: assetKey, totalBytes: total)
-                    }
+                Self.materializeAndCleanupIfIdle(store: store, assetKey: assetKey, destinationURL: layout.videoFileURL, expectedSize: total)
+                await MainActor.run {
+                    DonbyDownloadManager.shared.markCompleted(assetKey: assetKey, totalBytes: total)
                 }
             }
         } else {
@@ -1516,34 +1805,59 @@ public final class DonbyDownloadManager: ObservableObject {
         }
     }
 
+    @discardableResult
+    nonisolated private static func materializeAndCleanupIfIdle(
+        store: TieredAssetChunkStore,
+        assetKey: String,
+        destinationURL: URL,
+        expectedSize: Int64
+    ) -> Bool {
+        let res = materializeCompletedVideoFile(store: store, destinationURL: destinationURL, expectedSize: expectedSize)
+        if res.success && !res.keptCacheForActiveReader {
+            DonbyTurboCacheEngine.shared.removeAsset(assetKey: assetKey, forceIncludePinned: true)
+        }
+        return res.success
+    }
+
     nonisolated private static func materializeCompletedVideoFile(
         store: TieredAssetChunkStore,
         destinationURL: URL,
         expectedSize: Int64
-    ) -> Bool {
+    ) -> (success: Bool, keptCacheForActiveReader: Bool) {
         let fm = FileManager.default
         let dir = destinationURL.deletingLastPathComponent()
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        store.closeFileHandles()
 
         let src = store.dataFileURL
         guard fm.fileExists(atPath: src.path) else {
-            return fm.fileExists(atPath: destinationURL.path)
+            return (fm.fileExists(atPath: destinationURL.path), false)
+        }
+
+        // If PlayerView is currently streaming from this ChunkStore, use APFS CoW copy instead of moving media.bin out from under the reader.
+        let hasActiveReaders = store.activeReaderCount > 0
+        if !hasActiveReaders {
+            store.closeFileHandles()
+        } else {
+            store.flushMeta()
         }
 
         do {
             if fm.fileExists(atPath: destinationURL.path) {
                 try fm.removeItem(at: destinationURL)
             }
-            try fm.moveItem(at: src, to: destinationURL)
+            if hasActiveReaders {
+                try fm.copyItem(at: src, to: destinationURL)
+            } else {
+                try fm.moveItem(at: src, to: destinationURL)
+            }
             if expectedSize > 0 {
                 let handle = try FileHandle(forUpdating: destinationURL)
                 try handle.truncate(atOffset: UInt64(expectedSize))
                 try handle.close()
             }
-            return true
+            return (true, hasActiveReaders)
         } catch {
-            return false
+            return (false, hasActiveReaders)
         }
     }
 
@@ -1626,9 +1940,7 @@ public final class DonbyDownloadManager: ObservableObject {
                 store.flushMeta()
                 if let destPath = entrySnapshot.localVideoFilePath {
                     let destURL = URL(fileURLWithPath: destPath)
-                    if Self.materializeCompletedVideoFile(store: store, destinationURL: destURL, expectedSize: meta.totalSize) {
-                        DonbyTurboCacheEngine.shared.removeAsset(assetKey: assetKey, forceIncludePinned: true)
-                    }
+                    Self.materializeAndCleanupIfIdle(store: store, assetKey: assetKey, destinationURL: destURL, expectedSize: meta.totalSize)
                 }
                 await MainActor.run {
                     DonbyDownloadManager.shared.markCompleted(assetKey: assetKey, totalBytes: meta.totalSize)
@@ -1734,9 +2046,7 @@ public final class DonbyDownloadManager: ObservableObject {
                 let finalTotal = store.currentMeta().totalSize
                 if let destPath = entrySnapshot.localVideoFilePath {
                     let destURL = URL(fileURLWithPath: destPath)
-                    if Self.materializeCompletedVideoFile(store: store, destinationURL: destURL, expectedSize: finalTotal) {
-                        DonbyTurboCacheEngine.shared.removeAsset(assetKey: assetKey, forceIncludePinned: true)
-                    }
+                    Self.materializeAndCleanupIfIdle(store: store, assetKey: assetKey, destinationURL: destURL, expectedSize: finalTotal)
                 }
                 await MainActor.run {
                     DonbyDownloadManager.shared.markCompleted(assetKey: assetKey, totalBytes: finalTotal)
@@ -2101,8 +2411,7 @@ public final class DonbyDownloadManager: ObservableObject {
                             }
                         }
                     }
-                    if Self.materializeCompletedVideoFile(store: store, destinationURL: layout.videoFileURL, expectedSize: expectedSize) {
-                        DonbyTurboCacheEngine.shared.removeAsset(assetKey: entry.assetKey, forceIncludePinned: true)
+                    if Self.materializeAndCleanupIfIdle(store: store, assetKey: entry.assetKey, destinationURL: layout.videoFileURL, expectedSize: expectedSize) {
                         hasVideoOnDisk = true
                         didMutate = true
                     }

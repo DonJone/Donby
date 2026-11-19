@@ -435,7 +435,30 @@ public struct PlayerView: View {
                     Task {
                         await UHDStreamClient.shared.reportPlayback(server: srv, kind: .finished, item: itm, assetId: assetId, positionSeconds: endPos)
                     }
+                } else if !session.server.host.isEmpty && !session.server.accessToken.isEmpty {
+                    let srv = session.server
+                    let itm = currentItem
+                    let assetId = currentResource.mediaSource.id
+                    let psId = currentResource.playSessionId
+                    let endPos = currentTime
+                    Task {
+                        await EmbyClient.shared.reportPlaybackStopped(
+                            server: srv,
+                            itemId: itm.id,
+                            mediaSourceId: assetId,
+                            playSessionId: psId,
+                            positionSeconds: endPos
+                        )
+                        try? await EmbyClient.shared.setPlayed(server: srv, itemId: itm.id, played: true)
+                    }
                 }
+                DonbyDownloadManager.shared.updateOfflinePlaybackProgress(
+                    itemId: currentItem.id,
+                    played: true,
+                    positionSeconds: 0,
+                    durationSeconds: duration,
+                    persistDiskNow: true
+                )
                 if let idx = session.episodesQueue.firstIndex(where: { $0.id == currentItem.id }),
                    session.episodesQueue.indices.contains(idx + 1) {
                     let nextEp = session.episodesQueue[idx + 1]
@@ -1622,6 +1645,18 @@ public struct PlayerView: View {
             if let knownSize = currentResource.mediaSource.size, knownSize > 0 {
                 store.setTotalSize(knownSize, sourceURL: urlStr)
             }
+            let cachedMeta = appState.formattedWatchRecordMetadata(for: currentItem)
+            let cachedPoster = EmbyClient.shared.imageURL(server: session.server, item: currentItem, kind: .primary, maxWidth: 400)?.absoluteString
+            store.updateCachedMetadata(
+                serverId: session.server.id,
+                itemId: currentItem.id,
+                mediaSourceId: currentResource.mediaSource.id,
+                displayTitle: cachedMeta.title,
+                subtitle: cachedMeta.subtitle,
+                posterURLString: cachedPoster,
+                itemSnapshot: currentItem,
+                mediaSourceSnapshot: currentResource.mediaSource
+            )
             let budget = appState.effectiveConnectionBudget(for: session.server)
             preparedTurboHandle = TurboStreamByteHandle(
                 assetKey: assetKey,
@@ -1983,7 +2018,7 @@ public struct PlayerView: View {
     }
 
     private func exportRedactedDiagnostics() {
-        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.21"
+        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.22"
         var lines: [String] = []
         lines.append("Donby Diagnostics Report (v\(appVer))")
         lines.append("Time: \(ISO8601DateFormatter().string(from: Date()))")
@@ -2502,6 +2537,14 @@ public struct PlayerView: View {
             streamURLString: streamStr,
             embyItemId: embyId,
             resolutionTag: isLocal ? (kernelStats.is_hw_accelerated ? "本地 4K" : "本地文件") : (kernelStats.is_hw_accelerated ? "HW 4K" : "4K UHD")
+        )
+
+        DonbyDownloadManager.shared.updateOfflinePlaybackProgress(
+            itemId: currentItem.id,
+            played: nil,
+            positionSeconds: currentTime,
+            durationSeconds: duration,
+            persistDiskNow: isFinal
         )
 
         if isFinal {

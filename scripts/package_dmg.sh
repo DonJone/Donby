@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-VERSION="${DONBY_VERSION:-1.3.21}"
+VERSION="${DONBY_VERSION:-1.3.22}"
 ARCH="$(uname -m)"
 APP_NAME="Donby"
 DIST_DIR="dist"
@@ -27,6 +27,7 @@ if [ "$APP_DIR" != "${STAGING_DIR}/${APP_NAME}.app" ]; then
     cp -R "$APP_DIR" "${STAGING_DIR}/${APP_NAME}.app"
 fi
 ln -s /Applications "${STAGING_DIR}/Applications"
+touch "${STAGING_DIR}/.metadata_never_index"
 
 if [ -f "Resources/AppIcon.icns" ]; then
     cp "Resources/AppIcon.icns" "${STAGING_DIR}/.VolumeIcon.icns"
@@ -60,7 +61,18 @@ until hdiutil create \
 done
 
 echo "==> [4/4] Verifying DMG & generating SHA256 checksum..."
-hdiutil verify "$DMG_PATH" >/dev/null
+sync
+sleep 2
+verify_attempt=1
+until hdiutil verify "$DMG_PATH" >/dev/null; do
+    if [ "$verify_attempt" -ge 5 ]; then
+        echo "ERROR: hdiutil verify failed after ${verify_attempt} attempts" >&2
+        exit 1
+    fi
+    echo "Retrying hdiutil verify (attempt $((verify_attempt + 1))/5)..."
+    verify_attempt=$((verify_attempt + 1))
+    sleep 3
+done
 (
     cd "$DIST_DIR"
     shasum -a 256 "$DMG_NAME" > SHA256SUMS.txt

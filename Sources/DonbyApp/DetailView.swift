@@ -7,6 +7,7 @@ public struct DetailView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject private var downloadManager = DonbyDownloadManager.shared
     public let initialItem: EmbyItem
+    public let preferOfflineFocus: Bool
 
     @State private var item: EmbyItem
     @State private var selectedSourceId: String = ""
@@ -21,9 +22,23 @@ public struct DetailView: View {
     @State private var selectedEpisodeForInfo: EmbyItem? = nil
     @State private var didUserDisableSubtitle: Bool = false
 
-    public init(item: EmbyItem) {
+    public init(item: EmbyItem, preferOfflineFocus: Bool = false) {
         self.initialItem = item
+        self.preferOfflineFocus = preferOfflineFocus
         self._item = State(initialValue: item)
+    }
+
+    private var effectiveDetailServer: EmbyServerConfig? {
+        if let local = offlineGroupForCurrentItem(),
+           let sid = local.serverId,
+           let matched = appState.servers.first(where: { $0.id == sid }) {
+            return matched
+        }
+        if let sIdStr = item.serverId,
+           let srv = appState.servers.first(where: { $0.id.uuidString == sIdStr }) {
+            return srv
+        }
+        return appState.activeServer
     }
 
     private var selectedMediaSource: MediaSourceInfo? {
@@ -77,7 +92,7 @@ public struct DetailView: View {
         ZStack(alignment: .bottomLeading) {
             // 1. Clear High-Resolution Backdrop Fanart (Cinematic bleed)
             GeometryReader { bgGeo in
-                MediaArtworkView(server: appState.activeServer, item: item, kind: .backdrop, maxWidth: 3840)
+                MediaArtworkView(server: effectiveDetailServer, item: item, kind: .backdrop, maxWidth: 3840)
                     .frame(width: bgGeo.size.width, height: bgGeo.size.height)
                     .clipped()
             }
@@ -162,7 +177,7 @@ public struct DetailView: View {
                                 Label("刷新详情信息", systemImage: "arrow.clockwise")
                             }
 
-                            if let server = appState.activeServer {
+                            if let server = effectiveDetailServer {
                                 Button {
                                     appState.linePickerServer = server
                                 } label: {
@@ -213,7 +228,7 @@ public struct DetailView: View {
                 // Hero Title + Actions + Metadata Row
                 VStack(alignment: .leading, spacing: 14) {
                     ClearLogoHeaderView(
-                        server: appState.activeServer,
+                        server: effectiveDetailServer,
                         item: item,
                         isLightMode: appState.isLightMode,
                         showTitle: item.isEpisode ? (item.seriesName ?? item.name) : item.name,
@@ -303,7 +318,7 @@ public struct DetailView: View {
                                     Button {
                                         didUserDisableSubtitle = true
                                         selectedSubtitleIndex = nil
-                                        if let srvId = appState.activeServer?.id {
+                                        if let srvId = effectiveDetailServer?.id ?? appState.activeServer?.id {
                                             appState.recordPrimarySubtitleChoice(
                                                 serverId: srvId,
                                                 item: item,
@@ -324,7 +339,7 @@ public struct DetailView: View {
                                             Button {
                                                 didUserDisableSubtitle = false
                                                 selectedSubtitleIndex = stream.index
-                                                if let srvId = appState.activeServer?.id {
+                                                if let srvId = effectiveDetailServer?.id ?? appState.activeServer?.id {
                                                     appState.recordPrimarySubtitleChoice(
                                                         serverId: srvId,
                                                         item: item,
@@ -357,16 +372,17 @@ public struct DetailView: View {
                                 title: mainPlayButtonTitle,
                                 systemImage: "play.fill",
                                 tint: nil,
-                                progressFraction: item.progressFraction,
+                                progressFraction: (item.isSeries ? (heroTargetEpisode?.progressFraction ?? item.progressFraction) : item.progressFraction),
                                 horizontalPadding: 24,
                                 verticalPadding: 11,
                                 fontSize: 13.5
                             ) {
+                                let playTarget = heroResolvedPlayTarget
                                 Task {
                                     await appState.startPlayback(
-                                        item: item,
+                                        item: playTarget,
                                         episodesQueue: episodes,
-                                        preferredSourceId: selectedSourceId,
+                                        preferredSourceId: playTarget.id == item.id ? selectedSourceId : nil,
                                         audioStreamIndex: selectedAudioIndex,
                                         subtitleStreamIndex: selectedSubtitleIndex,
                                         subtitleExplicitlyOff: didUserDisableSubtitle
@@ -447,12 +463,29 @@ public struct DetailView: View {
         return nil
     }
 
+    private var heroTargetEpisode: EmbyItem? {
+        guard item.isSeries else { return nil }
+        return episodes.first(where: { $0.id == focusedEpisodeId }) ?? episodes.first
+    }
+
+    private var heroResolvedPlayTarget: EmbyItem {
+        if item.isSeries, let ep = heroTargetEpisode {
+            return (ep.seriesName == nil || ep.seriesName!.isEmpty) ? ep.withSeriesName(item.name) : ep
+        }
+        return item
+    }
+
     @ViewBuilder
     private var detailDownloadButton: some View {
         let matchingEntry = downloadManager.entries.first {
             $0.itemId == item.id && (selectedSourceId.isEmpty || $0.mediaSourceId == selectedSourceId)
         }
-        let serverAllows = appState.activeServer.map { appState.canDownload(from: $0) } ?? true
+        let cachedSummary = (matchingEntry == nil) ? DonbyTurboCacheEngine.shared.cachedProgress(
+            forItemId: item.id,
+            serverId: effectiveDetailServer?.id,
+            mediaSourceId: selectedSourceId.isEmpty ? nil : selectedSourceId
+        ) : nil
+        let serverAllows = effectiveDetailServer.map { appState.canDownload(from: $0) } ?? true
         let iconName: String = {
             if !serverAllows { return "lock" }
             switch matchingEntry?.status {
@@ -466,7 +499,7 @@ public struct DetailView: View {
             switch matchingEntry?.status {
             case .completed: return Color(red: 0.22, green: 0.86, blue: 0.38)
             case .downloading, .queued: return appState.accentColor
-            default: return nil
+            default: return (cachedSummary != nil) ? appState.accentColor : nil
             }
         }()
         let tip: String = {
@@ -476,7 +509,11 @@ public struct DetailView: View {
             case .downloading:
                 return String(format: "下载中 %.0f%%", (matchingEntry?.progressFraction ?? 0) * 100)
             case .queued: return "已在下载队列等待"
-            default: return item.isSeries ? "离线下载首集或未看剧集至 ~/Movies/Donby" : "离线下载至 ~/Movies/Donby"
+            default:
+                if let cached = cachedSummary {
+                    return String(format: "已播放缓存 %.0f%%（点击从断点继续下载至 ~/Movies/Donby）", cached.progressFraction * 100)
+                }
+                return item.isSeries ? "离线下载首集或未看剧集至 ~/Movies/Donby" : "离线下载至 ~/Movies/Donby"
             }
         }()
 
@@ -490,7 +527,7 @@ public struct DetailView: View {
                 appState.selectSidebarModule(.downloads)
                 return
             }
-            guard let server = appState.activeServer, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            guard let server = effectiveDetailServer, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 appState.showToast("当前为离线模式", icon: "internaldrive.fill")
                 return
             }
@@ -506,6 +543,13 @@ public struct DetailView: View {
     }
 
     private var mainPlayButtonTitle: String {
+        if item.isSeries, let ep = heroTargetEpisode {
+            let code = ep.episodeCodeString ?? ep.name
+            if ep.resumePositionSeconds > 0 {
+                return "续播 \(code) \(ep.resumePositionString)"
+            }
+            return "播放 \(code)"
+        }
         if item.resumePositionSeconds > 0 {
             return "播放 \(item.resumePositionString)"
         } else if item.isSeries {
@@ -543,11 +587,12 @@ public struct DetailView: View {
     }
 
     private func startPlaybackFromBeginning() {
+        let playTarget = heroResolvedPlayTarget
         Task {
             await appState.startPlayback(
-                item: item,
+                item: playTarget,
                 episodesQueue: episodes,
-                preferredSourceId: selectedSourceId,
+                preferredSourceId: playTarget.id == item.id ? selectedSourceId : nil,
                 audioStreamIndex: selectedAudioIndex,
                 subtitleStreamIndex: selectedSubtitleIndex,
                 subtitleExplicitlyOff: didUserDisableSubtitle,
@@ -643,7 +688,7 @@ public struct DetailView: View {
                 Button {
                     didUserDisableSubtitle = true
                     selectedSubtitleIndex = nil
-                    if let srvId = appState.activeServer?.id {
+                    if let srvId = effectiveDetailServer?.id ?? appState.activeServer?.id {
                         appState.recordPrimarySubtitleChoice(
                             serverId: srvId,
                             item: item,
@@ -664,7 +709,7 @@ public struct DetailView: View {
                         Button {
                             didUserDisableSubtitle = false
                             selectedSubtitleIndex = stream.index
-                            if let srvId = appState.activeServer?.id {
+                            if let srvId = effectiveDetailServer?.id ?? appState.activeServer?.id {
                                 appState.recordPrimarySubtitleChoice(
                                     serverId: srvId,
                                     item: item,
@@ -813,10 +858,26 @@ public struct DetailView: View {
                         }
                     }
                     }
+                    .onAppear {
+                        if let target = focusedEpisodeId ?? episodes.first?.id {
+                            DispatchQueue.main.async {
+                                proxy.scrollTo(target, anchor: .center)
+                            }
+                        }
+                    }
                     .onChange(of: focusedEpisodeId) { _, newId in
                         if let newId {
                             withAnimation(.easeInOut(duration: 0.25)) {
                                 proxy.scrollTo(newId, anchor: .center)
+                            }
+                        }
+                    }
+                    .onChange(of: episodes.map(\.id)) { _, _ in
+                        if let target = focusedEpisodeId ?? episodes.first?.id {
+                            DispatchQueue.main.async {
+                                withAnimation(.easeInOut(duration: 0.25)) {
+                                    proxy.scrollTo(target, anchor: .center)
+                                }
                             }
                         }
                     }
@@ -841,10 +902,15 @@ public struct DetailView: View {
         let epDownloadEntry = downloadManager.activeOrCompletedEntry(for: ep.id)
         let isEpDownloaded = (epDownloadEntry?.status == .completed)
         let isEpDownloading = (epDownloadEntry?.status == .downloading || epDownloadEntry?.status == .queued)
+        let isEpWatched = appState.isItemWatchedOfflineOrLocal(ep, localVideoPath: epDownloadEntry?.localVideoFilePath)
+        let epCachedSummary = (!isEpDownloaded && !isEpDownloading) ? DonbyTurboCacheEngine.shared.cachedProgress(
+            forItemId: ep.id,
+            serverId: effectiveDetailServer?.id
+        ) : nil
 
         return VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .bottomLeading) {
-                MediaArtworkView(server: appState.activeServer, item: ep, kind: .primary, maxWidth: 560)
+                MediaArtworkView(server: effectiveDetailServer, item: ep, kind: .primary, maxWidth: 560)
                     .frame(width: 256, height: 144)
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
@@ -893,6 +959,12 @@ public struct DetailView: View {
                             .clipShape(Capsule())
                         }
                         Spacer()
+                        if isEpWatched {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 13.5, weight: .bold))
+                                .foregroundStyle(Color(red: 0.22, green: 0.86, blue: 0.38))
+                                .background(Circle().fill(Color.black.opacity(0.65)).padding(-1))
+                        }
                         if let duration = ep.runtimeMinutesString {
                             Text(duration)
                                 .font(.system(size: 11, weight: .semibold, design: .rounded))
@@ -927,8 +999,10 @@ public struct DetailView: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .strokeBorder(
-                        isSelected ? Color.white : (appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.10)),
-                        lineWidth: isSelected ? 2.0 : 0.65
+                        isSelected
+                            ? (appState.isLightMode ? appState.accentColor : Color.white)
+                            : (appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.10)),
+                        lineWidth: isSelected ? 2.2 : 0.65
                     )
             )
             .shadow(
@@ -980,7 +1054,7 @@ public struct DetailView: View {
                     } label: {
                         Label("删除本地离线文件", systemImage: "trash")
                     }
-                } else if !isEpDownloading, let srv = appState.activeServer, !srv.host.isEmpty {
+                } else if !isEpDownloading, let srv = effectiveDetailServer, !srv.host.isEmpty {
                     let targetEp = (ep.seriesName == nil || ep.seriesName!.isEmpty) ? ep.withSeriesName(item.name) : ep
                     Button {
                         Task {
@@ -991,7 +1065,11 @@ public struct DetailView: View {
                             )
                         }
                     } label: {
-                        Label("离线下载此集", systemImage: "arrow.down.circle")
+                        if let cached = epCachedSummary {
+                            Label(String(format: "离线下载此集 (已缓存 %.0f%%)", cached.progressFraction * 100), systemImage: "arrow.down.circle")
+                        } else {
+                            Label("离线下载此集", systemImage: "arrow.down.circle")
+                        }
                     }
                 }
             }
@@ -1172,22 +1250,94 @@ public struct DetailView: View {
         }
     }
 
+    private func downloadedEpisodesIn(_ group: OfflineLibraryGroup?) -> [EmbyItem] {
+        var result: [EmbyItem] = []
+        var seenIds = Set<String>()
+        if let group {
+            for sNum in group.episodesBySeason.keys.sorted() {
+                for ep in group.episodesBySeason[sNum] ?? [] {
+                    if seenIds.insert(ep.id).inserted {
+                        result.append(ep)
+                    }
+                }
+            }
+        }
+        let targetSeriesId = initialItem.isSeries ? initialItem.id : (initialItem.seriesId ?? initialItem.id)
+        for entry in downloadManager.entries where entry.status == .completed {
+            let snap = entry.hydratedItemSnapshot
+            let matchesSeries = (snap.seriesId == targetSeriesId) || (snap.seriesName == item.name)
+            if matchesSeries && seenIds.insert(snap.id).inserted {
+                result.append(snap)
+            }
+        }
+        return result.sorted {
+            let sA = $0.parentIndexNumber ?? 1
+            let sB = $1.parentIndexNumber ?? 1
+            if sA != sB { return sA < sB }
+            return ($0.indexNumber ?? 0) < ($1.indexNumber ?? 0)
+        }
+    }
+
+    private func isEpisodeWatched(_ ep: EmbyItem) -> Bool {
+        let localPath = downloadManager.activeOrCompletedEntry(for: ep.id)?.localVideoFilePath
+        return appState.isItemWatchedOfflineOrLocal(ep, localVideoPath: localPath)
+    }
+
+    private func preferredFocusEpisodeId(in eps: [EmbyItem]) -> String? {
+        if initialItem.isEpisode, let exact = eps.first(where: { $0.id == initialItem.id }) {
+            return exact.id
+        }
+        if preferOfflineFocus {
+            let downloadedInSeason = eps.filter { downloadManager.completedEntry(for: $0.id) != nil }
+            if let unwatchedDownloaded = downloadedInSeason.first(where: { !isEpisodeWatched($0) }) {
+                return unwatchedDownloaded.id
+            }
+            if let firstDownloaded = downloadedInSeason.first {
+                return firstDownloaded.id
+            }
+        }
+        return eps.first(where: { !isEpisodeWatched($0) })?.id ?? eps.first?.id
+    }
+
+    private func mergeEpisodes(remote: [EmbyItem], local: [EmbyItem]) -> [EmbyItem] {
+        guard !local.isEmpty else { return remote }
+        var merged = remote
+        let existingIds = Set(remote.map(\.id))
+        for localEp in local where !existingIds.contains(localEp.id) {
+            merged.append(localEp)
+        }
+        return merged.sorted { ($0.indexNumber ?? 0) < ($1.indexNumber ?? 0) }
+    }
+
     private func loadFullDetailData() async {
+        let localGroup = offlineGroupForCurrentItem()
         // Hydrate from local offline library first so offline items / slow networks show immediately
-        if let localGroup = offlineGroupForCurrentItem() {
+        if let localGroup {
             self.item = localGroup.displayItem
             if localGroup.isSeries && !localGroup.seasonItems.isEmpty {
                 self.seasons = localGroup.seasonItems
-                let preferredSeasonNum = initialItem.isEpisode
-                    ? (initialItem.parentIndexNumber ?? localGroup.seasonItems.first?.indexNumber ?? 1)
-                    : (localGroup.seasonItems.first?.indexNumber ?? 1)
-                self.selectedSeasonIndex = preferredSeasonNum
-                self.episodes = localGroup.episodesBySeason[preferredSeasonNum] ?? []
+                if preferOfflineFocus {
+                    let allDownloaded = downloadedEpisodesIn(localGroup)
+                    let targetEp = allDownloaded.first(where: { !isEpisodeWatched($0) }) ?? allDownloaded.first
+                    let preferredSeasonNum = targetEp?.parentIndexNumber ?? localGroup.seasonItems.first?.indexNumber ?? 1
+                    let localEps = localGroup.episodesBySeason[preferredSeasonNum] ?? []
+                    self.selectedSeasonIndex = preferredSeasonNum
+                    self.episodes = localEps
+                    self.focusedEpisodeId = targetEp?.id ?? preferredFocusEpisodeId(in: localEps)
+                } else {
+                    let preferredSeasonNum = initialItem.isEpisode
+                        ? (initialItem.parentIndexNumber ?? localGroup.seasonItems.first?.indexNumber ?? 1)
+                        : (localGroup.seasonItems.first?.indexNumber ?? 1)
+                    let localEps = localGroup.episodesBySeason[preferredSeasonNum] ?? []
+                    self.selectedSeasonIndex = preferredSeasonNum
+                    self.episodes = localEps
+                    self.focusedEpisodeId = preferredFocusEpisodeId(in: localEps)
+                }
             }
             syncDefaultTracks()
         }
 
-        guard let server = appState.activeServer else { return }
+        guard let server = effectiveDetailServer else { return }
         guard !server.host.isEmpty else { return }
         isLoadingDetails = true
         defer { isLoadingDetails = false }
@@ -1218,15 +1368,7 @@ public struct DetailView: View {
 
             if let preloadedSeasons = await seasonsTask, !preloadedSeasons.isEmpty {
                 self.seasons = preloadedSeasons
-                if item.isEpisode, let firstSeason = preloadedSeasons.first(where: { ($0.indexNumber ?? 1) == (item.parentIndexNumber ?? 1) }) ?? preloadedSeasons.first {
-                    let sNum = item.parentIndexNumber ?? firstSeason.indexNumber ?? 1
-                    selectedSeasonIndex = sNum
-                    await loadEpisodesForSeason(firstSeason, seasonNumber: sNum)
-                } else if let firstSeason = preloadedSeasons.first(where: { ($0.indexNumber ?? 1) > 0 }) ?? preloadedSeasons.first {
-                    let sNum = firstSeason.indexNumber ?? 1
-                    selectedSeasonIndex = sNum
-                    await loadEpisodesForSeason(firstSeason, seasonNumber: sNum)
-                }
+                await applyInitialSeasonAndFocus(seasons: preloadedSeasons, localGroup: localGroup)
             }
             self.similarItems = []
             return
@@ -1252,21 +1394,19 @@ public struct DetailView: View {
         if item.isSeries {
             if let loadedSeasons = preloadedSeasons, !loadedSeasons.isEmpty {
                 self.seasons = loadedSeasons
-                if let firstSeason = loadedSeasons.first {
-                    let sNum = firstSeason.indexNumber ?? 1
-                    selectedSeasonIndex = sNum
-                    await loadEpisodesForSeason(firstSeason, seasonNumber: sNum)
-                }
+                await applyInitialSeasonAndFocus(seasons: loadedSeasons, localGroup: localGroup)
             } else if let allEps = try? await EmbyClient.shared.fetchEpisodes(server: server, seriesId: item.id) {
                 guard !Task.isCancelled else { return }
-                self.episodes = allEps
                 let sNums = Set(allEps.compactMap { $0.parentIndexNumber }).sorted()
                 if !sNums.isEmpty {
-                    self.seasons = sNums.map { s in
+                    let builtSeasons = sNums.map { s in
                         EmbyItem(id: "\(item.id)_s\(s)", name: "第 \(s) 季", type: "Season", seriesId: item.id, indexNumber: s)
                     }
-                    selectedSeasonIndex = sNums.first ?? 1
-                    self.episodes = allEps.filter { ($0.parentIndexNumber ?? 1) == selectedSeasonIndex }
+                    self.seasons = builtSeasons
+                    await applyInitialSeasonAndFocus(seasons: builtSeasons, localGroup: localGroup, preloadedAllEpisodes: allEps)
+                } else {
+                    self.episodes = allEps
+                    self.focusedEpisodeId = preferredFocusEpisodeId(in: allEps)
                 }
             }
         } else if item.isEpisode, let sId = item.seriesId {
@@ -1293,16 +1433,76 @@ public struct DetailView: View {
         }
     }
 
-    private func loadEpisodesForSeason(_ season: EmbyItem, seasonNumber: Int? = nil) async {
-        let sNum = seasonNumber ?? season.indexNumber ?? 1
-        selectedSeasonIndex = sNum
-        if let localGroup = offlineGroupForCurrentItem(),
-           let localEps = localGroup.episodesBySeason[sNum], !localEps.isEmpty,
-           (appState.activeServer?.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) {
-            self.episodes = localEps
+    private func applyInitialSeasonAndFocus(
+        seasons loadedSeasons: [EmbyItem],
+        localGroup: OfflineLibraryGroup?,
+        preloadedAllEpisodes: [EmbyItem]? = nil
+    ) async {
+        if item.isEpisode, let epSeason = loadedSeasons.first(where: { ($0.indexNumber ?? 1) == (item.parentIndexNumber ?? 1) }) ?? loadedSeasons.first {
+            let sNum = item.parentIndexNumber ?? epSeason.indexNumber ?? 1
+            await loadEpisodesForSeason(epSeason, seasonNumber: sNum, preloadedAllEpisodes: preloadedAllEpisodes)
             return
         }
-        guard let server = appState.activeServer else { return }
+
+        if preferOfflineFocus {
+            let allDownloaded = downloadedEpisodesIn(localGroup)
+            let downloadedIds = Set(allDownloaded.map(\.id))
+            let downloadedSeasonNums = Array(Set(allDownloaded.map { $0.parentIndexNumber ?? 1 })).sorted()
+
+            if !downloadedSeasonNums.isEmpty {
+                var fallbackSeasonNum: Int? = nil
+                var fallbackEps: [EmbyItem] = []
+                var fallbackFocusId: String? = nil
+
+                for sNum in downloadedSeasonNums {
+                    guard let seasonObj = loadedSeasons.first(where: { ($0.indexNumber ?? 1) == sNum }) else { continue }
+                    let seasonEps = await fetchMergedEpisodesForSeason(seasonObj, seasonNumber: sNum, localGroup: localGroup, preloadedAllEpisodes: preloadedAllEpisodes)
+                    guard !Task.isCancelled else { return }
+
+                    let downloadedInSeason = seasonEps.filter { downloadedIds.contains($0.id) }
+                    if fallbackSeasonNum == nil && !downloadedInSeason.isEmpty {
+                        fallbackSeasonNum = sNum
+                        fallbackEps = seasonEps
+                        fallbackFocusId = downloadedInSeason.first?.id
+                    }
+                    if let firstUnwatched = downloadedInSeason.first(where: { !isEpisodeWatched($0) }) {
+                        self.selectedSeasonIndex = sNum
+                        self.episodes = seasonEps
+                        self.focusedEpisodeId = firstUnwatched.id
+                        return
+                    }
+                }
+
+                if let fallbackSeasonNum {
+                    self.selectedSeasonIndex = fallbackSeasonNum
+                    self.episodes = fallbackEps
+                    self.focusedEpisodeId = fallbackFocusId ?? preferredFocusEpisodeId(in: fallbackEps)
+                    return
+                }
+            }
+        }
+
+        if let defaultSeason = loadedSeasons.first(where: { ($0.indexNumber ?? 1) > 0 }) ?? loadedSeasons.first {
+            let sNum = defaultSeason.indexNumber ?? 1
+            await loadEpisodesForSeason(defaultSeason, seasonNumber: sNum, preloadedAllEpisodes: preloadedAllEpisodes)
+        }
+    }
+
+    private func fetchMergedEpisodesForSeason(
+        _ season: EmbyItem,
+        seasonNumber: Int,
+        localGroup: OfflineLibraryGroup?,
+        preloadedAllEpisodes: [EmbyItem]? = nil
+    ) async -> [EmbyItem] {
+        let localEps = localGroup?.episodesBySeason[seasonNumber] ?? []
+        if let preloadedAllEpisodes {
+            let filtered = preloadedAllEpisodes.filter { ($0.parentIndexNumber ?? 1) == seasonNumber }
+            let remote = filtered.isEmpty ? preloadedAllEpisodes : filtered
+            return mergeEpisodes(remote: remote, local: localEps)
+        }
+        guard let server = effectiveDetailServer, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return localEps
+        }
         if server.type == .uhdNative {
             let tvId = item.isEpisode ? (item.seriesId ?? item.id) : item.id
             let sName = item.isEpisode ? item.seriesName : item.name
@@ -1310,28 +1510,32 @@ public struct DetailView: View {
                 server: server,
                 tvId: tvId,
                 seasonId: season.id,
-                seasonNumber: sNum,
+                seasonNumber: seasonNumber,
                 seriesName: sName
             ) {
-                self.episodes = page.items
+                return mergeEpisodes(remote: page.items, local: localEps)
             }
-            return
+            return localEps
         }
-        do {
-            let eps = try await EmbyClient.shared.fetchEpisodes(server: server, seriesId: item.isEpisode ? (item.seriesId ?? item.id) : item.id, seasonId: season.id)
-            if !eps.isEmpty {
-                self.episodes = eps
-            } else {
-                let allEps = try await EmbyClient.shared.fetchEpisodes(server: server, seriesId: item.isEpisode ? (item.seriesId ?? item.id) : item.id)
-                let filtered = allEps.filter { ($0.parentIndexNumber ?? 1) == sNum }
-                self.episodes = filtered.isEmpty ? allEps : filtered
-            }
-        } catch {
-            if let allEps = try? await EmbyClient.shared.fetchEpisodes(server: server, seriesId: item.isEpisode ? (item.seriesId ?? item.id) : item.id) {
-                let filtered = allEps.filter { ($0.parentIndexNumber ?? 1) == sNum }
-                self.episodes = filtered.isEmpty ? allEps : filtered
-            }
+        let seriesId = item.isEpisode ? (item.seriesId ?? item.id) : item.id
+        if let eps = try? await EmbyClient.shared.fetchEpisodes(server: server, seriesId: seriesId, seasonId: season.id), !eps.isEmpty {
+            return mergeEpisodes(remote: eps, local: localEps)
         }
+        if let allEps = try? await EmbyClient.shared.fetchEpisodes(server: server, seriesId: seriesId) {
+            let filtered = allEps.filter { ($0.parentIndexNumber ?? 1) == seasonNumber }
+            return mergeEpisodes(remote: filtered.isEmpty ? allEps : filtered, local: localEps)
+        }
+        return localEps
+    }
+
+    private func loadEpisodesForSeason(_ season: EmbyItem, seasonNumber: Int? = nil, preloadedAllEpisodes: [EmbyItem]? = nil) async {
+        let sNum = seasonNumber ?? season.indexNumber ?? 1
+        selectedSeasonIndex = sNum
+        let localGroup = offlineGroupForCurrentItem()
+        let merged = await fetchMergedEpisodesForSeason(season, seasonNumber: sNum, localGroup: localGroup, preloadedAllEpisodes: preloadedAllEpisodes)
+        guard !Task.isCancelled else { return }
+        self.episodes = merged
+        self.focusedEpisodeId = preferredFocusEpisodeId(in: merged)
     }
 
     private func syncDefaultTracks() {
@@ -1351,7 +1555,7 @@ public struct DetailView: View {
         if let selSub = selectedSubtitleIndex, subtitleStreams.contains(where: { $0.index == selSub }) {
             // keep valid subtitle selection
         } else if !didUserDisableSubtitle {
-            if let srvId = appState.activeServer?.id,
+            if let srvId = effectiveDetailServer?.id ?? appState.activeServer?.id,
                let remembered = appState.resolvedPrimarySubtitleMemory(serverId: srvId, item: item) {
                 if remembered.isDisabled {
                     didUserDisableSubtitle = true
