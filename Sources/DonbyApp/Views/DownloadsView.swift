@@ -668,6 +668,15 @@ private struct DownloadEntryRowCard: View {
                             .background(accentColor.opacity(0.12))
                             .clipShape(Capsule())
                     }
+                    if entry.origin == .autoArchivedFromCache {
+                        Text("自动归档")
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(Color.orange.opacity(0.14))
+                            .clipShape(Capsule())
+                    }
                     Text(entry.serverName)
                         .font(.system(size: 11))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))
@@ -719,6 +728,19 @@ private struct DownloadEntryRowCard: View {
             Spacer()
 
             HStack(spacing: 8) {
+                if entry.origin == .autoArchivedFromCache {
+                    Button {
+                        DonbyDownloadManager.shared.promoteToManualDownload(assetKey: entry.assetKey)
+                    } label: {
+                        Image(systemName: "bookmark")
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(.orange)
+                            .padding(7)
+                    }
+                    .buttonStyle(.plain)
+                    .help("转为手动保留（播毕不自动删除）")
+                }
+
                 Button {
                     onRevealInFinder()
                 } label: {

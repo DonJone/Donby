@@ -169,6 +169,7 @@ public final class AppState: ObservableObject {
     @AppStorage("donby.autoSkipIntroOutro") public var autoSkipIntroOutro: Bool = false
     @AppStorage("donby.autoNextEpisode") public var autoNextEpisode: Bool = true
     @AppStorage("donby.autoSaveFullCacheToOffline") public var autoSaveFullCacheToOffline: Bool = false
+    @AppStorage("donby.autoDeleteAutoArchivedAfterPlayback") public var autoDeleteAutoArchivedAfterPlayback: Bool = false
     @Published public var serverCapabilities: [UUID: ServerDeliveryCapabilities] = [:]
 
     public static var appleMusicRed: Color {
@@ -901,7 +902,14 @@ public final class AppState: ObservableObject {
         }
     }
 
+    public func cancelPendingPlaybackStart() {
+        guard isStartingPlayback else { return }
+        playbackStartGeneration &+= 1
+        isStartingPlayback = false
+    }
+
     public func openServer(_ server: EmbyServerConfig) {
+        cancelPendingPlaybackStart()
         activeServerId = server.id
         openedServerId = server.id
         selectedLibrary = nil
@@ -933,6 +941,7 @@ public final class AppState: ObservableObject {
     }
 
     public func selectSidebarModule(_ tab: MainNavigationTab) {
+        cancelPendingPlaybackStart()
         openedServerId = nil
         selectedLibrary = nil
         detailStack.removeAll()
@@ -1558,6 +1567,7 @@ public final class AppState: ObservableObject {
     }
 
     public func openDetail(for item: EmbyItem, preferOfflineFocus: Bool = false) {
+        cancelPendingPlaybackStart()
         if preferOfflineFocus {
             detailOfflineFocusIds.insert(item.id)
         } else {
@@ -1568,6 +1578,7 @@ public final class AppState: ObservableObject {
     }
 
     public func popDetail() {
+        cancelPendingPlaybackStart()
         if let popped = detailStack.popLast() {
             detailOfflineFocusIds.remove(popped.id)
         }
@@ -2346,12 +2357,23 @@ public final class AppState: ObservableObject {
             posterURLString: (seriesPoster ?? itemPoster)?.absoluteString,
             itemArtworkURLs: (poster: itemPoster, backdrop: itemBackdrop, thumb: itemThumb, logo: itemLogo, seasonPoster: seasonPoster),
             seriesArtworkURLs: (poster: seriesPoster, backdrop: seriesBackdrop, logo: seriesLogo),
-            connectionBudgetPerTask: budget
+            connectionBudgetPerTask: budget,
+            origin: isAutoSave ? .autoArchivedFromCache : .manualDownload
         )
         showToast(
-            summary.isFullyCached ? "已将完整缓存保存至离线库：\(meta.title)" : "已从缓存继续下载 (\(Int(summary.progressFraction * 100))%)：\(meta.title)",
+            isAutoSave
+                ? "已将完整播放缓存自动归档：\(meta.title)"
+                : (summary.isFullyCached ? "已将完整缓存保存至离线库：\(meta.title)" : "已从缓存继续下载 (\(Int(summary.progressFraction * 100))%)：\(meta.title)"),
             icon: "arrow.down.circle.fill"
         )
+    }
+
+    public func cleanupAutoArchivedEntryIfFinished(itemId: String, mediaSourceId: String?) {
+        guard autoSaveFullCacheToOffline && autoDeleteAutoArchivedAfterPlayback else { return }
+        if let removed = DonbyDownloadManager.shared.removeAutoArchivedAfterPlayback(itemId: itemId, mediaSourceId: mediaSourceId) {
+            DonbyLogger.shared.log("播放完毕已自动删除缓存自动归档文件（手动下载保留）: \(removed.title)", level: .info, subsystem: "Cache")
+            showToast("播放完毕，已清理自动归档：\(removed.title)", icon: "trash.circle.fill")
+        }
     }
 
     public func handleIncomingURL(_ url: URL) {

@@ -1223,7 +1223,9 @@ public struct DetailView: View {
                     subtitleStreamIndex: selectedSubtitleIndex,
                     subtitleExplicitlyOff: didUserDisableSubtitle
                 )
-                appState.showToast("已启动原画最高规格直解: \(best.displayVersionName)", icon: "sparkles")
+                if appState.activePlayback != nil {
+                    appState.showToast("已启动原画最高规格直解: \(best.displayVersionName)", icon: "sparkles")
+                }
             }
         } else {
             Task {
@@ -1234,7 +1236,9 @@ public struct DetailView: View {
                     subtitleStreamIndex: selectedSubtitleIndex,
                     subtitleExplicitlyOff: didUserDisableSubtitle
                 )
-                appState.showToast("已启动原画规格直解播放", icon: "sparkles")
+                if appState.activePlayback != nil {
+                    appState.showToast("已启动原画规格直解播放", icon: "sparkles")
+                }
             }
         }
     }

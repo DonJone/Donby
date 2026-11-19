@@ -7,6 +7,7 @@ import DonbyStorage
 
 public struct MainWindowView: View {
     @EnvironmentObject private var appState: AppState
+    @State private var showDelayedResolvePill: Bool = false
 
     public init() {}
 
@@ -70,11 +71,65 @@ public struct MainWindowView: View {
                 .ignoresSafeArea(.container, edges: .top)
             }
 
+            if appState.activePlayback == nil && showDelayedResolvePill {
+                HStack {
+                    Spacer()
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("正在连接媒体...")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        Button {
+                            appState.cancelPendingPlaybackStart()
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 10, weight: .bold))
+                                Text("取消")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                            }
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.10))
+                            .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 7)
+                    .donbyLiquidGlassCapsule()
+                    .padding(.trailing, 24)
+                    .padding(.bottom, 22)
+                }
+                .transition(.opacity)
+                .zIndex(95)
+            }
+
             if let toast = appState.toastMessage {
                 ToastBannerView(toast: toast)
                     .padding(.bottom, 26)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                     .zIndex(100)
+            }
+        }
+        .task(id: appState.isStartingPlayback) {
+            if appState.isStartingPlayback {
+                showDelayedResolvePill = false
+                try? await Task.sleep(nanoseconds: 650_000_000)
+                if !Task.isCancelled && appState.isStartingPlayback && appState.activePlayback == nil {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        showDelayedResolvePill = true
+                    }
+                }
+            } else {
+                showDelayedResolvePill = false
+            }
+        }
+        .onExitCommand {
+            if appState.activePlayback == nil && appState.isStartingPlayback {
+                appState.cancelPendingPlaybackStart()
             }
         }
         .sheet(isPresented: $appState.showAddServerSheet) {

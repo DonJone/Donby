@@ -496,6 +496,16 @@ public struct SettingsView: View {
                     .font(.system(size: 11.5))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
 
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("播放完毕后自动删除自动归档文件（保留手动下载）", isOn: $appState.autoDeleteAutoArchivedAfterPlayback)
+                        .disabled(!appState.autoSaveFullCacheToOffline)
+                    Text("仅清理经「完整播放缓存自动转存」生成的剧集与影片文件（含对应外挂字幕与空目录）；手动点击下载的内容不会被自动删除。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                }
+                .padding(.leading, 22)
+                .opacity(appState.autoSaveFullCacheToOffline ? 1.0 : 0.55)
+
                 HStack {
                     let usage = DonbyTurboCacheEngine.shared.calculateDiskUsage()
                     Text("当前临时缓存占用：\(ByteCountFormatter.string(fromByteCount: usage.unpinnedCacheBytes, countStyle: .file)) · 已锁定离线：\(ByteCountFormatter.string(fromByteCount: usage.pinnedDownloadBytes, countStyle: .file))")
@@ -552,7 +562,7 @@ public struct SettingsView: View {
                     Text("Donby")
                         .font(.system(size: 20, weight: .heavy, design: .rounded))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    let currentVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.22"
+                    let currentVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.23"
                     Text("版本 \(currentVer) (Build 2026.11) · macOS Apple Silicon")
                         .font(.system(size: 12))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))

@@ -94,6 +94,7 @@ public struct PlayerView: View {
     @State private var skipBannerIsOutro: Bool = false
     @State private var didAutoSkipIntroForCurrentItem: Bool = false
     @State private var didAutoSkipOutroForCurrentItem: Bool = false
+    @State private var finishedItemPendingCleanup: (itemId: String, mediaSourceId: String)? = nil
 
     private let progressTimer = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
     private let embySyncTimer = Timer.publish(every: 10.0, on: .main, in: .common).autoconnect()
@@ -153,103 +154,51 @@ public struct PlayerView: View {
                     }
                 }
 
-            if showControls {
-                VStack {
-                    topOSDBar
-                        .onContinuousHover { _ in showControlsAndResetTimer() }
-                    Spacer()
-                    if let bannerTitle = skipBannerLabel {
-                        HStack {
-                            Spacer()
-                            Button {
-                                if skipBannerIsOutro,
-                                   let idx = session.episodesQueue.firstIndex(where: { $0.id == currentItem.id }),
-                                   session.episodesQueue.indices.contains(idx + 1) {
-                                    switchToEpisode(session.episodesQueue[idx + 1])
-                                } else {
-                                    seekTo(skipBannerTargetSec)
-                                }
-                                skipBannerLabel = nil
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: skipBannerIsOutro ? "forward.end.fill" : "forward.fill")
-                                    Text(bannerTitle)
-                                }
-                                .font(.system(size: 12.5, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 8)
-                                .background(
-                                    ZStack {
-                                        Capsule().fill(.ultraThinMaterial)
-                                        Capsule().fill(Color.black.opacity(0.55))
-                                        Capsule().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.7)
-                                    }
-                                )
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.trailing, 24)
-                            .padding(.bottom, 8)
-                        }
-                    }
-                    bottomControlBar
-                        .background(
-                            GeometryReader { geo in
-                                Color.clear
-                                    .onAppear { bottomControlBarHeight = geo.size.height }
-                                    .onChange(of: geo.size.height) { _, newH in
-                                        if abs(bottomControlBarHeight - newH) > 0.5 {
-                                            bottomControlBarHeight = newH
-                                        }
-                                    }
-                            }
-                        )
-                        .onContinuousHover { _ in showControlsAndResetTimer() }
-                }
-                .transition(.opacity)
-            }
-
-            if let drawer = activeDrawer {
-                HStack {
-                    Spacer()
-                    rightDrawerPanel(tab: drawer)
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
-                        .onContinuousHover { _ in autoHideTask?.cancel() }
-                }
-            }
-
             if isOpeningMedia {
-                ZStack {
-                    Color.black.opacity(0.85)
-                    VStack(spacing: 16) {
+                VStack {
+                    Spacer()
+                    HStack(spacing: 10) {
                         ProgressView()
-                            .scaleEffect(1.2)
-                            .tint(appState.accentColor)
-                        Text("正在解析视频流与配置硬件解码...")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.95))
-                        Text(currentResource.routeNote.isEmpty ? currentItem.name : "\(currentItem.name) · \(currentResource.routeNote)")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.white.opacity(0.6))
+                            .controlSize(.small)
+                            .tint(.white.opacity(0.78))
+                        Text("正在加载...")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.78))
+
+                        Rectangle()
+                            .fill(Color.white.opacity(0.18))
+                            .frame(width: 0.75, height: 12)
+
+                        Button {
+                            exitPlayer()
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 10, weight: .bold))
+                                Text("取消")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                            }
+                            .foregroundStyle(.white.opacity(0.88))
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .padding(.horizontal, 36).padding(.vertical, 28)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7.5)
                     .background(
                         ZStack {
-                            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .fill(.ultraThinMaterial)
-                            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .fill(Color.black.opacity(0.68))
-                            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6)
+                            Capsule().fill(.ultraThinMaterial)
+                            Capsule().fill(Color.black.opacity(0.42))
+                            Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.6)
                         }
                     )
+                    .padding(.bottom, 34)
                 }
                 .transition(.opacity)
             }
 
             if let err = openingErrorMessage {
                 ZStack {
-                    Color.black.opacity(0.9)
+                    Color.black.opacity(0.82)
                     VStack(spacing: 16) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 36))
@@ -299,6 +248,73 @@ public struct PlayerView: View {
                 }
                 .transition(.opacity)
             }
+
+            if showControls || isOpeningMedia || openingErrorMessage != nil {
+                VStack {
+                    topOSDBar
+                        .onContinuousHover { _ in showControlsAndResetTimer() }
+                    Spacer()
+                    if showControls && !isOpeningMedia && openingErrorMessage == nil {
+                        if let bannerTitle = skipBannerLabel {
+                            HStack {
+                                Spacer()
+                                Button {
+                                    if skipBannerIsOutro,
+                                       let idx = session.episodesQueue.firstIndex(where: { $0.id == currentItem.id }),
+                                       session.episodesQueue.indices.contains(idx + 1) {
+                                        switchToEpisode(session.episodesQueue[idx + 1])
+                                    } else {
+                                        seekTo(skipBannerTargetSec)
+                                    }
+                                    skipBannerLabel = nil
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: skipBannerIsOutro ? "forward.end.fill" : "forward.fill")
+                                        Text(bannerTitle)
+                                    }
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        ZStack {
+                                            Capsule().fill(.ultraThinMaterial)
+                                            Capsule().fill(Color.black.opacity(0.55))
+                                            Capsule().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.7)
+                                        }
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.trailing, 24)
+                                .padding(.bottom, 8)
+                            }
+                        }
+                        bottomControlBar
+                            .background(
+                                GeometryReader { geo in
+                                    Color.clear
+                                        .onAppear { bottomControlBarHeight = geo.size.height }
+                                        .onChange(of: geo.size.height) { _, newH in
+                                            if abs(bottomControlBarHeight - newH) > 0.5 {
+                                                bottomControlBarHeight = newH
+                                            }
+                                        }
+                                }
+                            )
+                            .onContinuousHover { _ in showControlsAndResetTimer() }
+                    }
+                }
+                .transition(.opacity)
+            }
+
+            if let drawer = activeDrawer {
+                HStack {
+                    Spacer()
+                    rightDrawerPanel(tab: drawer)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                        .onContinuousHover { _ in autoHideTask?.cancel() }
+                }
+            }
         }
         .sheet(isPresented: $showLogSheet) {
             LogViewerSheet()
@@ -316,6 +332,7 @@ public struct PlayerView: View {
         .onKeyPress(KeyEquivalent("l")) { showLogSheet.toggle(); return .handled }
         .onKeyPress(KeyEquivalent("L")) { showLogSheet.toggle(); return .handled }
         .onKeyPress(.escape) { exitPlayer(); return .handled }
+        .onExitCommand { exitPlayer() }
         .onAppear {
             playbackSpeed = Float(appState.defaultPlaySpeed)
             updateClock()
@@ -427,6 +444,7 @@ public struct PlayerView: View {
             if pState == DK_STATE_ENDED && !didHandlePlaybackEnded {
                 didHandlePlaybackEnded = true
                 isPlaying = false
+                finishedItemPendingCleanup = (currentItem.id, currentResource.mediaSource.id)
                 if session.server.type == .uhdNative && !session.server.accessToken.isEmpty {
                     let srv = session.server
                     let itm = currentItem
@@ -569,15 +587,22 @@ public struct PlayerView: View {
                 Button {
                     exitPlayer()
                 } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 32, height: 32)
-                        .background(
-                            Circle()
-                                .fill(Color.black.opacity(0.55))
-                                .overlay(Circle().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6))
-                        )
+                    HStack(spacing: 5) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 13.5, weight: .semibold))
+                        if isOpeningMedia || openingErrorMessage != nil {
+                            Text("退出")
+                                .font(.system(size: 12.5, weight: .semibold))
+                        }
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, (isOpeningMedia || openingErrorMessage != nil) ? 11 : 0)
+                    .frame(width: (isOpeningMedia || openingErrorMessage != nil) ? nil : 32, height: 32)
+                    .background(
+                        Capsule()
+                            .fill(Color.black.opacity(0.55))
+                            .overlay(Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6))
+                    )
                 }
                 .buttonStyle(.plain)
                 .help("退出播放 (Esc)")
@@ -1561,7 +1586,7 @@ public struct PlayerView: View {
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             if !Task.isCancelled {
                 await MainActor.run {
-                    if activeDrawer == nil && !isScrubbing {
+                    if activeDrawer == nil && !isScrubbing && !isOpeningMedia && openingErrorMessage == nil {
                         withAnimation(.easeInOut(duration: 0.25)) {
                             showControls = false
                         }
@@ -1589,6 +1614,9 @@ public struct PlayerView: View {
         isOpeningMedia = true
         openingErrorMessage = nil
         didHandlePlaybackEnded = false
+        finishedItemPendingCleanup = nil
+        currentTime = max(0, startSeconds)
+        duration = 1
         bufferedAheadSeconds = 0
         displayDownloadSpeedMBs = 0.0
         localExternalSubtitleName = nil
@@ -1876,6 +1904,7 @@ public struct PlayerView: View {
         guard let handle = playerHandle else { return }
         if dk_player_get_state(handle) == DK_STATE_ENDED {
             didHandlePlaybackEnded = false
+            finishedItemPendingCleanup = nil
             currentTime = 0
             dk_player_seek(handle, 0, true)
             dk_player_play(handle)
@@ -2018,7 +2047,7 @@ public struct PlayerView: View {
     }
 
     private func exportRedactedDiagnostics() {
-        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.22"
+        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.23"
         var lines: [String] = []
         lines.append("Donby Diagnostics Report (v\(appVer))")
         lines.append("Time: \(ISO8601DateFormatter().string(from: Date()))")
@@ -2376,6 +2405,12 @@ public struct PlayerView: View {
         switchToEpisode(session.episodesQueue[targetIdx])
     }
 
+    private func isCurrentPlaybackConsideredFinished() -> Bool {
+        if didHandlePlaybackEnded || didAutoSkipOutroForCurrentItem { return true }
+        if let pending = finishedItemPendingCleanup, pending.itemId == currentItem.id { return true }
+        return duration > 60 && currentTime > 0 && (currentTime / duration) >= 0.92
+    }
+
     private func switchToEpisode(_ nextEp: EmbyItem) {
         episodeSwitchTask?.cancel()
         let server = session.server
@@ -2386,6 +2421,8 @@ public struct PlayerView: View {
         let prevSourceId = currentResource.mediaSource.id
         let prevSessionId = currentResource.playSessionId
         let prevPos = currentTime
+        let prevWasFinished = isCurrentPlaybackConsideredFinished()
+        finishedItemPendingCleanup = nil
         saveCurrentWatchProgress(isFinal: true)
         episodeSwitchTask = Task {
             do {
@@ -2434,6 +2471,9 @@ public struct PlayerView: View {
                 currentItem = nextEp
                 currentResource = res
                 startNativeKernelPlayback(startSeconds: nextEp.resumePositionSeconds)
+                if prevWasFinished {
+                    appState.cleanupAutoArchivedEntryIfFinished(itemId: prevItem.id, mediaSourceId: prevSourceId)
+                }
             } catch {
                 guard !Task.isCancelled else { return }
                 episodeSwitchTask = nil
@@ -2449,30 +2489,41 @@ public struct PlayerView: View {
         if let mm = mouseMonitor { NSEvent.removeMonitor(mm); mouseMonitor = nil }
         if let km = keyMonitor { NSEvent.removeMonitor(km); keyMonitor = nil }
 
-        saveCurrentWatchProgress(isFinal: true)
+        let exitingItemId = currentItem.id
+        let exitingSourceId = currentResource.mediaSource.id
+        let wasOpenedSuccessfully = (!isOpeningMedia && openingErrorMessage == nil && playerHandle != nil)
+        let exitingWasFinished = wasOpenedSuccessfully && isCurrentPlaybackConsideredFinished()
+        finishedItemPendingCleanup = nil
 
-        if !session.server.host.isEmpty && !session.server.accessToken.isEmpty {
-            let srv = session.server
-            let itm = currentItem
-            let msId = currentResource.mediaSource.id
-            let psId = currentResource.playSessionId
-            let pos = currentTime
-            Task {
-                if srv.type == .uhdNative {
-                    await UHDStreamClient.shared.reportPlayback(server: srv, kind: .stopped, item: itm, assetId: msId, positionSeconds: pos)
-                } else {
-                    await EmbyClient.shared.reportPlaybackStopped(
-                        server: srv,
-                        itemId: itm.id,
-                        mediaSourceId: msId,
-                        playSessionId: psId,
-                        positionSeconds: pos
-                    )
+        if wasOpenedSuccessfully {
+            saveCurrentWatchProgress(isFinal: true)
+
+            if !session.server.host.isEmpty && !session.server.accessToken.isEmpty {
+                let srv = session.server
+                let itm = currentItem
+                let msId = currentResource.mediaSource.id
+                let psId = currentResource.playSessionId
+                let pos = currentTime
+                Task {
+                    if srv.type == .uhdNative {
+                        await UHDStreamClient.shared.reportPlayback(server: srv, kind: .stopped, item: itm, assetId: msId, positionSeconds: pos)
+                    } else {
+                        await EmbyClient.shared.reportPlaybackStopped(
+                            server: srv,
+                            itemId: itm.id,
+                            mediaSourceId: msId,
+                            playSessionId: psId,
+                            positionSeconds: pos
+                        )
+                    }
                 }
             }
         }
 
         stopNativeKernel()
+        if exitingWasFinished {
+            appState.cleanupAutoArchivedEntryIfFinished(itemId: exitingItemId, mediaSourceId: exitingSourceId)
+        }
         appState.activePlayback = nil
     }
 

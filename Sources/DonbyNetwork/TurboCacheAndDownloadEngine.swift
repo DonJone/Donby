@@ -1283,6 +1283,11 @@ public struct OfflineSubtitleAsset: Codable, Hashable, Identifiable, Sendable {
     }
 }
 
+public enum DownloadOrigin: String, Codable, Sendable {
+    case manualDownload = "manual"
+    case autoArchivedFromCache = "autoArchived"
+}
+
 public struct DownloadEntry: Codable, Identifiable, Equatable, Sendable {
     public var id: String { assetKey }
     public let assetKey: String
@@ -1312,7 +1317,49 @@ public struct DownloadEntry: Codable, Identifiable, Equatable, Sendable {
     public var downloadedBytes: Int64
     public var speedMBs: Double
     public var errorMessage: String?
+    public var origin: DownloadOrigin
     public let createdAt: Date
+
+    private enum CodingKeys: String, CodingKey {
+        case assetKey, serverId, serverName, itemId, mediaSourceId, title, subtitle, posterURLString
+        case resolutionBadge, streamURLString, downloadURLString, headers, itemSnapshot, mediaSourceSnapshot
+        case offlineSubtitles, localVideoFilePath, localFolderPath, localSeriesFolderPath
+        case localPosterPath, localBackdropPath, localThumbPath, localLogoPath
+        case status, totalBytes, downloadedBytes, speedMBs, errorMessage, origin, createdAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        assetKey = try c.decode(String.self, forKey: .assetKey)
+        serverId = try c.decode(UUID.self, forKey: .serverId)
+        serverName = try c.decode(String.self, forKey: .serverName)
+        itemId = try c.decode(String.self, forKey: .itemId)
+        mediaSourceId = try c.decode(String.self, forKey: .mediaSourceId)
+        title = try c.decode(String.self, forKey: .title)
+        subtitle = try c.decodeIfPresent(String.self, forKey: .subtitle)
+        posterURLString = try c.decodeIfPresent(String.self, forKey: .posterURLString)
+        resolutionBadge = try c.decodeIfPresent(String.self, forKey: .resolutionBadge)
+        streamURLString = try c.decode(String.self, forKey: .streamURLString)
+        downloadURLString = try c.decode(String.self, forKey: .downloadURLString)
+        headers = try c.decodeIfPresent([String: String].self, forKey: .headers) ?? [:]
+        itemSnapshot = try c.decode(EmbyItem.self, forKey: .itemSnapshot)
+        mediaSourceSnapshot = try c.decode(MediaSourceInfo.self, forKey: .mediaSourceSnapshot)
+        offlineSubtitles = try c.decodeIfPresent([OfflineSubtitleAsset].self, forKey: .offlineSubtitles) ?? []
+        localVideoFilePath = try c.decodeIfPresent(String.self, forKey: .localVideoFilePath)
+        localFolderPath = try c.decodeIfPresent(String.self, forKey: .localFolderPath)
+        localSeriesFolderPath = try c.decodeIfPresent(String.self, forKey: .localSeriesFolderPath)
+        localPosterPath = try c.decodeIfPresent(String.self, forKey: .localPosterPath)
+        localBackdropPath = try c.decodeIfPresent(String.self, forKey: .localBackdropPath)
+        localThumbPath = try c.decodeIfPresent(String.self, forKey: .localThumbPath)
+        localLogoPath = try c.decodeIfPresent(String.self, forKey: .localLogoPath)
+        status = try c.decode(DownloadTaskStatus.self, forKey: .status)
+        totalBytes = try c.decodeIfPresent(Int64.self, forKey: .totalBytes) ?? 0
+        downloadedBytes = try c.decodeIfPresent(Int64.self, forKey: .downloadedBytes) ?? 0
+        speedMBs = try c.decodeIfPresent(Double.self, forKey: .speedMBs) ?? 0
+        errorMessage = try c.decodeIfPresent(String.self, forKey: .errorMessage)
+        origin = try c.decodeIfPresent(DownloadOrigin.self, forKey: .origin) ?? .manualDownload
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+    }
 
     public init(
         assetKey: String,
@@ -1342,6 +1389,7 @@ public struct DownloadEntry: Codable, Identifiable, Equatable, Sendable {
         downloadedBytes: Int64 = 0,
         speedMBs: Double = 0.0,
         errorMessage: String? = nil,
+        origin: DownloadOrigin = .manualDownload,
         createdAt: Date = Date()
     ) {
         self.assetKey = assetKey
@@ -1371,6 +1419,7 @@ public struct DownloadEntry: Codable, Identifiable, Equatable, Sendable {
         self.downloadedBytes = downloadedBytes
         self.speedMBs = speedMBs
         self.errorMessage = errorMessage
+        self.origin = origin
         self.createdAt = createdAt
     }
 
@@ -1596,7 +1645,8 @@ public final class DonbyDownloadManager: ObservableObject {
         posterURLString: String?,
         itemArtworkURLs: (poster: URL?, backdrop: URL?, thumb: URL?, logo: URL?, seasonPoster: URL?) = (nil, nil, nil, nil, nil),
         seriesArtworkURLs: (poster: URL?, backdrop: URL?, logo: URL?) = (nil, nil, nil),
-        connectionBudgetPerTask: Int = 3
+        connectionBudgetPerTask: Int = 3,
+        origin: DownloadOrigin = .manualDownload
     ) {
         let assetKey = DonbyTurboCacheEngine.makeAssetKey(
             serverId: server.id,
@@ -1635,6 +1685,9 @@ public final class DonbyDownloadManager: ObservableObject {
             entries[idx].localBackdropPath = layout.backdropFileURL.path
             entries[idx].localThumbPath = layout.thumbFileURL.path
             entries[idx].localLogoPath = layout.clearLogoFileURL.path
+            if origin == .manualDownload {
+                entries[idx].origin = .manualDownload
+            }
             if entries[idx].status == .paused || entries[idx].status == .failed {
                 entries[idx].status = alreadyOnDisk ? .completed : .queued
                 entries[idx].errorMessage = nil
@@ -1666,7 +1719,9 @@ public final class DonbyDownloadManager: ObservableObject {
                 status: (alreadyOnDisk || existingMeta.isFullyCached) ? .completed : .queued,
                 totalBytes: max(existingMeta.totalSize, resource.mediaSource.size ?? 0),
                 downloadedBytes: existingMeta.cachedBytes,
-                speedMBs: 0.0
+                speedMBs: 0.0,
+                errorMessage: nil,
+                origin: origin
             )
             entries.insert(newEntry, at: 0)
         }
@@ -1731,6 +1786,26 @@ public final class DonbyDownloadManager: ObservableObject {
             }
         }
         scheduleQueue(connectionBudgetPerTask: connectionBudgetPerTask)
+    }
+
+    public func promoteToManualDownload(assetKey: String) {
+        guard let idx = entries.firstIndex(where: { $0.assetKey == assetKey }),
+              entries[idx].origin != .manualDownload else { return }
+        entries[idx].origin = .manualDownload
+        saveToDisk()
+    }
+
+    @discardableResult
+    public func removeAutoArchivedAfterPlayback(itemId: String, mediaSourceId: String? = nil) -> DownloadEntry? {
+        guard let target = entries.first(where: { entry in
+            entry.origin == .autoArchivedFromCache &&
+            entry.itemId == itemId &&
+            (mediaSourceId == nil || mediaSourceId?.isEmpty == true || entry.mediaSourceId == mediaSourceId)
+        }) else {
+            return nil
+        }
+        removeDownload(assetKey: target.assetKey, deleteCachedData: true)
+        return target
     }
 
     public func removeDownload(assetKey: String, deleteCachedData: Bool = true) {
