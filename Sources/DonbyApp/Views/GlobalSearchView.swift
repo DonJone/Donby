@@ -5,14 +5,15 @@ import DonbyNetwork
 // MARK: - Global Search View
 public struct GlobalSearchView: View {
     @EnvironmentObject private var appState: AppState
-    @State private var query: String = ""
-    @State private var filterChip: String = "全部"
-    @State private var remoteResults: [EmbyItem] = []
     @State private var isSearchingRemote: Bool = false
 
     private let filterChips = ["全部", "电影", "电视剧", "本地/网络"]
 
     public init() {}
+
+    private var query: String { appState.globalSearchQuery }
+    private var filterChip: String { appState.globalSearchFilterChip }
+    private var remoteResults: [EmbyItem] { appState.globalSearchRemoteResults }
 
     private var searchResults: [EmbyItem] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -81,14 +82,24 @@ public struct GlobalSearchView: View {
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
 
-                    TextField("搜索电影、电视剧、演员、本地视频或 IPTV 频道...", text: $query)
+                    TextField("搜索电影、电视剧、演员、本地视频或 IPTV 频道...", text: $appState.globalSearchQuery)
                         .textFieldStyle(.plain)
                         .font(.system(size: 15))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        .onSubmit {
+                            appState.recordSearchHistory(appState.globalSearchQuery)
+                        }
+
+                    if isSearchingRemote {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
 
                     if !query.isEmpty {
                         Button {
-                            query = ""
+                            appState.globalSearchQuery = ""
+                            appState.globalSearchRemoteResults = []
+                            appState.globalSearchLastFetchedQuery = ""
                         } label: {
                             Image(systemName: "xmark.circle.fill")
                                 .font(.system(size: 14))
@@ -111,7 +122,7 @@ public struct GlobalSearchView: View {
                     ForEach(filterChips, id: \.self) { chip in
                         let isSel = (filterChip == chip)
                         Button {
-                            filterChip = chip
+                            appState.globalSearchFilterChip = chip
                         } label: {
                             Text(chip)
                                 .font(.system(size: 12, weight: isSel ? .bold : .medium))
@@ -141,7 +152,14 @@ public struct GlobalSearchView: View {
 
             ScrollView {
                 if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    recommendedDiscoverSection
+                    VStack(alignment: .leading, spacing: 24) {
+                        if !appState.searchHistory.isEmpty {
+                            searchHistorySection
+                        }
+                        recommendedDiscoverSection
+                    }
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 20)
                 } else if totalResultCount == 0 && !isSearchingRemote {
                     emptySearchPlaceholder
                 } else {
@@ -158,8 +176,14 @@ public struct GlobalSearchView: View {
                                             item: item,
                                             width: 150,
                                             appearance: appState.cardAppearance,
-                                            onSelect: { appState.openDetail(for: item) },
-                                            onPlay: { Task { await appState.startPlayback(item: item) } }
+                                            onSelect: {
+                                                appState.recordSearchHistory(appState.globalSearchQuery)
+                                                appState.openDetail(for: item)
+                                            },
+                                            onPlay: {
+                                                appState.recordSearchHistory(appState.globalSearchQuery)
+                                                Task { await appState.startPlayback(item: item) }
+                                            }
                                         )
                                         .equatable()
                                     }
@@ -182,6 +206,7 @@ public struct GlobalSearchView: View {
                                             .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                                         Spacer()
                                         Button("播放") {
+                                            appState.recordSearchHistory(appState.globalSearchQuery)
                                             if let url = URL(string: file.urlString) {
                                                 appState.playDirectURL(url: url, title: file.name)
                                             }
@@ -218,6 +243,7 @@ public struct GlobalSearchView: View {
                                             .foregroundStyle(.secondary)
                                         Spacer()
                                         Button("播放") {
+                                            appState.recordSearchHistory(appState.globalSearchQuery)
                                             if let url = URL(string: ch.urlString) {
                                                 appState.playDirectURL(url: url, title: ch.name)
                                             }
@@ -242,12 +268,17 @@ public struct GlobalSearchView: View {
             }
         }
         .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
-        .task(id: query) {
-            let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        .task(id: "\(appState.activeServer?.id.uuidString ?? "none")|\(appState.globalSearchQuery)") {
+            let q = appState.globalSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !q.isEmpty,
                   let server = appState.activeServer,
                   !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                remoteResults = []
+                appState.globalSearchRemoteResults = []
+                appState.globalSearchLastFetchedQuery = ""
+                isSearchingRemote = false
+                return
+            }
+            if q == appState.globalSearchLastFetchedQuery && server.id == appState.globalSearchLastServerId {
                 isSearchingRemote = false
                 return
             }
@@ -257,19 +288,61 @@ public struct GlobalSearchView: View {
             if server.type == .uhdNative {
                 if let items = try? await UHDStreamClient.shared.search(server: server, query: q, limit: 48),
                    !Task.isCancelled {
-                    remoteResults = items
+                    appState.globalSearchRemoteResults = items
+                    appState.globalSearchLastServerId = server.id
+                    appState.globalSearchLastFetchedQuery = q
                 } else if !Task.isCancelled {
-                    remoteResults = []
+                    appState.globalSearchRemoteResults = []
+                    appState.globalSearchLastServerId = server.id
+                    appState.globalSearchLastFetchedQuery = q
                 }
             } else if let resp = try? await EmbyClient.shared.fetchItems(server: server, searchTerm: q, limit: 48),
                       !Task.isCancelled {
-                remoteResults = resp.items
+                appState.globalSearchRemoteResults = resp.items
+                appState.globalSearchLastServerId = server.id
+                appState.globalSearchLastFetchedQuery = q
             } else if !Task.isCancelled {
-                remoteResults = []
+                appState.globalSearchRemoteResults = []
+                appState.globalSearchLastServerId = server.id
+                appState.globalSearchLastFetchedQuery = q
             }
             if !Task.isCancelled {
                 isSearchingRemote = false
             }
+        }
+    }
+
+    private var searchHistorySection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                HStack(spacing: 6) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    Text("搜索历史")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                }
+                Spacer()
+                Button("清空") {
+                    appState.clearSearchHistory()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+            }
+
+            SearchHistoryFlowGrid(
+                items: appState.searchHistory,
+                isLightMode: appState.isLightMode,
+                onSelect: { term in
+                    appState.globalSearchQuery = term
+                    appState.recordSearchHistory(term)
+                },
+                onDelete: { term in
+                    appState.removeSearchHistoryItem(term)
+                }
+            )
         }
     }
 
@@ -289,9 +362,9 @@ public struct GlobalSearchView: View {
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 64)
+                .padding(.vertical, 52)
             } else {
-                VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 16) {
                     Text("近期更新与推荐")
                         .font(.system(size: 15, weight: .bold))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
@@ -308,8 +381,6 @@ public struct GlobalSearchView: View {
                         }
                     }
                 }
-                .padding(.horizontal, 28)
-                .padding(.vertical, 20)
             }
         }
     }
@@ -328,5 +399,111 @@ public struct GlobalSearchView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 60)
+    }
+}
+
+private struct SearchHistoryFlowGrid: View {
+    let items: [String]
+    let isLightMode: Bool
+    let onSelect: (String) -> Void
+    let onDelete: (String) -> Void
+
+    var body: some View {
+        SearchHistoryChipLayout(horizontalSpacing: 8, verticalSpacing: 8) {
+            ForEach(items, id: \.self) { term in
+                SearchHistoryChip(
+                    term: term,
+                    isLightMode: isLightMode,
+                    onSelect: { onSelect(term) },
+                    onDelete: { onDelete(term) }
+                )
+            }
+        }
+    }
+}
+
+private struct SearchHistoryChip: View {
+    let term: String
+    let isLightMode: Bool
+    let onSelect: () -> Void
+    let onDelete: () -> Void
+    @State private var isHovered: Bool = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button(action: onSelect) {
+                Text(term)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: isLightMode))
+                    .lineLimit(1)
+            }
+            .buttonStyle(.plain)
+
+            if isHovered {
+                Button(action: onDelete) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            Capsule()
+                .fill(isLightMode
+                      ? Color.black.opacity(isHovered ? 0.08 : 0.05)
+                      : Color.white.opacity(isHovered ? 0.13 : 0.08))
+        )
+        .overlay(
+            Capsule()
+                .strokeBorder(DonbyGlassPalette.separator(isLight: isLightMode), lineWidth: 0.5)
+        )
+        .onHover { isHovered = $0 }
+    }
+}
+
+private struct SearchHistoryChipLayout: Layout {
+    var horizontalSpacing: CGFloat = 8
+    var verticalSpacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var usedWidth: CGFloat = 0
+
+        for sub in subviews {
+            let sz = sub.sizeThatFits(.unspecified)
+            if x > 0 && x + sz.width > maxWidth {
+                x = 0
+                y += rowHeight + verticalSpacing
+                rowHeight = 0
+            }
+            x += sz.width + horizontalSpacing
+            usedWidth = max(usedWidth, min(maxWidth, x - horizontalSpacing))
+            rowHeight = max(rowHeight, sz.height)
+        }
+        return CGSize(width: usedWidth, height: y + rowHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX
+        var y = bounds.minY
+        var rowHeight: CGFloat = 0
+
+        for sub in subviews {
+            let sz = sub.sizeThatFits(.unspecified)
+            if x > bounds.minX && x + sz.width > bounds.maxX {
+                x = bounds.minX
+                y += rowHeight + verticalSpacing
+                rowHeight = 0
+            }
+            sub.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(sz))
+            x += sz.width + horizontalSpacing
+            rowHeight = max(rowHeight, sz.height)
+        }
     }
 }

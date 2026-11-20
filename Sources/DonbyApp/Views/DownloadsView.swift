@@ -180,9 +180,11 @@ public struct DownloadsView: View {
                 let iconColor = displayMode == .queue
                     ? appState.accentColor
                     : (appState.isLightMode ? (hovered ? Color.black : Color(white: 0.32)) : (hovered ? .white : Color(white: 0.88)))
-                Image(systemName: displayMode == .library ? "arrow.down.circle" : "square.grid.2x2")
-                    .font(.system(size: 13.5, weight: .semibold))
-                    .foregroundStyle(iconColor)
+                if displayMode == .library {
+                    DownloadVectorIcon(state: .idle, size: 14.5, color: iconColor)
+                } else {
+                    GridWallVectorIcon(size: 14.5, color: iconColor)
+                }
             }
 
             ToolbarVectorButton(
@@ -190,9 +192,7 @@ public struct DownloadsView: View {
                 action: { appState.selectSidebarModule(.files) }
             ) { hovered in
                 let iconColor = appState.isLightMode ? (hovered ? Color.black : Color(white: 0.32)) : (hovered ? .white : Color(white: 0.88))
-                Image(systemName: "folder")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(iconColor)
+                FolderVectorIcon(size: 14.5, color: iconColor)
             }
 
             ToolbarVectorButton(
@@ -203,9 +203,7 @@ public struct DownloadsView: View {
                 }
             ) { hovered in
                 let iconColor = appState.isLightMode ? (hovered ? Color.black : Color(white: 0.32)) : (hovered ? .white : Color(white: 0.88))
-                Image(systemName: "macwindow")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(iconColor)
+                FinderRevealVectorIcon(size: 14.5, color: iconColor)
             }
 
             ToolbarVectorButton(
@@ -214,9 +212,7 @@ public struct DownloadsView: View {
                 action: { showSortPopover.toggle() }
             ) { hovered in
                 let iconColor = appState.isLightMode ? (hovered ? Color.black : Color(white: 0.32)) : (hovered ? .white : Color(white: 0.88))
-                Image(systemName: "arrow.up.arrow.down")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(iconColor)
+                SortArrowsVectorIcon(size: 14.5, color: iconColor)
             }
             .popover(isPresented: $showSortPopover, arrowEdge: .bottom) {
                 VStack(alignment: .leading, spacing: 10) {
@@ -304,19 +300,38 @@ public struct DownloadsView: View {
                             .frame(width: 68, alignment: .trailing)
                     }
                     if entry.status == .downloading || entry.status == .queued {
-                        Button("暂停") {
+                        Button {
                             DonbyDownloadManager.shared.pauseDownload(assetKey: entry.assetKey)
+                        } label: {
+                            HStack(spacing: 4) {
+                                PauseVectorIcon(size: 10.5, color: DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                                Text("暂停")
+                                    .font(.system(size: 11, weight: .semibold))
+                            }
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .donbyLiquidGlassCapsule()
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.mini)
+                        .buttonStyle(.plain)
                     } else {
-                        Button("重试") {
+                        Button {
                             let server = appState.servers.first(where: { $0.id == entry.serverId })
                             let budget = server.map { min(4, appState.effectiveConnectionBudget(for: $0)) } ?? 3
                             DonbyDownloadManager.shared.resumeDownload(assetKey: entry.assetKey, connectionBudgetPerTask: budget)
+                        } label: {
+                            HStack(spacing: 4) {
+                                DownloadVectorIcon(state: .idle, size: 11, color: appState.accentTextColor)
+                                Text("继续")
+                                    .font(.system(size: 11, weight: .semibold))
+                            }
+                            .foregroundStyle(appState.accentTextColor)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(appState.accentColor)
+                            .clipShape(Capsule())
                         }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.mini)
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, 12)
@@ -392,12 +407,12 @@ public struct DownloadsView: View {
 
     private var storageSummaryBanner: some View {
         HStack(spacing: 14) {
-            Image(systemName: "internaldrive.fill")
-                .font(.system(size: 18))
-                .foregroundStyle(appState.accentColor)
-                .frame(width: 34, height: 34)
-                .background(appState.accentColor.opacity(0.12))
-                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            ZStack {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(appState.accentColor.opacity(0.12))
+                DownloadVectorIcon(state: .completed, size: 16.5, color: appState.accentColor)
+            }
+            .frame(width: 34, height: 34)
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 14) {
@@ -469,9 +484,16 @@ public struct DownloadsView: View {
     private var libraryEmptyPlaceholder: some View {
         VStack(spacing: 12) {
             Spacer()
-            Image(systemName: "arrow.down.circle")
-                .font(.system(size: 42))
-                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode).opacity(0.55))
+            ZStack {
+                Circle()
+                    .fill(appState.isLightMode ? Color.black.opacity(0.04) : Color.white.opacity(0.05))
+                    .frame(width: 64, height: 64)
+                DownloadVectorIcon(
+                    state: .idle,
+                    size: 26,
+                    color: DonbyGlassPalette.secondaryText(isLight: appState.isLightMode).opacity(0.65)
+                )
+            }
             Text(searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "暂无离线影视" : "未找到匹配的离线影视")
                 .font(.system(size: 14.5, weight: .semibold))
                 .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
@@ -729,62 +751,79 @@ private struct DownloadEntryRowCard: View {
 
             HStack(spacing: 8) {
                 if entry.origin == .autoArchivedFromCache {
-                    Button {
-                        DonbyDownloadManager.shared.promoteToManualDownload(assetKey: entry.assetKey)
-                    } label: {
-                        Image(systemName: "bookmark")
-                            .font(.system(size: 12.5))
-                            .foregroundStyle(.orange)
-                            .padding(7)
+                    ToolbarVectorButton(
+                        tooltip: "转为手动保留（播毕不自动删除）",
+                        action: {
+                            DonbyDownloadManager.shared.promoteToManualDownload(assetKey: entry.assetKey)
+                        }
+                    ) { _ in
+                        BookmarkVectorIcon(size: 13.5, color: .orange)
                     }
-                    .buttonStyle(.plain)
-                    .help("转为手动保留（播毕不自动删除）")
                 }
 
-                Button {
-                    onRevealInFinder()
-                } label: {
-                    Image(systemName: "folder")
-                        .font(.system(size: 13))
-                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))
-                        .padding(7)
+                ToolbarVectorButton(
+                    tooltip: "在访达中显示文件",
+                    action: { onRevealInFinder() }
+                ) { hovered in
+                    let col = isLightMode ? (hovered ? Color.black : Color(white: 0.34)) : (hovered ? .white : Color(white: 0.85))
+                    FinderRevealVectorIcon(size: 13.5, color: col)
                 }
-                .buttonStyle(.plain)
-                .help("在访达中显示文件")
 
                 if entry.status == .completed {
                     Button {
                         onPlayOffline()
                     } label: {
-                        Label("离线播放", systemImage: "play.fill")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(accentTextColor)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 7)
-                            .background(accentColor)
-                            .clipShape(Capsule())
+                        HStack(spacing: 6) {
+                            PlayVectorIcon(size: 11.5, color: accentTextColor)
+                            Text("离线播放")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .foregroundStyle(accentTextColor)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(accentColor)
+                        .clipShape(Capsule())
                     }
                     .buttonStyle(.plain)
                 } else if entry.status == .downloading || entry.status == .queued {
-                    Button("暂停") { onPause() }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                    Button {
+                        onPause()
+                    } label: {
+                        HStack(spacing: 5) {
+                            PauseVectorIcon(size: 11, color: DonbyGlassPalette.primaryText(isLight: isLightMode))
+                            Text("暂停")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: isLightMode))
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 6.5)
+                        .donbyLiquidGlassCapsule()
+                    }
+                    .buttonStyle(.plain)
                 } else {
-                    Button("继续下载") { onResume() }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
+                    Button {
+                        onResume()
+                    } label: {
+                        HStack(spacing: 5) {
+                            DownloadVectorIcon(state: .idle, size: 12.5, color: accentTextColor)
+                            Text("继续下载")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .foregroundStyle(accentTextColor)
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 6.5)
+                        .background(accentColor)
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
                 }
 
-                Button(role: .destructive) {
-                    onRemove()
-                } label: {
-                    Image(systemName: "trash")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.red.opacity(0.85))
-                        .padding(7)
+                ToolbarVectorButton(
+                    tooltip: "删除离线任务与本地缓存文件",
+                    action: { onRemove() }
+                ) { hovered in
+                    TrashVectorIcon(size: 13.5, color: hovered ? .red : .red.opacity(0.85))
                 }
-                .buttonStyle(.plain)
-                .help("删除离线任务与本地缓存文件")
             }
         }
         .padding(14)
@@ -879,26 +918,29 @@ private struct CachedAssetRowCard: View {
                 Button {
                     onPromoteToOffline()
                 } label: {
-                    Label(summary.isFullyCached ? "转存离线" : "从缓存下载", systemImage: "arrow.down.circle.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(accentTextColor)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
-                        .background(accentColor)
-                        .clipShape(Capsule())
+                    HStack(spacing: 5.5) {
+                        DownloadVectorIcon(
+                            state: summary.isFullyCached ? .completed : .idle,
+                            size: 12.5,
+                            color: accentTextColor
+                        )
+                        Text(summary.isFullyCached ? "转存离线" : "从缓存下载")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .foregroundStyle(accentTextColor)
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 7)
+                    .background(accentColor)
+                    .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
 
-                Button(role: .destructive) {
-                    onRemoveCache()
-                } label: {
-                    Image(systemName: "trash")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.red.opacity(0.85))
-                        .padding(7)
+                ToolbarVectorButton(
+                    tooltip: "清理此项临时分片缓存",
+                    action: { onRemoveCache() }
+                ) { hovered in
+                    TrashVectorIcon(size: 13.5, color: hovered ? .red : .red.opacity(0.85))
                 }
-                .buttonStyle(.plain)
-                .help("清理此项临时分片缓存")
             }
         }
         .padding(14)

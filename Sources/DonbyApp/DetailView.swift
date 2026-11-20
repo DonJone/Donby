@@ -493,20 +493,27 @@ public struct DetailView: View {
             mediaSourceId: selectedSourceId.isEmpty ? nil : selectedSourceId
         ) : nil
         let serverAllows = effectiveDetailServer.map { appState.canDownload(from: $0) } ?? true
-        let iconName: String = {
-            if !serverAllows { return "lock" }
+        let defaultInk = Color(red: 0.12, green: 0.12, blue: 0.14)
+        let vectorState: DownloadVectorIcon.State = {
+            if !serverAllows { return .locked }
             switch matchingEntry?.status {
-            case .completed: return "arrow.down.circle.fill"
-            case .downloading, .queued: return "arrow.down.circle"
-            default: return "arrow.down"
+            case .completed:
+                return .completed
+            case .downloading, .queued:
+                return .active(progress: matchingEntry?.progressFraction ?? 0.08)
+            case .paused:
+                return .paused
+            default:
+                return .idle
             }
         }()
-        let tintCol: Color? = {
-            if !serverAllows { return .secondary }
+        let tintCol: Color = {
+            if !serverAllows { return Color(white: 0.50) }
             switch matchingEntry?.status {
-            case .completed: return Color(red: 0.18, green: 0.72, blue: 0.50)
+            case .completed: return defaultInk
             case .downloading, .queued: return appState.accentColor
-            default: return (cachedSummary != nil) ? appState.accentColor : nil
+            case .paused: return appState.accentColor
+            default: return (cachedSummary != nil) ? appState.accentColor : defaultInk
             }
         }()
         let tip: String = {
@@ -524,28 +531,29 @@ public struct DetailView: View {
             }
         }()
 
-        LiquidGlassCircleButton(
-            systemImage: iconName,
-            iconColor: tintCol,
+        LiquidGlassVectorCircleButton(
             size: 38,
-            tooltip: tip
+            tooltip: tip,
+            action: {
+                if matchingEntry?.status == .completed {
+                    appState.selectSidebarModule(.downloads)
+                    return
+                }
+                guard let server = effectiveDetailServer, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    appState.showToast("当前为离线模式", icon: "internaldrive.fill")
+                    return
+                }
+                Task {
+                    await appState.enqueueDownload(
+                        server: server,
+                        item: item,
+                        seriesItemHint: item.isSeries ? item : nil,
+                        preferredSourceId: selectedSourceId.isEmpty ? nil : selectedSourceId
+                    )
+                }
+            }
         ) {
-            if matchingEntry?.status == .completed {
-                appState.selectSidebarModule(.downloads)
-                return
-            }
-            guard let server = effectiveDetailServer, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                appState.showToast("当前为离线模式", icon: "internaldrive.fill")
-                return
-            }
-            Task {
-                await appState.enqueueDownload(
-                    server: server,
-                    item: item,
-                    seriesItemHint: item.isSeries ? item : nil,
-                    preferredSourceId: selectedSourceId.isEmpty ? nil : selectedSourceId
-                )
-            }
+            DownloadVectorIcon(state: vectorState, size: 15.5, color: tintCol)
         }
     }
 

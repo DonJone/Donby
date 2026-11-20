@@ -401,6 +401,52 @@ public struct LiquidGlassCircleButton: View {
     }
 }
 
+/// Sculpted Liquid Glass circular button accepting a custom geometric Canvas vector icon
+public struct LiquidGlassVectorCircleButton<Icon: View>: View {
+    public var size: CGFloat = 38
+    public var tooltip: String = ""
+    public let action: () -> Void
+    @ViewBuilder public let icon: () -> Icon
+
+    @State private var isHovered: Bool = false
+
+    public init(
+        size: CGFloat = 38,
+        tooltip: String = "",
+        action: @escaping () -> Void,
+        @ViewBuilder icon: @escaping () -> Icon
+    ) {
+        self.size = size
+        self.tooltip = tooltip
+        self.action = action
+        self.icon = icon
+    }
+
+    public var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(Color.white.opacity(isHovered ? 1.0 : 0.95))
+                    .shadow(color: Color.black.opacity(isHovered ? 0.20 : 0.11), radius: isHovered ? 6 : 4, y: 2)
+
+                Circle()
+                    .strokeBorder(Color.black.opacity(0.06), lineWidth: 0.65)
+
+                icon()
+            }
+            .frame(width: size, height: size)
+            .contentShape(Circle())
+            .scaleEffect(isHovered ? 1.05 : 1.0)
+            .animation(.easeOut(duration: 0.15), value: isHovered)
+        }
+        .buttonStyle(.plain)
+        .frame(width: size, height: size)
+        .alignmentGuide(VerticalAlignment.center) { d in d[VerticalAlignment.center] }
+        .onHover { isHovered = $0 }
+        .help(tooltip)
+    }
+}
+
 /// Sculpted Liquid Glass circular Menu button with unified physical optics matching LiquidGlassCircleButton
 public struct LiquidGlassCircleMenu<MenuItems: View>: View {
     @Environment(\.colorScheme) private var colorScheme
@@ -604,23 +650,25 @@ public struct DonbyDownloadedBadgePill: View {
     }
 
     public var body: some View {
-        let symbolTint = isCompleted ? Color(red: 0.42, green: 0.88, blue: 0.68) : accentColor
-        let borderTint = isCompleted ? Color.white.opacity(0.20) : accentColor.opacity(0.50)
-        HStack(spacing: 3) {
-            Image(systemName: isCompleted ? "arrow.down.to.line" : "arrow.down")
-                .font(.system(size: max(8.0, fontSize - 1.0), weight: .bold))
-                .foregroundStyle(symbolTint)
+        let symbolTint = isCompleted ? Color.white.opacity(0.95) : accentColor
+        let borderTint = isCompleted ? Color.white.opacity(0.24) : accentColor.opacity(0.45)
+        HStack(spacing: 4) {
+            DownloadVectorIcon(
+                state: isCompleted ? .completed : .idle,
+                size: max(9.5, fontSize + 0.5),
+                color: symbolTint
+            )
             Text(text)
                 .font(.system(size: fontSize, weight: .semibold, design: .rounded))
-                .foregroundStyle(Color.white.opacity(0.94))
+                .foregroundStyle(Color.white.opacity(0.95))
         }
-        .padding(.horizontal, 6.5)
+        .padding(.horizontal, 7)
         .padding(.vertical, 2.5)
-        .background(Color.black.opacity(0.66))
+        .background(Color.black.opacity(0.64))
         .clipShape(Capsule())
         .overlay(
             Capsule()
-                .strokeBorder(borderTint, lineWidth: 0.65)
+                .strokeBorder(borderTint, lineWidth: 0.7)
         )
     }
 }

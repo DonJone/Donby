@@ -563,8 +563,8 @@ public struct SettingsView: View {
 
     // 4. 关于
     private var aboutSettingsTab: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            settingsHeader(title: "关于", subtitle: "版本信息、软件更新与快捷键")
+        VStack(alignment: .leading, spacing: 20) {
+            settingsHeader(title: "关于", subtitle: "版本信息、开源仓库、快捷键与软件更新")
 
             VStack(alignment: .center, spacing: 12) {
                 DonbyAppLogoView(size: 64)
@@ -573,7 +573,7 @@ public struct SettingsView: View {
                     Text("Donby")
                         .font(.system(size: 20, weight: .heavy, design: .rounded))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    let currentVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.29"
+                    let currentVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.30"
                     Text("版本 \(currentVer) · macOS (Apple Silicon)")
                         .font(.system(size: 12))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
@@ -582,6 +582,27 @@ public struct SettingsView: View {
                 Text("原生 macOS Emby 与媒体播放器")
                     .font(.system(size: 12.5))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+
+                Button {
+                    if let url = URL(string: "https://github.com/DonJone/Donby") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        FinderRevealVectorIcon(
+                            size: 12.5,
+                            color: DonbyGlassPalette.primaryText(isLight: appState.isLightMode)
+                        )
+                        Text("GitHub 仓库 · DonJone/Donby")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6.5)
+                    .donbyLiquidGlassCapsule()
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 2)
             }
             .frame(maxWidth: .infinity)
             .padding(22)
@@ -591,9 +612,6 @@ public struct SettingsView: View {
                 RoundedRectangle(cornerRadius: 12)
                     .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
             )
-
-            // Software Update Card
-            softwareUpdateCard
 
             // Keyboard Shortcuts Sheet
             VStack(alignment: .leading, spacing: 10) {
@@ -607,6 +625,7 @@ public struct SettingsView: View {
                 shortcutRow(key: "F", desc: "切换全屏")
                 shortcutRow(key: "Esc", desc: "退出播放")
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(18)
             .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
             .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -615,15 +634,33 @@ public struct SettingsView: View {
                     .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
             )
 
-            // Open Source Acknowledgements
-            VStack(alignment: .leading, spacing: 6) {
-                Text("开源组件")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                Text("支持 Emby、Jellyfin 与 UHDNow 服务，音视频解码及字幕渲染基于 FFmpeg 与 libass。")
+            // Open Source Acknowledgements & Repository Link
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .center) {
+                    Text("开源组件与项目仓库")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    Spacer()
+                    Button {
+                        if let url = URL(string: "https://github.com/DonJone/Donby") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Text("github.com/DonJone/Donby")
+                                .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                            FinderRevealVectorIcon(size: 11.5, color: appState.accentColor)
+                        }
+                        .foregroundStyle(appState.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Text("支持 Emby、Jellyfin 与 UHDNow 服务，音视频解码及字幕渲染基于 FFmpeg、VideoToolbox 与 libass。")
                     .font(.system(size: 12))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(18)
             .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
             .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -631,6 +668,10 @@ public struct SettingsView: View {
                 RoundedRectangle(cornerRadius: 12)
                     .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
             )
+
+            // Software Update Card (placed at bottom of About tab)
+            softwareUpdateCard
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 

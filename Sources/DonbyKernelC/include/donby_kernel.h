@@ -145,6 +145,7 @@ void      dk_player_close(DKPlayer* player);
 void      dk_player_play(DKPlayer* player);
 void      dk_player_pause(DKPlayer* player);
 void      dk_player_seek(DKPlayer* player, double target_sec, bool accurate);
+bool      dk_player_should_yield_read(DKPlayer* player);
 void      dk_player_set_rate(DKPlayer* player, float rate);
 void      dk_player_set_volume(DKPlayer* player, float volume, bool muted);
 void      dk_player_set_buffer_limit_mb(DKPlayer* player, int32_t limit_mb);

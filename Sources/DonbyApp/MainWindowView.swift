@@ -224,10 +224,19 @@ private struct SidebarTabItemButton: View {
             appState.selectSidebarModule(tab)
         } label: {
             HStack(spacing: 11) {
-                Image(systemName: tab.icon)
-                    .font(.system(size: 14.5, weight: isSelected ? .semibold : .medium))
-                    .foregroundStyle(isSelected ? (appState.isMonochromeTheme ? .white : appState.accentTextColor) : (isHovered ? DonbyGlassPalette.primaryText(isLight: appState.isLightMode) : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode)))
-                    .frame(width: 20, alignment: .center)
+                let iconFg = isSelected
+                    ? (appState.isMonochromeTheme ? Color.white : appState.accentTextColor)
+                    : (isHovered ? DonbyGlassPalette.primaryText(isLight: appState.isLightMode) : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                Group {
+                    if tab == .downloads {
+                        DownloadVectorIcon(state: .idle, size: 15, color: iconFg)
+                    } else {
+                        Image(systemName: tab.icon)
+                            .font(.system(size: 14.5, weight: isSelected ? .semibold : .medium))
+                            .foregroundStyle(iconFg)
+                    }
+                }
+                .frame(width: 20, alignment: .center)
 
                 Text(tab.title)
                     .font(.system(size: 13.5, weight: isSelected ? .semibold : .regular))

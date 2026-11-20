@@ -5,13 +5,15 @@ import DonbyKernelC
 
 public struct EmbyMainView: View {
     @EnvironmentObject private var appState: AppState
-    @State private var inlineSearchText: String = ""
-    @State private var remoteInlineSearchResults: [EmbyItem] = []
     @State private var isSearchingInline: Bool = false
     @State private var showViewOptionsPopover: Bool = false
+    @State private var showSearchHistoryPopover: Bool = false
     @State private var isLinePillHovered: Bool = false
 
     public init() {}
+
+    private var inlineSearchText: String { appState.embyInlineSearchQuery }
+    private var remoteInlineSearchResults: [EmbyItem] { appState.embyInlineSearchResults }
 
     public var body: some View {
         let appearance = appState.cardAppearance
@@ -74,12 +76,17 @@ public struct EmbyMainView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
-                .task(id: inlineSearchText) {
-                    let q = inlineSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+                .task(id: "\(appState.activeServer?.id.uuidString ?? "none")|\(appState.embyInlineSearchQuery)") {
+                    let q = appState.embyInlineSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !q.isEmpty,
                           let server = appState.activeServer,
                           !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                        remoteInlineSearchResults = []
+                        appState.embyInlineSearchResults = []
+                        appState.embyInlineSearchLastFetchedQuery = ""
+                        isSearchingInline = false
+                        return
+                    }
+                    if q == appState.embyInlineSearchLastFetchedQuery && server.id == appState.embyInlineSearchLastServerId {
                         isSearchingInline = false
                         return
                     }
@@ -89,15 +96,23 @@ public struct EmbyMainView: View {
                     if server.type == .uhdNative {
                         if let items = try? await UHDStreamClient.shared.search(server: server, query: q, limit: 60),
                            !Task.isCancelled {
-                            remoteInlineSearchResults = items
+                            appState.embyInlineSearchResults = items
+                            appState.embyInlineSearchLastServerId = server.id
+                            appState.embyInlineSearchLastFetchedQuery = q
                         } else if !Task.isCancelled {
-                            remoteInlineSearchResults = []
+                            appState.embyInlineSearchResults = []
+                            appState.embyInlineSearchLastServerId = server.id
+                            appState.embyInlineSearchLastFetchedQuery = q
                         }
                     } else if let resp = try? await EmbyClient.shared.fetchItems(server: server, searchTerm: q, limit: 60),
                               !Task.isCancelled {
-                        remoteInlineSearchResults = resp.items
+                        appState.embyInlineSearchResults = resp.items
+                        appState.embyInlineSearchLastServerId = server.id
+                        appState.embyInlineSearchLastFetchedQuery = q
                     } else if !Task.isCancelled {
-                        remoteInlineSearchResults = []
+                        appState.embyInlineSearchResults = []
+                        appState.embyInlineSearchLastServerId = server.id
+                        appState.embyInlineSearchLastFetchedQuery = q
                     }
                     if !Task.isCancelled {
                         isSearchingInline = false
@@ -308,10 +323,82 @@ public struct EmbyMainView: View {
                 }
             }
 
+            if !appState.searchHistory.isEmpty {
+                ToolbarVectorButton(
+                    tooltip: "搜索历史",
+                    isActive: showSearchHistoryPopover,
+                    action: { showSearchHistoryPopover.toggle() }
+                ) { hovered in
+                    let iconColor = appState.isLightMode ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28)) : (hovered ? .white : Color(white: 0.88))
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(iconColor)
+                }
+                .popover(isPresented: $showSearchHistoryPopover, arrowEdge: .bottom) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("搜索历史")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("清空") {
+                                appState.clearSearchHistory()
+                                showSearchHistoryPopover = false
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        }
+                        Divider()
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(appState.searchHistory, id: \.self) { term in
+                                    HStack(spacing: 6) {
+                                        Button {
+                                            appState.embyInlineSearchQuery = term
+                                            appState.recordSearchHistory(term)
+                                            showSearchHistoryPopover = false
+                                        } label: {
+                                            HStack(spacing: 6) {
+                                                Image(systemName: "magnifyingglass")
+                                                    .font(.system(size: 11))
+                                                    .foregroundStyle(.secondary)
+                                                Text(term)
+                                                    .font(.system(size: 12.5))
+                                                    .lineLimit(1)
+                                                Spacer()
+                                            }
+                                            .contentShape(Rectangle())
+                                        }
+                                        .buttonStyle(.plain)
+
+                                        Button {
+                                            appState.removeSearchHistoryItem(term)
+                                        } label: {
+                                            Image(systemName: "xmark")
+                                                .font(.system(size: 10, weight: .semibold))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                    .padding(.vertical, 3)
+                                }
+                            }
+                        }
+                        .frame(maxHeight: 220)
+                    }
+                    .padding(12)
+                    .frame(width: 220)
+                }
+            }
+
             DonbySearchPillField(
                 placeholder: "搜索媒体",
-                text: $inlineSearchText,
-                width: 185
+                text: $appState.embyInlineSearchQuery,
+                width: 185,
+                onSubmit: {
+                    appState.recordSearchHistory(appState.embyInlineSearchQuery)
+                }
             )
         }
         .padding(.horizontal, 24)
@@ -351,6 +438,21 @@ public struct EmbyMainView: View {
                 if isSearchingInline {
                     ProgressView().controlSize(.small)
                 }
+                Spacer()
+                Button {
+                    appState.embyInlineSearchQuery = ""
+                    appState.embyInlineSearchResults = []
+                    appState.embyInlineSearchLastFetchedQuery = ""
+                } label: {
+                    Text("清除搜索")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.08))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
             }
 
             if results.isEmpty && !isSearchingInline {
@@ -370,8 +472,14 @@ public struct EmbyMainView: View {
                             item: item,
                             width: 152,
                             appearance: appearance,
-                            onSelect: { appState.openDetail(for: item) },
-                            onPlay: { Task { await appState.startPlayback(item: item) } }
+                            onSelect: {
+                                appState.recordSearchHistory(appState.embyInlineSearchQuery)
+                                appState.openDetail(for: item)
+                            },
+                            onPlay: {
+                                appState.recordSearchHistory(appState.embyInlineSearchQuery)
+                                Task { await appState.startPlayback(item: item) }
+                            }
                         )
                         .equatable()
                     }
@@ -550,8 +658,24 @@ public struct MLibListView: View {
     @State private var ascending: Bool = false
     @State private var filterUnwatchedOnly: Bool = false
     @State private var filterFavoritesOnly: Bool = false
-    @State private var searchQuery: String = ""
     @State private var showSortPopover: Bool = false
+
+    private var searchQuery: String {
+        appState.librarySearchQueryById[library.id] ?? ""
+    }
+
+    private var searchQueryBinding: Binding<String> {
+        Binding(
+            get: { appState.librarySearchQueryById[library.id] ?? "" },
+            set: { newValue in
+                if newValue.isEmpty {
+                    appState.librarySearchQueryById.removeValue(forKey: library.id)
+                } else {
+                    appState.librarySearchQueryById[library.id] = newValue
+                }
+            }
+        )
+    }
 
     private static let pageSize = 120
 
@@ -561,7 +685,10 @@ public struct MLibListView: View {
             HStack(spacing: 10) {
                 ToolbarVectorButton(
                     tooltip: "返回媒体库首页",
-                    action: { withAnimation(.easeOut(duration: 0.18)) { appState.selectedLibrary = nil } }
+                    action: {
+                        appState.librarySearchQueryById.removeValue(forKey: library.id)
+                        withAnimation(.easeOut(duration: 0.18)) { appState.selectedLibrary = nil }
+                    }
                 ) { hovered in
                     let iconColor = appState.isLightMode ? (hovered ? Color.black : Color(white: 0.32)) : (hovered ? .white : Color(white: 0.88))
                     Image(systemName: "chevron.left")
@@ -618,7 +745,12 @@ public struct MLibListView: View {
                     .frame(width: 200)
                 }
 
-                DonbySearchPillField(placeholder: "搜索", text: $searchQuery, width: 200)
+                DonbySearchPillField(
+                    placeholder: "搜索",
+                    text: searchQueryBinding,
+                    width: 200,
+                    onSubmit: { appState.recordSearchHistory(searchQuery) }
+                )
             }
             .padding(.horizontal, 24)
             .frame(height: 54)
@@ -640,8 +772,14 @@ public struct MLibListView: View {
                     hasMoreItems: hasMoreItems,
                     isLoadingMore: isLoadingMore,
                     appearance: appearance,
-                    onSelect: { item in appState.openDetail(for: item) },
-                    onPlay: { item in Task { await appState.startPlayback(item: item) } },
+                    onSelect: { item in
+                        appState.recordSearchHistory(searchQuery)
+                        appState.openDetail(for: item)
+                    },
+                    onPlay: { item in
+                        appState.recordSearchHistory(searchQuery)
+                        Task { await appState.startPlayback(item: item) }
+                    },
                     onLoadMore: { Task { await loadLibraryItems(reset: false) } }
                 )
             }

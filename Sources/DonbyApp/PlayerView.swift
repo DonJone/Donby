@@ -89,6 +89,8 @@ public struct PlayerView: View {
     @State private var kernelChapters: [PlaybackChapterItem] = []
     @State private var healthPolicy = PlaybackHealthPolicy()
     @State private var seekGeneration: Int = 0
+    @State private var lastSeekCommitUptime: TimeInterval = 0
+    @State private var lastSeekCommitTarget: Double = 0
     @State private var skipBannerLabel: String? = nil
     @State private var skipBannerTargetSec: Double = 0
     @State private var skipBannerIsOutro: Bool = false
@@ -405,7 +407,9 @@ public struct PlayerView: View {
             updateClock()
             guard let handle = playerHandle, !isScrubbing else { return }
             let newPos = dk_player_get_position(handle)
-            if abs(currentTime - newPos) > 0.05 {
+            let sinceSeek = ProcessInfo.processInfo.systemUptime - lastSeekCommitUptime
+            let isSettlingSeek = sinceSeek < 0.65 && abs(newPos - lastSeekCommitTarget) > 3.0
+            if !isSettlingSeek && abs(currentTime - newPos) > 0.05 {
                 currentTime = newPos
             }
             let newBuffered = dk_player_get_buffered_duration(handle)
@@ -1737,6 +1741,11 @@ public struct PlayerView: View {
             }
             dk_player_set_buffer_limit_mb(handle, cachePoolMB)
             if let turboHandle = preparedTurboHandle {
+                let handleAddr = UInt(bitPattern: handle)
+                turboHandle.setShouldYieldReadHandler {
+                    guard let ptr = OpaquePointer(bitPattern: handleAddr) else { return true }
+                    return dk_player_should_yield_read(ptr)
+                }
                 let opaque = Unmanaged.passRetained(turboHandle).toOpaque()
                 dk_player_set_custom_io(handle, opaque, dkTurboReadCB, dkTurboSeekCB, dkTurboAbortCB, dkTurboCloseCB)
             }
@@ -1960,13 +1969,15 @@ public struct PlayerView: View {
         seekTo(target)
     }
 
-    private func seekTo(_ seconds: Double) {
+    private func seekTo(_ seconds: Double, accurate: Bool = false) {
         didHandlePlaybackEnded = false
         seekGeneration += 1
+        lastSeekCommitUptime = ProcessInfo.processInfo.systemUptime
+        lastSeekCommitTarget = seconds
         currentTime = seconds
         if let handle = playerHandle {
-            dk_player_seek(handle, seconds, true)
-            activeTurboHandle?.interruptPendingReadForSeek()
+            dk_player_seek(handle, seconds, accurate)
+            activeTurboHandle?.wakeWaitingReads()
         }
     }
 

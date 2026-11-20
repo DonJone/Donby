@@ -186,6 +186,7 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
     public let assetDirectory: URL
     public let dataFileURL: URL
     public let metaFileURL: URL
+    public let chunksDirectoryURL: URL
 
     private let lock = NSLock()
     private var meta: ChunkStoreMeta
@@ -199,6 +200,7 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
     private var dirtyMetaOps: Int = 0
     private var activeReaders: Int = 0
     private var didNotifyFullyCached: Bool = false
+    private var contiguousPrefixCount: Int = 0
 
     public init(
         assetKey: String,
@@ -211,6 +213,7 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
         self.assetDirectory = rootDirectory.appendingPathComponent(assetKey, isDirectory: true)
         self.dataFileURL = assetDirectory.appendingPathComponent("media.bin")
         self.metaFileURL = assetDirectory.appendingPathComponent("meta.json")
+        self.chunksDirectoryURL = assetDirectory.appendingPathComponent("chunks", isDirectory: true)
         self.maxMemoryBytes = max(32 * 1024 * 1024, min(2_147_483_648, maxMemoryBytes))
         self.persistDisk = persistDisk
 
@@ -223,6 +226,7 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
             self.meta = ChunkStoreMeta(assetKey: assetKey, chunkSize: chunkSize)
         }
         self.meta.lastAccess = Date()
+        self.reconcileAndCompactDiskStorageLocked()
     }
 
     deinit {
@@ -345,14 +349,40 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
             memoryBytes += data.count
         }
 
-        // 2. Store in L2 Disk cache if enabled or pinned
+        // 2. Store in L2 Disk cache if enabled or pinned.
+        // Write contiguous prefix chunks [0..contiguousPrefixCount] directly to `media.bin`,
+        // while spilling out-of-order / high-offset seek chunks into `chunks/<index>.chk`
+        // so `media.bin` never creates a multi-tens-of-GB sparse or zero-filled file before download completion.
         if persistDisk || meta.pinned {
-            ensureFileHandlesLocked()
-            if let wh = writeHandle {
-                let offset = UInt64(index) * UInt64(meta.chunkSize)
-                do {
-                    try wh.seek(toOffset: offset)
-                    try wh.write(contentsOf: data)
+            if index <= contiguousPrefixCount {
+                ensureFileHandlesLocked()
+                if let wh = writeHandle {
+                    let offset = UInt64(index) * UInt64(meta.chunkSize)
+                    do {
+                        try wh.seek(toOffset: offset)
+                        try wh.write(contentsOf: data)
+                        meta.completedChunks.insert(index)
+                        if index == contiguousPrefixCount {
+                            contiguousPrefixCount += 1
+                            foldConsecutiveSpillChunksIntoMediaBinLocked(wh: wh)
+                        }
+                        dirtyMetaOps += 1
+                        if dirtyMetaOps >= 32 || meta.isFullyCached {
+                            dirtyMetaOps = 0
+                            saveMetaLocked()
+                        }
+                        if meta.isFullyCached && !meta.pinned && !didNotifyFullyCached {
+                            didNotifyFullyCached = true
+                            completedMetaForNotify = meta
+                        }
+                    } catch {
+                        // Ignore transient disk write error and keep L1 memory copy
+                    }
+                }
+            } else {
+                try? FileManager.default.createDirectory(at: chunksDirectoryURL, withIntermediateDirectories: true)
+                let spillURL = chunkSpillFileURL(for: index)
+                if (try? data.write(to: spillURL, options: .atomic)) != nil {
                     meta.completedChunks.insert(index)
                     dirtyMetaOps += 1
                     if dirtyMetaOps >= 32 || meta.isFullyCached {
@@ -360,11 +390,13 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
                         saveMetaLocked()
                     }
                     if meta.isFullyCached && !meta.pinned && !didNotifyFullyCached {
+                        ensureFileHandlesLocked()
+                        if let wh = writeHandle {
+                            foldConsecutiveSpillChunksIntoMediaBinLocked(wh: wh)
+                        }
                         didNotifyFullyCached = true
                         completedMetaForNotify = meta
                     }
-                } catch {
-                    // Ignore transient disk write error and keep L1 memory copy
                 }
             }
         }
@@ -383,11 +415,27 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
             return mem
         }
         guard meta.completedChunks.contains(index) else { return nil }
+        let len = expectedChunkLenLocked(index: index)
+        guard len > 0 else { return nil }
+
+        // Check out-of-order spill file first if beyond contiguous prefix
+        if index >= contiguousPrefixCount {
+            let spillURL = chunkSpillFileURL(for: index)
+            if let data = try? Data(contentsOf: spillURL), !data.isEmpty {
+                let slice = data.count > len ? data.prefix(len) : data
+                evictMemoryLockedIfNeeded(incomingBytes: slice.count)
+                if slice.count <= maxMemoryBytes {
+                    memoryChunks[index] = slice
+                    memoryOrder.append(index)
+                    memoryBytes += slice.count
+                }
+                return slice
+            }
+        }
+
         ensureFileHandlesLocked()
         guard let rh = readHandle else { return nil }
         let offset = UInt64(index) * UInt64(meta.chunkSize)
-        let len = expectedChunkLenLocked(index: index)
-        guard len > 0 else { return nil }
         do {
             try rh.seek(toOffset: offset)
             if let data = try rh.read(upToCount: len), !data.isEmpty {
@@ -432,12 +480,130 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
 
     public func closeFileHandles() {
         lock.lock()
+        if let wh = writeHandle {
+            foldConsecutiveSpillChunksIntoMediaBinLocked(wh: wh)
+        }
         saveMetaLocked()
         try? readHandle?.close()
         readHandle = nil
         try? writeHandle?.close()
         writeHandle = nil
         lock.unlock()
+    }
+
+    public func prepareContiguousMediaBinForMaterialization() {
+        lock.lock()
+        ensureFileHandlesLocked()
+        if let wh = writeHandle {
+            foldConsecutiveSpillChunksIntoMediaBinLocked(wh: wh)
+            // Also fold any remaining completed spill chunks in case contiguousPrefixCount lagged
+            let sorted = meta.completedChunks.sorted()
+            for idx in sorted {
+                let spillURL = chunkSpillFileURL(for: idx)
+                if FileManager.default.fileExists(atPath: spillURL.path),
+                   let data = try? Data(contentsOf: spillURL), !data.isEmpty {
+                    let offset = UInt64(idx) * UInt64(meta.chunkSize)
+                    try? wh.seek(toOffset: offset)
+                    try? wh.write(contentsOf: data)
+                    try? FileManager.default.removeItem(at: spillURL)
+                }
+            }
+        }
+        try? FileManager.default.removeItem(at: chunksDirectoryURL)
+        saveMetaLocked()
+        lock.unlock()
+    }
+
+    private func chunkSpillFileURL(for index: Int) -> URL {
+        chunksDirectoryURL.appendingPathComponent("\(index).chk")
+    }
+
+    private func foldConsecutiveSpillChunksIntoMediaBinLocked(wh: FileHandle) {
+        var didFoldAny = false
+        while meta.completedChunks.contains(contiguousPrefixCount) {
+            let spillURL = chunkSpillFileURL(for: contiguousPrefixCount)
+            if FileManager.default.fileExists(atPath: spillURL.path) {
+                guard let spillData = try? Data(contentsOf: spillURL), !spillData.isEmpty else {
+                    break
+                }
+                let offset = UInt64(contiguousPrefixCount) * UInt64(meta.chunkSize)
+                do {
+                    try wh.seek(toOffset: offset)
+                    try wh.write(contentsOf: spillData)
+                    try? FileManager.default.removeItem(at: spillURL)
+                    didFoldAny = true
+                } catch {
+                    break
+                }
+            }
+            contiguousPrefixCount += 1
+        }
+        if didFoldAny {
+            if let contents = try? FileManager.default.contentsOfDirectory(atPath: chunksDirectoryURL.path), contents.isEmpty {
+                try? FileManager.default.removeItem(at: chunksDirectoryURL)
+            }
+        }
+    }
+
+    /// Computes contiguous prefix [0..<prefix] and compacts any legacy bloated `media.bin` whose logical EOF
+    /// was stretched to multi-GB by out-of-order tail/seek chunks.
+    private func reconcileAndCompactDiskStorageLocked() {
+        var prefix = 0
+        while meta.completedChunks.contains(prefix) {
+            prefix += 1
+        }
+        contiguousPrefixCount = prefix
+
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: dataFileURL.path) else { return }
+
+        // First fold any spill chunks < prefix that might already exist in `chunks/`
+        if fm.fileExists(atPath: chunksDirectoryURL.path) {
+            ensureFileHandlesLocked()
+            if let wh = writeHandle {
+                for idx in 0..<prefix {
+                    let spillURL = chunkSpillFileURL(for: idx)
+                    if fm.fileExists(atPath: spillURL.path),
+                       let d = try? Data(contentsOf: spillURL), !d.isEmpty {
+                        let off = UInt64(idx) * UInt64(meta.chunkSize)
+                        try? wh.seek(toOffset: off)
+                        try? wh.write(contentsOf: d)
+                        try? fm.removeItem(at: spillURL)
+                    }
+                }
+            }
+        }
+
+        let prefixBytes = Int64(prefix) * Int64(meta.chunkSize)
+        let logicalSize = ((try? fm.attributesOfItem(atPath: dataFileURL.path))?[.size] as? NSNumber)?.int64Value ?? 0
+        // If `media.bin` is stretched > 4 chunks beyond the contiguous prefix (e.g. a 35 GB file with only 140 MB downloaded),
+        // extract out-of-order chunks >= prefix into `chunks/<idx>.chk` and truncate `media.bin` down to `prefixBytes`!
+        guard logicalSize > prefixBytes + Int64(meta.chunkSize * 4), !meta.isFullyCached else {
+            return
+        }
+
+        ensureFileHandlesLocked()
+        if let rh = readHandle {
+            let highChunks = meta.completedChunks.filter { $0 >= prefix }.sorted()
+            if !highChunks.isEmpty {
+                try? fm.createDirectory(at: chunksDirectoryURL, withIntermediateDirectories: true)
+            }
+            for idx in highChunks {
+                let spillURL = chunkSpillFileURL(for: idx)
+                if fm.fileExists(atPath: spillURL.path) { continue }
+                let off = UInt64(idx) * UInt64(meta.chunkSize)
+                let len = expectedChunkLenLocked(index: idx)
+                guard len > 0, Int64(off) < logicalSize else { continue }
+                if (try? rh.seek(toOffset: off)) != nil,
+                   let data = try? rh.read(upToCount: len), !data.isEmpty {
+                    try? data.write(to: spillURL, options: .atomic)
+                }
+            }
+        }
+
+        if let wh = writeHandle {
+            try? wh.truncate(atOffset: UInt64(max(0, prefixBytes)))
+        }
     }
 
     private func expectedChunkLenLocked(index: Int) -> Int {
@@ -549,7 +715,7 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
     override private init() {
         let q = OperationQueue()
         q.name = "com.donby.turbo.streaming"
-        q.maxConcurrentOperationCount = 4
+        q.maxConcurrentOperationCount = 8
         q.qualityOfService = .userInitiated
         self.delegateQueue = q
         super.init()
@@ -743,7 +909,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
     private let openedUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
 
     private var nextAttemptId: UInt64 = 1
-    private var seekInterruptGen: UInt64 = 0
+    private var shouldYieldReadHandler: (@Sendable () -> Bool)? = nil
     private var inFlightChunks: Set<Int> = []
     private var rescueChunks: Set<Int> = []
     private var chunkStartTime: [Int: TimeInterval] = [:]
@@ -837,12 +1003,38 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         _ = stepBulkPrefetchSchedule()
     }
 
-    /// Wakes any blocked read waiting on a pre-seek chunk so demuxer switches immediately to the new seek target.
-    public func interruptPendingReadForSeek() {
+    /// Registers a lock-free kernel predicate queried during blocking reads so superseded pre-seek reads yield immediately without racing new seeks.
+    public func setShouldYieldReadHandler(_ handler: (@Sendable () -> Bool)?) {
         condition.lock()
-        seekInterruptGen &+= 1
+        shouldYieldReadHandler = handler
         condition.broadcast()
         condition.unlock()
+    }
+
+    /// Wakes any blocked read so it re-evaluates `shouldYieldReadHandler` immediately after a seek request.
+    public func wakeWaitingReads() {
+        condition.lock()
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    public func interruptPendingReadForSeek() {
+        wakeWaitingReads()
+    }
+
+    private func shouldYieldCurrentReadLocked() -> Bool {
+        if isAborted || isClosed { return true }
+        return shouldYieldReadHandler?() ?? false
+    }
+
+    private func shouldYieldReadAtOffsetLocked(_ offset: Int64, totalSize: Int64, chunkSize: Int) -> Bool {
+        if isAborted || isClosed { return true }
+        // Never abort a near-tail container index read (e.g. 64+ KB Matroska Cues at the end of a 3h 30GB MKV)
+        // on an intermediate seek, because FFmpeg sets `cues_parsing_deferred = 0` before reading Cues.
+        if totalSize > Int64(chunkSize * 4) && offset >= totalSize - Int64(chunkSize * 2) {
+            return false
+        }
+        return shouldYieldReadHandler?() ?? false
     }
 
     private func isChunkInFlight(_ chunkIndex: Int) -> Bool {
@@ -872,7 +1064,6 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             return -1
         }
         let currentOffset = cursorOffset
-        let entrySeekGen = seekInterruptGen
         condition.unlock()
 
         let meta = store.currentMeta()
@@ -902,13 +1093,20 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             return readDirectTailRange(at: currentOffset, totalSize: meta.totalSize, into: buffer, count: count)
         }
 
+        condition.lock()
+        if shouldYieldReadAtOffsetLocked(currentOffset, totalSize: meta.totalSize, chunkSize: chunkSize) {
+            condition.unlock()
+            return -1
+        }
+        condition.unlock()
+
         // Urgent path: trigger urgent streaming fetch & wake coordinator
         requestUrgentChunk(targetChunk)
 
         let hardDeadline = Date().addingTimeInterval(26.0)
         var stallDeadline = Date().addingTimeInterval(15.0)
         condition.lock()
-        while !isAborted && !isClosed && seekInterruptGen == entrySeekGen {
+        while !shouldYieldReadAtOffsetLocked(currentOffset, totalSize: meta.totalSize, chunkSize: chunkSize) {
             if let partialCopied = tryCopyPartialLocked(targetChunk: targetChunk, offsetInChunk: offsetInChunk, into: buffer, count: count) {
                 condition.unlock()
                 return partialCopied
@@ -1035,8 +1233,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
     ) -> Int {
         let deadline = Date().addingTimeInterval(15.0)
         condition.lock()
-        let entrySeekGen = seekInterruptGen
-        while !isAborted && !isClosed && seekInterruptGen == entrySeekGen {
+        while !isAborted && !isClosed {
             if let copied = tryCopyDirectTailLocked(at: offset, into: buffer, count: count) {
                 condition.unlock()
                 return copied
@@ -1206,15 +1403,27 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
 
         let newChunk = Int(max(0, cursorOffset) / Int64(meta.chunkSize))
         var tasksToCancel: [URLSessionDataTask] = []
-        if abs(newChunk - oldChunk) > 3 {
+        let totalChunks = total > 0 ? Int((total + Int64(meta.chunkSize) - 1) / Int64(meta.chunkSize)) : 0
+        let isNearTailProbe = totalChunks > 2 && newChunk >= totalChunks - 2
+        if abs(newChunk - oldChunk) > 4 {
             let keepEnd = newChunk + prefetchAheadChunks
-            for (_, rec) in activeAttempts where !rec.isUrgent {
-                if rec.chunkIndex < max(0, newChunk - 1) || rec.chunkIndex > keepEnd {
-                    if let task = rec.task {
-                        tasksToCancel.append(task)
+            for (_, rec) in activeAttempts {
+                if rec.chunkIndex == 0 && inOpenProbePhase { continue }
+                // On a real playback jump (not an EOF cue probe), also cancel stale out-of-window urgent/rescue tasks
+                // so HTTP/2 sockets & CDN slots immediately serve the newly seeked position.
+                let cancelUrgent = !isNearTailProbe && rec.chunkIndex >= 0
+                if !rec.isUrgent || cancelUrgent {
+                    if rec.chunkIndex < max(0, newChunk - 1) || rec.chunkIndex > keepEnd {
+                        if let task = rec.task {
+                            tasksToCancel.append(task)
+                        }
                     }
                 }
             }
+            // Give the newly seeked target chunk a clean retry budget immediately
+            failedCount.removeValue(forKey: newChunk)
+            chunk429Retries.removeValue(forKey: newChunk)
+            chunkNextRetryTime.removeValue(forKey: newChunk)
         }
         let resultPos = cursorOffset
         condition.broadcast()
@@ -1252,6 +1461,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         }
         isAborted = true
         isClosed = true
+        shouldYieldReadHandler = nil
         for (_, rec) in activeAttempts {
             if let task = rec.task {
                 tasksToCancel.append(task)
@@ -1873,6 +2083,28 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
         try? FileManager.default.removeItem(at: dir)
     }
 
+    private static func physicalOrCachedBytes(for dataURL: URL, meta: ChunkStoreMeta?) -> Int64 {
+        let fm = FileManager.default
+        let hasMediaBin = fm.fileExists(atPath: dataURL.path)
+        let chunksDir = dataURL.deletingLastPathComponent().appendingPathComponent("chunks", isDirectory: true)
+        let hasSpillChunks = fm.fileExists(atPath: chunksDir.path)
+        guard hasMediaBin || hasSpillChunks else {
+            return 0
+        }
+        if let meta, !meta.completedChunks.isEmpty {
+            return meta.cachedBytes
+        }
+        if let vals = try? dataURL.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey]),
+           let alloc = vals.totalFileAllocatedSize ?? vals.fileAllocatedSize, alloc > 0 {
+            return Int64(alloc)
+        }
+        if let attrs = try? fm.attributesOfItem(atPath: dataURL.path),
+           let sz = attrs[.size] as? NSNumber {
+            return sz.int64Value
+        }
+        return 0
+    }
+
     /// Computes total disk bytes used by unpinned cache vs pinned offline downloads (including ~/Movies/Donby).
     public func calculateDiskUsage() -> (unpinnedCacheBytes: Int64, pinnedDownloadBytes: Int64) {
         var unpinned: Int64 = 0
@@ -1886,20 +2118,12 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
             for dir in dirs {
                 let metaURL = dir.appendingPathComponent("meta.json")
                 let dataURL = dir.appendingPathComponent("media.bin")
-                let isPinned: Bool = {
-                    if let d = try? Data(contentsOf: metaURL),
-                       let m = try? JSONDecoder().decode(ChunkStoreMeta.self, from: d) {
-                        return m.pinned
-                    }
-                    return false
+                let parsedMeta: ChunkStoreMeta? = {
+                    guard let d = try? Data(contentsOf: metaURL) else { return nil }
+                    return try? JSONDecoder().decode(ChunkStoreMeta.self, from: d)
                 }()
-                let fileSize: Int64 = {
-                    if let attrs = try? FileManager.default.attributesOfItem(atPath: dataURL.path),
-                       let sz = attrs[.size] as? NSNumber {
-                        return sz.int64Value
-                    }
-                    return 0
-                }()
+                let isPinned = parsedMeta?.pinned ?? false
+                let fileSize = Self.physicalOrCachedBytes(for: dataURL, meta: parsedMeta)
                 if isPinned {
                     pinned += fileSize
                 } else {
@@ -1953,7 +2177,7 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
                 continue
             }
             if m.pinned { continue }
-            let sz = ((try? FileManager.default.attributesOfItem(atPath: dataURL.path))?[.size] as? NSNumber)?.int64Value ?? 0
+            let sz = Self.physicalOrCachedBytes(for: dataURL, meta: m)
             totalUnpinned += sz
             unpinnedEntries.append(Entry(key: m.assetKey, dir: dir, lastAccess: m.lastAccess, size: sz))
         }
@@ -2016,8 +2240,7 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
                 continue
             }
             if meta.pinned { continue }
-            let diskSize = ((try? FileManager.default.attributesOfItem(atPath: dataURL.path))?[.size] as? NSNumber)?.int64Value ?? 0
-            let cachedBytes = max(meta.cachedBytes, diskSize > 0 && meta.completedChunks.isEmpty ? diskSize : meta.cachedBytes)
+            let cachedBytes = Self.physicalOrCachedBytes(for: dataURL, meta: meta)
             guard cachedBytes > 0 else { continue }
 
             let fallbackTitle = meta.itemSnapshot?.name
@@ -2702,6 +2925,7 @@ public final class DonbyDownloadManager: ObservableObject {
         let dir = destinationURL.deletingLastPathComponent()
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
 
+        store.prepareContiguousMediaBinForMaterialization()
         let src = store.dataFileURL
         guard fm.fileExists(atPath: src.path) else {
             return (fm.fileExists(atPath: destinationURL.path), false)

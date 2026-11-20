@@ -276,11 +276,27 @@ public final class AppState: ObservableObject {
     private let iptvChannelsStorageKey = "donby.iptvChannels.v3"
     private let watchHistoryStorageKey = "donby.watchHistory.v3"
     private let cachedSeriesNamesStorageKey = "donby.cachedSeriesNames.v1"
+    private let searchHistoryStorageKey = "donby.searchHistory.v1"
     @Published public var cachedSeriesNames: [String: String] = [:]
+
+    // Persistent search state (survives navigating into DetailView and returning) & Search History
+    @Published public var searchHistory: [String] = []
+    @Published public var globalSearchQuery: String = ""
+    @Published public var globalSearchFilterChip: String = "全部"
+    @Published public var globalSearchRemoteResults: [EmbyItem] = []
+    public var globalSearchLastServerId: UUID? = nil
+    public var globalSearchLastFetchedQuery: String = ""
+
+    @Published public var embyInlineSearchQuery: String = ""
+    @Published public var embyInlineSearchResults: [EmbyItem] = []
+    public var embyInlineSearchLastServerId: UUID? = nil
+    public var embyInlineSearchLastFetchedQuery: String = ""
+    @Published public var librarySearchQueryById: [String: String] = [:]
 
     public init() {
         AppState.sharedInstance = self
         self.isSidebarCollapsed = UserDefaults.standard.bool(forKey: "donby.defaultSidebarCollapsed")
+        self.searchHistory = UserDefaults.standard.stringArray(forKey: searchHistoryStorageKey) ?? []
         isLoadingFromDisk = true
         loadServersFromDisk()
         loadURLMediaFromDisk()
@@ -924,8 +940,30 @@ public final class AppState: ObservableObject {
         isStartingPlayback = false
     }
 
+    public func recordSearchHistory(_ rawQuery: String) {
+        let cleaned = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return }
+        searchHistory.removeAll { $0.compare(cleaned, options: .caseInsensitive) == .orderedSame }
+        searchHistory.insert(cleaned, at: 0)
+        if searchHistory.count > 20 {
+            searchHistory = Array(searchHistory.prefix(20))
+        }
+        UserDefaults.standard.set(searchHistory, forKey: searchHistoryStorageKey)
+    }
+
+    public func removeSearchHistoryItem(_ term: String) {
+        searchHistory.removeAll { $0 == term }
+        UserDefaults.standard.set(searchHistory, forKey: searchHistoryStorageKey)
+    }
+
+    public func clearSearchHistory() {
+        searchHistory.removeAll()
+        UserDefaults.standard.removeObject(forKey: searchHistoryStorageKey)
+    }
+
     public func openServer(_ server: EmbyServerConfig) {
         cancelPendingPlaybackStart()
+        let isSwitchingServer = (openedServerId != server.id)
         activeServerId = server.id
         openedServerId = server.id
         selectedLibrary = nil
@@ -934,6 +972,13 @@ public final class AppState: ObservableObject {
         detailFocusedEpisodeMemory.removeAll()
         homeErrorMessage = nil
         inFlightSeriesNameTasks.removeAll()
+        if isSwitchingServer {
+            embyInlineSearchQuery = ""
+            embyInlineSearchResults = []
+            embyInlineSearchLastServerId = nil
+            embyInlineSearchLastFetchedQuery = ""
+            librarySearchQueryById.removeAll()
+        }
 
         // Instantaneous switch from memory/disk snapshot
         if let snap = ServerHomeCacheStore.shared.snapshot(for: server.id), !snap.libraryViews.isEmpty {
