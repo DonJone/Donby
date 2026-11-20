@@ -8,7 +8,32 @@ import DonbyKernelC
 // MARK: - Display Link Driver (CVDisplayLink with High-Frequency Common-Mode Timer Fallback)
 
 private final class DisplayLinkDriver {
+    private final class CallbackToken {
+        private let lock = NSLock()
+        private var handler: (() -> Void)?
+
+        init(handler: @escaping () -> Void) {
+            self.handler = handler
+        }
+
+        func invoke() {
+            lock.lock()
+            let fn = handler
+            lock.unlock()
+            fn?()
+        }
+
+        func invalidate() {
+            lock.lock()
+            handler = nil
+            lock.unlock()
+        }
+    }
+
+    private static let lifecycleQueue = DispatchQueue(label: "com.donby.displaylink.lifecycle", qos: .userInitiated)
+
     private var displayLink: CVDisplayLink?
+    private var activeToken: CallbackToken?
     private var fallbackTimer: Timer?
     private var handler: (() -> Void)?
     private let lock = NSLock()
@@ -16,39 +41,46 @@ private final class DisplayLinkDriver {
 
     func start(handler: @escaping () -> Void) {
         let oldLink: CVDisplayLink?
+        let oldToken: CallbackToken?
         let oldTimer: Timer?
         lock.lock()
         oldLink = displayLink
         displayLink = nil
+        oldToken = activeToken
+        activeToken = nil
         oldTimer = fallbackTimer
         fallbackTimer = nil
         self.handler = handler
         self.isRunning = true
         lock.unlock()
 
-        if let oldLink {
-            CVDisplayLinkStop(oldLink)
-        }
+        oldToken?.invalidate()
+        stopDisplayLinkAsync(oldLink, token: oldToken)
         invalidateTimer(oldTimer)
 
         var link: CVDisplayLink?
         let status = CVDisplayLinkCreateWithActiveCGDisplays(&link)
         if status == kCVReturnSuccess, let link = link {
+            let token = CallbackToken(handler: handler)
             let callback: CVDisplayLinkOutputCallback = { _, _, _, _, _, userInfo in
                 guard let userInfo = userInfo else { return kCVReturnSuccess }
-                let driver = Unmanaged<DisplayLinkDriver>.fromOpaque(userInfo).takeUnretainedValue()
-                driver.tick()
+                let tok = Unmanaged<CallbackToken>.fromOpaque(userInfo).takeUnretainedValue()
+                tok.invoke()
                 return kCVReturnSuccess
             }
-            CVDisplayLinkSetOutputCallback(link, callback, Unmanaged.passUnretained(self).toOpaque())
+            CVDisplayLinkSetOutputCallback(link, callback, Unmanaged.passUnretained(token).toOpaque())
             lock.lock()
             let stillRunning = isRunning
             if stillRunning {
                 self.displayLink = link
+                self.activeToken = token
             }
             lock.unlock()
             if stillRunning {
-            CVDisplayLinkStart(link)
+                CVDisplayLinkStart(link)
+            } else {
+                token.invalidate()
+                stopDisplayLinkAsync(link, token: token)
             }
         } else {
             // Fallback for headless environments or when CVDisplayLink fails:
@@ -66,7 +98,7 @@ private final class DisplayLinkDriver {
                 RunLoop.main.add(timer, forMode: .common)
                 self.lock.lock()
                 if self.isRunning {
-                self.fallbackTimer = timer
+                    self.fallbackTimer = timer
                 } else {
                     timer.invalidate()
                 }
@@ -84,20 +116,32 @@ private final class DisplayLinkDriver {
 
     func stop() {
         let oldLink: CVDisplayLink?
+        let oldToken: CallbackToken?
         let oldTimer: Timer?
         lock.lock()
         isRunning = false
         handler = nil
         oldLink = displayLink
         displayLink = nil
+        oldToken = activeToken
+        activeToken = nil
         oldTimer = fallbackTimer
         fallbackTimer = nil
         lock.unlock()
 
-        if let oldLink {
-            CVDisplayLinkStop(oldLink)
-        }
+        oldToken?.invalidate()
+        stopDisplayLinkAsync(oldLink, token: oldToken)
         invalidateTimer(oldTimer)
+    }
+
+    private func stopDisplayLinkAsync(_ link: CVDisplayLink?, token: CallbackToken?) {
+        guard let link else { return }
+        // Never call CVDisplayLinkStop synchronously on the main thread: while tick() is inside
+        // Metal nextDrawable() or C++ subtitle locks, blocking main causes a CA/WindowServer deadlock.
+        Self.lifecycleQueue.async {
+            CVDisplayLinkStop(link)
+            withExtendedLifetime((link, token)) {}
+        }
     }
 
     private func invalidateTimer(_ timer: Timer?) {
@@ -185,6 +229,9 @@ public final class DKMetalLayerView: NSView {
 
     private let renderLock = NSLock()
     private let sizeLock = NSLock()
+    private let snapshotLock = NSLock()
+    private var snapshotPixelBuffer: CVPixelBuffer?
+    private var snapshotColorUniforms = DKGpuColorUniforms()
     private var cachedDrawableSize: CGSize = .zero
     private var cachedEDRHeadroom: Float = 1.0
     private var layoutGeneration: UInt64 = 0
@@ -391,10 +438,10 @@ public final class DKMetalLayerView: NSView {
     }
 
     public func captureSnapshotImage() -> NSImage? {
-        renderLock.lock()
-        let pb = lastPixelBuffer
-        let uniforms = lastColorUniforms
-        renderLock.unlock()
+        snapshotLock.lock()
+        let pb = snapshotPixelBuffer
+        let uniforms = snapshotColorUniforms
+        snapshotLock.unlock()
         guard let pb,
               let cgImg = Self.renderOffscreenCGImage(
                   pixelBuffer: pb,
@@ -407,10 +454,10 @@ public final class DKMetalLayerView: NSView {
     }
 
     public func captureSnapshotCGImage(maxDimension: Int? = nil) -> CGImage? {
-        renderLock.lock()
-        let pb = lastPixelBuffer
-        let uniforms = lastColorUniforms
-        renderLock.unlock()
+        snapshotLock.lock()
+        let pb = snapshotPixelBuffer
+        let uniforms = snapshotColorUniforms
+        snapshotLock.unlock()
         guard let pb else { return nil }
         return Self.renderOffscreenCGImage(
             pixelBuffer: pb,
@@ -421,10 +468,10 @@ public final class DKMetalLayerView: NSView {
     }
 
     public func currentFrameSnapshotInput() -> (pixelBuffer: CVPixelBuffer, colorUniforms: DKGpuColorUniforms, edrHeadroom: Float)? {
-        renderLock.lock()
-        let pb = lastPixelBuffer
-        let uniforms = lastColorUniforms
-        renderLock.unlock()
+        snapshotLock.lock()
+        let pb = snapshotPixelBuffer
+        let uniforms = snapshotColorUniforms
+        snapshotLock.unlock()
         guard let pb else { return nil }
         return (pb, uniforms, currentEDRHeadroom)
     }
@@ -993,6 +1040,10 @@ public final class DKMetalLayerView: NSView {
         if rendered {
             self.lastPixelBuffer = pixelBuffer
             self.lastColorUniforms = uniforms
+            snapshotLock.lock()
+            self.snapshotPixelBuffer = pixelBuffer
+            self.snapshotColorUniforms = uniforms
+            snapshotLock.unlock()
             sizeLock.lock()
             if layoutGeneration == gen {
                 _needsRedrawOnSameFrame = false

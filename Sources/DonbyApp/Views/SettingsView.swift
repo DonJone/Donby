@@ -573,7 +573,7 @@ public struct SettingsView: View {
                     Text("Donby")
                         .font(.system(size: 20, weight: .heavy, design: .rounded))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    let currentVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.28"
+                    let currentVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.29"
                     Text("版本 \(currentVer) · macOS (Apple Silicon)")
                         .font(.system(size: 12))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))

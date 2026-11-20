@@ -355,7 +355,7 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
                     try wh.write(contentsOf: data)
                     meta.completedChunks.insert(index)
                     dirtyMetaOps += 1
-                    if dirtyMetaOps >= 16 || meta.isFullyCached {
+                    if dirtyMetaOps >= 32 || meta.isFullyCached {
                         dirtyMetaOps = 0
                         saveMetaLocked()
                     }
@@ -490,6 +490,7 @@ private final class StreamingChunkContext {
     let isDirectRange: Bool
     let requestOriginURL: URL
     let usedRedirectedURL: Bool
+    let redirectEpoch: UInt64
     weak var owner: TurboStreamByteHandle?
     weak var dataTask: URLSessionDataTask?
     var statusCode: Int = 200
@@ -510,6 +511,7 @@ private final class StreamingChunkContext {
         isDirectRange: Bool = false,
         requestOriginURL: URL,
         usedRedirectedURL: Bool,
+        redirectEpoch: UInt64 = 0,
         owner: TurboStreamByteHandle
     ) {
         self.attemptId = attemptId
@@ -521,6 +523,7 @@ private final class StreamingChunkContext {
         self.isDirectRange = isDirectRange
         self.requestOriginURL = requestOriginURL
         self.usedRedirectedURL = usedRedirectedURL
+        self.redirectEpoch = redirectEpoch
         self.owner = owner
     }
 }
@@ -684,6 +687,7 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
         let isRescue = ctx.isRescue
         let isDirect = ctx.isDirectRange
         let usedRedirected = ctx.usedRedirectedURL
+        let redirectEpoch = ctx.redirectEpoch
         let totalSize = ctx.parsedTotalSize
         let status = ctx.rejectedByStatus ? ctx.statusCode : (error == nil ? ctx.statusCode : -1)
         let succeeded = ctx.reached200Cap || (error == nil && ctx.acceptBody && !ctx.rejectedByStatus && !ctx.cancelledIntentionally)
@@ -696,6 +700,7 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
                 attemptId: attemptId,
                 startOffset: startByte,
                 usedRedirectedURL: usedRedirected,
+                redirectEpoch: redirectEpoch,
                 totalSize: totalSize,
                 statusCode: status,
                 succeeded: succeeded,
@@ -708,6 +713,7 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
                 isUrgent: isUrgent,
                 isRescue: isRescue,
                 usedRedirectedURL: usedRedirected,
+                redirectEpoch: redirectEpoch,
                 totalSize: totalSize,
                 statusCode: status,
                 succeeded: succeeded,
@@ -729,6 +735,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
     private var isAborted: Bool = false
     private var isClosed: Bool = false
     private var effectiveStreamURL: URL? = nil
+    private var effectiveRedirectEpoch: UInt64 = 0
     private var didNotifyRedirectCallback: Bool = false
 
     private var inOpenProbePhase: Bool = true
@@ -736,14 +743,20 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
     private let openedUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
 
     private var nextAttemptId: UInt64 = 1
+    private var seekInterruptGen: UInt64 = 0
     private var inFlightChunks: Set<Int> = []
     private var rescueChunks: Set<Int> = []
     private var chunkStartTime: [Int: TimeInterval] = [:]
+    private var chunkNextRetryTime: [Int: TimeInterval] = [:]
+    private var chunk429Retries: [Int: Int] = [:]
     private var failedCount: [Int: Int] = [:]
     private var activeBulkWorkers: Int = 0
+    private var configuredConcurrencyBudget: Int
     private var dynamicConcurrencyCap: Int
     private var prefetchAheadChunks: Int
     private var last429BackoffUntil: TimeInterval = 0
+    private var last429StepDownUptime: TimeInterval = 0
+    private var cleanSuccessesSinceLast429: Int = 0
     private var measuredWireSpeedMBs: Double = 0.0
     private var recentWireBytes: Int64 = 0
     private var recentWireTimestamp: TimeInterval = ProcessInfo.processInfo.systemUptime
@@ -763,6 +776,8 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
     private var directSlices: [(startOffset: Int64, data: Data)] = []
     private var directInFlightStarts: [Int64: UInt64] = [:]
     private var directFailedStarts: [Int64: Int] = [:]
+    private var direct429Retries: [Int64: Int] = [:]
+    private var directNextRetryTime: [Int64: TimeInterval] = [:]
 
     private var coordinatorTask: Task<Void, Never>?
 
@@ -780,7 +795,9 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         self.streamURL = streamURL
         self.headers = headers
         self.store = store
-        self.dynamicConcurrencyCap = max(1, min(8, connectionBudget))
+        let clampedBudget = max(1, min(8, connectionBudget))
+        self.configuredConcurrencyBudget = clampedBudget
+        self.dynamicConcurrencyCap = clampedBudget
         self.prefetchAheadChunks = max(12, min(360, prefetchAheadChunks))
         self.onResolvedRedirectURL = onResolvedRedirectURL
 
@@ -811,11 +828,27 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
 
     public func updateTuning(connectionBudget: Int, prefetchAheadChunks: Int) {
         condition.lock()
-        self.dynamicConcurrencyCap = max(1, min(8, connectionBudget))
+        let clampedBudget = max(1, min(8, connectionBudget))
+        self.configuredConcurrencyBudget = clampedBudget
+        self.dynamicConcurrencyCap = clampedBudget
         self.prefetchAheadChunks = max(12, min(360, prefetchAheadChunks))
         condition.broadcast()
         condition.unlock()
         _ = stepBulkPrefetchSchedule()
+    }
+
+    /// Wakes any blocked read waiting on a pre-seek chunk so demuxer switches immediately to the new seek target.
+    public func interruptPendingReadForSeek() {
+        condition.lock()
+        seekInterruptGen &+= 1
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    private func isChunkInFlight(_ chunkIndex: Int) -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        return inFlightChunks.contains(chunkIndex)
     }
 
     /// Signals that FFmpeg header/stream probing has finished so full multi-connection lookahead may engage.
@@ -839,6 +872,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             return -1
         }
         let currentOffset = cursorOffset
+        let entrySeekGen = seekInterruptGen
         condition.unlock()
 
         let meta = store.currentMeta()
@@ -860,45 +894,63 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             return partialCopied
         }
 
-        // Fast path 3: exact-offset unaligned EOF tail read (avoids downloading hundreds of KB of unused prefix bytes)
+        // Fast path 3: exact-offset unaligned EOF tail read (check inFlightChunks under lock to avoid Swift Set race)
         if meta.totalSize > 0,
            currentOffset >= meta.totalSize - Int64(chunkSize),
            offsetInChunk >= 16_384,
-           !inFlightChunks.contains(targetChunk) {
+           !isChunkInFlight(targetChunk) {
             return readDirectTailRange(at: currentOffset, totalSize: meta.totalSize, into: buffer, count: count)
         }
 
         // Urgent path: trigger urgent streaming fetch & wake coordinator
         requestUrgentChunk(targetChunk)
 
-        let deadline = Date().addingTimeInterval(15.0)
+        let hardDeadline = Date().addingTimeInterval(26.0)
+        var stallDeadline = Date().addingTimeInterval(15.0)
         condition.lock()
-        while !isAborted && !isClosed {
+        while !isAborted && !isClosed && seekInterruptGen == entrySeekGen {
             if let partialCopied = tryCopyPartialLocked(targetChunk: targetChunk, offsetInChunk: offsetInChunk, into: buffer, count: count) {
                 condition.unlock()
                 return partialCopied
             }
-            if (failedCount[targetChunk] ?? 0) >= 4 {
+            if (failedCount[targetChunk] ?? 0) >= 6 || (chunk429Retries[targetChunk] ?? 0) >= 12 {
                 condition.unlock()
                 return -1
             }
-            if Date() >= deadline {
+            let nowDate = Date()
+            if nowDate >= stallDeadline || nowDate >= hardDeadline {
                 condition.unlock()
                 return -1
             }
-            // Wait up to 2.8s on cold Chunk 0 before spawning duplicate rescue so 302+TLS TTFB isn't double-fired.
             let now = ProcessInfo.processInfo.systemUptime
             let activeAttempt = activeDisplayAttempt[targetChunk].flatMap { activeAttempts[$0] }
             let receivedAnyBytes = activeAttempt.flatMap { attemptBuffers[$0.attemptId]?.isEmpty == false } ?? false
             let stalledTime: TimeInterval = activeAttempt.map { now - $0.lastByteTimestamp } ?? (chunkStartTime[targetChunk].map { now - $0 } ?? 0)
+            if receivedAnyBytes && stalledTime < 2.0 {
+                stallDeadline = min(hardDeadline, nowDate.addingTimeInterval(12.0))
+            }
+            // If previous attempt failed or hit 429 cooldown and finished, re-trigger urgent fetch cleanly once retry delay elapses.
+            if !inFlightChunks.contains(targetChunk), now >= (chunkNextRetryTime[targetChunk] ?? 0) {
+                inFlightChunks.insert(targetChunk)
+                chunkStartTime[targetChunk] = now
+                spawnChunkFetchLocked(index: targetChunk, isUrgent: true, isRescue: false)
+                condition.unlock()
+                if let chunkData = store.readChunk(index: targetChunk) {
+                    return copyOut(from: chunkData, offsetInChunk: offsetInChunk, into: buffer, count: count, targetChunk: targetChunk)
+                }
+                condition.lock()
+                continue
+            }
+            // Wait up to 2.8s on cold Chunk 0 before spawning duplicate rescue; avoid duplicate rescue during 429 cooldown.
             let rescueThreshold: TimeInterval = receivedAnyBytes ? 2.2 : ((targetChunk == 0 && !chunk0HeadersReceived) ? 2.8 : 1.4)
-            if (chunkStartTime[targetChunk] != nil) &&
+            if now >= last429BackoffUntil &&
+                (chunkStartTime[targetChunk] != nil) &&
                 stalledTime > rescueThreshold &&
                 !rescueChunks.contains(targetChunk) {
                 rescueChunks.insert(targetChunk)
                 spawnChunkFetchLocked(index: targetChunk, isUrgent: true, isRescue: true)
             }
-            condition.wait(until: Date().addingTimeInterval(0.04))
+            condition.wait(until: Date().addingTimeInterval(0.03))
             condition.unlock()
             if let chunkData = store.readChunk(index: targetChunk) {
                 return copyOut(from: chunkData, offsetInChunk: offsetInChunk, into: buffer, count: count, targetChunk: targetChunk)
@@ -981,19 +1033,22 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         into buffer: UnsafeMutablePointer<UInt8>,
         count: Int
     ) -> Int {
-        let deadline = Date().addingTimeInterval(12.0)
+        let deadline = Date().addingTimeInterval(15.0)
         condition.lock()
-        while !isAborted && !isClosed {
+        let entrySeekGen = seekInterruptGen
+        while !isAborted && !isClosed && seekInterruptGen == entrySeekGen {
             if let copied = tryCopyDirectTailLocked(at: offset, into: buffer, count: count) {
                 condition.unlock()
                 return copied
             }
-            if (directFailedStarts[offset] ?? 0) >= 3 || Date() >= deadline {
+            if (directFailedStarts[offset] ?? 0) >= 5 || (direct429Retries[offset] ?? 0) >= 10 || Date() >= deadline {
                 condition.unlock()
                 return -1
             }
-            if directInFlightStarts[offset] == nil &&
-                !directInFlightStarts.keys.contains(where: { $0 <= offset && offset < $0 + 262_144 }) {
+            let now = ProcessInfo.processInfo.systemUptime
+            if now >= (directNextRetryTime[offset] ?? 0),
+               directInFlightStarts[offset] == nil,
+               !directInFlightStarts.keys.contains(where: { $0 <= offset && offset < $0 + 262_144 }) {
                 spawnDirectRangeFetchLocked(startOffset: offset, totalSize: totalSize)
             }
             condition.wait(until: Date().addingTimeInterval(0.03))
@@ -1077,6 +1132,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             isDirectRange: true,
             requestOriginURL: targetURL,
             usedRedirectedURL: usedRedirected,
+            redirectEpoch: usedRedirected ? effectiveRedirectEpoch : 0,
             owner: self
         )
 
@@ -1204,9 +1260,13 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         activeAttempts.removeAll()
         attemptBuffers.removeAll()
         activeDisplayAttempt.removeAll()
+        chunkNextRetryTime.removeAll()
+        chunk429Retries.removeAll()
         directSlices.removeAll()
         directInFlightStarts.removeAll()
         directFailedStarts.removeAll()
+        direct429Retries.removeAll()
+        directNextRetryTime.removeAll()
         condition.broadcast()
         condition.unlock()
 
@@ -1299,7 +1359,8 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                 for candidate in currentChunk...maxChunk {
                     if activeBulkWorkers >= effectiveCap { break }
                     if inFlightChunks.contains(candidate) { continue }
-                    if (failedCount[candidate] ?? 0) >= 4 { continue }
+                    if (failedCount[candidate] ?? 0) >= 6 || (chunk429Retries[candidate] ?? 0) >= 12 { continue }
+                    if now < (chunkNextRetryTime[candidate] ?? 0) { continue }
                     if store.hasChunk(candidate) { continue }
                     inFlightChunks.insert(candidate)
                     activeBulkWorkers += 1
@@ -1359,6 +1420,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             isRescue: isRescue,
             requestOriginURL: targetURL,
             usedRedirectedURL: usedRedirected,
+            redirectEpoch: usedRedirected ? effectiveRedirectEpoch : 0,
             owner: self
         )
 
@@ -1398,7 +1460,10 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         if let finalURL,
            finalURL.absoluteString != originURL.absoluteString,
            finalURL.absoluteString != streamURL.absoluteString {
-            effectiveStreamURL = finalURL
+            if effectiveStreamURL?.absoluteString != finalURL.absoluteString {
+                effectiveStreamURL = finalURL
+                effectiveRedirectEpoch &+= 1
+            }
             if !didNotifyRedirectCallback {
                 didNotifyRedirectCallback = true
                 notifyRedirectURL = finalURL
@@ -1469,10 +1534,34 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         condition.unlock()
     }
 
+    private func handleRateLimit429Locked(now: TimeInterval) {
+        cleanSuccessesSinceLast429 = 0
+        last429BackoffUntil = max(last429BackoffUntil, now + 0.9)
+        if now >= last429StepDownUptime + 1.5 {
+            last429StepDownUptime = now
+            if dynamicConcurrencyCap > 1 {
+                dynamicConcurrencyCap = max(1, dynamicConcurrencyCap - 1)
+                DonbyLogger.shared.log("Turbo 分片引擎检测到 HTTP 429 限流，自动降并发至 \(dynamicConcurrencyCap) 并退避", level: .warning, subsystem: "TurboCache")
+            }
+        }
+    }
+
+    private func recordCleanCompletionAndRecoverConcurrencyLocked(now: TimeInterval) {
+        guard dynamicConcurrencyCap < configuredConcurrencyBudget else { return }
+        guard now >= last429BackoffUntil + 2.5 else { return }
+        cleanSuccessesSinceLast429 += 1
+        if cleanSuccessesSinceLast429 >= 8 {
+            cleanSuccessesSinceLast429 = 0
+            dynamicConcurrencyCap = min(configuredConcurrencyBudget, dynamicConcurrencyCap + 1)
+            DonbyLogger.shared.log("Turbo 分片引擎限流缓解，并发恢复至 \(dynamicConcurrencyCap)", level: .info, subsystem: "TurboCache")
+        }
+    }
+
     fileprivate func finishDirectRangeAttempt(
         attemptId: UInt64,
         startOffset: Int64,
         usedRedirectedURL: Bool,
+        redirectEpoch: UInt64,
         totalSize: Int64?,
         statusCode: Int,
         succeeded: Bool,
@@ -1481,6 +1570,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         if let totalSize, totalSize > 0 {
             store.setTotalSize(totalSize, sourceURL: streamURL.absoluteString)
         }
+        let now = ProcessInfo.processInfo.systemUptime
         condition.lock()
         activeAttempts.removeValue(forKey: attemptId)
         if directInFlightStarts[startOffset] == attemptId {
@@ -1489,16 +1579,29 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         let data = attemptBuffers.removeValue(forKey: attemptId)
         if succeeded, let data, !data.isEmpty {
             directFailedStarts.removeValue(forKey: startOffset)
+            direct429Retries.removeValue(forKey: startOffset)
+            directNextRetryTime.removeValue(forKey: startOffset)
             directSlices.removeAll { $0.startOffset == startOffset }
             directSlices.append((startOffset: startOffset, data: data))
             if directSlices.count > 12 {
                 directSlices.removeFirst()
             }
+            recordCleanCompletionAndRecoverConcurrencyLocked(now: now)
         } else if !wasCancelled {
-            if usedRedirectedURL && statusCode >= 400 && statusCode != 416 && statusCode != 429 {
-                effectiveStreamURL = nil
-            } else {
-                directFailedStarts[startOffset, default: 0] += 1
+            if statusCode == 429 {
+                handleRateLimit429Locked(now: now)
+                let r = (direct429Retries[startOffset] ?? 0) + 1
+                direct429Retries[startOffset] = r
+                directNextRetryTime[startOffset] = now + min(2.0, 0.45 * Double(r))
+            } else if usedRedirectedURL && (statusCode == 200 || statusCode >= 400) && statusCode != 416 {
+                if redirectEpoch == effectiveRedirectEpoch {
+                    effectiveStreamURL = nil
+                }
+                directNextRetryTime[startOffset] = now + 0.05
+            } else if statusCode != 416 {
+                let f = (directFailedStarts[startOffset] ?? 0) + 1
+                directFailedStarts[startOffset] = f
+                directNextRetryTime[startOffset] = now + min(1.5, 0.15 * Double(f))
             }
         }
         condition.broadcast()
@@ -1511,6 +1614,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         isUrgent: Bool,
         isRescue: Bool,
         usedRedirectedURL: Bool,
+        redirectEpoch: UInt64,
         totalSize: Int64?,
         statusCode: Int,
         succeeded: Bool,
@@ -1520,6 +1624,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             store.setTotalSize(totalSize, sourceURL: streamURL.absoluteString)
         }
 
+        let now = ProcessInfo.processInfo.systemUptime
         var completedData: Data? = nil
         var competingTasksToCancel: [URLSessionDataTask] = []
         var scheduleNext = false
@@ -1537,8 +1642,11 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             inFlightChunks.remove(index)
             rescueChunks.remove(index)
             chunkStartTime.removeValue(forKey: index)
+            chunkNextRetryTime.removeValue(forKey: index)
+            chunk429Retries.removeValue(forKey: index)
             failedCount.removeValue(forKey: index)
             activeDisplayAttempt.removeValue(forKey: index)
+            recordCleanCompletionAndRecoverConcurrencyLocked(now: now)
 
             // Cancel any competing attempt still running for the same chunk index
             let competingIds = activeAttempts.values.filter { $0.chunkIndex == index }.map(\.attemptId)
@@ -1575,15 +1683,21 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             }
 
             if !wasCancelled {
-                if usedRedirectedURL && statusCode >= 400 && statusCode != 416 && statusCode != 429 {
-                    // Cached 302 CDN URL expired or rejected; clear redirect & retry original URL
-                    effectiveStreamURL = nil
-                } else if statusCode == 429 {
-                    dynamicConcurrencyCap = max(1, dynamicConcurrencyCap - 1)
-                    last429BackoffUntil = ProcessInfo.processInfo.systemUptime + 1.8
-                    DonbyLogger.shared.log("Turbo 分片引擎检测到 HTTP 429 限流，自动降并发至 \(dynamicConcurrencyCap) 并退避", level: .warning, subsystem: "TurboCache")
+                if statusCode == 429 {
+                    handleRateLimit429Locked(now: now)
+                    let r = (chunk429Retries[index] ?? 0) + 1
+                    chunk429Retries[index] = r
+                    chunkNextRetryTime[index] = now + min(2.4, 0.45 * Double(r))
+                } else if usedRedirectedURL && (statusCode == 200 || statusCode >= 400) && statusCode != 416 {
+                    // Cached 302 CDN URL expired or rejected; clear redirect once per epoch & retry origin URL cleanly
+                    if redirectEpoch == effectiveRedirectEpoch {
+                        effectiveStreamURL = nil
+                    }
+                    chunkNextRetryTime[index] = now + 0.05
                 } else if statusCode != 416 {
-                    failedCount[index, default: 0] += 1
+                    let f = (failedCount[index] ?? 0) + 1
+                    failedCount[index] = f
+                    chunkNextRetryTime[index] = now + min(1.5, 0.15 * Double(f))
                 }
             }
             scheduleNext = !isAborted && !isClosed && !wasCancelled
@@ -2621,6 +2735,317 @@ public final class DonbyDownloadManager: ObservableObject {
         }
     }
 
+private final class DownloadRangeStreamDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private final class StreamTaskState {
+        let allowStatus200: Bool
+        var responseContinuation: CheckedContinuation<(HTTPURLResponse, AsyncThrowingStream<Data, Error>), Error>?
+        var dataContinuation: AsyncThrowingStream<Data, Error>.Continuation?
+        var yieldedResponse = false
+
+        init(allowStatus200: Bool) {
+            self.allowStatus200 = allowStatus200
+        }
+    }
+
+    private let lock = NSLock()
+    private var states: [Int: StreamTaskState] = [:]
+
+    func openStream(
+        session: URLSession,
+        request: URLRequest,
+        allowStatus200: Bool
+    ) async throws -> (HTTPURLResponse, AsyncThrowingStream<Data, Error>) {
+        let dataTask = session.dataTask(with: request)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (respCont: CheckedContinuation<(HTTPURLResponse, AsyncThrowingStream<Data, Error>), Error>) in
+                let state = StreamTaskState(allowStatus200: allowStatus200)
+                state.responseContinuation = respCont
+                lock.lock()
+                states[dataTask.taskIdentifier] = state
+                lock.unlock()
+                dataTask.resume()
+            }
+        } onCancel: {
+            dataTask.cancel()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        lock.lock()
+        guard let state = states[dataTask.taskIdentifier], !state.yieldedResponse else {
+            lock.unlock()
+            completionHandler(.cancel)
+            return
+        }
+        state.yieldedResponse = true
+        let respCont = state.responseContinuation
+        state.responseContinuation = nil
+
+        guard let http = response as? HTTPURLResponse else {
+            states.removeValue(forKey: dataTask.taskIdentifier)
+            lock.unlock()
+            respCont?.resume(throwing: URLError(.badServerResponse))
+            completionHandler(.cancel)
+            return
+        }
+
+        var capturedCont: AsyncThrowingStream<Data, Error>.Continuation!
+        let stream = AsyncThrowingStream<Data, Error> { cont in
+            capturedCont = cont
+        }
+        capturedCont.onTermination = { _ in
+            dataTask.cancel()
+        }
+
+        let accept = (http.statusCode == 206) || (http.statusCode == 200 && state.allowStatus200)
+        if accept {
+            state.dataContinuation = capturedCont
+            lock.unlock()
+            respCont?.resume(returning: (http, stream))
+            completionHandler(.allow)
+        } else {
+            states.removeValue(forKey: dataTask.taskIdentifier)
+            lock.unlock()
+            capturedCont.finish()
+            respCont?.resume(returning: (http, stream))
+            completionHandler(.cancel)
+        }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard !data.isEmpty else { return }
+        lock.lock()
+        let cont = states[dataTask.taskIdentifier]?.dataContinuation
+        lock.unlock()
+        cont?.yield(data)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        guard let state = states.removeValue(forKey: task.taskIdentifier) else {
+            lock.unlock()
+            return
+        }
+        let respCont = state.responseContinuation
+        state.responseContinuation = nil
+        let dataCont = state.dataContinuation
+        state.dataContinuation = nil
+        let alreadyYielded = state.yieldedResponse
+        state.yieldedResponse = true
+        lock.unlock()
+
+        if !alreadyYielded {
+            respCont?.resume(throwing: error ?? URLError(.unknown))
+        } else if let error {
+            dataCont?.finish(throwing: error)
+        } else {
+            dataCont?.finish()
+        }
+    }
+}
+
+    nonisolated private static func buildRangeURLRequest(
+        url: URL,
+        originHost: String?,
+        headers: [String: String],
+        startByte: Int64,
+        endByte: Int64,
+        timeout: TimeInterval
+    ) -> URLRequest {
+        var req = URLRequest(url: url, timeoutInterval: timeout)
+        req.httpMethod = "GET"
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        let sameOrigin = (url.host?.lowercased() == originHost?.lowercased())
+        for (k, v) in headers {
+            if !sameOrigin && k.lowercased() == "authorization" { continue }
+            req.setValue(v, forHTTPHeaderField: k)
+        }
+        if req.value(forHTTPHeaderField: "User-Agent") == nil {
+            req.setValue("Donby/1.0 (macOS; UHDNow Client)", forHTTPHeaderField: "User-Agent")
+        }
+        req.setValue("bytes=\(startByte)-\(endByte)", forHTTPHeaderField: "Range")
+        return req
+    }
+
+private actor DownloadBatchCoordinator {
+    enum BatchLease {
+        case batch(startChunk: Int, endChunk: Int, requestURL: URL, usedCDN: Bool, redirectEpoch: UInt64)
+        case wait(TimeInterval)
+        case done
+    }
+
+    private var missingQueue: [Int]
+    private var activeBatchEnd: Int = -1
+    private var inFlightChunkCount: Int = 0
+    private var activeWorkerCount: Int = 0
+    private var workerCap: Int
+    private let maxWorkerCap: Int
+    private var batchSizeChunks: Int = 16 // 16 * 512 KiB = 8 MiB contiguous range per HTTP GET
+
+    private let originURL: URL
+    private var cachedCDNURL: URL?
+    private var redirectEpoch: UInt64 = 0
+
+    private var backoffUntil: TimeInterval = 0
+    private var last429StepDownTime: TimeInterval = 0
+    private var cleanBatchesSince429: Int = 0
+    private var batchHardRetries: [Int: Int] = [:]
+    private var batch429Retries: [Int: Int] = [:]
+
+    private(set) var failedError: String?
+    private var bytesSinceLastReport: Int64 = 0
+    private var lastReportTime: TimeInterval = ProcessInfo.processInfo.systemUptime
+
+    init(missingChunks: [Int], initialOriginURL: URL, initialCDNURL: URL?, maxWorkerCap: Int) {
+        self.missingQueue = missingChunks
+        self.originURL = initialOriginURL
+        self.cachedCDNURL = initialCDNURL
+        self.redirectEpoch = initialCDNURL != nil ? 1 : 0
+        self.maxWorkerCap = maxWorkerCap
+        self.workerCap = maxWorkerCap
+        _ = activeBatchEnd
+        _ = inFlightChunkCount
+    }
+
+    func leaseNextBatch() -> BatchLease {
+        if failedError != nil { return .done }
+        if missingQueue.isEmpty {
+            return activeWorkerCount > 0 ? .wait(0.15) : .done
+        }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        if now < backoffUntil {
+            return .wait(min(1.5, max(0.05, backoffUntil - now)))
+        }
+        if activeWorkerCount >= workerCap {
+            return .wait(0.08)
+        }
+
+        let start = missingQueue.removeFirst()
+        var end = start
+        let limit = min(batchSizeChunks, missingQueue.count + 1)
+        var taken = 1
+        while taken < limit, let peek = missingQueue.first, peek == end + 1 {
+            missingQueue.removeFirst()
+            end = peek
+            taken += 1
+        }
+
+        activeWorkerCount += 1
+        let useCDN = (cachedCDNURL != nil)
+        return .batch(
+            startChunk: start,
+            endChunk: end,
+            requestURL: cachedCDNURL ?? originURL,
+            usedCDN: useCDN,
+            redirectEpoch: useCDN ? redirectEpoch : 0
+        )
+    }
+
+    func recordProgressBytes(_ byteCount: Int) -> (shouldReport: Bool, speedMBs: Double) {
+        bytesSinceLastReport += Int64(byteCount)
+        let now = ProcessInfo.processInfo.systemUptime
+        let dt = now - lastReportTime
+        if dt >= 0.35 {
+            let spd = (Double(bytesSinceLastReport) / (1024.0 * 1024.0)) / dt
+            bytesSinceLastReport = 0
+            lastReportTime = now
+            return (true, spd)
+        }
+        return (false, 0)
+    }
+
+    func updateResolvedRedirectURL(_ finalURL: URL?, usedCDN: Bool, epoch: UInt64) {
+        guard let finalURL else { return }
+        if !usedCDN, finalURL.absoluteString != originURL.absoluteString {
+            if cachedCDNURL?.absoluteString != finalURL.absoluteString {
+                cachedCDNURL = finalURL
+                redirectEpoch &+= 1
+            }
+        } else if usedCDN, epoch == redirectEpoch, finalURL.absoluteString != cachedCDNURL?.absoluteString {
+            cachedCDNURL = finalURL
+            redirectEpoch &+= 1
+        }
+    }
+
+    func finishBatchSuccess() {
+        activeWorkerCount = max(0, activeWorkerCount - 1)
+        let now = ProcessInfo.processInfo.systemUptime
+        if now >= backoffUntil + 2.0 {
+            cleanBatchesSince429 += 1
+            if cleanBatchesSince429 >= 4 {
+                cleanBatchesSince429 = 0
+                if batchSizeChunks < 16 {
+                    batchSizeChunks = min(16, batchSizeChunks * 2)
+                } else if workerCap < maxWorkerCap {
+                    workerCap = min(maxWorkerCap, workerCap + 1)
+                }
+            }
+        }
+    }
+
+    func requeueBatchFailure(
+        resumeFromChunk: Int,
+        endChunk: Int,
+        statusCode: Int,
+        usedCDN: Bool,
+        epoch: UInt64,
+        retryAfterHeader: String?
+    ) {
+        activeWorkerCount = max(0, activeWorkerCount - 1)
+        if resumeFromChunk <= endChunk {
+            let unstored = Array(resumeFromChunk...endChunk)
+            missingQueue.insert(contentsOf: unstored, at: 0)
+        }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        if statusCode == 429 {
+            cleanBatchesSince429 = 0
+            let headerDelay = retryAfterHeader.flatMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+            let r = (batch429Retries[resumeFromChunk] ?? 0) + 1
+            batch429Retries[resumeFromChunk] = r
+            let waitSec = min(6.0, max(0.8, headerDelay ?? (0.7 * Double(min(r, 6)))))
+            backoffUntil = max(backoffUntil, now + waitSec)
+            if now >= last429StepDownTime + 1.5 {
+                last429StepDownTime = now
+                if workerCap > 1 {
+                    workerCap = max(1, workerCap - 1)
+                    DonbyLogger.shared.log("离线下载触发 HTTP 429 限流，自动降并发至 \(workerCap) 并退避 \(String(format: "%.1fs", waitSec))", level: .warning, subsystem: "Download")
+                } else if batchSizeChunks > 4 {
+                    batchSizeChunks = max(4, batchSizeChunks / 2)
+                }
+            }
+            if r >= 12, failedError == nil {
+                failedError = "分片 #\(resumeFromChunk) 触发服务器持续限流 (429)"
+            }
+            return
+        }
+
+        if usedCDN && (statusCode == 200 || statusCode >= 400) && statusCode != 416 {
+            if epoch == redirectEpoch {
+                cachedCDNURL = nil
+            }
+            return
+        }
+
+        let hardCount = (batchHardRetries[resumeFromChunk] ?? 0) + 1
+        batchHardRetries[resumeFromChunk] = hardCount
+        if hardCount >= 5 {
+            if failedError == nil {
+                let codeDesc = statusCode > 0 ? "HTTP \(statusCode)" : "网络错误"
+                failedError = "分片 #\(resumeFromChunk) 多次拉取失败 (\(codeDesc))"
+            }
+        } else {
+            backoffUntil = max(backoffUntil, now + min(2.0, 0.35 * Double(hardCount)))
+        }
+    }
+}
+
     private func startDownloadWorker(for entrySnapshot: DownloadEntry, connectionBudget: Int) {
         let assetKey = entrySnapshot.assetKey
         workerTasks[assetKey]?.cancel()
@@ -2628,6 +3053,7 @@ public final class DonbyDownloadManager: ObservableObject {
         let task = Task.detached(priority: .utility) {
             let store = DonbyTurboCacheEngine.shared.store(for: assetKey, persistDisk: true)
             store.setPinned(true)
+            defer { store.flushMeta() }
 
             let primaryURL = URL(string: entrySnapshot.downloadURLString) ?? URL(string: entrySnapshot.streamURLString)
             let fallbackURL = URL(string: entrySnapshot.streamURLString)
@@ -2638,38 +3064,50 @@ public final class DonbyDownloadManager: ObservableObject {
                 return
             }
 
+            let workers = max(2, min(6, connectionBudget))
             let cfg = URLSessionConfiguration.ephemeral
-            cfg.httpMaximumConnectionsPerHost = 6
-            cfg.timeoutIntervalForRequest = 18
-            cfg.timeoutIntervalForResource = 60
-            let session = URLSession(configuration: cfg)
+            cfg.urlCache = nil
+            cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+            cfg.httpMaximumConnectionsPerHost = max(8, workers + 2)
+            cfg.timeoutIntervalForRequest = 20
+            cfg.timeoutIntervalForResource = 300
+
+            let streamDelegate = DownloadRangeStreamDelegate()
+            let opQueue = OperationQueue()
+            opQueue.name = "com.donby.download.worker"
+            opQueue.maxConcurrentOperationCount = max(4, workers * 2)
+            opQueue.qualityOfService = .utility
+            let session = URLSession(configuration: cfg, delegate: streamDelegate, delegateQueue: opQueue)
             defer { session.invalidateAndCancel() }
 
-            var activeURL = targetURL
-            // 1. Ensure chunk 0 & totalSize are resolved
-            if store.currentMeta().totalSize <= 0 || !store.hasChunk(0) {
-                let chunkSize = store.currentMeta().chunkSize
-                var req = URLRequest(url: activeURL, timeoutInterval: 15)
-                for (k, v) in entrySnapshot.headers { req.setValue(v, forHTTPHeaderField: k) }
-                req.setValue("bytes=0-\(chunkSize - 1)", forHTTPHeaderField: "Range")
+            var originURL = targetURL
+            var resolvedCDNURL: URL? = nil
+            let headers = entrySnapshot.headers
+            let primaryOriginHost = originURL.host
 
+            // 1. Ensure chunk 0 & totalSize + 302 CDN redirect URL are resolved cleanly
+            let probeChunkSize = store.currentMeta().chunkSize
+            if store.currentMeta().totalSize <= 0 || !store.hasChunk(0) {
                 var probeData: Data?
                 var probeResp: HTTPURLResponse?
-                if let (d, r) = try? await session.data(for: req),
-                   let http = r as? HTTPURLResponse,
-                   (http.statusCode == 206 || http.statusCode == 200) {
-                    probeData = d
-                    probeResp = http
-                } else if let fb = fallbackURL, fb != activeURL {
-                    activeURL = fb
-                    var fbReq = URLRequest(url: fb, timeoutInterval: 15)
-                    for (k, v) in entrySnapshot.headers { fbReq.setValue(v, forHTTPHeaderField: k) }
-                    fbReq.setValue("bytes=0-\(chunkSize - 1)", forHTTPHeaderField: "Range")
-                    if let (d, r) = try? await session.data(for: fbReq),
+                let probeCandidates = [targetURL, fallbackURL].compactMap { $0 }
+                for candidate in probeCandidates {
+                    if Task.isCancelled { return }
+                    let req = Self.buildRangeURLRequest(
+                        url: candidate,
+                        originHost: candidate.host,
+                        headers: headers,
+                        startByte: 0,
+                        endByte: Int64(probeChunkSize - 1),
+                        timeout: 18
+                    )
+                    if let (d, r) = try? await session.data(for: req),
                        let http = r as? HTTPURLResponse,
                        (http.statusCode == 206 || http.statusCode == 200) {
+                        originURL = candidate
                         probeData = d
                         probeResp = http
+                        break
                     }
                 }
 
@@ -2679,11 +3117,31 @@ public final class DonbyDownloadManager: ObservableObject {
                     }
                     return
                 }
-                if let total = TurboStreamByteHandle.parseTotalSize(from: firstHttp, startByte: 0, dataCount: firstData.count), total > 0 {
-                    store.setTotalSize(total, sourceURL: activeURL.absoluteString)
+                if let finalRespURL = firstHttp.url, finalRespURL.absoluteString != originURL.absoluteString {
+                    resolvedCDNURL = finalRespURL
                 }
-                let slice = firstData.count > chunkSize ? firstData.prefix(chunkSize) : firstData
+                if let total = TurboStreamByteHandle.parseTotalSize(from: firstHttp, startByte: 0, dataCount: firstData.count), total > 0 {
+                    store.setTotalSize(total, sourceURL: originURL.absoluteString)
+                }
+                let slice = firstData.count > probeChunkSize ? Data(firstData.prefix(probeChunkSize)) : firstData
                 store.storeChunk(index: 0, data: slice)
+            } else {
+                // Warm existing CDN redirect link cleanly with a tiny HEAD/1-byte probe if resuming so batches bypass origin 429s
+                let req = Self.buildRangeURLRequest(
+                    url: originURL,
+                    originHost: primaryOriginHost,
+                    headers: headers,
+                    startByte: 0,
+                    endByte: 0,
+                    timeout: 10
+                )
+                if let (_, r) = try? await session.data(for: req),
+                   let http = r as? HTTPURLResponse,
+                   (http.statusCode == 206 || http.statusCode == 200),
+                   let finalRespURL = http.url,
+                   finalRespURL.absoluteString != originURL.absoluteString {
+                    resolvedCDNURL = finalRespURL
+                }
             }
 
             let meta = store.currentMeta()
@@ -2708,88 +3166,151 @@ public final class DonbyDownloadManager: ObservableObject {
                 return
             }
 
-            let workers = max(1, min(4, connectionBudget))
             let chunkSize = meta.chunkSize
             let totalSize = meta.totalSize
-            let headers = entrySnapshot.headers
-            let finalURL = activeURL
-
-            actor ChunkWorkQueue {
-                var queue: [Int]
-                var failedError: String?
-                var bytesSinceLastReport: Int64 = 0
-                var lastReportTime: TimeInterval = ProcessInfo.processInfo.systemUptime
-
-                init(chunks: [Int]) {
-                    self.queue = chunks
-                }
-                func next() -> Int? {
-                    guard failedError == nil, !queue.isEmpty else { return nil }
-                    return queue.removeFirst()
-                }
-                func recordSuccess(bytes: Int) -> (shouldReport: Bool, speedMBs: Double) {
-                    bytesSinceLastReport += Int64(bytes)
-                    let now = ProcessInfo.processInfo.systemUptime
-                    let dt = now - lastReportTime
-                    if dt >= 0.35 {
-                        let spd = (Double(bytesSinceLastReport) / (1024.0 * 1024.0)) / dt
-                        bytesSinceLastReport = 0
-                        lastReportTime = now
-                        return (true, spd)
-                    }
-                    return (false, 0)
-                }
-                func recordFailure(_ msg: String) {
-                    if failedError == nil { failedError = msg }
-                }
-            }
-
-            let workQueue = ChunkWorkQueue(chunks: missingChunks)
+            let coordinator = DownloadBatchCoordinator(
+                missingChunks: missingChunks,
+                initialOriginURL: originURL,
+                initialCDNURL: resolvedCDNURL,
+                maxWorkerCap: workers
+            )
 
             await withTaskGroup(of: Void.self) { group in
                 for _ in 0..<workers {
                     group.addTask {
                         while !Task.isCancelled {
-                            guard let idx = await workQueue.next() else { break }
-                            let startByte = Int64(idx) * Int64(chunkSize)
-                            let endByte = min(totalSize - 1, startByte + Int64(chunkSize) - 1)
-                            var success = false
+                            switch await coordinator.leaseNextBatch() {
+                            case .done:
+                                return
+                            case .wait(let delaySec):
+                                try? await Task.sleep(nanoseconds: UInt64(delaySec * 1_000_000_000))
+                            case .batch(let startChunk, let endChunk, let requestURL, let usedCDN, let redirectEpoch):
+                                let batchStartByte = Int64(startChunk) * Int64(chunkSize)
+                                let batchEndByte = min(totalSize - 1, Int64(endChunk + 1) * Int64(chunkSize) - 1)
+                                let req = Self.buildRangeURLRequest(
+                                    url: requestURL,
+                                    originHost: originURL.host,
+                                    headers: headers,
+                                    startByte: batchStartByte,
+                                    endByte: batchEndByte,
+                                    timeout: 25
+                                )
 
-                            for attempt in 0..<4 {
-                                if Task.isCancelled { return }
-                                var req = URLRequest(url: finalURL, timeoutInterval: 20)
-                                for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
-                                req.setValue("bytes=\(startByte)-\(endByte)", forHTTPHeaderField: "Range")
+                                var currentChunkIdx = startChunk
+                                var statusCode = -1
+                                var retryAfterHeader: String? = nil
 
-                                if let (data, resp) = try? await session.data(for: req),
-                                   let http = resp as? HTTPURLResponse {
-                                    if http.statusCode == 206 || (http.statusCode == 200 && idx == 0) {
-                                        store.storeChunk(index: idx, data: data)
-                                        let rep = await workQueue.recordSuccess(bytes: data.count)
-                                        if rep.shouldReport {
-                                            let curMeta = store.currentMeta()
-                                            await MainActor.run {
-                                                DonbyDownloadManager.shared.updateProgress(
-                                                    assetKey: assetKey,
-                                                    downloadedBytes: curMeta.cachedBytes,
-                                                    totalBytes: curMeta.totalSize,
-                                                    speedMBs: rep.speedMBs
+                                do {
+                                    let (http, byteStream) = try await streamDelegate.openStream(
+                                        session: session,
+                                        request: req,
+                                        allowStatus200: (startChunk == 0 && batchStartByte == 0)
+                                    )
+                                    statusCode = http.statusCode
+                                    retryAfterHeader = http.value(forHTTPHeaderField: "Retry-After")
+
+                                    if statusCode == 206 || (statusCode == 200 && startChunk == 0) {
+                                        await coordinator.updateResolvedRedirectURL(http.url, usedCDN: usedCDN, epoch: redirectEpoch)
+
+                                        var acc = Data()
+                                        acc.reserveCapacity(chunkSize * 2)
+                                        var readCursor = 0
+
+                                        for try await netSlice in byteStream {
+                                            if Task.isCancelled { break }
+                                            acc.append(netSlice)
+
+                                            let rep = await coordinator.recordProgressBytes(netSlice.count)
+                                            while currentChunkIdx <= endChunk {
+                                                let expectedLen = min(
+                                                    chunkSize,
+                                                    Int(max(0, totalSize - Int64(currentChunkIdx) * Int64(chunkSize)))
                                                 )
+                                                if acc.count - readCursor < expectedLen {
+                                                    break
+                                                }
+                                                let endPos = readCursor + expectedLen
+                                                let chunkData = Data(acc[readCursor..<endPos])
+                                                readCursor = endPos
+                                                store.storeChunk(index: currentChunkIdx, data: chunkData)
+                                                currentChunkIdx += 1
+                                            }
+                                            if readCursor >= chunkSize {
+                                                acc.removeSubrange(0..<readCursor)
+                                                readCursor = 0
+                                            }
+                                            if rep.shouldReport {
+                                                let curMeta = store.currentMeta()
+                                                await MainActor.run {
+                                                    DonbyDownloadManager.shared.updateProgress(
+                                                        assetKey: assetKey,
+                                                        downloadedBytes: curMeta.cachedBytes,
+                                                        totalBytes: curMeta.totalSize,
+                                                        speedMBs: rep.speedMBs
+                                                    )
+                                                }
                                             }
                                         }
-                                        success = true
-                                        break
-                                    } else if http.statusCode == 429 {
-                                        try? await Task.sleep(nanoseconds: UInt64(1_200_000_000 * (attempt + 1)))
-                                        continue
-                                    }
-                                }
-                                try? await Task.sleep(nanoseconds: UInt64(400_000_000 * (attempt + 1)))
-                            }
 
-                            if !success && !Task.isCancelled {
-                                await workQueue.recordFailure("分片 #\(idx) 多次拉取失败")
-                                break
+                                        if Task.isCancelled {
+                                            await coordinator.requeueBatchFailure(
+                                                resumeFromChunk: currentChunkIdx,
+                                                endChunk: endChunk,
+                                                statusCode: -1,
+                                                usedCDN: usedCDN,
+                                                epoch: redirectEpoch,
+                                                retryAfterHeader: nil
+                                            )
+                                            return
+                                        }
+
+                                        // Flush trailing partial slice if EOF matches exact chunk length
+                                        while currentChunkIdx <= endChunk {
+                                            let expectedLen = min(
+                                                chunkSize,
+                                                Int(max(0, totalSize - Int64(currentChunkIdx) * Int64(chunkSize)))
+                                            )
+                                            guard acc.count - readCursor >= expectedLen else { break }
+                                            let endPos = readCursor + expectedLen
+                                            let chunkData = Data(acc[readCursor..<endPos])
+                                            readCursor = endPos
+                                            store.storeChunk(index: currentChunkIdx, data: chunkData)
+                                            currentChunkIdx += 1
+                                        }
+
+                                        if currentChunkIdx > endChunk {
+                                            await coordinator.finishBatchSuccess()
+                                        } else {
+                                            await coordinator.requeueBatchFailure(
+                                                resumeFromChunk: currentChunkIdx,
+                                                endChunk: endChunk,
+                                                statusCode: statusCode,
+                                                usedCDN: usedCDN,
+                                                epoch: redirectEpoch,
+                                                retryAfterHeader: retryAfterHeader
+                                            )
+                                        }
+                                    } else {
+                                        await coordinator.requeueBatchFailure(
+                                            resumeFromChunk: currentChunkIdx,
+                                            endChunk: endChunk,
+                                            statusCode: statusCode,
+                                            usedCDN: usedCDN,
+                                            epoch: redirectEpoch,
+                                            retryAfterHeader: retryAfterHeader
+                                        )
+                                    }
+                                } catch {
+                                    if Task.isCancelled { return }
+                                    await coordinator.requeueBatchFailure(
+                                        resumeFromChunk: currentChunkIdx,
+                                        endChunk: endChunk,
+                                        statusCode: statusCode,
+                                        usedCDN: usedCDN,
+                                        epoch: redirectEpoch,
+                                        retryAfterHeader: retryAfterHeader
+                                    )
+                                }
                             }
                         }
                     }
@@ -2798,7 +3319,7 @@ public final class DonbyDownloadManager: ObservableObject {
 
             if Task.isCancelled { return }
             store.flushMeta()
-            if let err = await workQueue.failedError {
+            if let err = await coordinator.failedError {
                 await MainActor.run {
                     DonbyDownloadManager.shared.markFailed(assetKey: assetKey, message: err)
                 }

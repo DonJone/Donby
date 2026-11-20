@@ -1914,18 +1914,22 @@ public struct PlayerView: View {
         }
         openingBox?.abort()
         openingBox = nil
-        activeTurboHandle?.abort()
-        activeTurboHandle?.close()
-        activeTurboHandle = nil
+        let turboToClose = activeTurboHandle
+        self.activeTurboHandle = nil
+        turboToClose?.abort()
         episodeSwitchTask?.cancel()
         episodeSwitchTask = nil
         displayDownloadSpeedMBs = 0.0
         bufferedAheadSeconds = 0
         skipBannerLabel = nil
-        guard let handle = activeHandle else { return }
+        guard activeHandle != nil || turboToClose != nil else { return }
         Task.detached(priority: .userInitiated) {
-            dk_player_close(handle)
-            dk_player_destroy(handle)
+            if let handle = activeHandle {
+                dk_player_close(handle)
+                dk_player_destroy(handle)
+            }
+            // Close off MainActor in case flushMeta / store locks contend with disk I/O
+            turboToClose?.close()
         }
     }
 
@@ -1962,6 +1966,7 @@ public struct PlayerView: View {
         currentTime = seconds
         if let handle = playerHandle {
             dk_player_seek(handle, seconds, true)
+            activeTurboHandle?.interruptPendingReadForSeek()
         }
     }
 
@@ -2076,7 +2081,7 @@ public struct PlayerView: View {
     }
 
     private func exportRedactedDiagnostics() {
-        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.28"
+        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.29"
         var lines: [String] = []
         lines.append("Donby Diagnostics Report (v\(appVer))")
         lines.append("Time: \(ISO8601DateFormatter().string(from: Date()))")

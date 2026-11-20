@@ -171,6 +171,9 @@ struct DKPlayer {
     std::atomic<bool> abort_requested{false};
     std::atomic<bool> external_abort_requested{false};
     std::atomic<bool> seek_requested{false};
+    std::atomic<uint64_t> latest_seek_seq{0};
+    std::atomic<uint64_t> executing_seek_seq{0};
+    std::atomic<bool> seek_executing{false};
     std::atomic<double> seek_target_sec{0.0};
     std::atomic<bool> seek_accurate{false};
     std::atomic<double> video_seek_drop_until_pts{-1.0};
@@ -854,6 +857,9 @@ static double dk_get_audio_clock(DKPlayer* player) {
 // Master A/V synchronization clock
 static double dk_get_master_clock(DKPlayer* player) {
     if (!player || player->abort_requested.load() || player->is_closing.load()) return 0.0;
+    if (player->seek_requested.load(std::memory_order_acquire) || player->seek_executing.load(std::memory_order_acquire)) {
+        return player->seek_target_sec.load(std::memory_order_relaxed);
+    }
     if (player->audio_stream_idx >= 0 && player->audio_queue != nullptr) {
         return dk_get_audio_clock(player);
     }
@@ -1790,6 +1796,22 @@ static void dk_decode_subtitle_packet(DKPlayer* player, AVPacket* pkt) {
     }
 }
 
+static void dk_clear_avio_error_state(AVFormatContext* fmt_ctx) {
+    if (fmt_ctx && fmt_ctx->pb) {
+        fmt_ctx->pb->error = 0;
+        fmt_ctx->pb->eof_reached = 0;
+    }
+}
+
+static void dk_signal_seek_request(DKPlayer* player, double target_sec, bool accurate) {
+    if (!player) return;
+    player->seek_target_sec.store(target_sec, std::memory_order_release);
+    player->seek_accurate.store(accurate, std::memory_order_release);
+    player->latest_seek_seq.fetch_add(1, std::memory_order_acq_rel);
+    player->seek_requested.store(true, std::memory_order_release);
+    player->demux_cv.notify_all();
+}
+
 // Worker: Demuxing, thread-safe seeking, and cache writing
 static void dk_demux_worker(DKPlayer* player) {
     AVPacket* pkt = av_packet_alloc();
@@ -1797,13 +1819,44 @@ static void dk_demux_worker(DKPlayer* player) {
 
     while (!player->abort_requested.load()) {
         // Thread-safe seek handling
-        if (player->seek_requested.load()) {
+        if (player->seek_requested.load(std::memory_order_acquire)) {
             std::lock_guard<std::mutex> lock(player->demux_mtx);
-            double target_sec = player->seek_target_sec.load();
-            bool accurate = player->seek_accurate.load();
+            uint64_t my_seek_seq = player->latest_seek_seq.load(std::memory_order_acquire);
+            double target_sec = player->seek_target_sec.load(std::memory_order_acquire);
+            bool accurate = player->seek_accurate.load(std::memory_order_acquire);
 
+            player->executing_seek_seq.store(my_seek_seq, std::memory_order_release);
+            player->seek_executing.store(true, std::memory_order_release);
+            player->seek_requested.store(false, std::memory_order_release);
+
+            struct SeekScopeGuard {
+                std::atomic<bool>& flag;
+                explicit SeekScopeGuard(std::atomic<bool>& f) : flag(f) {}
+                ~SeekScopeGuard() { flag.store(false, std::memory_order_release); }
+            } seek_guard(player->seek_executing);
+
+            dk_clear_avio_error_state(player->format_ctx);
             int64_t target_ts = static_cast<int64_t>(target_sec * AV_TIME_BASE);
-            avformat_seek_file(player->format_ctx, -1, INT64_MIN, target_ts, target_ts, AVSEEK_FLAG_BACKWARD);
+            int seek_ret = avformat_seek_file(player->format_ctx, -1, INT64_MIN, target_ts, target_ts, AVSEEK_FLAG_BACKWARD);
+            if (seek_ret < 0 &&
+                !player->abort_requested.load() &&
+                player->latest_seek_seq.load(std::memory_order_acquire) == my_seek_seq) {
+                dk_clear_avio_error_state(player->format_ctx);
+                seek_ret = av_seek_frame(player->format_ctx, -1, target_ts, AVSEEK_FLAG_BACKWARD);
+            }
+            dk_clear_avio_error_state(player->format_ctx);
+
+            if (player->abort_requested.load()) break;
+            // If another seek arrived while we were seeking, immediately re-seek to the latest target
+            if (player->latest_seek_seq.load(std::memory_order_acquire) != my_seek_seq) {
+                continue;
+            }
+            if (seek_ret < 0) {
+                char errbuf[256];
+                av_strerror(seek_ret, errbuf, sizeof(errbuf));
+                dk_log(1, "DKEngine Warning: Seek to %.2fs returned %d (%s)", target_sec, seek_ret, errbuf);
+            }
+
             player->demux_eof.store(false);
             player->video_eof.store(false);
             player->audio_eof.store(false);
@@ -1923,7 +1976,6 @@ static void dk_demux_worker(DKPlayer* player) {
             }
             player->seek_preview_pending.store(was_paused, std::memory_order_release);
             player->force_present_next_frame.store(true, std::memory_order_release);
-            player->seek_requested.store(false);
             player->video_decode_cv.notify_all();
             player->audio_decode_cv.notify_all();
             player->video_frame_cv.notify_all();
@@ -1959,6 +2011,11 @@ static void dk_demux_worker(DKPlayer* player) {
 
         int ret = av_read_frame(player->format_ctx, pkt);
         if (ret < 0) {
+            if (player->abort_requested.load() || player->is_closing.load()) break;
+            if (player->seek_requested.load(std::memory_order_acquire)) {
+                dk_clear_avio_error_state(player->format_ctx);
+                continue;
+            }
             if (ret == AVERROR_EOF) {
                 consecutive_io_errors = 0;
                 if (!player->demux_eof.exchange(true)) {
@@ -1979,7 +2036,6 @@ static void dk_demux_worker(DKPlayer* player) {
                 });
                 continue;
             }
-            if (player->abort_requested.load()) break;
             if (ret == AVERROR(EAGAIN)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
@@ -1997,7 +2053,15 @@ static void dk_demux_worker(DKPlayer* player) {
                 player->state.store(DK_STATE_ERROR);
                 break;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            if (player->format_ctx && player->format_ctx->pb) {
+                int64_t retry_pos = avio_tell(player->format_ctx->pb);
+                dk_clear_avio_error_state(player->format_ctx);
+                if (retry_pos >= 0) {
+                    avio_seek(player->format_ctx->pb, retry_pos, SEEK_SET);
+                    dk_clear_avio_error_state(player->format_ctx);
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(120));
             continue;
         }
         consecutive_io_errors = 0;
@@ -2155,8 +2219,14 @@ static std::string dk_normalize_path_or_url(const char* in_url) {
 static int dk_avio_read_thunk(void* opaque, uint8_t* buf, int buf_size) {
     DKPlayer* player = static_cast<DKPlayer*>(opaque);
     if (!player || !player->custom_io_read) return AVERROR_EOF;
+    auto should_yield_for_seek = [player]() -> bool {
+        if (!player->seek_requested.load(std::memory_order_acquire)) return false;
+        return !player->seek_executing.load(std::memory_order_acquire) ||
+               player->latest_seek_seq.load(std::memory_order_acquire) != player->executing_seek_seq.load(std::memory_order_acquire);
+    };
     if (player->abort_requested.load(std::memory_order_relaxed) ||
-        player->is_closing.load(std::memory_order_relaxed)) {
+        player->is_closing.load(std::memory_order_relaxed) ||
+        should_yield_for_seek()) {
         return AVERROR_EXIT;
     }
     int n = player->custom_io_read(player->custom_io_opaque, buf, buf_size);
@@ -2168,7 +2238,8 @@ static int dk_avio_read_thunk(void* opaque, uint8_t* buf, int buf_size) {
         return AVERROR_EOF;
     }
     return (player->abort_requested.load(std::memory_order_relaxed) ||
-            player->is_closing.load(std::memory_order_relaxed))
+            player->is_closing.load(std::memory_order_relaxed) ||
+            should_yield_for_seek())
         ? AVERROR_EXIT
         : AVERROR(EIO);
 }
@@ -2800,10 +2871,7 @@ void dk_player_pause(DKPlayer* player) {
 void dk_player_seek(DKPlayer* player, double target_sec, bool accurate) {
     DKReaderGuard guard(player);
     if (!guard) return;
-    player->seek_target_sec.store(target_sec);
-    player->seek_accurate.store(accurate);
-    player->seek_requested.store(true);
-    player->demux_cv.notify_all();
+    dk_signal_seek_request(player, target_sec, accurate);
 }
 
 void dk_player_set_rate(DKPlayer* player, float rate) {
@@ -2977,10 +3045,7 @@ void dk_player_select_track(DKPlayer* player, int track_type, int stream_index) 
                 player->audio_stream_idx.store(-1);
             }
         }
-        player->seek_target_sec.store(cur_pts);
-        player->seek_accurate.store(true);
-        player->seek_requested.store(true);
-        player->demux_cv.notify_all();
+        dk_signal_seek_request(player, cur_pts, true);
     } else if (track_type == 2) { // Primary Subtitle
         if (stream_index >= 0) {
             if (static_cast<unsigned int>(stream_index) >= player->format_ctx->nb_streams ||
@@ -2996,10 +3061,7 @@ void dk_player_select_track(DKPlayer* player, int track_type, int stream_index) 
             dk_open_subtitle_decoder_locked(player, stream_index);
         }
         if (stream_index >= 0) {
-            player->seek_target_sec.store(std::max(0.0, cur_pts));
-            player->seek_accurate.store(true);
-            player->seek_requested.store(true);
-            player->demux_cv.notify_all();
+            dk_signal_seek_request(player, std::max(0.0, cur_pts), true);
         } else {
             dk_log(0, "DKEngine: Subtitles disabled by user");
         }
@@ -3023,10 +3085,7 @@ void dk_player_select_secondary_subtitle_track(DKPlayer* player, int stream_inde
         dk_open_subtitle_decoder_for_slot_locked(player, stream_index, true);
     }
     if (stream_index >= 0) {
-        player->seek_target_sec.store(std::max(0.0, cur_pts));
-        player->seek_accurate.store(true);
-        player->seek_requested.store(true);
-        player->demux_cv.notify_all();
+        dk_signal_seek_request(player, std::max(0.0, cur_pts), true);
     }
 }
 
