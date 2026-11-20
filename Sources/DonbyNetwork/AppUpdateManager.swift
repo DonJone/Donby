@@ -40,7 +40,7 @@ public final class AppUpdateManager: ObservableObject {
     private init() {}
 
     public static var currentVersion: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.3.32"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.3.33"
     }
 
     public var lastCheckedDate: Date? {
@@ -615,10 +615,12 @@ public final class AppUpdateManager: ObservableObject {
 
         BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/donby-backup.XXXXXX" 2>/dev/null || echo "/tmp/donby-backup-$$")"
         mkdir -p "$BACKUP_DIR" 2>/dev/null || true
-        BACKUP_APP="${BACKUP_DIR}/Donby.app"
+        BACKUP_CONTENTS="${BACKUP_DIR}/Contents"
 
-        if [ -e "$TARGET_APP" ]; then
-            mv "$TARGET_APP" "$BACKUP_APP" || {
+        # Preserve top-level /Applications/Donby.app directory inode so macOS Dock never creates a second tile
+        mkdir -p "$TARGET_APP" 2>/dev/null || true
+        if [ -d "$TARGET_APP/Contents" ]; then
+            mv "$TARGET_APP/Contents" "$BACKUP_CONTENTS" || {
                 rm -rf "$BACKUP_DIR"
                 exit 1
             }
@@ -626,38 +628,44 @@ public final class AppUpdateManager: ObservableObject {
 
         LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
         detach_dmg() {
-            [ -z "$MOUNT_POINT" ] && return 0
-            hdiutil detach "$MOUNT_POINT" -quiet >/dev/null 2>&1 || hdiutil detach "$MOUNT_POINT" -force -quiet >/dev/null 2>&1 || true
+            if [ -n "$MOUNT_POINT" ]; then
+                hdiutil detach "$MOUNT_POINT" -quiet >/dev/null 2>&1 || hdiutil detach "$MOUNT_POINT" -force -quiet >/dev/null 2>&1 || true
+            fi
+            for vol in /Volumes/Donby*; do
+                [ -e "$vol" ] || continue
+                hdiutil detach "$vol" -quiet >/dev/null 2>&1 || hdiutil detach "$vol" -force -quiet >/dev/null 2>&1 || true
+            done
         }
         cleanup_ls() {
             [ ! -x "$LSREG" ] && return 0
-            "$LSREG" -u "$BACKUP_APP" >/dev/null 2>&1 || true
             [ -n "$SOURCE_APP" ] && "$LSREG" -u "$SOURCE_APP" >/dev/null 2>&1 || true
             for vol in /Volumes/Donby*; do
-                [ -e "${vol}/Donby.app" ] && "$LSREG" -u "${vol}/Donby.app" >/dev/null 2>&1 || true
+                "$LSREG" -u "${vol}/Donby.app" >/dev/null 2>&1 || true
             done
+            "$LSREG" -u "/Volumes/Donby/Donby.app" >/dev/null 2>&1 || true
             for tr in "${HOME}/.Trash"/Donby*.app; do
                 [ -e "$tr" ] && "$LSREG" -u "$tr" >/dev/null 2>&1 || true
             done
         }
 
-        if ditto "$SOURCE_APP" "$TARGET_APP"; then
+        if ditto "$SOURCE_APP/Contents" "$TARGET_APP/Contents"; then
+            touch "$TARGET_APP" >/dev/null 2>&1 || true
             xattr -rd com.apple.quarantine "$TARGET_APP" >/dev/null 2>&1 || true
+            rm -rf "$BACKUP_DIR" >/dev/null 2>&1 || true
+            [ -n "$CLEANUP_DIR" ] && rm -rf "$CLEANUP_DIR" >/dev/null 2>&1 || true
+            detach_dmg
             cleanup_ls
             [ -x "$LSREG" ] && "$LSREG" -f "$TARGET_APP" >/dev/null 2>&1 || true
-            rm -rf "$BACKUP_DIR" >/dev/null 2>&1 || true
-            detach_dmg
-            [ -n "$CLEANUP_DIR" ] && rm -rf "$CLEANUP_DIR" >/dev/null 2>&1 || true
             rm -f "$PACKAGE_FILE" >/dev/null 2>&1 || true
             [ -n "$PACKAGE_FILE" ] && rmdir "$(dirname "$PACKAGE_FILE")" >/dev/null 2>&1 || true
             sleep 0.35
-            /usr/bin/open -F "$TARGET_APP"
+            /usr/bin/open "$TARGET_APP"
         else
-            rm -rf "$TARGET_APP"
-            [ -e "$BACKUP_APP" ] && mv "$BACKUP_APP" "$TARGET_APP"
+            rm -rf "$TARGET_APP/Contents"
+            [ -d "$BACKUP_CONTENTS" ] && mv "$BACKUP_CONTENTS" "$TARGET_APP/Contents"
             rm -rf "$BACKUP_DIR" >/dev/null 2>&1 || true
             detach_dmg
-            /usr/bin/open -F "$TARGET_APP"
+            /usr/bin/open "$TARGET_APP"
         fi
         """
 

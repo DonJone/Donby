@@ -31,10 +31,20 @@ echo "==> Building Donby release binary..."
 swift build --sdk "$SDK_PATH" -c release
 
 BIN_PATH="$(swift build --sdk "$SDK_PATH" -c release --show-bin-path)/Donby"
-APP_DIR="${DONBY_APP_DIR:-Donby.app}"
+APP_DIR="${DONBY_APP_DIR:-/Applications/Donby.app}"
 
-mkdir -p "$(dirname "$APP_DIR")"
-rm -rf "$APP_DIR"
+# Always remove any stray workspace ./Donby.app so LaunchServices & Dock never see two Donby.app bundles
+if [ "$APP_DIR" != "Donby.app" ] && [ "$APP_DIR" != "$(pwd)/Donby.app" ] && [ -e "Donby.app" ]; then
+    LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+    if [ -x "$LSREGISTER" ]; then
+        "$LSREGISTER" -u "$(pwd)/Donby.app" >/dev/null 2>&1 || true
+    fi
+    rm -rf "Donby.app"
+fi
+
+# Update Contents/ in-place to preserve top-level /Applications/Donby.app directory inode for macOS Dock
+mkdir -p "$APP_DIR"
+rm -rf "$APP_DIR/Contents"
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 
@@ -48,7 +58,7 @@ if [ -f "Resources/AppIcon.icns" ]; then
 fi
 cp Resources/uhdnow_*.png "$APP_DIR/Contents/Resources/" 2>/dev/null || true
 
-APP_VERSION="${DONBY_VERSION:-1.3.32}"
+APP_VERSION="${DONBY_VERSION:-1.3.33}"
 BUILD_NUMBER="${DONBY_BUILD_NUMBER:-$(date -u +%Y%m%d%H%M)}"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST

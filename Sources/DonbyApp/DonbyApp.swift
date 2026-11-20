@@ -28,6 +28,39 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let isCanonical = canonicalPaths.contains(bundlePath)
         let otherInstances = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
             .filter { $0.processIdentifier != currentPID }
+
+        // If a non-canonical duplicate bundle (e.g. workspace build artifact or mounted DMG) was launched
+        // while /Applications/Donby.app is already running or installed, hand off to /Applications/Donby.app
+        // and exit immediately without creating a second Dock icon.
+        if !isCanonical {
+            let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+            if let canonicalRunning = otherInstances.first(where: { canonicalPaths.contains($0.bundleURL?.path ?? "") }) {
+                NSApp.setActivationPolicy(.prohibited)
+                canonicalRunning.activate(options: [.activateAllWindows])
+                if FileManager.default.isExecutableFile(atPath: lsregister) {
+                    let proc = Process()
+                    proc.executableURL = URL(fileURLWithPath: lsregister)
+                    proc.arguments = ["-u", bundlePath]
+                    try? proc.run()
+                }
+                Darwin.exit(0)
+            } else if FileManager.default.fileExists(atPath: "/Applications/Donby.app") {
+                let installedVer = Bundle(path: "/Applications/Donby.app")?.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+                if !AppVersionComparator.isVersion(currentVersion, newerThan: installedVer) {
+                    NSApp.setActivationPolicy(.prohibited)
+                    if FileManager.default.isExecutableFile(atPath: lsregister) {
+                        let proc = Process()
+                        proc.executableURL = URL(fileURLWithPath: lsregister)
+                        proc.arguments = ["-u", bundlePath]
+                        try? proc.run()
+                        proc.waitUntilExit()
+                    }
+                    NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/Donby.app"))
+                    Darwin.exit(0)
+                }
+            }
+        }
+
         for other in otherInstances {
             let otherPath = other.bundleURL?.path ?? ""
             let otherVer = Bundle(path: otherPath)?.infoDictionary?["CFBundleShortVersionString"] as? String
@@ -75,12 +108,30 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
+            @Sendable func detachVolume(_ mountPath: String) {
+                for args in [["detach", mountPath, "-quiet"], ["detach", mountPath, "-force", "-quiet"]] {
+                    let proc = Process()
+                    proc.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+                    proc.arguments = args
+                    proc.standardOutput = FileHandle.nullDevice
+                    proc.standardError = FileHandle.nullDevice
+                    try? proc.run()
+                    proc.waitUntilExit()
+                    if proc.terminationStatus == 0 { break }
+                }
+            }
+
             if let volumes = try? fileMgr.contentsOfDirectory(atPath: "/Volumes") {
                 for vol in volumes where vol == "Donby" || vol.hasPrefix("Donby ") {
-                    runLsregister(["-u", "/Volumes/\(vol)/Donby.app"])
+                    let volPath = "/Volumes/\(vol)"
+                    let volAppPath = "\(volPath)/Donby.app"
+                    runLsregister(["-u", volAppPath])
+                    detachVolume(volPath)
+                    runLsregister(["-u", volAppPath])
                 }
             } else {
                 runLsregister(["-u", "/Volumes/Donby/Donby.app"])
+                detachVolume("/Volumes/Donby")
             }
 
             let trashDir = (NSHomeDirectory() as NSString).appendingPathComponent(".Trash")
@@ -93,6 +144,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             let registeredPaths = NSWorkspace.shared.urlsForApplications(withBundleIdentifier: bundleID).map(\.path)
             for candidate in registeredPaths where candidate != bundlePath {
                 runLsregister(["-u", candidate])
+                if candidate.hasSuffix("/git/Donby/Donby.app") {
+                    try? fileMgr.removeItem(atPath: candidate)
+                }
             }
 
             runLsregister(["-f", bundlePath])
