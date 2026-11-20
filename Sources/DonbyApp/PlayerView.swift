@@ -408,7 +408,7 @@ public struct PlayerView: View {
             guard let handle = playerHandle, !isScrubbing else { return }
             let newPos = dk_player_get_position(handle)
             let sinceSeek = ProcessInfo.processInfo.systemUptime - lastSeekCommitUptime
-            let isSettlingSeek = sinceSeek < 0.65 && abs(newPos - lastSeekCommitTarget) > 3.0
+            let isSettlingSeek = sinceSeek < 1.2 && abs(newPos - lastSeekCommitTarget) > 8.0
             if !isSettlingSeek && abs(currentTime - newPos) > 0.05 {
                 currentTime = newPos
             }
