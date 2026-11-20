@@ -40,7 +40,7 @@ public final class AppUpdateManager: ObservableObject {
     private init() {}
 
     public static var currentVersion: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.3.31"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.3.32"
     }
 
     public var lastCheckedDate: Date? {

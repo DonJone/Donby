@@ -1040,15 +1040,19 @@ static void dk_try_start_audio_queue_if_ready(DKPlayer* player) {
         return;
     }
     const int64_t buffered_samples = player->buffered_audio_samples.load(std::memory_order_relaxed);
-    if (buffered_samples < 16384) return;
+    const bool eof_reached = player->audio_eof.load(std::memory_order_relaxed) ||
+                             player->demux_eof.load(std::memory_order_relaxed);
+    // Require 24000 stereo samples (0.50s cushion, ~4x the 3 hardware AudioQueueBuffers)
+    // unless stream EOF is reached.
+    if (buffered_samples < 24000 && !eof_reached) return;
 
     bool video_ready = (player->video_stream_idx < 0) ||
                        player->video_eof.load(std::memory_order_relaxed) ||
-                       player->demux_eof.load(std::memory_order_relaxed) ||
-                       (buffered_samples >= 28800);
+                       eof_reached ||
+                       (buffered_samples >= 44000);
     if (!video_ready) {
         std::lock_guard<std::mutex> vql(player->video_queue_mtx);
-        const size_t min_frames = player->force_present_next_frame.load(std::memory_order_relaxed) ? 3 : 2;
+        const size_t min_frames = player->force_present_next_frame.load(std::memory_order_relaxed) ? 5 : 4;
         video_ready = (player->video_queue.size() >= min_frames) ||
                       player->video_eof.load(std::memory_order_relaxed) ||
                       player->demux_eof.load(std::memory_order_relaxed);
@@ -3404,6 +3408,21 @@ CVPixelBufferRef dk_player_acquire_frame(DKPlayer* player, double* out_pts, DKGp
             if (player->audio_stream_idx.load() < 0 || (player->audio_eof.load() && player->buffered_audio_samples.load() <= 0)) {
                 player->state.store(DK_STATE_ENDED);
             }
+        } else if (player->state.load() == DK_STATE_PLAYING &&
+                   !dk_is_seeking(player) &&
+                   !player->demux_eof.load(std::memory_order_relaxed) &&
+                   !player->video_eof.load(std::memory_order_relaxed) &&
+                   !player->audio_eof.load(std::memory_order_relaxed) &&
+                   player->buffered_audio_samples.load(std::memory_order_relaxed) <= 0 &&
+                   player->audio_queue != nullptr &&
+                   player->audio_queue_started.exchange(false, std::memory_order_acq_rel)) {
+            // Both video and audio buffers drained due to network starvation:
+            // pause AudioQueue so dk_try_start_audio_queue_if_ready refills a clean 0.50s+ cushion
+            // instead of playing 1 packet at a time ("play-freeze-play-freeze" stutter).
+            lock.unlock();
+            AudioQueueStop(player->audio_queue, true);
+            AudioQueueReset(player->audio_queue);
+            lock.lock();
         }
         if (player->last_frame) {
             CVPixelBufferRetain(player->last_frame);
