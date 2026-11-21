@@ -1,6 +1,6 @@
 # Module Map: Turbo Cache, Streaming & Network (`DonbyNetwork`)
 
-> Last synced: `v1.4.5`. Load this doc for streaming, seek latency, HTTP/2 Range, L1/L2 caching, detail-page preloading, Emby/UHD API, offline downloads, and channel-aware auto-updates.
+> Last synced: `v1.4.33`. Load this doc for streaming, seek latency, HTTP/2 Range, L1/L2 caching, detail-page preloading, Emby/UHD API, Watch Party, Danmu, offline downloads, and channel-aware auto-updates.
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyNetwork/TurboCacheAndDownloadEngine.swift` (~4754L)
@@ -12,8 +12,12 @@
   - `DonbyTurboCacheEngine` — asset lifecycle, download queue, cache eviction, offline materialization, auto-archive, and single-slot background detail-page preloader (`startDetailPreload` / `cancelDetailPreload`).
 - `Sources/DonbyNetwork/EmbyClient.swift` (~1135L)
   - `RedirectCacheStore`, `EmbyPlaybackInfoCache` (TTL `300s`), `EmbyHostWarmCache`, `NoRedirectDelegate`, `EmbyClient`.
-- `Sources/DonbyNetwork/UHDStreamClient.swift` (~1682L)
-  - UHD native API client: auth, subscriptions/limits, parallel domain resolution (`/playback/domains/*/resolve`), asset cache (TTL `300s`), `/play/*`, `/download/*`, speed-test.
+- `Sources/DonbyNetwork/UHDStreamClient.swift` (~1600L)
+  - UHD native API client (`streaming-openapi.yaml v1.0.0-draft.2` + `team-v2-openapi.yaml`): password & 8-digit code login (`/login`, `/login/code`, `/logout`), connection test, full subscription/traffic account snapshots, domain listing & fresh `/resolve`, spec-compliant `TEST_BASE` chunk-delegate speed test (`32/64/100 MiB`, warmup exclusion, cancel-safe no-report, free `probeLineExitNetworkInfo`), hot/anime-hot/anime-calendar/genres/persons/person-works, cross-season `/tv/{id}/playback-state`, TMDB ID search, typed favorites (`movie`/`tv`/`person`), Team API v2 owner overview/members/traffic reset, `/play/*`, `/download/*`.
+- `Sources/DonbyNetwork/UHDWatchPartyClient.swift` (~420L)
+  - UHD Watch Party REST client (`/watch-parties`, `/join`, `/membership`, `/members/{id}`, lock, host transfer, end) + `@MainActor UHDWatchPartySession` WebSocket sync (`wss://.../watch-party-socket`, 10s heartbeat, RTT server clock offset, `PARTY_STALE` recovery, `aligning` auto-pause, graceful auto-reconnect).
+- `Sources/DonbyNetwork/UHDDanmuClient.swift` (~215L)
+  - UHD managed Danmu proxy client (`https://{resolved_domain}/api/v1/danmu/{token}/api/v2/...`: `match`, `search/anime`, `bangumi`, `comment`, `429 Retry-After` handling, zero quota consumption).
 - `Sources/DonbyNetwork/OfflineMediaLibrary.swift` (~576L)
   - `DonbyOfflineLibraryStorage`, `OfflineSeriesSidecar`, `OfflineEpisodeOrMovieSidecar`, pinned chunk-to-offline linkage.
 - `Sources/DonbyNetwork/AppUpdateManager.swift` (~750L)

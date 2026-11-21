@@ -109,6 +109,15 @@ public struct PlayerView: View {
     @State private var lastSubtitleAlignUndo: SubtitleAlignUndoState? = nil
     @State private var secondarySubtitleTimeScale: Double = 1.0
     @State private var isSecondaryAlignedToPrimary: Bool = false
+    @State private var uhdDanmuComments: [UHDDanmuComment] = []
+    @State private var uhdDanmuMatchedTitle: String = ""
+    @State private var isLoadingUHDDanmu: Bool = false
+    @State private var showUHDDanmuPickerSheet: Bool = false
+    @State private var showWatchPartyCreateSheetInPlayer: Bool = false
+    @State private var isApplyingWatchPartyRemoteState: Bool = false
+    @State private var lastWatchPartyEpoch: Int = -1
+    @State private var lastWatchPartyHostReportUptime: TimeInterval = 0
+    @State private var lastWatchPartyMemberStatus: String = ""
 
     private enum TracksDrawerSection: String, CaseIterable, Identifiable {
         case tracks = "轨道"
@@ -195,6 +204,18 @@ public struct PlayerView: View {
                         }
                     }
                 }
+
+            if session.server.type == .uhdNative {
+                UHDDanmuLiveOverlay(
+                    comments: uhdDanmuComments,
+                    isEnabled: appState.enableDanmaku,
+                    isPlaying: isPlaying && hasRenderedFirstFrame && !isWaitingForSeekOrBuffer,
+                    playbackRate: Double(playbackSpeed),
+                    timeProvider: {
+                        (autoHideBox.liveCurrentTime, autoHideBox.lastObservedPosUptime > 0 ? autoHideBox.lastObservedPosUptime : ProcessInfo.processInfo.systemUptime)
+                    }
+                )
+            }
 
             if isOpeningMedia || (!hasRenderedFirstFrame && openingErrorMessage == nil) {
                 VStack {
@@ -475,6 +496,36 @@ public struct PlayerView: View {
             if let km = keyMonitor { NSEvent.removeMonitor(km); keyMonitor = nil }
             stopNativeKernel()
         }
+        .onAppear {
+            bindActiveWatchPartyCallbacksIfNeeded()
+        }
+        .task(id: "\(currentItem.id)|\(appState.enableDanmaku)") {
+            await loadUHDDanmuIfEnabled()
+        }
+        .task(id: appState.activeWatchPartySession?.roomId ?? "none") {
+            bindActiveWatchPartyCallbacksIfNeeded()
+        }
+        .sheet(isPresented: $showUHDDanmuPickerSheet) {
+            UHDDanmuPickerSheet(
+                server: session.server,
+                initialKeyword: currentItem.isEpisode ? (currentItem.seriesName ?? currentItem.name) : currentItem.name,
+                onSelectEpisode: { label, _, comments in
+                    uhdDanmuMatchedTitle = label
+                    uhdDanmuComments = comments
+                    appState.enableDanmaku = true
+                    appState.showToast("已加载 \(comments.count) 条弹幕 · \(label)", icon: "text.bubble.fill")
+                }
+            )
+        }
+        .sheet(isPresented: $showWatchPartyCreateSheetInPlayer) {
+            UHDWatchPartyCreateSheet(
+                server: session.server,
+                item: currentItem,
+                preferredSourceId: currentResource.mediaSource.id
+            )
+            .environmentObject(appState)
+            .preferredColorScheme(.dark)
+        }
         .onReceive(progressTimer) { _ in
             let hudVisible = showControls || activeDrawer != nil
             if hudVisible {
@@ -545,11 +596,29 @@ public struct PlayerView: View {
             }
 
             let pState = dk_player_get_state(handle)
+            // Watch Party 1Hz host heartbeat & member buffering status sync
+            if let wp = appState.activeWatchPartySession, hasRenderedFirstFrame && !isOpeningMedia {
+                if wp.isHost {
+                    if isPlaying && !didHandlePlaybackEnded && (nowUptime - lastWatchPartyHostReportUptime) >= 1.0 {
+                        lastWatchPartyHostReportUptime = nowUptime
+                        wp.sendPlayback(state: "playing", positionSeconds: livePos, rate: Double(playbackSpeed))
+                    }
+                } else {
+                    let desiredStatus = isWaitingForSeekOrBuffer ? "buffering" : "ready"
+                    if desiredStatus != lastWatchPartyMemberStatus {
+                        lastWatchPartyMemberStatus = desiredStatus
+                        wp.sendMemberStatus(desiredStatus)
+                    }
+                }
+            }
             if pState == DK_STATE_ENDED && !didHandlePlaybackEnded {
                 didHandlePlaybackEnded = true
                 isPlaying = false
                 currentTime = livePos
                 finishedItemPendingCleanup = (currentItem.id, currentResource.mediaSource.id)
+                if let wp = appState.activeWatchPartySession, wp.isHost {
+                    wp.sendPlayback(state: "ended", positionSeconds: livePos, rate: Double(playbackSpeed))
+                }
                 if session.server.type == .uhdNative && !session.server.accessToken.isEmpty {
                     let srv = session.server
                     let itm = currentItem
@@ -725,8 +794,44 @@ public struct PlayerView: View {
                 .lineLimit(1)
                 .frame(maxWidth: 620)
 
-            HStack {
+            HStack(spacing: 10) {
                 Spacer()
+                if let wp = appState.activeWatchPartySession {
+                    WatchPartyTopStatusPill(session: wp) {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            activeDrawer = (activeDrawer == .watchParty) ? nil : .watchParty
+                        }
+                    }
+                }
+
+                if session.server.type == .uhdNative {
+                    Button {
+                        appState.enableDanmaku.toggle()
+                        appState.showToast(
+                            appState.enableDanmaku ? "已开启 UHD 弹幕" : "已关闭弹幕",
+                            icon: appState.enableDanmaku ? "text.bubble.fill" : "text.bubble"
+                        )
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: appState.enableDanmaku ? "text.bubble.fill" : "text.bubble")
+                                .font(.system(size: 11.5, weight: .semibold))
+                            Text(appState.enableDanmaku && !uhdDanmuComments.isEmpty ? "弹幕 \(uhdDanmuComments.count)" : "弹幕")
+                                .font(.system(size: 11.5, weight: .semibold))
+                        }
+                        .foregroundStyle(appState.enableDanmaku ? .white : .white.opacity(0.58))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(
+                            Capsule()
+                                .fill(appState.enableDanmaku ? appState.accentColor.opacity(0.42) : Color.black.opacity(0.50))
+                                .overlay(Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6))
+                        )
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help("切换 UHD 弹幕显示")
+                }
+
                 Text(String(format: "%.1f MB/s", max(0.0, displayDownloadSpeedMBs)))
                     .font(.system(size: 14.5, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white)
@@ -1212,6 +1317,9 @@ public struct PlayerView: View {
             Button {
                 playbackSpeed = Float(spd)
                 if let handle = playerHandle { dk_player_set_rate(handle, playbackSpeed) }
+                if let wp = appState.activeWatchPartySession, wp.isHost, !isApplyingWatchPartyRemoteState {
+                    wp.sendPlayback(state: isPlaying ? "playing" : "paused", positionSeconds: autoHideBox.liveCurrentTime, rate: spd)
+                }
             } label: {
                 let isSel = abs(playbackSpeed - Float(spd)) < 0.05
                 let title = String(format: "%.2gx 倍速", spd)
@@ -1259,6 +1367,17 @@ public struct PlayerView: View {
         Section("面板与工具") {
             Button("选集播放列表") {
                 withAnimation(.easeInOut(duration: 0.18)) { activeDrawer = .playlist }
+            }
+            if session.server.type == .uhdNative {
+                Button(appState.activeWatchPartySession != nil ? "打开同看房间面板" : "同看房间 (Watch Party)...") {
+                    withAnimation(.easeInOut(duration: 0.18)) { activeDrawer = .watchParty }
+                }
+                Button(appState.enableDanmaku ? "关闭 UHD 弹幕" : "开启 UHD 弹幕") {
+                    appState.enableDanmaku.toggle()
+                }
+                Button("手动搜索 / 匹配弹幕...") {
+                    showUHDDanmuPickerSheet = true
+                }
             }
             Button("查看运行日志 (L)") {
                 showLogSheet = true
@@ -1510,12 +1629,19 @@ public struct PlayerView: View {
         )
     }
 
+    private var availableDrawerTabs: [PlayerDrawerTab] {
+        if session.server.type == .uhdNative || appState.activeWatchPartySession != nil {
+            return PlayerDrawerTab.allCases
+        }
+        return [.playlist, .tracks, .mediaInfo]
+    }
+
     private func rightDrawerPanel(tab: PlayerDrawerTab) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             // Top Liquid Glass Drawer Header
             HStack(spacing: 8) {
                 drawerSegmentedPill(
-                    options: PlayerDrawerTab.allCases,
+                    options: availableDrawerTabs,
                     selection: tab,
                     title: { $0.rawValue },
                     onSelect: { nextTab in
@@ -2204,6 +2330,9 @@ public struct PlayerView: View {
                         }
                         .buttonStyle(.plain)
                     }
+
+                case .watchParty:
+                    watchPartyDrawerContent
                 }
             }
         }
@@ -2847,6 +2976,9 @@ public struct PlayerView: View {
             dk_player_play(handle)
             isPlaying = true
         }
+        if let wp = appState.activeWatchPartySession, wp.isHost, !isApplyingWatchPartyRemoteState {
+            wp.sendPlayback(state: isPlaying ? "playing" : "paused", positionSeconds: autoHideBox.liveCurrentTime, rate: Double(playbackSpeed))
+        }
     }
 
     private func seekRelative(_ delta: Double) {
@@ -2866,6 +2998,9 @@ public struct PlayerView: View {
         if let handle = playerHandle {
             dk_player_seek(handle, seconds, accurate)
             activeTurboHandle?.wakeWaitingReads()
+        }
+        if let wp = appState.activeWatchPartySession, wp.isHost, !isApplyingWatchPartyRemoteState {
+            wp.sendPlayback(state: isPlaying ? "playing" : "paused", positionSeconds: seconds, rate: Double(playbackSpeed))
         }
     }
 
@@ -3751,6 +3886,9 @@ public struct PlayerView: View {
                 currentItem = nextEp
                 currentResource = res
                 appState.updateDetailFocusedEpisodeIfActive(forItem: nextEp)
+                if let wp = appState.activeWatchPartySession, wp.isHost, !isApplyingWatchPartyRemoteState {
+                    wp.sendSwitch(assetId: res.mediaSource.id, positionSeconds: nextEp.resumePositionSeconds, rate: Double(playbackSpeed), playing: true)
+                }
                 startNativeKernelPlayback(startSeconds: nextEp.resumePositionSeconds)
                 if prevWasFinished {
                     appState.cleanupAutoArchivedEntryIfFinished(itemId: prevItem.id, mediaSourceId: prevSourceId)
@@ -3802,11 +3940,217 @@ public struct PlayerView: View {
         }
 
         appState.updateDetailFocusedEpisodeIfActive(forItem: currentItem)
+        if appState.activeWatchPartySession != nil {
+            appState.leaveOrEndActiveWatchParty(endRoom: false)
+        }
         stopNativeKernel()
         if exitingWasFinished {
             appState.cleanupAutoArchivedEntryIfFinished(itemId: exitingItemId, mediaSourceId: exitingSourceId)
         }
         appState.activePlayback = nil
+    }
+
+    // MARK: - UHD Watch Party Sync & Drawer + UHD Danmu
+
+    @ViewBuilder
+    private var watchPartyDrawerContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let wp = appState.activeWatchPartySession {
+                WatchPartyActiveRoomDrawerView(
+                    session: wp,
+                    accentColor: appState.accentColor,
+                    onCopyToast: { msg, icon in appState.showToast(msg, icon: icon) },
+                    onLeave: {
+                        appState.leaveOrEndActiveWatchParty(endRoom: false)
+                        appState.showToast("已退出同看房间", icon: "rectangle.portrait.and.arrow.right")
+                    },
+                    onEnd: {
+                        appState.leaveOrEndActiveWatchParty(endRoom: true)
+                        appState.showToast("已结束同看房间", icon: "xmark.circle.fill")
+                    }
+                )
+            } else {
+                drawerGlassCard {
+                    Text("UHD 同看 (Watch Party)")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white)
+                    Text("邀请好友一起同步观影。视频版本和时间轴由房主控制，每位成员使用各自账号的线路、音轨与字幕。")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.white.opacity(0.70))
+
+                    Button {
+                        showWatchPartyCreateSheetInPlayer = true
+                    } label: {
+                        HStack {
+                            Image(systemName: "person.2.wave.2.fill")
+                            Text("为当前影片创建同看房间")
+                        }
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 9).fill(appState.accentColor.opacity(0.75)))
+                        .contentShape(RoundedRectangle(cornerRadius: 9))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            if session.server.type == .uhdNative {
+                drawerGlassCard {
+                    HStack {
+                        Text("UHD 弹幕")
+                            .font(.system(size: 12.5, weight: .bold))
+                            .foregroundStyle(.white)
+                        Spacer()
+                        Toggle("", isOn: $appState.enableDanmaku)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                    }
+                    if !uhdDanmuMatchedTitle.isEmpty {
+                        Text("当前匹配：\(uhdDanmuMatchedTitle)（\(uhdDanmuComments.count) 条）")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.white.opacity(0.68))
+                            .lineLimit(2)
+                    } else if isLoadingUHDDanmu {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.mini)
+                            Text("正在自动匹配弹幕...")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.white.opacity(0.68))
+                        }
+                    } else {
+                        Text("弹幕流量不计入套餐额度")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.white.opacity(0.60))
+                    }
+
+                    Button {
+                        showUHDDanmuPickerSheet = true
+                    } label: {
+                        HStack {
+                            Image(systemName: "magnifyingglass")
+                            Text("手动搜索 / 切换弹幕来源")
+                        }
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 7)
+                        .background(drawerRowBackground(isSelected: false))
+                        .contentShape(RoundedRectangle(cornerRadius: 9))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func bindActiveWatchPartyCallbacksIfNeeded() {
+        guard let wp = appState.activeWatchPartySession else { return }
+        wp.onRoomSnapshot = { [self] room in
+            self.handleWatchPartySnapshot(room, session: wp)
+        }
+        wp.onStaleRevision = { [self] latest in
+            guard wp.isHost, let _ = latest else { return }
+            wp.sendPlayback(state: self.isPlaying ? "playing" : "paused", positionSeconds: self.autoHideBox.liveCurrentTime, rate: Double(self.playbackSpeed))
+        }
+        wp.onTerminated = { [self] reason in
+            self.appState.showToast(reason, icon: "person.2.slash")
+            if self.appState.activeWatchPartySession?.roomId == wp.roomId {
+                self.appState.activeWatchPartySession = nil
+            }
+        }
+        if let existing = wp.snapshot {
+            handleWatchPartySnapshot(existing, session: wp)
+        }
+    }
+
+    private func handleWatchPartySnapshot(_ room: UHDWatchPartyRoomSnapshot, session wp: UHDWatchPartySession) {
+        if wp.isHost {
+            // Per watch-party.md: when room enters `aligning` (member joined/reconnected),
+            // host pauses locally and immediately reports exact paused position with the new revision.
+            if room.phase == "aligning", let handle = playerHandle {
+                isApplyingWatchPartyRemoteState = true
+                dk_player_pause(handle)
+                isPlaying = false
+                let exactPos = dk_player_get_position(handle)
+                autoHideBox.liveCurrentTime = exactPos
+                currentTime = exactPos
+                isApplyingWatchPartyRemoteState = false
+                wp.sendPlayback(state: "paused", positionSeconds: exactPos, rate: Double(playbackSpeed))
+                appState.showToast("新成员加入，已暂停等待全员对齐", icon: "person.2.wave.2")
+            } else if room.phase == "preparing" && hasRenderedFirstFrame && !isOpeningMedia {
+                wp.sendPlayback(state: isPlaying ? "playing" : "paused", positionSeconds: autoHideBox.liveCurrentTime, rate: Double(playbackSpeed))
+            }
+            return
+        }
+
+        // Member synchronization: follow host media, phase, rate, and extrapolated timeline position.
+        if room.media.assetId != currentResource.mediaSource.id && room.epoch != lastWatchPartyEpoch {
+            lastWatchPartyEpoch = room.epoch
+            let srv = wp.server
+            let targetPos = room.extrapolatedPositionSeconds(estimatedServerNowMs: wp.estimatedServerNowMs)
+            Task {
+                let isEp = room.media.itemType.lowercased() == "episode"
+                let stub = EmbyItem(id: room.media.itemId, name: "同看影片", serverId: srv.serverId, type: isEp ? "Episode" : "Movie", uhdMediaType: isEp ? "episode" : "movie")
+                let detailed = (try? await UHDStreamClient.shared.fetchItemDetail(server: srv, item: stub)) ?? stub
+                if let res = try? await UHDStreamClient.shared.resolvePlaybackResource(
+                    server: srv,
+                    item: detailed,
+                    preferredSourceId: room.media.assetId,
+                    preferredPreset: appState.preferredVersionPreset
+                ) {
+                    isApplyingWatchPartyRemoteState = true
+                    currentItem = detailed
+                    currentResource = res
+                    startNativeKernelPlayback(startSeconds: targetPos)
+                    isApplyingWatchPartyRemoteState = false
+                }
+            }
+            return
+        }
+
+        guard let handle = playerHandle, hasRenderedFirstFrame, !isOpeningMedia else { return }
+        isApplyingWatchPartyRemoteState = true
+        defer { isApplyingWatchPartyRemoteState = false }
+
+        let targetRate = Float(max(0.25, min(3.0, room.rate)))
+        if abs(playbackSpeed - targetRate) > 0.04 {
+            playbackSpeed = targetRate
+            dk_player_set_rate(handle, targetRate)
+        }
+
+        let targetPos = room.extrapolatedPositionSeconds(estimatedServerNowMs: wp.estimatedServerNowMs)
+        let localPos = autoHideBox.liveCurrentTime
+        if abs(targetPos - localPos) > 1.25 {
+            seekTo(targetPos, accurate: true)
+        }
+
+        let shouldPlay = (room.phase == "playing")
+        if shouldPlay && !isPlaying {
+            dk_player_play(handle)
+            isPlaying = true
+        } else if !shouldPlay && isPlaying {
+            dk_player_pause(handle)
+            isPlaying = false
+        }
+    }
+
+    private func loadUHDDanmuIfEnabled() async {
+        guard session.server.type == .uhdNative, appState.enableDanmaku else { return }
+        guard !session.server.accessToken.isEmpty else { return }
+        isLoadingUHDDanmu = true
+        defer { isLoadingUHDDanmu = false }
+        if let loaded = try? await UHDDanmuClient.shared.autoLoadComments(
+            server: session.server,
+            item: currentItem,
+            mediaSource: currentResource.mediaSource
+        ) {
+            guard !Task.isCancelled else { return }
+            uhdDanmuMatchedTitle = loaded.matchedTitle
+            uhdDanmuComments = loaded.comments
+        }
     }
 
     private func saveCurrentWatchProgress(isFinal: Bool = false) {

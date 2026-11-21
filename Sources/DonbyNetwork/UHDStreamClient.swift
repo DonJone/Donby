@@ -1,26 +1,16 @@
 import Foundation
 import DonbyCore
 
-public struct UHDTrafficSummary: Sendable, Codable, Equatable {
-    public let displayUnlimitedTraffic: Bool
-    public let usedBytes: Int64
-    public let limitBytes: Int64
-    public let updatedAt: String
-}
-
-public struct UHDSpeedTestResult: Sendable, Equatable {
-    public let domainId: String
-    public let location: String
-    public let isp: String
-    public let averageMbps: Double
-    public let peakMbps: Double
-    public let elapsedMs: Int64
-    public let downloadedBytes: Int64
-}
-
 public struct UHDLoginResult: Sendable {
     public let token: String
     public let expiresAt: String
+}
+
+public struct UHDConnectionTestResult: Sendable {
+    public let latencyMs: Int
+    public let authenticated: Bool
+    public let planName: String?
+    public let message: String
 }
 
 private struct UHDEnvelope<T: Decodable>: Decodable {
@@ -86,6 +76,23 @@ private struct UHDGenreDTO: Decodable {
     let id: String
     let name: String
     let slug: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, slug
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let intId = try? c.decode(Int.self, forKey: .id) {
+            self.id = String(intId)
+        } else if let strId = try? c.decode(String.self, forKey: .id) {
+            self.id = strId
+        } else {
+            self.id = ""
+        }
+        self.name = (try? c.decode(String.self, forKey: .name)) ?? ""
+        self.slug = try? c.decodeIfPresent(String.self, forKey: .slug)
+    }
 }
 
 private struct UHDMediaSummaryDTO: Decodable {
@@ -128,6 +135,68 @@ private struct UHDMediaSummaryDTO: Decodable {
     }
 }
 
+private struct UHDAnimeCalendarDayDTO: Decodable {
+    let weekday: Int
+    let total: Int
+}
+
+private struct UHDAnimeCalendarScheduleDTO: Decodable {
+    let airDate: String
+    let estimated: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case airDate = "air_date"
+        case estimated
+    }
+}
+
+private struct UHDAnimeCalendarItemDTO: Decodable {
+    let summary: UHDMediaSummaryDTO
+    let schedule: UHDAnimeCalendarScheduleDTO
+
+    enum CodingKeys: String, CodingKey {
+        case schedule
+    }
+
+    init(from decoder: Decoder) throws {
+        self.summary = try UHDMediaSummaryDTO(from: decoder)
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.schedule = try c.decode(UHDAnimeCalendarScheduleDTO.self, forKey: .schedule)
+    }
+}
+
+private struct UHDPersonCardDTO: Decodable {
+    let id: String
+    let name: String
+    let tmdbId: String?
+    let imdbId: String?
+    let imageURL: String?
+    let favorite: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, favorite
+        case tmdbId = "tmdb_id"
+        case imdbId = "imdb_id"
+        case imageURL = "image_url"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(String.self, forKey: .id)
+        self.name = try c.decode(String.self, forKey: .name)
+        if let s = try? c.decodeIfPresent(String.self, forKey: .tmdbId) {
+            self.tmdbId = s
+        } else if let n = try? c.decodeIfPresent(Int.self, forKey: .tmdbId) {
+            self.tmdbId = String(n)
+        } else {
+            self.tmdbId = nil
+        }
+        self.imdbId = try? c.decodeIfPresent(String.self, forKey: .imdbId)
+        self.imageURL = try? c.decodeIfPresent(String.self, forKey: .imageURL)
+        self.favorite = try? c.decodeIfPresent(Bool.self, forKey: .favorite)
+    }
+}
+
 private struct UHDMediaDetailDTO: Decodable {
     let id: String
     let type: String
@@ -149,6 +218,7 @@ private struct UHDMediaDetailDTO: Decodable {
     let status: String?
     let tmdbId: Int?
     let imdbId: String?
+    let doubanId: String?
 
     enum CodingKeys: String, CodingKey {
         case id, type, title, tagline, description, rating, duration, genres, status
@@ -163,6 +233,7 @@ private struct UHDMediaDetailDTO: Decodable {
         case userState = "user_state"
         case tmdbId = "tmdb_id"
         case imdbId = "imdb_id"
+        case doubanId = "douban_id"
     }
 }
 
@@ -185,14 +256,52 @@ private struct UHDItemsOnlyDTO<T: Decodable>: Decodable {
     let items: [T]
 }
 
-private struct UHDFavoritesCursorDTO: Decodable {
+private struct UHDFavoritesCursorDTO<T: Decodable>: Decodable {
     let total: Int?
-    let items: [UHDMediaSummaryDTO]
+    let items: [T]
     let nextCursor: String?
 
     enum CodingKeys: String, CodingKey {
         case total, items
         case nextCursor = "next_cursor"
+    }
+}
+
+private struct UHDTVPlaybackEpisodeDTO: Decodable {
+    let episodeId: String
+    let mediaId: String
+    let seasonId: String
+    let seasonNumber: Int
+    let episodeNumber: Int
+    let title: String?
+    let thumbURL: String?
+    let duration: Int64
+    let positionMs: Int64
+    let progressPct: Int
+    let lastPlayedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case episodeId = "episode_id"
+        case mediaId = "media_id"
+        case seasonId = "season_id"
+        case seasonNumber = "season_number"
+        case episodeNumber = "episode_number"
+        case title
+        case thumbURL = "thumb_url"
+        case duration
+        case positionMs = "position_ms"
+        case progressPct = "progress_pct"
+        case lastPlayedAt = "last_played_at"
+    }
+}
+
+private struct UHDTVPlaybackStateDTO: Decodable {
+    let resume: UHDTVPlaybackEpisodeDTO?
+    let nextUp: UHDTVPlaybackEpisodeDTO?
+
+    enum CodingKeys: String, CodingKey {
+        case resume
+        case nextUp = "next_up"
     }
 }
 
@@ -429,11 +538,12 @@ private struct UHDAssetResponseDTO: Decodable {
 private struct UHDPlaybackDomainDTO: Decodable {
     let id: String
     let name: String
+    let domain: String?
     let description: String?
     let sortOrder: Int
 
     enum CodingKeys: String, CodingKey {
-        case id, name, description
+        case id, name, domain, description
         case sortOrder = "sort_order"
     }
 }
@@ -491,31 +601,80 @@ private struct UHDPlaybackStatesDTO: Decodable {
 private struct UHDSubscriptionPlanDTO: Decodable {
     let id: String
     let name: String
+    let description: String?
+    let planType: String?
+    let trafficLimit: Int64?
+    let activeVideoDeliveryLimit: Int?
+    let loginDeviceLimit: Int?
+    let monthlyPrice: Double?
+    let yearlyPrice: Double?
+    let teamTrafficLimit: Int64?
+    let memberQuota: Int?
+    let allowDownload: Bool?
+    let displayUnlimitedTraffic: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, description
+        case planType = "plan_type"
+        case trafficLimit = "traffic_limit"
+        case activeVideoDeliveryLimit = "active_video_delivery_limit"
+        case loginDeviceLimit = "login_device_limit"
+        case monthlyPrice = "monthly_price"
+        case yearlyPrice = "yearly_price"
+        case teamTrafficLimit = "team_traffic_limit"
+        case memberQuota = "member_quota"
+        case allowDownload = "allow_download"
+        case displayUnlimitedTraffic = "display_unlimited_traffic"
+    }
 }
 
 private struct UHDSubscriptionDTO: Decodable {
+    let isTrial: Bool?
     let allowDownload: Bool
     let displayUnlimitedTraffic: Bool
-    let trafficLimitBytes: Int64
-    let activeVideoDeliveryLimit: Int
+    let userId: String?
+    let planId: String?
     let plan: UHDSubscriptionPlanDTO?
+    let ownerId: String?
+    let memberUsage: Int?
+    let subscribedAt: String?
+    let expiresAt: String?
+    let cancelledAt: String?
+    let trafficLimitBytes: Int64?
+    let trafficLimitLegacy: Int64?
+    let activeVideoDeliveryLimit: Int
+    let renewDay: Int?
+    let autoRenew: Bool?
 
     enum CodingKeys: String, CodingKey {
+        case isTrial = "is_trial"
         case allowDownload = "allow_download"
         case displayUnlimitedTraffic = "display_unlimited_traffic"
-        case trafficLimitBytes = "traffic_limit_bytes"
-        case activeVideoDeliveryLimit = "active_video_delivery_limit"
+        case userId = "user_id"
+        case planId = "plan_id"
         case plan
+        case ownerId = "owner_id"
+        case memberUsage = "member_usage"
+        case subscribedAt = "subscribed_at"
+        case expiresAt = "expires_at"
+        case cancelledAt = "cancelled_at"
+        case trafficLimitBytes = "traffic_limit_bytes"
+        case trafficLimitLegacy = "traffic_limit"
+        case activeVideoDeliveryLimit = "active_video_delivery_limit"
+        case renewDay = "renew_day"
+        case autoRenew = "auto_renew"
     }
 }
 
 private struct UHDTrafficDTO: Decodable {
+    let userId: String?
     let displayUnlimitedTraffic: Bool
     let usedBytes: Int64
     let limitBytes: Int64
     let updatedAt: String
 
     enum CodingKeys: String, CodingKey {
+        case userId = "user_id"
         case displayUnlimitedTraffic = "display_unlimited_traffic"
         case usedBytes = "used_bytes"
         case limitBytes = "limit_bytes"
@@ -524,11 +683,21 @@ private struct UHDTrafficDTO: Decodable {
 }
 
 private struct UHDSpeedTestNetworkInfoDTO: Decodable {
-    let isp: String
-    let displayLocation: String
+    let ip: String?
+    let country: String?
+    let countryName: String?
+    let region: String?
+    let regionName: String?
+    let province: String?
+    let provinceName: String?
+    let isp: String?
+    let displayLocation: String?
 
     enum CodingKeys: String, CodingKey {
-        case isp
+        case ip, country, region, province, isp
+        case countryName = "country_name"
+        case regionName = "region_name"
+        case provinceName = "province_name"
         case displayLocation = "display_location"
     }
 }
@@ -540,6 +709,69 @@ private struct UHDSpeedTestSessionDTO: Decodable {
     enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
         case reportToken = "report_token"
+    }
+}
+
+private struct UHDTeamSettingsDTO: Decodable {
+    let activeVideoDeliveryLimit: Int
+    let allowDownload: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case activeVideoDeliveryLimit = "active_video_delivery_limit"
+        case allowDownload = "allow_download"
+    }
+}
+
+private struct UHDTeamOverviewDTO: Decodable {
+    let expiresAt: String
+    let memberCount: Int
+    let memberLimit: Int
+    let trafficLimitBytes: Int64
+    let trafficUsedBytes: Int64
+    let renewDay: Int
+    let settings: UHDTeamSettingsDTO
+
+    enum CodingKeys: String, CodingKey {
+        case expiresAt = "expires_at"
+        case memberCount = "member_count"
+        case memberLimit = "member_limit"
+        case trafficLimitBytes = "traffic_limit_bytes"
+        case trafficUsedBytes = "traffic_used_bytes"
+        case renewDay = "renew_day"
+        case settings
+    }
+}
+
+private struct UHDTeamMemberDTO: Decodable {
+    let id: String
+    let username: String
+    let expiresAt: String
+    let trafficLimitBytes: Int64
+    let trafficUsedBytes: Int64
+    let renewDay: Int
+    let activeVideoDeliveryLimit: Int
+    let allowDownload: Bool
+    let sessionCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id, username
+        case expiresAt = "expires_at"
+        case trafficLimitBytes = "traffic_limit_bytes"
+        case trafficUsedBytes = "traffic_used_bytes"
+        case renewDay = "renew_day"
+        case activeVideoDeliveryLimit = "active_video_delivery_limit"
+        case allowDownload = "allow_download"
+        case sessionCount = "session_count"
+    }
+}
+
+private struct UHDTeamMemberPageDTO: Decodable {
+    let items: [UHDTeamMemberDTO]
+    let nextCursor: String?
+
+    enum CodingKeys: String, CodingKey {
+        case items
+        case nextCursor = "next_cursor"
     }
 }
 
@@ -609,6 +841,185 @@ private actor UHDHostWarmCache {
     }
 }
 
+// MARK: - High-Throughput Chunk-Level Speed Test Receiver (Zero Byte-by-Byte Bottleneck)
+
+private final class UHDSpeedTestStreamRunner: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let expectedBytes: Int64
+    private let onProgress: @Sendable (UHDSpeedTestProgress) -> Void
+    private let lock = NSLock()
+    private var engine: UHDSpeedTestMetricsEngine?
+    private var contentLength: Int64
+    private var continuation: CheckedContinuation<UHDSpeedTestMetricsEngine.Snapshot, Error>?
+    private var finished = false
+    private var lastProgressEmitTime: Double = 0
+    private weak var activeTask: URLSessionDataTask?
+    private var ownSession: URLSession?
+
+    init(expectedBytes: Int64, onProgress: @escaping @Sendable (UHDSpeedTestProgress) -> Void) {
+        self.expectedBytes = expectedBytes
+        self.contentLength = expectedBytes
+        self.onProgress = onProgress
+        super.init()
+    }
+
+    func run(request: URLRequest) async throws -> UHDSpeedTestMetricsEngine.Snapshot {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        cfg.urlCache = nil
+        cfg.httpShouldSetCookies = false
+        cfg.waitsForConnectivity = false
+        cfg.timeoutIntervalForRequest = 30
+        cfg.timeoutIntervalForResource = 180
+        let queue = OperationQueue()
+        queue.name = "com.donby.uhd.speedtest"
+        queue.maxConcurrentOperationCount = 1
+        let session = URLSession(configuration: cfg, delegate: self, delegateQueue: queue)
+        self.ownSession = session
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                lock.lock()
+                if finished {
+                    lock.unlock()
+                    cont.resume(throwing: CancellationError())
+                    return
+                }
+                self.continuation = cont
+                let task = session.dataTask(with: request)
+                self.activeTask = task
+                lock.unlock()
+                task.resume()
+            }
+        } onCancel: {
+            self.cancel()
+        }
+    }
+
+    func cancel() {
+        lock.lock()
+        let task = activeTask
+        let cont = continuation
+        let wasFinished = finished
+        finished = true
+        continuation = nil
+        lock.unlock()
+        task?.cancel()
+        ownSession?.invalidateAndCancel()
+        ownSession = nil
+        if !wasFinished {
+            cont?.resume(throwing: CancellationError())
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            let err: Error = (http.statusCode == 401)
+                ? EmbyClientError.unauthorized
+                : EmbyClientError.httpStatus(http.statusCode, "测速下载被拒绝 (HTTP \(http.statusCode))")
+            complete(with: .failure(err))
+            completionHandler(.cancel)
+            return
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        lock.lock()
+        if response.expectedContentLength > 0 {
+            contentLength = response.expectedContentLength
+        }
+        engine = UHDSpeedTestMetricsEngine(startTimeSec: now)
+        lastProgressEmitTime = now
+        lock.unlock()
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        let now = ProcessInfo.processInfo.systemUptime
+        var emitPayload: UHDSpeedTestProgress?
+
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        if engine == nil {
+            engine = UHDSpeedTestMetricsEngine(startTimeSec: now)
+        }
+        let sampled = engine!.ingest(chunkBytes: Int64(data.count), at: now)
+        if sampled || (now - lastProgressEmitTime) >= 0.12 {
+            lastProgressEmitTime = now
+            let snap = engine!.currentSnapshot(at: now)
+            let denom = Double(max(1, contentLength))
+            emitPayload = UHDSpeedTestProgress(
+                fraction: min(1.0, Double(snap.totalBytes) / denom),
+                currentMbps: snap.currentMbps,
+                averageMbps: snap.averageMbps,
+                peakMbps: snap.peakMbps,
+                downloadedBytes: snap.totalBytes,
+                totalBytes: contentLength,
+                recentSamplesMbps: Array(snap.samplesMbps.suffix(48))
+            )
+        }
+        lock.unlock()
+
+        if let emitPayload {
+            onProgress(emitPayload)
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let error {
+            let nsErr = error as NSError
+            if nsErr.domain == NSURLErrorDomain && nsErr.code == NSURLErrorCancelled {
+                complete(with: .failure(CancellationError()))
+            } else {
+                complete(with: .failure(error))
+            }
+            return
+        }
+
+        lock.lock()
+        var eng = engine ?? UHDSpeedTestMetricsEngine(startTimeSec: now)
+        let finalSnap = eng.finalize(at: now)
+        let total = max(contentLength, finalSnap.totalBytes)
+        lock.unlock()
+
+        onProgress(UHDSpeedTestProgress(
+            fraction: 1.0,
+            currentMbps: finalSnap.currentMbps,
+            averageMbps: finalSnap.averageMbps,
+            peakMbps: finalSnap.peakMbps,
+            downloadedBytes: finalSnap.totalBytes,
+            totalBytes: total,
+            recentSamplesMbps: Array(finalSnap.samplesMbps.suffix(48))
+        ))
+        complete(with: .success(finalSnap))
+    }
+
+    private func complete(with result: Result<UHDSpeedTestMetricsEngine.Snapshot, Error>) {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        let cont = continuation
+        continuation = nil
+        let sessionToClose = ownSession
+        ownSession = nil
+        lock.unlock()
+
+        sessionToClose?.finishTasksAndInvalidate()
+        cont?.resume(with: result)
+    }
+}
+
+// MARK: - UHDStreamClient
+
 public final class UHDStreamClient: Sendable {
     public static let shared = UHDStreamClient()
 
@@ -628,7 +1039,7 @@ public final class UHDStreamClient: Sendable {
         return trimmed
     }
 
-    private func resolveAbsoluteImageURL(apiBase: String, relativeOrAbsolute: String?) -> String? {
+    public func resolveAbsoluteImageURL(apiBase: String, relativeOrAbsolute: String?) -> String? {
         guard let raw = relativeOrAbsolute?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
             return nil
         }
@@ -657,7 +1068,8 @@ public final class UHDStreamClient: Sendable {
         queryItems: [URLQueryItem] = [],
         token: String = "",
         bodyData: Data? = nil,
-        timeout: TimeInterval = 15
+        timeout: TimeInterval = 15,
+        extraHeaders: [String: String] = [:]
     ) throws -> URLRequest {
         let cleanBase = normalizedAPIBase(baseURL)
         let cleanPath = path.hasPrefix("/") ? path : "/\(path)"
@@ -682,20 +1094,45 @@ public final class UHDStreamClient: Sendable {
             req.httpBody = bodyData
             req.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
         }
+        for (k, v) in extraHeaders {
+            req.setValue(v, forHTTPHeaderField: k)
+        }
         return req
+    }
+
+    private func friendlyHTTPError(statusCode: Int, serverMsg: String, context: String? = nil) -> EmbyClientError {
+        let cleanMsg = serverMsg.trimmingCharacters(in: .whitespacesAndNewlines)
+        if statusCode == 401 {
+            if !cleanMsg.isEmpty {
+                return .httpStatus(401, cleanMsg)
+            }
+            return .unauthorized
+        }
+        if !cleanMsg.isEmpty {
+            return .httpStatus(statusCode, cleanMsg)
+        }
+        switch statusCode {
+        case 400: return .httpStatus(400, context ?? "请求参数无效")
+        case 403: return .httpStatus(403, context ?? "订阅无效或权限不足")
+        case 404: return .httpStatus(404, context ?? "资源不存在或线路已失效")
+        case 409: return .httpStatus(409, context ?? "设备会话已达上限或状态冲突")
+        case 429: return .httpStatus(429, "请求过于频繁，请稍后重试")
+        case 503: return .httpStatus(503, "服务暂不可用，请稍后重试")
+        default: return .httpStatus(statusCode, context ?? "服务端异常")
+        }
     }
 
     private func performRequest<T: Decodable>(
         _ type: T.Type,
         request: URLRequest,
-        priority: APIRequestGate.Priority = .normal
+        priority: APIRequestGate.Priority = .normal,
+        errorContext: String? = nil
     ) async throws -> T {
         try await APIRequestGate.shared.withPermit(priority: priority) {
             let (data, response) = try await self.apiSession.data(for: request)
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                 let errMsg = (try? JSONDecoder().decode(UHDOkOnly.self, from: data))?.msg ?? ""
-                if http.statusCode == 401 { throw EmbyClientError.unauthorized }
-                throw EmbyClientError.httpStatus(http.statusCode, errMsg)
+                throw self.friendlyHTTPError(statusCode: http.statusCode, serverMsg: errMsg, context: errorContext)
             }
             let envelope = try JSONDecoder().decode(UHDEnvelope<T>.self, from: data)
             guard envelope.ok, let payload = envelope.data else {
@@ -707,19 +1144,19 @@ public final class UHDStreamClient: Sendable {
 
     private func performAction(
         request: URLRequest,
-        priority: APIRequestGate.Priority = .normal
+        priority: APIRequestGate.Priority = .normal,
+        errorContext: String? = nil
     ) async throws {
         try await APIRequestGate.shared.withPermit(priority: priority) {
             let (data, response) = try await self.apiSession.data(for: request)
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                 let errMsg = (try? JSONDecoder().decode(UHDOkOnly.self, from: data))?.msg ?? ""
-                if http.statusCode == 401 { throw EmbyClientError.unauthorized }
-                throw EmbyClientError.httpStatus(http.statusCode, errMsg)
+                throw self.friendlyHTTPError(statusCode: http.statusCode, serverMsg: errMsg, context: errorContext)
             }
         }
     }
 
-    // MARK: - Auth
+    // MARK: - Auth & Connectivity
 
     public func login(baseURL: String, username: String, password: String) async throws -> UHDLoginResult {
         let payload = ["username": username, "password": password]
@@ -731,37 +1168,156 @@ public final class UHDStreamClient: Sendable {
             bodyData: body,
             timeout: 12
         )
-        let res = try await performRequest(UHDLoginDataDTO.self, request: req, priority: .playback)
+        let res = try await performRequest(
+            UHDLoginDataDTO.self,
+            request: req,
+            priority: .playback,
+            errorContext: "登录失败，请核对用户名、媒体客户端密码或订阅状态"
+        )
         guard !res.token.isEmpty else { throw EmbyClientError.emptyToken }
         return UHDLoginResult(token: res.token, expiresAt: res.expiresAt)
     }
 
-    public func logout(server: EmbyServerConfig) async {
-        guard let req = try? makeRequest(
-            baseURL: server.mainLineURL,
-            path: "/api/v1/stream/logout",
+    /// Exchanges an 8-digit code generated in the UHD Web Portal (`概览 -> 设备 -> 登录码`) for a Stream session token.
+    public func loginWithCode(baseURL: String, rawCode: String) async throws -> UHDLoginResult {
+        guard let normalized = UHDLoginCodeNormalizer.normalize(rawCode) else {
+            throw EmbyClientError.httpStatus(400, "请输入完整的 8 位数字登录码（保留前导 0）")
+        }
+        let body = try JSONEncoder().encode(["code": normalized])
+        let req = try makeRequest(
+            baseURL: baseURL,
+            path: "/api/v1/stream/login/code",
             method: "POST",
-            token: server.accessToken,
-            timeout: 8
-        ) else { return }
-        try? await performAction(request: req, priority: .normal)
+            bodyData: body,
+            timeout: 12
+        )
+        let res = try await performRequest(
+            UHDLoginDataDTO.self,
+            request: req,
+            priority: .playback,
+            errorContext: "登录码无效、已过期（3 分钟有效）或已被使用，请重新生成"
+        )
+        guard !res.token.isEmpty else { throw EmbyClientError.emptyToken }
+        return UHDLoginResult(token: res.token, expiresAt: res.expiresAt)
     }
 
-    // MARK: - Subscription, Traffic & Domains
+    @discardableResult
+    public func logout(server: EmbyServerConfig) async -> Bool {
+        guard !server.accessToken.isEmpty,
+              let req = try? makeRequest(
+                baseURL: server.mainLineURL,
+                path: "/api/v1/stream/logout",
+                method: "POST",
+                token: server.accessToken,
+                timeout: 8
+              ) else { return true }
+        do {
+            try await performAction(request: req, priority: .normal)
+            return true
+        } catch let err as EmbyClientError {
+            // Spec: 401 means token already revoked -> safe to clear local credentials
+            if case .unauthorized = err { return true }
+            if case .httpStatus(401, _) = err { return true }
+            return false
+        } catch {
+            return false
+        }
+    }
 
-    public func fetchSubscription(server: EmbyServerConfig) async throws -> ServerDeliveryCapabilities {
+    public func testConnection(baseURL: String, token: String = "") async throws -> UHDConnectionTestResult {
+        let start = CFAbsoluteTimeGetCurrent()
+        if !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let req = try makeRequest(
+                baseURL: baseURL,
+                path: "/api/v1/stream/subscriptions/me",
+                token: token.trimmingCharacters(in: .whitespacesAndNewlines),
+                timeout: 8
+            )
+            let dto = try await performRequest(UHDSubscriptionDTO.self, request: req, priority: .playback)
+            let ms = max(1, Int((CFAbsoluteTimeGetCurrent() - start) * 1000))
+            let plan = dto.plan?.name
+            return UHDConnectionTestResult(
+                latencyMs: ms,
+                authenticated: true,
+                planName: plan,
+                message: plan != nil ? "连接成功 · \(plan!) (\(ms) ms)" : "凭证有效 (\(ms) ms)"
+            )
+        } else {
+            let req = try makeRequest(
+                baseURL: baseURL,
+                path: "/api/v1/stream/playback/domains",
+                timeout: 8
+            )
+            let (_, response) = try await apiSession.data(for: req)
+            let ms = max(1, Int((CFAbsoluteTimeGetCurrent() - start) * 1000))
+            guard let http = response as? HTTPURLResponse else {
+                throw EmbyClientError.httpStatus(500, "未收到有效 HTTP 响应")
+            }
+            if http.statusCode == 401 || http.statusCode == 403 || (200...299).contains(http.statusCode) {
+                return UHDConnectionTestResult(
+                    latencyMs: ms,
+                    authenticated: (200...299).contains(http.statusCode),
+                    planName: nil,
+                    message: "服务器可达 · UHD API 正常 (\(ms) ms)"
+                )
+            }
+            throw EmbyClientError.httpStatus(http.statusCode, "服务器返回 HTTP \(http.statusCode)")
+        }
+    }
+
+    // MARK: - Subscription, Traffic & Account Snapshot
+
+    public func fetchSubscriptionDetail(server: EmbyServerConfig) async throws -> UHDSubscriptionInfo {
         let req = try makeRequest(
             baseURL: server.mainLineURL,
             path: "/api/v1/stream/subscriptions/me",
             token: server.accessToken
         )
         let dto = try await performRequest(UHDSubscriptionDTO.self, request: req, priority: .normal)
-        return ServerDeliveryCapabilities(
+        let planInfo = dto.plan.map { p in
+            UHDSubscriptionPlanInfo(
+                id: p.id,
+                name: p.name,
+                description: p.description,
+                planType: p.planType,
+                trafficLimitGB: p.trafficLimit,
+                activeVideoDeliveryLimit: p.activeVideoDeliveryLimit,
+                loginDeviceLimit: p.loginDeviceLimit,
+                monthlyPriceUSD: p.monthlyPrice,
+                yearlyPriceUSD: p.yearlyPrice,
+                teamTrafficLimitGB: p.teamTrafficLimit,
+                memberQuota: p.memberQuota,
+                allowDownload: p.allowDownload,
+                displayUnlimitedTraffic: p.displayUnlimitedTraffic
+            )
+        }
+        return UHDSubscriptionInfo(
+            isTrial: dto.isTrial ?? false,
             allowDownload: dto.allowDownload,
-            activeVideoDeliveryLimit: max(1, dto.activeVideoDeliveryLimit),
-            planName: dto.plan?.name,
             displayUnlimitedTraffic: dto.displayUnlimitedTraffic,
-            trafficLimitBytes: dto.trafficLimitBytes
+            userId: dto.userId ?? "",
+            planId: dto.planId ?? "",
+            plan: planInfo,
+            ownerId: dto.ownerId,
+            memberUsage: dto.memberUsage,
+            subscribedAt: dto.subscribedAt,
+            expiresAt: dto.expiresAt,
+            cancelledAt: dto.cancelledAt,
+            trafficLimitBytes: dto.trafficLimitBytes ?? dto.trafficLimitLegacy ?? 0,
+            activeVideoDeliveryLimit: max(1, dto.activeVideoDeliveryLimit),
+            renewDay: dto.renewDay,
+            autoRenew: dto.autoRenew ?? false
+        )
+    }
+
+    public func fetchSubscription(server: EmbyServerConfig) async throws -> ServerDeliveryCapabilities {
+        let info = try await fetchSubscriptionDetail(server: server)
+        return ServerDeliveryCapabilities(
+            allowDownload: info.allowDownload,
+            activeVideoDeliveryLimit: max(1, info.activeVideoDeliveryLimit),
+            planName: info.plan?.name,
+            displayUnlimitedTraffic: info.displayUnlimitedTraffic,
+            trafficLimitBytes: info.trafficLimitBytes
         )
     }
 
@@ -773,12 +1329,22 @@ public final class UHDStreamClient: Sendable {
         )
         let dto = try await performRequest(UHDTrafficDTO.self, request: req, priority: .normal)
         return UHDTrafficSummary(
+            userId: dto.userId,
             displayUnlimitedTraffic: dto.displayUnlimitedTraffic,
             usedBytes: dto.usedBytes,
             limitBytes: dto.limitBytes,
             updatedAt: dto.updatedAt
         )
     }
+
+    public func fetchAccountSnapshot(server: EmbyServerConfig) async -> UHDAccountSnapshot {
+        async let subTask = try? fetchSubscriptionDetail(server: server)
+        async let trafficTask = try? fetchTraffic(server: server)
+        let (sub, traffic) = await (subTask, trafficTask)
+        return UHDAccountSnapshot(subscription: sub, traffic: traffic, fetchedAt: Date())
+    }
+
+    // MARK: - Playback Domains & Speed Test (Official Spec Compliant)
 
     public func fetchPlaybackDomains(server: EmbyServerConfig) async throws -> [ServerLineInfo] {
         let req = try makeRequest(
@@ -788,36 +1354,35 @@ public final class UHDStreamClient: Sendable {
         )
         let domains = try await performRequest([UHDPlaybackDomainDTO].self, request: req, priority: .normal)
         let sorted = domains.sorted { $0.sortOrder < $1.sortOrder }
-        var resolvedMap: [String: String] = [:]
-        await withTaskGroup(of: (String, String).self) { group in
-            for dom in sorted {
-                let existingURL = server.backupLines.first(where: { $0.domainId == dom.id })?.url
-                if let existingURL, existingURL.hasPrefix("http") {
-                    resolvedMap[dom.id] = existingURL
-                } else {
-                    group.addTask {
-                        if let url = try? await self.resolvePlaybackDomain(server: server, domainId: dom.id) {
-                            return (dom.id, url.absoluteString)
-                        }
-                        return (dom.id, server.mainLineURL)
-                    }
-                }
-            }
-            for await (domId, resolvedURL) in group {
-                resolvedMap[domId] = resolvedURL
-            }
-        }
+        let existingByDomainId = Dictionary(
+            server.backupLines.compactMap { line -> (String, ServerLineInfo)? in
+                guard let did = line.domainId, !did.isEmpty else { return nil }
+                return (did, line)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+
         return sorted.map { dom in
-            ServerLineInfo(
-                name: dom.description?.isEmpty == false ? "\(dom.name) · \(dom.description!)" : dom.name,
-                url: resolvedMap[dom.id] ?? server.mainLineURL,
+            let prev = existingByDomainId[dom.id]
+            let displayName = (dom.description?.isEmpty == false) ? "\(dom.name) · \(dom.description!)" : dom.name
+            let baseURL = (dom.domain?.isEmpty == false) ? dom.domain! : (prev?.url ?? server.mainLineURL)
+            return ServerLineInfo(
+                id: prev?.id ?? UUID(),
+                name: displayName,
+                url: baseURL,
                 domainId: dom.id,
-                isAutoSynced: true
+                isAutoSynced: true,
+                latencyMs: prev?.latencyMs,
+                lastCheckedAt: prev?.lastCheckedAt,
+                lastSpeedMbps: prev?.lastSpeedMbps,
+                lastPeakMbps: prev?.lastPeakMbps,
+                lastExitLocation: prev?.lastExitLocation,
+                lastExitISP: prev?.lastExitISP
             )
         }
     }
 
-    public func resolvePlaybackDomain(server: EmbyServerConfig, domainId: String) async throws -> URL {
+    public func resolvePlaybackDomain(server: EmbyServerConfig, domainId: String, cacheTTL: TimeInterval = 300) async throws -> URL {
         let req = try makeRequest(
             baseURL: server.mainLineURL,
             path: "/api/v1/stream/playback/domains/\(domainId)/resolve",
@@ -829,17 +1394,13 @@ public final class UHDStreamClient: Sendable {
         guard let url = URL(string: clean) else {
             throw EmbyClientError.invalidServerURL(dto.domain)
         }
-        await UHDResolvedDomainCache.shared.set(url, serverId: server.id, domainId: domainId)
+        if cacheTTL > 0 {
+            await UHDResolvedDomainCache.shared.set(url, serverId: server.id, domainId: domainId, ttlSeconds: cacheTTL)
+        }
         return url
     }
 
-    public func invalidateResolvedDomainCache(serverId: UUID) async {
-        await UHDResolvedDomainCache.shared.invalidate(serverId: serverId)
-        await UHDAssetResponseCache.shared.invalidate(serverId: serverId)
-    }
-
-    public func prewarmPlaybackDomain(server: EmbyServerConfig) async {
-        guard server.type == .uhdNative, !server.mainLineURL.isEmpty, !server.accessToken.isEmpty else { return }
+    public func resolveActivePlaybackOrigin(server: EmbyServerConfig, forceFresh: Bool = false) async throws -> URL {
         let domainId: String? = {
             if let selectedId = server.selectedLineId,
                let line = server.backupLines.first(where: { $0.id == selectedId }),
@@ -849,19 +1410,36 @@ public final class UHDStreamClient: Sendable {
             return server.backupLines.first(where: { $0.domainId?.isEmpty == false })?.domainId
         }()
         if let domainId {
-            let resolvedURL: URL?
-            if let cached = await UHDResolvedDomainCache.shared.get(serverId: server.id, domainId: domainId) {
-                resolvedURL = cached
-            } else {
-                resolvedURL = try? await resolvePlaybackDomain(server: server, domainId: domainId)
+            if !forceFresh, let cached = await UHDResolvedDomainCache.shared.get(serverId: server.id, domainId: domainId) {
+                return cached
             }
-            if let resolvedURL, let host = resolvedURL.host, await UHDHostWarmCache.shared.shouldWarm(hostKey: host) {
-                var headReq = URLRequest(url: resolvedURL, timeoutInterval: 3.0)
-                headReq.httpMethod = "HEAD"
-                headReq.cachePolicy = .reloadIgnoringLocalCacheData
-                headReq.setValue("Donby/\(appVersion) (macOS; UHDNow Client)", forHTTPHeaderField: "User-Agent")
-                _ = try? await apiSession.data(for: headReq)
+            return try await resolvePlaybackDomain(server: server, domainId: domainId)
+        }
+        let fetched = try await fetchPlaybackDomains(server: server)
+        guard let firstId = fetched.first?.domainId, !firstId.isEmpty else {
+            guard let fallback = URL(string: server.mainLineURL) else {
+                throw EmbyClientError.invalidServerURL(server.mainLineURL)
             }
+            return fallback
+        }
+        return try await resolvePlaybackDomain(server: server, domainId: firstId)
+    }
+
+    public func invalidateResolvedDomainCache(serverId: UUID) async {
+        await UHDResolvedDomainCache.shared.invalidate(serverId: serverId)
+        await UHDAssetResponseCache.shared.invalidate(serverId: serverId)
+    }
+
+    public func prewarmPlaybackDomain(server: EmbyServerConfig) async {
+        guard server.type == .uhdNative, !server.mainLineURL.isEmpty, !server.accessToken.isEmpty else { return }
+        if let resolvedURL = try? await resolveActivePlaybackOrigin(server: server, forceFresh: false),
+           let host = resolvedURL.host,
+           await UHDHostWarmCache.shared.shouldWarm(hostKey: host) {
+            var headReq = URLRequest(url: resolvedURL, timeoutInterval: 3.0)
+            headReq.httpMethod = "HEAD"
+            headReq.cachePolicy = .reloadIgnoringLocalCacheData
+            headReq.setValue("Donby/\(appVersion) (macOS; UHDNow Client)", forHTTPHeaderField: "User-Agent")
+            _ = try? await apiSession.data(for: headReq)
         }
     }
 
@@ -870,9 +1448,19 @@ public final class UHDStreamClient: Sendable {
         let start = CFAbsoluteTimeGetCurrent()
         do {
             if let domainId, !domainId.isEmpty {
-                _ = try await resolvePlaybackDomain(server: server, domainId: domainId)
-                let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
-                return max(1, ms)
+                let resolved = try await resolvePlaybackDomain(server: server, domainId: domainId)
+                let probeStart = CFAbsoluteTimeGetCurrent()
+                let netReq = try makeRequest(
+                    baseURL: resolved.absoluteString,
+                    path: "/api/v1/stream/speed-test/network-info",
+                    token: server.accessToken,
+                    timeout: 6
+                )
+                let (_, resp) = try await apiSession.data(for: netReq)
+                if let http = resp as? HTTPURLResponse, (200...499).contains(http.statusCode) {
+                    return max(1, Int((CFAbsoluteTimeGetCurrent() - probeStart) * 1000))
+                }
+                return max(1, Int((CFAbsoluteTimeGetCurrent() - start) * 1000))
             } else {
                 let req = try makeRequest(
                     baseURL: server.mainLineURL,
@@ -881,101 +1469,165 @@ public final class UHDStreamClient: Sendable {
                     timeout: 6
                 )
                 _ = try await apiSession.data(for: req)
-                let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
-                return max(1, ms)
+                return max(1, Int((CFAbsoluteTimeGetCurrent() - start) * 1000))
             }
         } catch {
             return nil
         }
     }
 
+    /// Resolves a fresh `TEST_BASE` for `domainId` and probes `TEST_BASE/api/v1/stream/speed-test/network-info`
+    /// without consuming download traffic quota. Useful for verifying DIRECT vs PROXY exit routing.
+    public func probeLineExitNetworkInfo(
+        server: EmbyServerConfig,
+        domainId: String
+    ) async throws -> (resolvedBase: URL, networkInfo: UHDSpeedTestNetworkInfo, latencyMs: Int) {
+        let resolvedBase = try await resolvePlaybackDomain(server: server, domainId: domainId, cacheTTL: 0)
+        let probeStart = CFAbsoluteTimeGetCurrent()
+        let netReq = try makeRequest(
+            baseURL: resolvedBase.absoluteString,
+            path: "/api/v1/stream/speed-test/network-info",
+            token: server.accessToken,
+            timeout: 10
+        )
+        let dto = try await performRequest(UHDSpeedTestNetworkInfoDTO.self, request: netReq, priority: .normal)
+        let ms = max(1, Int((CFAbsoluteTimeGetCurrent() - probeStart) * 1000))
+        let info = UHDSpeedTestNetworkInfo(
+            ip: dto.ip ?? "",
+            country: dto.country ?? "",
+            countryName: dto.countryName ?? "",
+            region: dto.region ?? "",
+            regionName: dto.regionName ?? "",
+            province: dto.province ?? "",
+            provinceName: dto.provinceName ?? "",
+            isp: dto.isp ?? "",
+            displayLocation: dto.displayLocation ?? "未知"
+        )
+        return (resolvedBase, info, ms)
+    }
+
+    /// Spec-compliant UHD Speed Test:
+    /// 1. Resolve fresh `TEST_BASE` via `API_BASE/api/v1/stream/playback/domains/{domain_id}/resolve`.
+    /// 2. `GET TEST_BASE/api/v1/stream/speed-test/network-info`
+    /// 3. `POST TEST_BASE/api/v1/stream/speed-test/session`
+    /// 4. `GET TEST_BASE/api/v1/stream/speed-test/download?session_id=...&size_mb=...` (chunk-level delegate stream, warmup exclusion, 300ms rolling peak)
+    /// 5. `POST API_BASE/api/v1/stream/speed-test/report` (submitted ONCE only on clean completion, never retried, never sent on cancel/error).
     public func runSpeedTest(
         server: EmbyServerConfig,
         domainId: String,
         sizeMiB: Int = 32,
-        onProgress: @escaping @Sendable (Double, Double) -> Void
+        onNetworkInfo: (@Sendable (URL, UHDSpeedTestNetworkInfo) -> Void)? = nil,
+        onProgress: @escaping @Sendable (UHDSpeedTestProgress) -> Void
     ) async throws -> UHDSpeedTestResult {
         let clampedMiB = [32, 64, 100].contains(sizeMiB) ? sizeMiB : 32
         let apiBase = server.mainLineURL
-        let netInfoReq = try makeRequest(baseURL: apiBase, path: "/api/v1/stream/speed-test/network-info", token: server.accessToken)
-        let netInfo = try await performRequest(UHDSpeedTestNetworkInfoDTO.self, request: netInfoReq, priority: .normal)
 
+        // Step 1: Freshly resolve TEST_BASE for this round
+        let testBaseURL = try await resolvePlaybackDomain(server: server, domainId: domainId, cacheTTL: 0)
+        let testBase = testBaseURL.absoluteString
+        try Task.checkCancellation()
+
+        // Step 2: Query exit network info on TEST_BASE
+        let netInfoReq = try makeRequest(
+            baseURL: testBase,
+            path: "/api/v1/stream/speed-test/network-info",
+            token: server.accessToken,
+            timeout: 12
+        )
+        let netInfoDTO = try await performRequest(UHDSpeedTestNetworkInfoDTO.self, request: netInfoReq, priority: .normal)
+        let netInfo = UHDSpeedTestNetworkInfo(
+            ip: netInfoDTO.ip ?? "",
+            country: netInfoDTO.country ?? "",
+            countryName: netInfoDTO.countryName ?? "",
+            region: netInfoDTO.region ?? "",
+            regionName: netInfoDTO.regionName ?? "",
+            province: netInfoDTO.province ?? "",
+            provinceName: netInfoDTO.provinceName ?? "",
+            isp: netInfoDTO.isp ?? "",
+            displayLocation: netInfoDTO.displayLocation ?? "未知"
+        )
+        onNetworkInfo?(testBaseURL, netInfo)
+        try Task.checkCancellation()
+
+        // Step 3: Create speed-test session on TEST_BASE
         let sessionBody = try JSONSerialization.data(withJSONObject: [
             "parent_domain_id": domainId,
             "size_mib": clampedMiB
         ])
-        let sessionReq = try makeRequest(baseURL: apiBase, path: "/api/v1/stream/speed-test/session", method: "POST", token: server.accessToken, bodyData: sessionBody)
+        let sessionReq = try makeRequest(
+            baseURL: testBase,
+            path: "/api/v1/stream/speed-test/session",
+            method: "POST",
+            token: server.accessToken,
+            bodyData: sessionBody,
+            timeout: 15
+        )
         let session = try await performRequest(UHDSpeedTestSessionDTO.self, request: sessionReq, priority: .normal)
+        try Task.checkCancellation()
 
-        let dlReq = try makeRequest(
-            baseURL: apiBase,
+        // Step 4: Stream binary payload from TEST_BASE with chunk-level delegate (no compression, no cache)
+        var dlReq = try makeRequest(
+            baseURL: testBase,
             path: "/api/v1/stream/speed-test/download",
             queryItems: [
                 URLQueryItem(name: "session_id", value: session.sessionId),
                 URLQueryItem(name: "size_mb", value: "\(clampedMiB)")
             ],
             token: server.accessToken,
-            timeout: 120
+            timeout: 180,
+            extraHeaders: [
+                "Accept": "application/octet-stream",
+                "Accept-Encoding": "identity",
+                "Cache-Control": "no-cache"
+            ]
         )
+        dlReq.cachePolicy = .reloadIgnoringLocalCacheData
 
-        let expectedTotal = Double(clampedMiB) * 1_048_576.0
-        let (byteStream, response) = try await apiSession.bytes(for: dlReq)
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw EmbyClientError.httpStatus(http.statusCode, "测速下载被拒绝")
-        }
+        let expectedBytes = Int64(clampedMiB) * 1_048_576
+        let runner = UHDSpeedTestStreamRunner(expectedBytes: expectedBytes, onProgress: onProgress)
+        let snapshot = try await runner.run(request: dlReq)
 
-        let readStart = CFAbsoluteTimeGetCurrent()
-        var lastSampleTime = readStart
-        var lastSampleBytes: Int64 = 0
-        var totalRead: Int64 = 0
-        var samplesMbps: [Double] = []
-        var peakMbps = 0.0
-
-        for try await _ in byteStream {
-            totalRead += 1
-            if totalRead & 0xFFFF == 0 {
-                let now = CFAbsoluteTimeGetCurrent()
-                let dt = now - lastSampleTime
-                if dt >= 0.1 {
-                    let deltaBytes = totalRead - lastSampleBytes
-                    let mbps = (Double(deltaBytes) * 8.0) / (dt * 1_000_000.0)
-                    samplesMbps.append(mbps)
-                    peakMbps = max(peakMbps, mbps)
-                    lastSampleTime = now
-                    lastSampleBytes = totalRead
-                    onProgress(min(1.0, Double(totalRead) / expectedTotal), mbps)
-                }
-            }
-        }
-
-        let totalElapsedSec = max(0.05, CFAbsoluteTimeGetCurrent() - readStart)
-        let avgMbps = (Double(totalRead) * 8.0) / (totalElapsedSec * 1_000_000.0)
-        peakMbps = max(peakMbps, avgMbps)
-        let elapsedMs = Int64(totalElapsedSec * 1000.0)
-
+        // Step 5: Submit single report to API_BASE (never retry; keep local metrics if report fails)
+        var reportSubmitted = false
         let reportPayload: [String: Any] = [
             "session_id": session.sessionId,
             "report_token": session.reportToken,
-            "average_mbps": avgMbps,
-            "peak_mbps": peakMbps,
-            "elapsed_ms": elapsedMs,
-            "sample_count": samplesMbps.count,
-            "server_downloaded_bytes": totalRead
+            "average_mbps": snapshot.averageMbps,
+            "peak_mbps": snapshot.peakMbps,
+            "elapsed_ms": snapshot.elapsedMs,
+            "sample_count": snapshot.sampleCount,
+            "server_downloaded_bytes": snapshot.totalBytes
         ]
         if let reportData = try? JSONSerialization.data(withJSONObject: reportPayload),
-           let reportReq = try? makeRequest(baseURL: apiBase, path: "/api/v1/stream/speed-test/report", method: "POST", token: server.accessToken, bodyData: reportData) {
-            // OpenAPI explicitly specifies: never retry speed-test report
-            try? await performAction(request: reportReq, priority: .normal)
+           let reportReq = try? makeRequest(
+                baseURL: apiBase,
+                path: "/api/v1/stream/speed-test/report",
+                method: "POST",
+                token: server.accessToken,
+                bodyData: reportData,
+                timeout: 12
+           ) {
+            do {
+                try await performAction(request: reportReq, priority: .normal)
+                reportSubmitted = true
+            } catch {
+                reportSubmitted = false
+            }
         }
 
         return UHDSpeedTestResult(
             domainId: domainId,
-            location: netInfo.displayLocation,
-            isp: netInfo.isp,
-            averageMbps: avgMbps,
-            peakMbps: peakMbps,
-            elapsedMs: elapsedMs,
-            downloadedBytes: totalRead
+            resolvedHost: testBaseURL.host ?? testBase,
+            networkInfo: netInfo,
+            averageMbps: snapshot.averageMbps,
+            peakMbps: snapshot.peakMbps,
+            elapsedMs: snapshot.elapsedMs,
+            sampleCount: snapshot.sampleCount,
+            downloadedBytes: snapshot.totalBytes,
+            sizeMiB: clampedMiB,
+            samplesMbps: snapshot.samplesMbps,
+            reportSubmitted: reportSubmitted,
+            testedAt: Date()
         )
     }
 
@@ -1040,36 +1692,162 @@ public final class UHDStreamClient: Sendable {
         return (items, data.nextCursor)
     }
 
-    public func fetchHot(server: EmbyServerConfig, limit: Int = 24) async throws -> [EmbyItem] {
+    public func fetchHot(server: EmbyServerConfig, mediaType: String? = nil, limit: Int = 24) async throws -> [EmbyItem] {
+        var query = [URLQueryItem(name: "limit", value: "\(max(1, min(100, limit)))")]
+        if let mediaType, !mediaType.isEmpty {
+            query.append(URLQueryItem(name: "type", value: mediaType))
+        }
         let req = try makeRequest(
             baseURL: server.mainLineURL,
             path: "/api/v1/stream/library/hot",
-            queryItems: [URLQueryItem(name: "limit", value: "\(max(1, min(50, limit)))")],
+            queryItems: query,
             token: server.accessToken
         )
         let data = try await performRequest(UHDItemsOnlyDTO<UHDMediaSummaryDTO>.self, request: req, priority: .normal)
         return data.items.map { mapSummary($0, server: server) }
     }
 
-    public func search(server: EmbyServerConfig, query: String, limit: Int = 30) async throws -> [EmbyItem] {
+    public func fetchAnimeHot(server: EmbyServerConfig, mediaType: String? = nil, limit: Int = 24) async throws -> [EmbyItem] {
+        var query = [URLQueryItem(name: "limit", value: "\(max(1, min(100, limit)))")]
+        if let mediaType, !mediaType.isEmpty {
+            query.append(URLQueryItem(name: "type", value: mediaType))
+        }
+        let req = try makeRequest(
+            baseURL: server.mainLineURL,
+            path: "/api/v1/stream/library/anime/hot",
+            queryItems: query,
+            token: server.accessToken
+        )
+        let data = try await performRequest(UHDItemsOnlyDTO<UHDMediaSummaryDTO>.self, request: req, priority: .normal)
+        return data.items.map { mapSummary($0, server: server) }
+    }
+
+    public func fetchAnimeCalendarDays(server: EmbyServerConfig) async throws -> [UHDAnimeCalendarDay] {
+        let req = try makeRequest(
+            baseURL: server.mainLineURL,
+            path: "/api/v1/stream/library/anime/calendar/days",
+            token: server.accessToken
+        )
+        let data = try await performRequest([UHDAnimeCalendarDayDTO].self, request: req, priority: .normal)
+        return data.sorted { $0.weekday < $1.weekday }.map { UHDAnimeCalendarDay(weekday: $0.weekday, total: $0.total) }
+    }
+
+    public func fetchAnimeCalendarItems(server: EmbyServerConfig, weekday: Int) async throws -> [UHDAnimeCalendarEntry] {
+        let clampedDay = max(1, min(7, weekday))
+        let req = try makeRequest(
+            baseURL: server.mainLineURL,
+            path: "/api/v1/stream/library/anime/calendar/items",
+            queryItems: [URLQueryItem(name: "weekday", value: "\(clampedDay)")],
+            token: server.accessToken
+        )
+        let data = try await performRequest(UHDItemsOnlyDTO<UHDAnimeCalendarItemDTO>.self, request: req, priority: .normal)
+        return data.items.map { entry in
+            UHDAnimeCalendarEntry(
+                item: mapSummary(entry.summary, server: server),
+                schedule: UHDAnimeCalendarSchedule(airDate: entry.schedule.airDate, estimated: entry.schedule.estimated)
+            )
+        }
+    }
+
+    public func fetchGenres(server: EmbyServerConfig) async throws -> [UHDGenreInfo] {
+        let req = try makeRequest(
+            baseURL: server.mainLineURL,
+            path: "/api/v1/stream/library/genres",
+            token: server.accessToken
+        )
+        let data = try await performRequest([UHDGenreDTO].self, request: req, priority: .normal)
+        return data.map { UHDGenreInfo(id: $0.id, name: $0.name, slug: $0.slug ?? "") }
+    }
+
+    public func fetchPersonDetail(server: EmbyServerConfig, personId: String) async throws -> UHDPersonDetail {
+        let req = try makeRequest(
+            baseURL: server.mainLineURL,
+            path: "/api/v1/stream/library/persons/\(personId)",
+            token: server.accessToken
+        )
+        let dto = try await performRequest(UHDPersonCardDTO.self, request: req, priority: .normal)
+        return UHDPersonDetail(
+            id: dto.id,
+            name: dto.name,
+            tmdbId: dto.tmdbId,
+            imdbId: dto.imdbId,
+            imageURL: resolveAbsoluteImageURL(apiBase: server.mainLineURL, relativeOrAbsolute: dto.imageURL),
+            favorite: dto.favorite ?? false
+        )
+    }
+
+    public func fetchPersonWorks(
+        server: EmbyServerConfig,
+        personId: String,
+        mediaType: String? = nil,
+        sortBy: String = "release_date",
+        sortOrder: String = "desc",
+        limit: Int = 30,
+        cursor: String? = nil
+    ) async throws -> (items: [EmbyItem], nextCursor: String?) {
+        var query: [URLQueryItem] = [
+            URLQueryItem(name: "limit", value: "\(max(1, min(100, limit)))"),
+            URLQueryItem(name: "sort_by", value: sortBy),
+            URLQueryItem(name: "sort_order", value: sortOrder)
+        ]
+        if let mediaType, !mediaType.isEmpty {
+            query.append(URLQueryItem(name: "type", value: mediaType))
+        }
+        if let cursor, !cursor.isEmpty {
+            query.append(URLQueryItem(name: "cursor", value: cursor))
+        }
+        let req = try makeRequest(
+            baseURL: server.mainLineURL,
+            path: "/api/v1/stream/library/persons/\(personId)/works",
+            queryItems: query,
+            token: server.accessToken
+        )
+        let data = try await performRequest(UHDMediaCursorDTO.self, request: req, priority: .normal)
+        return (data.items.map { mapSummary($0, server: server) }, data.nextCursor)
+    }
+
+    public func searchWithMeta(
+        server: EmbyServerConfig,
+        query: String,
+        tmdbId: Int? = nil,
+        mediaType: String? = nil,
+        limit: Int = 60
+    ) async throws -> (items: [EmbyItem], truncated: Bool) {
+        var qItems: [URLQueryItem] = []
+        let parsedTmdb = tmdbId.map { ($0, mediaType) } ?? UHDTmdbSearchQueryParser.parse(query)
+        if let parsedTmdb {
+            qItems.append(URLQueryItem(name: "tmdb_id", value: "\(parsedTmdb.0)"))
+            if let t = parsedTmdb.1 ?? mediaType, !t.isEmpty {
+                qItems.append(URLQueryItem(name: "type", value: t))
+            }
+        } else {
+            let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return ([], false) }
+            qItems.append(URLQueryItem(name: "q", value: trimmed))
+            qItems.append(URLQueryItem(name: "limit", value: "\(max(1, min(100, limit)))"))
+            if let mediaType, !mediaType.isEmpty {
+                qItems.append(URLQueryItem(name: "type", value: mediaType))
+            }
+        }
         let req = try makeRequest(
             baseURL: server.mainLineURL,
             path: "/api/v1/stream/library/search",
-            queryItems: [
-                URLQueryItem(name: "q", value: query),
-                URLQueryItem(name: "limit", value: "\(max(1, min(50, limit)))")
-            ],
+            queryItems: qItems,
             token: server.accessToken
         )
         let data = try await performRequest(UHDSearchDataDTO.self, request: req, priority: .normal)
-        return data.items.map { mapSummary($0, server: server) }
+        return (data.items.map { mapSummary($0, server: server) }, data.truncated ?? false)
+    }
+
+    public func search(server: EmbyServerConfig, query: String, limit: Int = 50) async throws -> [EmbyItem] {
+        try await searchWithMeta(server: server, query: query, limit: limit).items
     }
 
     public func fetchPlaybackStates(server: EmbyServerConfig, limit: Int = 20) async throws -> (resume: [EmbyItem], nextUp: [EmbyItem]) {
         let req = try makeRequest(
             baseURL: server.mainLineURL,
             path: "/api/v1/stream/me/playback-states",
-            queryItems: [URLQueryItem(name: "limit", value: "\(max(1, min(50, limit)))")],
+            queryItems: [URLQueryItem(name: "limit", value: "\(max(1, min(100, limit)))")],
             token: server.accessToken
         )
         let data = try await performRequest(UHDPlaybackStatesDTO.self, request: req, priority: .normal)
@@ -1078,14 +1856,76 @@ public final class UHDStreamClient: Sendable {
         return (resumeItems, nextUpItems)
     }
 
+    public func fetchTVPlaybackState(server: EmbyServerConfig, tvId: String) async throws -> UHDTVPlaybackState {
+        let req = try makeRequest(
+            baseURL: server.mainLineURL,
+            path: "/api/v1/stream/tv/\(tvId)/playback-state",
+            token: server.accessToken
+        )
+        let dto = try await performRequest(UHDTVPlaybackStateDTO.self, request: req, priority: .normal)
+        let apiBase = server.mainLineURL
+        func mapEp(_ ep: UHDTVPlaybackEpisodeDTO?) -> UHDTVPlaybackEpisode? {
+            guard let ep else { return nil }
+            return UHDTVPlaybackEpisode(
+                episodeId: ep.episodeId,
+                mediaId: ep.mediaId,
+                seasonId: ep.seasonId,
+                seasonNumber: ep.seasonNumber,
+                episodeNumber: ep.episodeNumber,
+                title: ep.title,
+                thumbURL: resolveAbsoluteImageURL(apiBase: apiBase, relativeOrAbsolute: ep.thumbURL),
+                durationSeconds: ep.duration,
+                positionMs: ep.positionMs,
+                progressPct: ep.progressPct,
+                lastPlayedAt: ep.lastPlayedAt
+            )
+        }
+        return UHDTVPlaybackState(resume: mapEp(dto.resume), nextUp: mapEp(dto.nextUp))
+    }
+
+    /// Spec requires `type` in `movie | tv`. When `type == nil`, fetches both `movie` and `tv` concurrently.
     public func fetchFavorites(
         server: EmbyServerConfig,
         type: String? = nil,
         limit: Int = 30,
         cursor: String? = nil
     ) async throws -> (items: [EmbyItem], total: Int, nextCursor: String?) {
-        var query = [URLQueryItem(name: "limit", value: "\(max(1, min(100, limit)))")]
-        if let type, !type.isEmpty { query.append(URLQueryItem(name: "type", value: type)) }
+        if let explicitType = type, explicitType == "movie" || explicitType == "tv" {
+            var query = [
+                URLQueryItem(name: "type", value: explicitType),
+                URLQueryItem(name: "limit", value: "\(max(1, min(100, limit)))")
+            ]
+            if let cursor, !cursor.isEmpty { query.append(URLQueryItem(name: "cursor", value: cursor)) }
+            let req = try makeRequest(
+                baseURL: server.mainLineURL,
+                path: "/api/v1/stream/me/favorites",
+                queryItems: query,
+                token: server.accessToken
+            )
+            let data = try await performRequest(UHDFavoritesCursorDTO<UHDMediaSummaryDTO>.self, request: req, priority: .normal)
+            let items = data.items.map { mapSummary($0, server: server) }
+            return (items, data.total ?? items.count, data.nextCursor)
+        }
+
+        // Combined movie + tv favorites when caller did not specify a single category
+        let halfLimit = max(1, min(100, limit))
+        async let moviesTask = try? fetchFavorites(server: server, type: "movie", limit: halfLimit)
+        async let tvTask = try? fetchFavorites(server: server, type: "tv", limit: halfLimit)
+        let (moviesRes, tvRes) = await (moviesTask, tvTask)
+        let combined = (moviesRes?.items ?? []) + (tvRes?.items ?? [])
+        let total = (moviesRes?.total ?? 0) + (tvRes?.total ?? 0)
+        return (combined, total, nil)
+    }
+
+    public func fetchFavoritePersons(
+        server: EmbyServerConfig,
+        limit: Int = 40,
+        cursor: String? = nil
+    ) async throws -> (items: [UHDPersonDetail], total: Int, nextCursor: String?) {
+        var query = [
+            URLQueryItem(name: "type", value: "person"),
+            URLQueryItem(name: "limit", value: "\(max(1, min(100, limit)))")
+        ]
         if let cursor, !cursor.isEmpty { query.append(URLQueryItem(name: "cursor", value: cursor)) }
         let req = try makeRequest(
             baseURL: server.mainLineURL,
@@ -1093,9 +1933,19 @@ public final class UHDStreamClient: Sendable {
             queryItems: query,
             token: server.accessToken
         )
-        let data = try await performRequest(UHDFavoritesCursorDTO.self, request: req, priority: .normal)
-        let items = data.items.map { mapSummary($0, server: server) }
-        return (items, data.total ?? items.count, data.nextCursor)
+        let data = try await performRequest(UHDFavoritesCursorDTO<UHDPersonCardDTO>.self, request: req, priority: .normal)
+        let apiBase = server.mainLineURL
+        let people = data.items.map { p in
+            UHDPersonDetail(
+                id: p.id,
+                name: p.name,
+                tmdbId: p.tmdbId,
+                imdbId: p.imdbId,
+                imageURL: resolveAbsoluteImageURL(apiBase: apiBase, relativeOrAbsolute: p.imageURL),
+                favorite: p.favorite ?? true
+            )
+        }
+        return (people, data.total ?? people.count, data.nextCursor)
     }
 
     // MARK: - Item Details, Seasons, Episodes & Credits
@@ -1264,7 +2114,6 @@ public final class UHDStreamClient: Sendable {
             timeout: 15
         )
 
-        // Resolve parent domainId locally if already known so /assets and /resolve run concurrently.
         let knownDomainId: String? = {
             if let selectedId = server.selectedLineId,
                let line = server.backupLines.first(where: { $0.id == selectedId }),
@@ -1311,7 +2160,16 @@ public final class UHDStreamClient: Sendable {
                 }
                 domainId = first
             }
-            resolvedBase = try await resolvePlaybackDomain(server: server, domainId: domainId).absoluteString
+            do {
+                resolvedBase = try await resolvePlaybackDomain(server: server, domainId: domainId).absoluteString
+            } catch {
+                // Spec: 404 on domain resolve -> refresh domain list and retry with first available line
+                let refreshed = try await fetchPlaybackDomains(server: server)
+                guard let fallbackId = refreshed.first?.domainId, !fallbackId.isEmpty else {
+                    throw error
+                }
+                resolvedBase = try await resolvePlaybackDomain(server: server, domainId: fallbackId).absoluteString
+            }
         }
 
         let mediaSources = assets.videos.map { mapVideoAsset($0, resolvedBase: resolvedBase) }
@@ -1397,11 +2255,12 @@ public final class UHDStreamClient: Sendable {
     ) async {
         guard !assetId.isEmpty else { return }
         let itemType = resolveItemType(item) == "episode" ? "episode" : "movie"
+        let clampedMs = max(0, min(604_800_000, Int64(positionSeconds * 1000.0)))
         let payload: [String: Any] = [
             "item_type": itemType,
             "item_id": item.id,
             "asset_id": assetId,
-            "position_ms": max(0, Int64(positionSeconds * 1000.0))
+            "position_ms": clampedMs
         ]
         guard let body = try? JSONSerialization.data(withJSONObject: payload),
               let req = try? makeRequest(
@@ -1417,12 +2276,20 @@ public final class UHDStreamClient: Sendable {
 
     public func setFavorite(server: EmbyServerConfig, item: EmbyItem, isFavorite: Bool) async throws {
         let uhdType = resolveStateType(item, allowed: ["movie", "tv", "person"]) ?? "movie"
+        try await setFavoriteRaw(server: server, itemType: uhdType, itemId: item.id, isFavorite: isFavorite)
+    }
+
+    public func setPersonFavorite(server: EmbyServerConfig, personId: String, isFavorite: Bool) async throws {
+        try await setFavoriteRaw(server: server, itemType: "person", itemId: personId, isFavorite: isFavorite)
+    }
+
+    private func setFavoriteRaw(server: EmbyServerConfig, itemType: String, itemId: String, isFavorite: Bool) async throws {
         if isFavorite {
-            let body = try JSONSerialization.data(withJSONObject: ["item_type": uhdType, "item_id": item.id])
+            let body = try JSONSerialization.data(withJSONObject: ["item_type": itemType, "item_id": itemId])
             let req = try makeRequest(baseURL: server.mainLineURL, path: "/api/v1/stream/me/favorites", method: "POST", token: server.accessToken, bodyData: body)
             try await performAction(request: req, priority: .normal)
         } else {
-            let req = try makeRequest(baseURL: server.mainLineURL, path: "/api/v1/stream/me/favorites/\(uhdType)/\(item.id)", method: "DELETE", token: server.accessToken)
+            let req = try makeRequest(baseURL: server.mainLineURL, path: "/api/v1/stream/me/favorites/\(itemType)/\(itemId)", method: "DELETE", token: server.accessToken)
             try await performAction(request: req, priority: .normal)
         }
     }
@@ -1437,6 +2304,101 @@ public final class UHDStreamClient: Sendable {
             let req = try makeRequest(baseURL: server.mainLineURL, path: "/api/v1/stream/me/played/\(uhdType)/\(item.id)", method: "DELETE", token: server.accessToken)
             try await performAction(request: req, priority: .normal)
         }
+    }
+
+    // MARK: - Team Management API v2 (Platform API Key / Owner Only)
+
+    public func fetchTeamOverview(server: EmbyServerConfig) async throws -> UHDTeamOverview {
+        let req = try makeRequest(
+            baseURL: server.mainLineURL,
+            path: "/api/v2/team",
+            token: server.accessToken,
+            timeout: 10
+        )
+        let dto = try await performRequest(UHDTeamOverviewDTO.self, request: req, priority: .normal)
+        return UHDTeamOverview(
+            expiresAt: dto.expiresAt,
+            memberCount: dto.memberCount,
+            memberLimit: dto.memberLimit,
+            trafficLimitBytes: dto.trafficLimitBytes,
+            trafficUsedBytes: dto.trafficUsedBytes,
+            renewDay: dto.renewDay,
+            settings: UHDTeamSettings(
+                activeVideoDeliveryLimit: dto.settings.activeVideoDeliveryLimit,
+                allowDownload: dto.settings.allowDownload
+            )
+        )
+    }
+
+    public func fetchTeamMembers(
+        server: EmbyServerConfig,
+        query: String? = nil,
+        limit: Int = 50,
+        cursor: String? = nil
+    ) async throws -> (items: [UHDTeamMember], nextCursor: String?) {
+        var qItems = [URLQueryItem(name: "limit", value: "\(max(1, min(100, limit)))")]
+        if let query, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            qItems.append(URLQueryItem(name: "q", value: query.trimmingCharacters(in: .whitespacesAndNewlines)))
+        }
+        if let cursor, !cursor.isEmpty {
+            qItems.append(URLQueryItem(name: "cursor", value: cursor))
+        }
+        let req = try makeRequest(
+            baseURL: server.mainLineURL,
+            path: "/api/v2/team/members",
+            queryItems: qItems,
+            token: server.accessToken
+        )
+        let dto = try await performRequest(UHDTeamMemberPageDTO.self, request: req, priority: .normal)
+        let members = dto.items.map { m in
+            UHDTeamMember(
+                id: m.id,
+                username: m.username,
+                expiresAt: m.expiresAt,
+                trafficLimitBytes: m.trafficLimitBytes,
+                trafficUsedBytes: m.trafficUsedBytes,
+                renewDay: m.renewDay,
+                activeVideoDeliveryLimit: m.activeVideoDeliveryLimit,
+                allowDownload: m.allowDownload,
+                sessionCount: m.sessionCount
+            )
+        }
+        return (members, dto.nextCursor)
+    }
+
+    public func updateTeamSettings(
+        server: EmbyServerConfig,
+        activeVideoDeliveryLimit: Int? = nil,
+        allowDownload: Bool? = nil
+    ) async throws -> UHDTeamSettings {
+        var payload: [String: Any] = [:]
+        if let activeVideoDeliveryLimit { payload["active_video_delivery_limit"] = activeVideoDeliveryLimit }
+        if let allowDownload { payload["allow_download"] = allowDownload }
+        let body = try JSONSerialization.data(withJSONObject: payload)
+        let req = try makeRequest(
+            baseURL: server.mainLineURL,
+            path: "/api/v2/team/settings",
+            method: "PATCH",
+            token: server.accessToken,
+            bodyData: body
+        )
+        let dto = try await performRequest(UHDTeamSettingsDTO.self, request: req, priority: .normal)
+        return UHDTeamSettings(
+            activeVideoDeliveryLimit: dto.activeVideoDeliveryLimit,
+            allowDownload: dto.allowDownload
+        )
+    }
+
+    public func setTeamMemberTrafficUsage(server: EmbyServerConfig, memberId: String, usedBytes: Int64) async throws {
+        let body = try JSONSerialization.data(withJSONObject: ["traffic_used_bytes": max(0, usedBytes)])
+        let req = try makeRequest(
+            baseURL: server.mainLineURL,
+            path: "/api/v2/team/members/\(memberId)/traffic-usage",
+            method: "PUT",
+            token: server.accessToken,
+            bodyData: body
+        )
+        try await performAction(request: req, priority: .normal)
     }
 
     // MARK: - DTO Mapping
@@ -1479,7 +2441,7 @@ public final class UHDStreamClient: Sendable {
             serverId: server.serverId,
             type: embyType,
             genres: dto.genres?.map(\.name),
-            communityRating: dto.rating,
+            communityRating: UHDRatingNormalizer.normalize(dto.rating),
             productionYear: dto.releaseYear,
             premiereDate: dto.releaseDate,
             runTimeTicks: runtimeTicks,
@@ -1511,6 +2473,7 @@ public final class UHDStreamClient: Sendable {
         var providers: [String: String] = [:]
         if let tmdb = dto.tmdbId { providers["Tmdb"] = "\(tmdb)" }
         if let imdb = dto.imdbId, !imdb.isEmpty { providers["Imdb"] = imdb }
+        if let douban = dto.doubanId, !douban.isEmpty { providers["Douban"] = douban }
         return EmbyItem(
             id: dto.id,
             name: dto.title,
@@ -1520,7 +2483,7 @@ public final class UHDStreamClient: Sendable {
             overview: dto.description,
             taglines: dto.tagline.map { [$0] },
             genres: dto.genres?.map(\.name),
-            communityRating: dto.rating,
+            communityRating: UHDRatingNormalizer.normalize(dto.rating),
             productionYear: dto.releaseYear,
             premiereDate: dto.releaseDate,
             status: dto.status,

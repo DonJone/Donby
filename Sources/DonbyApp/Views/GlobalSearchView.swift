@@ -286,9 +286,9 @@ public struct GlobalSearchView: View {
             try? await Task.sleep(nanoseconds: 250_000_000)
             guard !Task.isCancelled else { return }
             if server.type == .uhdNative {
-                if let items = try? await UHDStreamClient.shared.search(server: server, query: q, limit: 48),
+                if let res = try? await UHDStreamClient.shared.searchWithMeta(server: server, query: q, limit: 48),
                    !Task.isCancelled {
-                    appState.globalSearchRemoteResults = items
+                    appState.globalSearchRemoteResults = res.items
                     appState.globalSearchLastServerId = server.id
                     appState.globalSearchLastFetchedQuery = q
                 } else if !Task.isCancelled {

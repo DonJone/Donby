@@ -7,6 +7,7 @@ public enum PlayerDrawerTab: String, CaseIterable, Identifiable {
     case playlist = "播放列表"
     case tracks = "音轨与字幕"
     case mediaInfo = "流媒体信息"
+    case watchParty = "同看房间"
     public var id: String { rawValue }
 }
 

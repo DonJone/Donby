@@ -134,9 +134,35 @@ public struct ServerLineInfo: Codable, Identifiable, Hashable, Sendable {
     public var isAutoSynced: Bool
     public var latencyMs: Int?
     public var lastCheckedAt: Date?
+    public var lastSpeedMbps: Double?
+    public var lastPeakMbps: Double?
+    public var lastExitLocation: String?
+    public var lastExitISP: String?
 
-    public init(id: UUID = UUID(), name: String, url: String, domainId: String? = nil, isAutoSynced: Bool = false, latencyMs: Int? = nil, lastCheckedAt: Date? = nil) {
-        self.id = id; self.name = name; self.url = Self.normalizeBaseURL(url); self.domainId = domainId; self.isAutoSynced = isAutoSynced; self.latencyMs = latencyMs; self.lastCheckedAt = lastCheckedAt
+    public init(
+        id: UUID = UUID(),
+        name: String,
+        url: String,
+        domainId: String? = nil,
+        isAutoSynced: Bool = false,
+        latencyMs: Int? = nil,
+        lastCheckedAt: Date? = nil,
+        lastSpeedMbps: Double? = nil,
+        lastPeakMbps: Double? = nil,
+        lastExitLocation: String? = nil,
+        lastExitISP: String? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.url = Self.normalizeBaseURL(url)
+        self.domainId = domainId
+        self.isAutoSynced = isAutoSynced
+        self.latencyMs = latencyMs
+        self.lastCheckedAt = lastCheckedAt
+        self.lastSpeedMbps = lastSpeedMbps
+        self.lastPeakMbps = lastPeakMbps
+        self.lastExitLocation = lastExitLocation
+        self.lastExitISP = lastExitISP
     }
 
     public static func normalizeBaseURL(_ raw: String) -> String {
@@ -177,6 +203,9 @@ public struct EmbyServerConfig: Codable, Identifiable, Hashable, Sendable {
     public var lastExtDomainSyncDate: Date?
     public var lastWatchedDate: Date?
     public var isDemoServer: Bool
+    public var keepSignedIn: Bool
+    public var lastLoginDate: Date?
+    public var tokenExpiresAt: String?
 
     public init(
         id: UUID = UUID(),
@@ -207,9 +236,48 @@ public struct EmbyServerConfig: Codable, Identifiable, Hashable, Sendable {
         backupLines: [ServerLineInfo] = [],
         lastExtDomainSyncDate: Date? = nil,
         lastWatchedDate: Date? = nil,
-        isDemoServer: Bool = false
+        isDemoServer: Bool = false,
+        keepSignedIn: Bool = true,
+        lastLoginDate: Date? = nil,
+        tokenExpiresAt: String? = nil
     ) {
-        self.id = id; self.name = name; self.note = note; self.type = type; self.host = host; self.port = port; self.isHttps = isHttps; self.path = path; self.username = username; self.password = password; self.accessToken = accessToken; self.userId = userId; self.serverId = serverId; self.serverName = serverName; self.serverVersion = serverVersion; self.iconURL = iconURL; self.isDefaultHome = isDefaultHome; self.isEncrypted = isEncrypted; self.enableGlobalSearch = enableGlobalSearch; self.strmUsePath = strmUsePath; self.cache302Request = cache302Request; self.movieCount = movieCount; self.episodeCount = episodeCount; self.selectedLineId = selectedLineId; self.mainLineLatencyMs = mainLineLatencyMs; self.backupLines = backupLines; self.lastExtDomainSyncDate = lastExtDomainSyncDate; self.lastWatchedDate = lastWatchedDate; self.isDemoServer = isDemoServer
+        self.id = id; self.name = name; self.note = note; self.type = type; self.host = host; self.port = port; self.isHttps = isHttps; self.path = path; self.username = username; self.password = password; self.accessToken = accessToken; self.userId = userId; self.serverId = serverId; self.serverName = serverName; self.serverVersion = serverVersion; self.iconURL = iconURL; self.isDefaultHome = isDefaultHome; self.isEncrypted = isEncrypted; self.enableGlobalSearch = enableGlobalSearch; self.strmUsePath = strmUsePath; self.cache302Request = cache302Request; self.movieCount = movieCount; self.episodeCount = episodeCount; self.selectedLineId = selectedLineId; self.mainLineLatencyMs = mainLineLatencyMs; self.backupLines = backupLines; self.lastExtDomainSyncDate = lastExtDomainSyncDate; self.lastWatchedDate = lastWatchedDate; self.isDemoServer = isDemoServer; self.keepSignedIn = keepSignedIn; self.lastLoginDate = lastLoginDate; self.tokenExpiresAt = tokenExpiresAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        self.name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        self.note = try c.decodeIfPresent(String.self, forKey: .note) ?? ""
+        self.type = try c.decodeIfPresent(ServerType.self, forKey: .type) ?? .emby
+        self.host = try c.decodeIfPresent(String.self, forKey: .host) ?? ""
+        self.port = try c.decodeIfPresent(Int.self, forKey: .port) ?? 443
+        self.isHttps = try c.decodeIfPresent(Bool.self, forKey: .isHttps) ?? true
+        self.path = try c.decodeIfPresent(String.self, forKey: .path) ?? ""
+        self.username = try c.decodeIfPresent(String.self, forKey: .username) ?? ""
+        self.password = try c.decodeIfPresent(String.self, forKey: .password) ?? ""
+        self.accessToken = try c.decodeIfPresent(String.self, forKey: .accessToken) ?? ""
+        self.userId = try c.decodeIfPresent(String.self, forKey: .userId) ?? ""
+        self.serverId = try c.decodeIfPresent(String.self, forKey: .serverId) ?? ""
+        self.serverName = try c.decodeIfPresent(String.self, forKey: .serverName) ?? ""
+        self.serverVersion = try c.decodeIfPresent(String.self, forKey: .serverVersion) ?? ""
+        self.iconURL = try c.decodeIfPresent(String.self, forKey: .iconURL) ?? "uhd"
+        self.isDefaultHome = try c.decodeIfPresent(Bool.self, forKey: .isDefaultHome) ?? false
+        self.isEncrypted = try c.decodeIfPresent(Bool.self, forKey: .isEncrypted) ?? false
+        self.enableGlobalSearch = try c.decodeIfPresent(Bool.self, forKey: .enableGlobalSearch) ?? true
+        self.strmUsePath = try c.decodeIfPresent(Bool.self, forKey: .strmUsePath) ?? false
+        self.cache302Request = try c.decodeIfPresent(Bool.self, forKey: .cache302Request) ?? true
+        self.movieCount = try c.decodeIfPresent(Int.self, forKey: .movieCount) ?? 0
+        self.episodeCount = try c.decodeIfPresent(Int.self, forKey: .episodeCount) ?? 0
+        self.selectedLineId = try c.decodeIfPresent(UUID.self, forKey: .selectedLineId)
+        self.mainLineLatencyMs = try c.decodeIfPresent(Int.self, forKey: .mainLineLatencyMs)
+        self.backupLines = try c.decodeIfPresent([ServerLineInfo].self, forKey: .backupLines) ?? []
+        self.lastExtDomainSyncDate = try c.decodeIfPresent(Date.self, forKey: .lastExtDomainSyncDate)
+        self.lastWatchedDate = try c.decodeIfPresent(Date.self, forKey: .lastWatchedDate)
+        self.isDemoServer = try c.decodeIfPresent(Bool.self, forKey: .isDemoServer) ?? false
+        self.keepSignedIn = try c.decodeIfPresent(Bool.self, forKey: .keepSignedIn) ?? true
+        self.lastLoginDate = try c.decodeIfPresent(Date.self, forKey: .lastLoginDate)
+        self.tokenExpiresAt = try c.decodeIfPresent(String.self, forKey: .tokenExpiresAt)
     }
 
     public var mainLineURL: String {

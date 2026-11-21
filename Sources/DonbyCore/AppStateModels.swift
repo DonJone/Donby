@@ -317,6 +317,7 @@ public enum EmbySortField: String, CaseIterable, Identifiable, Sendable {
     case dateCreated = "DateCreated,SortName"
     case premiereDate = "PremiereDate,SortName"
     case communityRating = "CommunityRating,SortName"
+    case hot = "PlayCount,SortName"
     case sortName = "SortName"
     case datePlayed = "DatePlayed,SortName"
     case random = "Random"
@@ -326,7 +327,8 @@ public enum EmbySortField: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .dateCreated: return "添加日期"
         case .premiereDate: return "发行日期"
-        case .communityRating: return "IMDb评分"
+        case .communityRating: return "评分"
+        case .hot: return "热门度"
         case .sortName: return "名称"
         case .datePlayed: return "播放日期"
         case .random: return "随机"

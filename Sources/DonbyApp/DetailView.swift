@@ -25,6 +25,7 @@ public struct DetailView: View {
     @State private var userDidPickEpisodeLocally: Bool = false
     @State private var cachedOfflineGroup: OfflineLibraryGroup? = nil
     @State private var cachedUnpinnedAssets: [CachedMediaSummary] = []
+    @State private var showWatchPartyCreateSheet: Bool = false
 
     private var detailSeriesKey: String {
         AppState.detailSeriesKey(for: item)
@@ -139,6 +140,18 @@ public struct DetailView: View {
         .ignoresSafeArea(.container, edges: .top)
         .sheet(item: $selectedEpisodeForInfo) { ep in
             EpisodeInfoSheet(episode: ep, isLightMode: appState.isLightMode)
+        }
+        .sheet(isPresented: $showWatchPartyCreateSheet) {
+            if let srv = effectiveDetailServer, srv.type == .uhdNative {
+                let target = heroResolvedPlayTarget
+                UHDWatchPartyCreateSheet(
+                    server: srv,
+                    item: target,
+                    preferredSourceId: target.id == item.id && !selectedSourceId.isEmpty ? selectedSourceId : nil
+                )
+                .environmentObject(appState)
+                .preferredColorScheme(appState.colorScheme)
+            }
         }
         .onChange(of: selectedSourceId) { _, _ in
             syncStreamsForSelectedSource()
@@ -333,6 +346,13 @@ public struct DetailView: View {
                             appState.linePickerServer = server
                         } label: {
                             Label("切换线路 (\(server.activeLineName))", systemImage: "arrow.triangle.swap")
+                        }
+                        if server.type == .uhdNative {
+                            Button {
+                                showWatchPartyCreateSheet = true
+                            } label: {
+                                Label("发起 UHD 同看房间", systemImage: "person.2.wave.2")
+                            }
                         }
                     }
 
@@ -551,6 +571,16 @@ public struct DetailView: View {
                                 }
 
                                 detailDownloadButton
+
+                                if effectiveDetailServer?.type == .uhdNative {
+                                    LiquidGlassCircleButton(
+                                        systemImage: "person.2.wave.2",
+                                        size: 38,
+                                        tooltip: "发起 UHD 同看房间"
+                                    ) {
+                                        showWatchPartyCreateSheet = true
+                                    }
+                                }
                             }
 
                             // Main Wide Frosted Capsule Play Button (as in better1.png)
@@ -1349,28 +1379,39 @@ public struct DetailView: View {
                 LazyHStack(alignment: .top, spacing: 18) {
                     ForEach(people.prefix(20)) { person in
                         let subtitle = Self.localizedPersonSubtitle(for: person)
-                        VStack(spacing: 8) {
-                            PersonAvatarView(
-                                server: effectiveDetailServer,
-                                person: person,
-                                width: 78,
-                                height: 100,
-                                accentColor: appState.accentColor
-                            )
-
-                            VStack(spacing: 2) {
-                                Text(person.name)
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                                    .lineLimit(1)
-                                Text(subtitle ?? " ")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                                    .opacity(subtitle == nil ? 0 : 1)
-                                    .lineLimit(1)
+                        let canOpenPerson = (effectiveDetailServer?.type == .uhdNative)
+                        Button {
+                            if let srv = effectiveDetailServer, srv.type == .uhdNative {
+                                appState.activeUHDPersonSheet = UHDPersonSheetTarget(server: srv, person: person)
                             }
-                            .frame(width: 82)
+                        } label: {
+                            VStack(spacing: 8) {
+                                PersonAvatarView(
+                                    server: effectiveDetailServer,
+                                    person: person,
+                                    width: 78,
+                                    height: 100,
+                                    accentColor: appState.accentColor
+                                )
+
+                                VStack(spacing: 2) {
+                                    Text(person.name)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                                        .lineLimit(1)
+                                    Text(subtitle ?? " ")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                                        .opacity(subtitle == nil ? 0 : 1)
+                                        .lineLimit(1)
+                                }
+                                .frame(width: 82)
+                            }
+                            .contentShape(Rectangle())
                         }
+                        .buttonStyle(.plain)
+                        .disabled(!canOpenPerson)
+                        .help(canOpenPerson ? "查看 \(person.name) 的库内作品" : "")
                     }
                 }
                 .padding(.horizontal, 28)
@@ -1623,6 +1664,10 @@ public struct DetailView: View {
                 guard let sid = targetSeriesId, !sid.isEmpty else { return nil }
                 return try? await UHDStreamClient.shared.fetchSeasons(server: server, tvId: sid)
             }()
+            async let tvPlaybackStateTask: UHDTVPlaybackState? = {
+                guard let sid = targetSeriesId, !sid.isEmpty else { return nil }
+                return try? await UHDStreamClient.shared.fetchTVPlaybackState(server: server, tvId: sid)
+            }()
 
             if let detailed = await detailTask {
                 guard !Task.isCancelled else { return }
@@ -1633,9 +1678,22 @@ public struct DetailView: View {
             guard !Task.isCancelled else { return }
             syncDefaultTracks()
 
+            let tvPlaybackState = await tvPlaybackStateTask
             if let preloadedSeasons = await seasonsTask, !preloadedSeasons.isEmpty {
                 self.seasons = preloadedSeasons
-                await applyInitialSeasonAndFocus(seasons: preloadedSeasons, localGroup: localGroup)
+                if !userDidPickEpisodeLocally,
+                   !initialItem.isEpisode,
+                   appState.detailFocusedEpisode(forSeriesKey: detailSeriesKey) == nil,
+                   let prefEp = tvPlaybackState?.preferredEpisode,
+                   let matchedSeason = preloadedSeasons.first(where: { $0.id == prefEp.seasonId || $0.indexNumber == prefEp.seasonNumber }) {
+                    await loadEpisodesForSeason(
+                        matchedSeason,
+                        seasonNumber: matchedSeason.indexNumber ?? prefEp.seasonNumber,
+                        preferredOverrideEpisodeId: prefEp.episodeId
+                    )
+                } else {
+                    await applyInitialSeasonAndFocus(seasons: preloadedSeasons, localGroup: localGroup)
+                }
             }
             self.similarItems = []
             return

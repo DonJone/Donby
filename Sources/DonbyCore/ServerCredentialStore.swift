@@ -195,6 +195,7 @@ public final class ServerCredentialStore {
 
         var desired: [String: ServerCredentialSecret] = [:]
         for server in servers {
+            guard server.keepSignedIn else { continue }
             let secret = ServerCredentialSecret(password: server.password, accessToken: server.accessToken)
             if !secret.isEmpty {
                 desired[server.id.uuidString] = secret

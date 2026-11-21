@@ -94,23 +94,27 @@ public struct EmbyMainView: View {
                     try? await Task.sleep(nanoseconds: 250_000_000)
                     guard !Task.isCancelled else { return }
                     if server.type == .uhdNative {
-                        if let items = try? await UHDStreamClient.shared.search(server: server, query: q, limit: 60),
+                        if let res = try? await UHDStreamClient.shared.searchWithMeta(server: server, query: q, limit: 60),
                            !Task.isCancelled {
-                            appState.embyInlineSearchResults = items
+                            appState.embyInlineSearchResults = res.items
+                            appState.embyInlineSearchTruncated = res.truncated
                             appState.embyInlineSearchLastServerId = server.id
                             appState.embyInlineSearchLastFetchedQuery = q
                         } else if !Task.isCancelled {
                             appState.embyInlineSearchResults = []
+                            appState.embyInlineSearchTruncated = false
                             appState.embyInlineSearchLastServerId = server.id
                             appState.embyInlineSearchLastFetchedQuery = q
                         }
                     } else if let resp = try? await EmbyClient.shared.fetchItems(server: server, searchTerm: q, limit: 60),
                               !Task.isCancelled {
                         appState.embyInlineSearchResults = resp.items
+                        appState.embyInlineSearchTruncated = false
                         appState.embyInlineSearchLastServerId = server.id
                         appState.embyInlineSearchLastFetchedQuery = q
                     } else if !Task.isCancelled {
                         appState.embyInlineSearchResults = []
+                        appState.embyInlineSearchTruncated = false
                         appState.embyInlineSearchLastServerId = server.id
                         appState.embyInlineSearchLastFetchedQuery = q
                     }
@@ -146,6 +150,24 @@ public struct EmbyMainView: View {
                 kind: .landscape,
                 items: appState.resumeItems
             ))
+        }
+        if appState.activeServer?.type == .uhdNative {
+            if !appState.uhdHotItems.isEmpty {
+                result.append(HomeShelfSection(
+                    id: "uhd_hot",
+                    title: "热门影视",
+                    kind: .poster,
+                    items: appState.uhdHotItems
+                ))
+            }
+            if !appState.uhdAnimeHotItems.isEmpty {
+                result.append(HomeShelfSection(
+                    id: "uhd_anime_hot",
+                    title: "热门动漫",
+                    kind: .poster,
+                    items: appState.uhdAnimeHotItems
+                ))
+            }
         }
         for lib in appState.libraryViews {
             if let items = appState.latestByLibrary[lib.id], !items.isEmpty {
@@ -242,6 +264,52 @@ public struct EmbyMainView: View {
                         .fixedSize(horizontal: true, vertical: false)
                         .onHover { isLinePillHovered = $0 }
                         .help("切换服务器线路 (⌘L)")
+
+                        if server.type == .uhdNative {
+                            let snap = appState.uhdAccountSnapshots[server.id]
+                            let badgeText: String = {
+                                if let t = snap?.traffic {
+                                    if let plan = snap?.subscription?.plan?.name, !plan.isEmpty {
+                                        return "\(plan) · \(t.shortToolbarBadgeText)"
+                                    }
+                                    return t.shortToolbarBadgeText
+                                }
+                                if let plan = appState.serverCapabilities[server.id]?.planName, !plan.isEmpty {
+                                    return plan
+                                }
+                                return "账户与流量"
+                            }()
+                            Button {
+                                appState.uhdAccountSheetServer = server
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "gauge.with.dots.needle.67percent")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(appState.accentColor)
+                                    Text(badgeText)
+                                        .font(.system(size: 11.5, weight: .semibold))
+                                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5.5)
+                                .frame(maxWidth: 168)
+                                .background(
+                                    Capsule()
+                                        .fill(appState.isLightMode ? Color.white : Color(white: 0.16))
+                                        .shadow(color: Color.black.opacity(appState.isLightMode ? 0.04 : 0.18), radius: 2, y: 1)
+                                )
+                                .overlay(
+                                    Capsule()
+                                        .strokeBorder(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08), lineWidth: 0.5)
+                                )
+                                .contentShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .help("查看 UHD 套餐、到期时间与流量余额")
+                        }
                     }
                 }
             }
@@ -249,6 +317,37 @@ public struct EmbyMainView: View {
             Spacer(minLength: 10)
 
             if let server = appState.activeServer {
+                if server.type == .uhdNative && !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    ToolbarVectorButton(
+                        tooltip: "动漫追番日历",
+                        action: { appState.showUHDAnimeCalendarSheet = true }
+                    ) { hovered in
+                        let iconColor = appState.isLightMode ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28)) : (hovered ? .white : Color(white: 0.88))
+                        Image(systemName: "calendar")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(iconColor)
+                    }
+
+                    ToolbarVectorButton(
+                        tooltip: "我的收藏（电影 / 剧集 / 人物）",
+                        action: { appState.showUHDFavoritesSheet = true }
+                    ) { hovered in
+                        let iconColor = appState.isLightMode ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28)) : (hovered ? .white : Color(white: 0.88))
+                        Image(systemName: "heart")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(iconColor)
+                    }
+
+                    ToolbarVectorButton(
+                        tooltip: "加入 UHD 同看房间",
+                        action: { appState.showUHDWatchPartyJoinSheet = true }
+                    ) { hovered in
+                        let iconColor = appState.isLightMode ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28)) : (hovered ? .white : Color(white: 0.88))
+                        Image(systemName: "person.2.wave.2")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(iconColor)
+                    }
+                }
                 ToolbarVectorButton(
                     tooltip: "切换线路 (⌘L)",
                     action: { appState.linePickerServer = server }
@@ -386,7 +485,7 @@ public struct EmbyMainView: View {
             }
 
             DonbySearchPillField(
-                placeholder: "搜索媒体",
+                placeholder: appState.activeServer?.type == .uhdNative ? "搜索媒体或 tmdb:ID" : "搜索媒体",
                 text: $appState.embyInlineSearchQuery,
                 width: 185,
                 onSubmit: {
@@ -421,7 +520,12 @@ public struct EmbyMainView: View {
         let appearance = appState.cardAppearance
         return VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 8) {
-                SectionHeaderView(title: "搜索结果", subtitle: "共找到 \(results.count) 个")
+                SectionHeaderView(
+                    title: "搜索结果",
+                    subtitle: appState.embyInlineSearchTruncated
+                        ? "已展示前 \(results.count) 条（结果已截断，建议补充关键词）"
+                        : "共找到 \(results.count) 个"
+                )
                 if isSearchingInline {
                     ProgressView().controlSize(.small)
                 }
@@ -502,6 +606,27 @@ public struct EmbyMainView: View {
             .buttonStyle(.plain)
 
             if let server = appState.activeServer {
+                if message.contains("401") || message.contains("凭证") || message.contains("登录") {
+                    Button {
+                        appState.editingServer = server
+                        appState.showAddServerSheet = true
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "person.badge.key.fill")
+                                .font(.system(size: 11.5, weight: .semibold))
+                            Text("重新登录")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .foregroundStyle(appState.accentTextColor)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(appState.accentColor)
+                        .clipShape(Capsule())
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+
                 Button {
                     appState.linePickerServer = server
                 } label: {
@@ -648,6 +773,8 @@ public struct MLibListView: View {
     @State private var ascending: Bool = false
     @State private var filterUnwatchedOnly: Bool = false
     @State private var filterFavoritesOnly: Bool = false
+    @State private var selectedGenreFilter: String = ""
+    @State private var availableUHDGenres: [UHDGenreInfo] = []
     @State private var showSortPopover: Bool = false
 
     private var searchQuery: String {
@@ -728,11 +855,24 @@ public struct MLibListView: View {
                         Toggle("升序排列", isOn: $ascending)
                         Toggle("仅显示未观看", isOn: $filterUnwatchedOnly)
                         Toggle("仅显示收藏", isOn: $filterFavoritesOnly)
+                        if appState.activeServer?.type == .uhdNative && !availableUHDGenres.isEmpty {
+                            Divider()
+                            Text("按类型筛选")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                            Picker("类型", selection: $selectedGenreFilter) {
+                                Text("全部类型").tag("")
+                                ForEach(availableUHDGenres) { g in
+                                    Text(g.name).tag(g.name)
+                                }
+                            }
+                            .labelsHidden()
+                        }
                     }
                     .toggleStyle(.checkbox)
                     .font(.system(size: 12.5))
                     .padding(14)
-                    .frame(width: 200)
+                    .frame(width: 215)
                 }
 
                 DonbySearchPillField(
@@ -775,12 +915,19 @@ public struct MLibListView: View {
             }
         }
         .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
-        .task(id: "\(library.id)|\(sortField.rawValue)|\(ascending)|\(filterUnwatchedOnly)|\(filterFavoritesOnly)|\(searchQuery)") {
+        .task(id: "\(library.id)|\(sortField.rawValue)|\(ascending)|\(filterUnwatchedOnly)|\(filterFavoritesOnly)|\(selectedGenreFilter)|\(searchQuery)") {
             if !searchQuery.isEmpty {
                 try? await Task.sleep(nanoseconds: 250_000_000)
                 guard !Task.isCancelled else { return }
             }
             await loadLibraryItems(reset: true)
+        }
+        .task(id: appState.activeServer?.id) {
+            if let srv = appState.activeServer, srv.type == .uhdNative, availableUHDGenres.isEmpty {
+                if let genres = try? await UHDStreamClient.shared.fetchGenres(server: srv) {
+                    availableUHDGenres = genres
+                }
+            }
         }
     }
 
@@ -821,6 +968,7 @@ public struct MLibListView: View {
                 let uhdSortBy: String = switch sortField {
                 case .premiereDate: "release_date"
                 case .communityRating: "rating"
+                case .hot: "hot"
                 case .sortName: "title"
                 default: "asset_updated_at"
                 }
@@ -836,6 +984,9 @@ public struct MLibListView: View {
                 var fetched = pageRes.items
                 if filterUnwatchedOnly { fetched = fetched.filter { $0.userData?.played != true } }
                 if filterFavoritesOnly { fetched = fetched.filter { $0.userData?.isFavorite == true } }
+                if !selectedGenreFilter.isEmpty {
+                    fetched = fetched.filter { $0.genres?.contains(selectedGenreFilter) == true }
+                }
                 if reset {
                     self.items = fetched
                     self.seenIds = Set(fetched.map(\.id))

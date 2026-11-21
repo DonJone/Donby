@@ -1,6 +1,6 @@
 # Module Map: App, Player HUD & Native UI (`DonbyApp`)
 
-> Last synced: `v1.4.32`. Load this doc for `PlayerView`, `AppState`, `DetailView`, 120Hz native collection views, artwork caching, Liquid Glass UI, and module views.
+> Last synced: `v1.4.33`. Load this doc for `PlayerView`, `AppState`, `DetailView`, 120Hz native collection views, artwork caching, Liquid Glass UI, UHD feature views, and module views.
 
 ## 1. File Inventory & Core Symbols
 - **App Entry & Global State**:
@@ -17,7 +17,7 @@
   - `Sources/DonbyApp/Components/LiquidGlassSystem.swift` (~674L) & `BrandIconsAndToolbar.swift` (~1285L) & `MediaCards.swift` (~536L).
 - **Feature Views**:
   - `DetailView.swift` (~1761L), `EmbyMainView.swift` (~907L), `MainCarouselView.swift` (~403L), `ServerViews.swift` (~997L), `LogViewerSheet.swift` (~345L).
-  - `Views/DownloadsView.swift` (~954L), `Views/FilesModuleView.swift` (~1224L), `Views/GlobalSearchView.swift` (~509L), `Views/IPTVModuleView.swift` (~405L), `Views/RecordsView.swift` (~293L), `Views/SettingsView.swift` (~965L).
+  - `Views/DownloadsView.swift` (~954L), `Views/FilesModuleView.swift` (~1224L), `Views/GlobalSearchView.swift` (~509L), `Views/IPTVModuleView.swift` (~405L), `Views/RecordsView.swift` (~293L), `Views/SettingsView.swift` (~965L), `Views/UHDFeatureViews.swift` (~1400L — `UHDAccountSheet`/`UHDAccountDashboardContent`, `UHDSpeedSparklineChart`, `UHDAnimeCalendarSheet`, `UHDFavoritesSheet`, `UHDPersonDetailSheet`, `UHDWatchPartyJoinSheet`/`CreateSheet`, `WatchPartyTopStatusPill`/`WatchPartyActiveRoomDrawerView`, `UHDDanmuLiveOverlay`/`UHDDanmuPickerSheet`).
 
 ## 2. Key Player UX State Machine (`PlayerView.swift`)
 - **Startup Loading Pill**: Remains visible until `DKMetalVideoView.onFirstFrameRendered` sets `hasRenderedFirstFrame = true` (prevents black-screen flicker between `dk_open` and first presented frame).

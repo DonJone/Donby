@@ -7,7 +7,7 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "1.4.32")
+        #expect(DonbyAppInfo.fallbackVersion == "1.4.33")
     }
 
     @Test func heroTopEdgeSynthesizerPreservesExactColorContrastAndSuppressesOutlierSpike() {
@@ -596,5 +596,147 @@ struct DonbyCoreTests {
         } else {
             Issue.record("Expected audioFirst to carry secondary delta, got \(outcome)")
         }
+    }
+
+    @Test func uhdSpeedTestMetricsEngineWarmupAndRollingPeakAndShortFallback() {
+        // 1. Steady 100 Mbps stream (12.5 MB/s) after warmup >= 300ms & > 1 MiB
+        var engine = UHDSpeedTestMetricsEngine(startTimeSec: 10.0)
+        let bytesPerStep: Int64 = 1_250_000 // 1.25 MB every 0.1s = 100 Mbps
+        for step in 1...20 {
+            let t = 10.0 + Double(step) * 0.10
+            engine.ingest(chunkBytes: bytesPerStep, at: t)
+        }
+        let snap = engine.finalize(at: 12.0)
+        #expect(snap.totalBytes == 25_000_000)
+        #expect(snap.elapsedMs == 2000)
+        #expect(snap.sampleCount >= 10)
+        #expect(abs(snap.averageMbps - 100.0) < 5.0)
+        #expect(snap.peakMbps >= snap.averageMbps)
+        #expect(snap.peakMbps <= 5000.0)
+
+        // 2. Short test fallback (finishes before warmup completes -> uses total bytes / max(250ms, elapsed) with 1 sample)
+        var shortEngine = UHDSpeedTestMetricsEngine(startTimeSec: 5.0)
+        shortEngine.ingest(chunkBytes: 500_000, at: 5.10)
+        let shortSnap = shortEngine.finalize(at: 5.10)
+        #expect(shortSnap.sampleCount == 1)
+        #expect(shortSnap.totalBytes == 500_000)
+        // 500_000 * 8 / 0.25 / 1_000_000 = 16.0 Mbps
+        #expect(abs(shortSnap.averageMbps - 16.0) < 0.01)
+    }
+
+    @Test func uhdParsersAndRatingAndWatchPartyExtrapolation() throws {
+        // Login code normalizer preserves leading zeros and strips grouping spaces
+        #expect(UHDLoginCodeNormalizer.normalize("0428 1753") == "04281753")
+        #expect(UHDLoginCodeNormalizer.normalize("0428-1753") == "04281753")
+        #expect(UHDLoginCodeNormalizer.normalize("1234567") == nil)
+        #expect(UHDLoginCodeNormalizer.formattedDisplay("04281753") == "0428 1753")
+
+        // Watch Party invite extractor (raw code & shared URL)
+        #expect(UHDWatchPartyInviteParser.extractInviteCode(from: "0428 1736") == "04281736")
+        #expect(UHDWatchPartyInviteParser.extractInviteCode(from: "https://media.example.com/stream/play?invite=04281736") == "04281736")
+        #expect(UHDWatchPartyInviteParser.extractInviteCode(from: "not-an-invite") == nil)
+
+        // TMDB search query parser
+        let p1 = UHDTmdbSearchQueryParser.parse("tmdb:1399")
+        #expect(p1?.tmdbId == 1399 && p1?.mediaType == nil)
+        let p2 = UHDTmdbSearchQueryParser.parse("tmdb:tv:1399")
+        #expect(p2?.tmdbId == 1399 && p2?.mediaType == "tv")
+        let p3 = UHDTmdbSearchQueryParser.parse("https://www.themoviedb.org/movie/603")
+        #expect(p3?.tmdbId == 603 && p3?.mediaType == "movie")
+        #expect(UHDTmdbSearchQueryParser.parse("权力的游戏") == nil)
+
+        // Rating 10x integer normalization
+        #expect(UHDRatingNormalizer.normalize(85) == 8.5)
+        #expect(UHDRatingNormalizer.normalize(0) == nil)
+        #expect(UHDRatingNormalizer.normalize(7.8) == 7.8)
+
+        // Watch Party extrapolated position (playing vs paused)
+        let playingSnap = UHDWatchPartyRoomSnapshot(
+            id: "room-1",
+            invite: "04281736",
+            hostId: "u1",
+            maxMembers: 4,
+            locked: false,
+            members: [],
+            media: UHDWatchPartyMedia(itemType: "movie", itemId: "m1", assetId: "a1"),
+            phase: "playing",
+            positionMs: 120_000,
+            serverMs: 1_000_000,
+            rate: 1.5,
+            intent: true,
+            control: "play",
+            epoch: 1,
+            term: 1,
+            revision: 2
+        )
+        // +4 seconds elapsed * 1.5x = +6s -> 126.0s
+        #expect(abs(playingSnap.extrapolatedPositionSeconds(estimatedServerNowMs: 1_004_000) - 126.0) < 0.001)
+
+        let pausedSnap = UHDWatchPartyRoomSnapshot(
+            id: "room-1",
+            invite: "04281736",
+            hostId: "u1",
+            maxMembers: 4,
+            locked: false,
+            members: [],
+            media: UHDWatchPartyMedia(itemType: "movie", itemId: "m1", assetId: "a1"),
+            phase: "paused",
+            positionMs: 120_000,
+            serverMs: 1_000_000,
+            rate: 1.5,
+            intent: false,
+            control: "pause",
+            epoch: 1,
+            term: 1,
+            revision: 3
+        )
+        // Paused never extrapolates forward
+        #expect(abs(pausedSnap.extrapolatedPositionSeconds(estimatedServerNowMs: 1_010_000) - 120.0) < 0.001)
+
+        // EmbyServerConfig backward-compatible decoding defaults keepSignedIn = true
+        let legacyJSON = """
+        {"id":"00000000-0000-0000-0000-000000000001","name":"OldUHD","note":"","type":"uhdNative","host":"api.example.com","port":443,"isHttps":true,"path":"","username":"alice","password":"","accessToken":"","userId":"","serverId":"","serverName":"","serverVersion":"","iconURL":"uhd","isDefaultHome":false,"isEncrypted":false,"enableGlobalSearch":true,"strmUsePath":false,"cache302Request":true,"movieCount":0,"episodeCount":0,"backupLines":[],"isDemoServer":false}
+        """.data(using: .utf8)!
+        let decodedLegacy = try JSONDecoder().decode(EmbyServerConfig.self, from: legacyJSON)
+        #expect(decodedLegacy.keepSignedIn == true)
+        #expect(decodedLegacy.lastLoginDate == nil)
+
+        // ServerCredentialStore must skip persisting secrets when keepSignedIn == false
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("donby-keepsignedin-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let vaultFile = tempDir.appendingPathComponent("credentials.vault")
+        let backend = EncryptedFileVaultBackend(fileURL: vaultFile, machineSalt: "unit-test-keep-signed-in")
+        let store = ServerCredentialStore(backend: backend)
+
+        let ephemeralServer = EmbyServerConfig(
+            name: "TempUHD",
+            type: .uhdNative,
+            host: "api.example.com",
+            username: "bob",
+            password: "secret-password",
+            accessToken: "ephemeral-token",
+            keepSignedIn: false
+        )
+        let persistedServer = EmbyServerConfig(
+            name: "SavedUHD",
+            type: .uhdNative,
+            host: "api2.example.com",
+            username: "alice",
+            password: "saved-password",
+            accessToken: "saved-token",
+            keepSignedIn: true
+        )
+        let sanitized = store.persistSecretsAndSanitizeForDefaults([ephemeralServer, persistedServer])
+        #expect(sanitized.allSatisfy { $0.password.isEmpty && $0.accessToken.isEmpty })
+
+        // Re-hydrate in a fresh store instance (simulating app restart)
+        let freshStore = ServerCredentialStore(backend: EncryptedFileVaultBackend(fileURL: vaultFile, machineSalt: "unit-test-keep-signed-in"))
+        let (rehydrated, _) = freshStore.hydrate(sanitized)
+        let rehydratedEphemeral = rehydrated.first { $0.id == ephemeralServer.id }
+        let rehydratedPersisted = rehydrated.first { $0.id == persistedServer.id }
+        #expect(rehydratedEphemeral?.password == "")
+        #expect(rehydratedEphemeral?.accessToken == "")
+        #expect(rehydratedPersisted?.password == "saved-password")
+        #expect(rehydratedPersisted?.accessToken == "saved-token")
     }
 }

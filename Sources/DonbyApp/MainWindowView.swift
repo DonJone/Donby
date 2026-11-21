@@ -168,6 +168,37 @@ public struct MainWindowView: View {
                 .environmentObject(appState)
                 .preferredColorScheme(appState.colorScheme)
         }
+        .sheet(item: $appState.uhdAccountSheetServer) { server in
+            UHDAccountSheet(serverId: server.id)
+                .environmentObject(appState)
+                .preferredColorScheme(appState.colorScheme)
+        }
+        .sheet(isPresented: $appState.showUHDAnimeCalendarSheet) {
+            if let server = appState.activeServer, server.type == .uhdNative {
+                UHDAnimeCalendarSheet(server: server)
+                    .environmentObject(appState)
+                    .preferredColorScheme(appState.colorScheme)
+            }
+        }
+        .sheet(isPresented: $appState.showUHDFavoritesSheet) {
+            if let server = appState.activeServer, server.type == .uhdNative {
+                UHDFavoritesSheet(server: server)
+                    .environmentObject(appState)
+                    .preferredColorScheme(appState.colorScheme)
+            }
+        }
+        .sheet(isPresented: $appState.showUHDWatchPartyJoinSheet) {
+            if let server = appState.activeServer, server.type == .uhdNative {
+                UHDWatchPartyJoinSheet(server: server)
+                    .environmentObject(appState)
+                    .preferredColorScheme(appState.colorScheme)
+            }
+        }
+        .sheet(item: $appState.activeUHDPersonSheet) { target in
+            UHDPersonDetailSheet(target: target)
+                .environmentObject(appState)
+                .preferredColorScheme(appState.colorScheme)
+        }
         .sheet(isPresented: $appState.showLogViewer) {
             LogViewerSheet()
                 .environmentObject(appState)
