@@ -8,6 +8,7 @@ KernelRust/target/
 Resources/AppIcon.iconset/
 tmp/
 uhdnowdoc.md
+docs/agent/local/
 .DS_Store
 **/.DS_Store
 *.xcuserdata
