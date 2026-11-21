@@ -36,23 +36,27 @@ public struct SettingsView: View {
             // Settings Sidebar Tabs
             VStack(alignment: .leading, spacing: 4) {
                 if appState.isSidebarCollapsed {
-                    Button {
-                        withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
-                            appState.isSidebarCollapsed = false
+                    HStack(spacing: 0) {
+                        Spacer()
+                        Button {
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                                appState.isSidebarCollapsed = false
+                            }
+                        } label: {
+                            DonbyToolbarCircleView(systemName: "sidebar.left")
                         }
-                    } label: {
-                        DonbyToolbarCircleView(systemName: "sidebar.left")
+                        .buttonStyle(.plain)
+                        .padding(.trailing, 12)
+                        .padding(.top, appState.isWindowFullScreen ? 4 : 8)
                     }
-                    .buttonStyle(.plain)
-                    .padding(.leading, appState.isWindowFullScreen ? 16 : 64)
-                    .padding(.top, 14)
+                    .frame(height: appState.isWindowFullScreen ? 46 : 52)
                 }
 
                 Text("偏好设置")
                     .font(.system(size: 17, weight: .bold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     .padding(.horizontal, 16)
-                    .padding(.top, 24)
+                    .padding(.top, appState.isSidebarCollapsed ? 6 : 24)
                     .padding(.bottom, 12)
 
                 ForEach(SettingsSectionTab.allCases) { tab in
@@ -121,7 +125,7 @@ public struct SettingsView: View {
             settingsHeader(title: "基础设置", subtitle: "启动页面、外观主题与界面显示")
 
             // 启动页面
-            VStack(alignment: .leading, spacing: 14) {
+            settingsCard(spacing: 14) {
                 Text("启动页面")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
@@ -185,16 +189,9 @@ public struct SettingsView: View {
                     .frame(width: 220)
                 }
             }
-            .padding(18)
-            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
-            )
 
             // Appearance Mode (Light / Dark / Auto)
-            VStack(alignment: .leading, spacing: 12) {
+            settingsCard(spacing: 12) {
                 Text("外观模式")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
@@ -209,17 +206,11 @@ public struct SettingsView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                .frame(maxWidth: 360, alignment: .leading)
             }
-            .padding(18)
-            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
-            )
 
-            // Theme Accent Color (7 colors)
-            VStack(alignment: .leading, spacing: 12) {
+            // Theme Accent Color
+            settingsCard(spacing: 12) {
                 Text("主题强调色")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
@@ -253,23 +244,17 @@ public struct SettingsView: View {
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 8)
-                            .background(isSel ? Color.white.opacity(0.08) : Color.clear)
+                            .background(isSel ? (appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.08)) : Color.clear)
                             .clipShape(RoundedRectangle(cornerRadius: 10))
+                            .contentShape(RoundedRectangle(cornerRadius: 10))
                         }
                         .buttonStyle(.plain)
                     }
                 }
             }
-            .padding(18)
-            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
-            )
 
             // Sidebar and Glass
-            VStack(alignment: .leading, spacing: 16) {
+            settingsCard(spacing: 16) {
                 Text("界面与显示")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
@@ -279,13 +264,6 @@ public struct SettingsView: View {
                 Toggle("卡片显示评分", isOn: $appState.showRatingBadge)
                 Toggle("显示媒体规格统计", isOn: $appState.displayMediaStatistics)
             }
-            .padding(18)
-            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
-            )
         }
     }
 
@@ -294,7 +272,7 @@ public struct SettingsView: View {
         VStack(alignment: .leading, spacing: 24) {
             settingsHeader(title: "播放", subtitle: "解码、控制栏、片头片尾与字幕偏好")
 
-            VStack(alignment: .leading, spacing: 16) {
+            settingsCard(spacing: 16) {
                 Toggle("使用硬件解码", isOn: $appState.enableHardwareDecode)
                 Text("通过 VideoToolbox 硬件加速解码 HEVC / H.264 视频")
                     .font(.system(size: 11.5))
@@ -372,15 +350,8 @@ public struct SettingsView: View {
                 Toggle("片尾自动播放下一集", isOn: $appState.autoNextEpisode)
                 Toggle("启用弹幕", isOn: $appState.enableDanmaku)
             }
-            .padding(18)
-            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
-            )
 
-            VStack(alignment: .leading, spacing: 14) {
+            settingsCard(spacing: 14) {
                 Text("字幕偏好")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
@@ -429,13 +400,6 @@ public struct SettingsView: View {
                 Toggle("控制栏显示时上移字幕", isOn: $appState.subtitleStyle.antiOcclusionEnabled)
                 Toggle("记忆剧集字幕选择", isOn: $appState.rememberSubtitleSelection)
             }
-            .padding(18)
-            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
-            )
         }
     }
 
@@ -444,7 +408,7 @@ public struct SettingsView: View {
         VStack(alignment: .leading, spacing: 24) {
             settingsHeader(title: "网络与缓存", subtitle: "线路同步、并发缓冲与缓存管理")
 
-            VStack(alignment: .leading, spacing: 16) {
+            settingsCard(spacing: 16) {
                 Toggle("自动同步服务器线路", isOn: $appState.autoSyncDomains)
                 Text("连接时获取服务端扩展线路列表")
                     .font(.system(size: 11.5))
@@ -573,14 +537,27 @@ public struct SettingsView: View {
                     .font(.system(size: 11.5))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }
-            .padding(18)
-            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
-            )
         }
+    }
+
+    /// Unified full-width Settings card container so every card across all tabs shares identical width and styling.
+    private func settingsCard<Content: View>(
+        alignment: HorizontalAlignment = .leading,
+        spacing: CGFloat = 14,
+        padding: CGFloat = 18,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: alignment, spacing: spacing) {
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: alignment == .center ? .center : .leading)
+        .padding(padding)
+        .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+        )
     }
 
     // 4. 关于
@@ -621,6 +598,7 @@ public struct SettingsView: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6.5)
                     .donbyLiquidGlassCapsule()
+                    .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
                 .padding(.top, 2)
@@ -628,9 +606,9 @@ public struct SettingsView: View {
             .frame(maxWidth: .infinity)
             .padding(22)
             .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
             )
 
@@ -808,11 +786,12 @@ public struct SettingsView: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(18)
         .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
         )
     }
