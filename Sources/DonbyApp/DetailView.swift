@@ -131,6 +131,9 @@ public struct DetailView: View {
                 }
                 .scrollContentBackground(.hidden)
                 .ignoresSafeArea(.container, edges: .top)
+
+                // Pinned top floating navigation capsules (fixed to viewport, never scrolls with hero)
+                floatingTopNavBar
             }
         }
         .ignoresSafeArea(.container, edges: .top)
@@ -263,6 +266,114 @@ public struct DetailView: View {
         }
     }
 
+    private var floatingTopNavBar: some View {
+        HStack {
+            // Floating Left Capsule: [ < | 🏠 ] — full-area clickable halves with zero dead rim
+            HStack(spacing: 0) {
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) { appState.popDetail() }
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
+                        .frame(width: 40, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Rectangle()
+                    .fill(appState.isLightMode ? Color.black.opacity(0.10) : Color.white.opacity(0.14))
+                    .frame(width: 0.75, height: 14)
+
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        appState.popToRootDetail()
+                    }
+                } label: {
+                    Image(systemName: "house")
+                        .font(.system(size: 13.5, weight: .medium))
+                        .foregroundStyle(appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
+                        .frame(width: 40, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .clipShape(Capsule(style: .continuous))
+            .donbyLiquidGlassCapsule()
+            .padding(.leading, appState.isSidebarCollapsed ? (appState.isWindowFullScreen ? 0 : 68) : 0)
+
+            Spacer()
+
+            // Floating Right Capsule: [ 🔍 | ⋯ ∨ ] — full-area clickable halves with zero dead rim
+            HStack(spacing: 0) {
+                Button {
+                    appState.selectSidebarModule(.search)
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
+                        .frame(width: 40, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Rectangle()
+                    .fill(appState.isLightMode ? Color.black.opacity(0.10) : Color.white.opacity(0.14))
+                    .frame(width: 0.75, height: 14)
+
+                Menu {
+                    Button {
+                        Task { await loadFullDetailData() }
+                    } label: {
+                        Label("刷新详情信息", systemImage: "arrow.clockwise")
+                    }
+
+                    if let server = effectiveDetailServer {
+                        Button {
+                            appState.linePickerServer = server
+                        } label: {
+                            Label("切换线路 (\(server.activeLineName))", systemImage: "arrow.triangle.swap")
+                        }
+                    }
+
+                    Button {
+                        playHighestSpecification()
+                    } label: {
+                        Label("播放最高画质版本", systemImage: "sparkles")
+                    }
+
+                    Button {
+                        Task {
+                            await appState.copyStreamDirectURL(item: item, preferredSourceId: selectedSourceId)
+                        }
+                    } label: {
+                        Label("复制播放链接", systemImage: "link")
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 12.5, weight: .semibold))
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8, weight: .bold))
+                    }
+                    .foregroundStyle(appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
+                    .frame(width: 44, height: 36)
+                    .contentShape(Rectangle())
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .frame(width: 44, height: 36)
+                .contentShape(Rectangle())
+            }
+            .clipShape(Capsule(style: .continuous))
+            .donbyLiquidGlassCapsule()
+            .fixedSize()
+        }
+        .padding(.horizontal, 28)
+        .padding(.top, 16)
+    }
+
     private func heroHeaderSection(heroHeight: CGFloat) -> some View {
         let canvasCol = appState.isLightMode ? DonbyGlassPalette.canvasLight : DonbyGlassPalette.canvasBlack
         return ZStack(alignment: .bottomLeading) {
@@ -296,115 +407,8 @@ public struct DetailView: View {
             .frame(height: heroHeight)
             .allowsHitTesting(false)
 
-            // 3. Floating Navigation Capsules & Hero Metadata Content
+            // 3. Hero Metadata Content
             VStack(alignment: .leading, spacing: 0) {
-                // Top Floating Navigation Bar
-                HStack {
-                    // Floating Left Capsule: [ < | 🏠 ] — full-area clickable halves with zero dead rim
-                    HStack(spacing: 0) {
-                        Button {
-                            withAnimation(.easeOut(duration: 0.18)) { appState.popDetail() }
-                        } label: {
-                            Image(systemName: "chevron.left")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
-                                .frame(width: 40, height: 36)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-
-                        Rectangle()
-                            .fill(appState.isLightMode ? Color.black.opacity(0.10) : Color.white.opacity(0.14))
-                            .frame(width: 0.75, height: 14)
-
-                        Button {
-                            withAnimation(.easeOut(duration: 0.18)) {
-                                appState.popToRootDetail()
-                            }
-                        } label: {
-                            Image(systemName: "house")
-                                .font(.system(size: 13.5, weight: .medium))
-                                .foregroundStyle(appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
-                                .frame(width: 40, height: 36)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .clipShape(Capsule(style: .continuous))
-                    .donbyLiquidGlassCapsule()
-                    .padding(.leading, appState.isSidebarCollapsed ? (appState.isWindowFullScreen ? 0 : 68) : 0)
-
-                    Spacer()
-
-                    // Floating Right Capsule: [ 🔍 | ⋯ ∨ ] — full-area clickable halves with zero dead rim
-                    HStack(spacing: 0) {
-                        Button {
-                            appState.selectSidebarModule(.search)
-                        } label: {
-                            Image(systemName: "magnifyingglass")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
-                                .frame(width: 40, height: 36)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-
-                        Rectangle()
-                            .fill(appState.isLightMode ? Color.black.opacity(0.10) : Color.white.opacity(0.14))
-                            .frame(width: 0.75, height: 14)
-
-                        Menu {
-                            Button {
-                                Task { await loadFullDetailData() }
-                            } label: {
-                                Label("刷新详情信息", systemImage: "arrow.clockwise")
-                            }
-
-                            if let server = effectiveDetailServer {
-                                Button {
-                                    appState.linePickerServer = server
-                                } label: {
-                                    Label("切换线路 (\(server.activeLineName))", systemImage: "arrow.triangle.swap")
-                                }
-                            }
-
-                            Button {
-                                playHighestSpecification()
-                            } label: {
-                                Label("播放最高画质版本", systemImage: "sparkles")
-                            }
-
-                            Button {
-                                Task {
-                                    await appState.copyStreamDirectURL(item: item, preferredSourceId: selectedSourceId)
-                                }
-                            } label: {
-                                Label("复制播放链接", systemImage: "link")
-                            }
-                        } label: {
-                            HStack(spacing: 3) {
-                                Image(systemName: "ellipsis")
-                                    .font(.system(size: 12.5, weight: .semibold))
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 8, weight: .bold))
-                            }
-                            .foregroundStyle(appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
-                            .frame(width: 44, height: 36)
-                            .contentShape(Rectangle())
-                        }
-                        .menuStyle(.button)
-                        .buttonStyle(.plain)
-                        .menuIndicator(.hidden)
-                        .frame(width: 44, height: 36)
-                        .contentShape(Rectangle())
-                    }
-                    .clipShape(Capsule(style: .continuous))
-                    .donbyLiquidGlassCapsule()
-                    .fixedSize()
-                }
-                .padding(.horizontal, 28)
-                .padding(.top, 16)
-
                 Spacer()
 
                 // Hero Title + Actions + Metadata Row
