@@ -7,7 +7,41 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "1.4.26")
+        #expect(DonbyAppInfo.fallbackVersion == "1.4.27")
+    }
+
+    @Test func heroTopEdgeSynthesizerPreservesHorizontalGradientAndSuppressesOutlierSpike() {
+        let w = 32
+        let rows = 8
+        let outH = 16
+        var band = [UInt8](repeating: 255, count: w * rows * 4)
+        for y in 0..<rows {
+            for x in 0..<w {
+                let idx = (y * w + x) * 4
+                if x < w / 2 {
+                    band[idx] = 220; band[idx + 1] = 100; band[idx + 2] = 40; band[idx + 3] = 255
+                } else {
+                    band[idx] = 30; band[idx + 1] = 80; band[idx + 2] = 210; band[idx + 3] = 255
+                }
+            }
+        }
+        // Inject pure-white specular outlier on row 0 in the blue region
+        let spikeIdx = (0 * w + 24) * 4
+        band[spikeIdx] = 255; band[spikeIdx + 1] = 255; band[spikeIdx + 2] = 255
+
+        let out = HeroTopEdgeSynthesizer.synthesizeWeightedStrip(topBandRGBA: band, width: w, rows: rows, outputHeight: outH)
+        #expect(out.count == w * outH * 4)
+
+        let leftBot = ((outH - 1) * w + 2) * 4
+        let rightBot = ((outH - 1) * w + 28) * 4
+        #expect(Int(out[leftBot]) > Int(out[leftBot + 2]) + 100)
+        #expect(Int(out[rightBot + 2]) > Int(out[rightBot]) + 100)
+
+        let spikeColBot = ((outH - 1) * w + 24) * 4
+        #expect(out[spikeColBot] < 120)
+
+        let leftTop = (0 * w + 2) * 4
+        #expect(Int(out[leftTop]) < Int(out[leftBot]))
     }
 
     @Test func subtitleDecoderUTF8BOMAndGB18030() {

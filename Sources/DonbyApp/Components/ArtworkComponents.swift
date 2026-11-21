@@ -1155,6 +1155,119 @@ public struct MediaArtworkView: View {
     }
 }
 
+/// Static weighted top-edge color-extension backdrop rendered behind DetailView's transparent ScrollView.
+/// Hidden behind the crisp hero at rest; smoothly revealed on pull-down overscroll with zero zoom or jitter.
+public struct HeroTopEdgeBackdropView: View {
+    public let server: EmbyServerConfig?
+    public let item: EmbyItem
+
+    @State private var synthesizedStrip: CGImage? = nil
+
+    public init(server: EmbyServerConfig?, item: EmbyItem) {
+        self.server = server
+        self.item = item
+    }
+
+    private static let stripCache: NSCache<NSString, CGImage> = {
+        let c = NSCache<NSString, CGImage>()
+        c.countLimit = 48
+        return c
+    }()
+
+    private var stripCacheKey: String {
+        "hero_top_edge_v1|\(server?.activeBaseURL ?? "")|\(item.id)"
+    }
+
+    public var body: some View {
+        Group {
+            if let strip = synthesizedStrip ?? Self.stripCache.object(forKey: stripCacheKey as NSString) {
+                Image(decorative: strip, scale: 1.0)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                Color.clear
+            }
+        }
+        .task(id: stripCacheKey) {
+            let key = stripCacheKey
+            if let cached = Self.stripCache.object(forKey: key as NSString) {
+                self.synthesizedStrip = cached
+                return
+            }
+            guard let backdrop = await MediaArtworkView.loadOrFetchCGImage(
+                server: server,
+                item: item,
+                kind: .backdrop,
+                maxWidth: 640,
+                priority: .normal
+            ), !Task.isCancelled else { return }
+
+            let strip: CGImage? = await Task.detached(priority: .userInitiated) {
+                Self.buildWeightedTopStrip(from: backdrop)
+            }.value
+            guard !Task.isCancelled, let strip else { return }
+            Self.stripCache.setObject(strip, forKey: key as NSString)
+            await MainActor.run {
+                self.synthesizedStrip = strip
+            }
+        }
+    }
+
+    nonisolated private static func buildWeightedTopStrip(from cgImage: CGImage) -> CGImage? {
+        let srcW = cgImage.width
+        let srcH = cgImage.height
+        guard srcW >= 8, srcH >= 8 else { return nil }
+
+        // Skip top 2px border in case source has a thin dark encoding/letterbox edge
+        let skipY = min(2, max(0, srcH / 20))
+        let cropH = min(14, max(4, srcH - skipY))
+        guard let topCrop = cgImage.cropping(to: CGRect(x: 0, y: skipY, width: srcW, height: cropH)) else {
+            return nil
+        }
+
+        let sampleW = 128
+        let sampleRows = 12
+        let outH = 64
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        var band = [UInt8](repeating: 0, count: sampleW * sampleRows * 4)
+        guard let ctx = CGContext(
+            data: &band,
+            width: sampleW,
+            height: sampleRows,
+            bitsPerComponent: 8,
+            bytesPerRow: sampleW * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        ctx.interpolationQuality = .medium
+        ctx.draw(topCrop, in: CGRect(x: 0, y: 0, width: sampleW, height: sampleRows))
+
+        let outPixels = HeroTopEdgeSynthesizer.synthesizeWeightedStrip(
+            topBandRGBA: band,
+            width: sampleW,
+            rows: sampleRows,
+            outputHeight: outH
+        )
+        guard outPixels.count == sampleW * outH * 4 else { return nil }
+        let providerData = Data(outPixels) as CFData
+        guard let provider = CGDataProvider(data: providerData) else { return nil }
+        return CGImage(
+            width: sampleW,
+            height: outH,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: sampleW * 4,
+            space: colorSpace,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: true,
+            intent: .defaultIntent
+        )
+    }
+}
+
 public struct PersonAvatarView: View {
     @Environment(\.colorScheme) private var colorScheme
     public let server: EmbyServerConfig?

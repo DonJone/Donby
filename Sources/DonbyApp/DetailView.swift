@@ -91,34 +91,11 @@ public struct DetailView: View {
                 canvasCol
                     .ignoresSafeArea(.container, edges: .top)
 
-                // Static color-matched ambient blur backdrop behind the top of ScrollView:
-                // hidden behind the crisp hero at rest, smoothly revealed on pull-down overscroll with zero zoom or jitter.
-                MediaArtworkView(
-                    server: effectiveDetailServer,
-                    item: item,
-                    kind: .backdrop,
-                    maxWidth: 320,
-                    alignment: .top
-                )
-                .frame(width: viewportGeo.size.width, height: 240)
-                .scaleEffect(1.18)
-                .blur(radius: 44)
-                .saturation(1.15)
-                .opacity(appState.isLightMode ? 0.78 : 0.85)
-                .mask(
-                    LinearGradient(
-                        stops: [
-                            .init(color: .white, location: 0.0),
-                            .init(color: .white, location: 0.55),
-                            .init(color: .clear, location: 1.0)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .frame(width: viewportGeo.size.width, height: 240)
-                .clipped()
-                .allowsHitTesting(false)
+                // Static weighted top-edge color-extension strip (#03 enhanced):
+                // hidden behind the crisp hero at rest; smoothly revealed on pull-down overscroll with zero zoom or jitter.
+                HeroTopEdgeBackdropView(server: effectiveDetailServer, item: item)
+                    .frame(width: viewportGeo.size.width, height: 240)
+                    .allowsHitTesting(false)
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
@@ -145,7 +122,6 @@ public struct DetailView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(canvasCol)
                     }
-                    .padding(.top, appState.isWindowFullScreen ? 0 : -28)
                 }
                 .scrollContentBackground(.hidden)
                 .ignoresSafeArea(.container, edges: .top)
