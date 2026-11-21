@@ -105,6 +105,19 @@ public struct PlayerView: View {
     @State private var subtitleStyleRevision: Int = 0
     @State private var isAdjustingSubtitleLayout: Bool = false
     @State private var showMoreSubtitleOptions: Bool = false
+    @State private var isAutoAligningSubtitle: Bool = false
+    @State private var lastAutoAlignSummary: String? = nil
+    @State private var lastSubtitleAlignUndo: SubtitleAlignUndoState? = nil
+    @State private var secondarySubtitleTimeScale: Double = 1.0
+    @State private var isSecondaryAlignedToPrimary: Bool = false
+
+    private struct SubtitleAlignUndoState {
+        let primaryDelay: Double
+        let secondaryDelay: Double
+        let secondaryTimeScale: Double
+        let wasSecondaryAligned: Bool
+        let label: String
+    }
 
     // Use `.default` RunLoop mode so timers automatically pause during macOS NSMenu `.eventTracking`,
     // preventing 0.25s body re-evaluations from flickering open subtitle/audio/speed dropdown menus.
@@ -1606,24 +1619,101 @@ public struct PlayerView: View {
                             }
 
                             HStack(spacing: 6) {
-                                Text("延迟 \(String(format: "%+.1fs", appState.subtitleStyle.primaryDelaySeconds))")
+                                Text("延迟 \(Self.formatSubtitleDelay(appState.subtitleStyle.primaryDelaySeconds))")
                                     .font(.system(size: 11.5, weight: .medium))
                                     .foregroundStyle(.white.opacity(0.9))
                                 Spacer()
-                                Button("-0.5s") { appState.subtitleStyle.primaryDelaySeconds = max(-30, appState.subtitleStyle.primaryDelaySeconds - 0.5) }.controlSize(.mini)
+                                Button("-0.5s") { appState.subtitleStyle.primaryDelaySeconds = max(-120, appState.subtitleStyle.primaryDelaySeconds - 0.5) }.controlSize(.mini)
                                 Button("0") { appState.subtitleStyle.primaryDelaySeconds = 0 }.controlSize(.mini)
-                                Button("+0.5s") { appState.subtitleStyle.primaryDelaySeconds = min(30, appState.subtitleStyle.primaryDelaySeconds + 0.5) }.controlSize(.mini)
+                                Button("+0.5s") { appState.subtitleStyle.primaryDelaySeconds = min(120, appState.subtitleStyle.primaryDelaySeconds + 0.5) }.controlSize(.mini)
                             }
 
                             if activeSecondarySubtitleSelection != .off {
                                 HStack(spacing: 6) {
-                                    Text("副延迟 \(String(format: "%+.1fs", appState.subtitleStyle.secondaryDelaySeconds))")
+                                    Text("副延迟 \(Self.formatSubtitleDelay(appState.subtitleStyle.secondaryDelaySeconds))")
                                         .font(.system(size: 11.5, weight: .medium))
                                         .foregroundStyle(.white.opacity(0.8))
                                     Spacer()
-                                    Button("-0.5s") { appState.subtitleStyle.secondaryDelaySeconds = max(-30, appState.subtitleStyle.secondaryDelaySeconds - 0.5) }.controlSize(.mini)
+                                    Button("-0.5s") { appState.subtitleStyle.secondaryDelaySeconds = max(-120, appState.subtitleStyle.secondaryDelaySeconds - 0.5) }.controlSize(.mini)
                                     Button("0") { appState.subtitleStyle.secondaryDelaySeconds = 0 }.controlSize(.mini)
-                                    Button("+0.5s") { appState.subtitleStyle.secondaryDelaySeconds = min(30, appState.subtitleStyle.secondaryDelaySeconds + 0.5) }.controlSize(.mini)
+                                    Button("+0.5s") { appState.subtitleStyle.secondaryDelaySeconds = min(120, appState.subtitleStyle.secondaryDelaySeconds + 0.5) }.controlSize(.mini)
+                                }
+                            }
+
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(spacing: 6) {
+                                    Button {
+                                        runAutoAlignAudioToSubtitle()
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            if isAutoAligningSubtitle {
+                                                ProgressView().controlSize(.mini)
+                                            } else {
+                                                Image(systemName: "waveform.badge.magnifyingglass")
+                                            }
+                                            Text("字音对齐")
+                                        }
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(.white)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 6)
+                                        .background(Color.white.opacity(activeSubtitleSelection == .off ? 0.04 : 0.11))
+                                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(activeSubtitleSelection == .off || isAutoAligningSubtitle || playerHandle == nil)
+                                    .help("使用内置 Silero VAD 语音识别最近 60 秒人声并自动校准字幕延迟")
+
+                                    if activeSecondarySubtitleSelection != .off {
+                                        Button {
+                                            runAutoAlignDualSubtitles()
+                                        } label: {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "arrow.left.arrow.right")
+                                                Text("双字对齐")
+                                            }
+                                            .font(.system(size: 11, weight: .medium))
+                                            .foregroundStyle(.white)
+                                            .frame(maxWidth: .infinity)
+                                            .padding(.vertical, 6)
+                                            .background(Color.white.opacity(activeSubtitleSelection == .off ? 0.04 : 0.11))
+                                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                        }
+                                        .buttonStyle(.plain)
+                                        .disabled(activeSubtitleSelection == .off || isAutoAligningSubtitle || playerHandle == nil)
+                                        .help("自动匹配主/副字幕时间轴偏移并检测 23.976/25fps 帧率漂移")
+                                    }
+
+                                    if lastSubtitleAlignUndo != nil {
+                                        Button("撤销") {
+                                            undoLastSubtitleAlignment()
+                                        }
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(appState.accentColor)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 6)
+                                        .background(Color.white.opacity(0.08))
+                                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+
+                                if let summary = lastAutoAlignSummary {
+                                    HStack(spacing: 6) {
+                                        Text(summary)
+                                            .font(.system(size: 10.5))
+                                            .foregroundStyle(.white.opacity(0.68))
+                                            .lineLimit(2)
+                                        Spacer()
+                                        if abs(secondarySubtitleTimeScale - 1.0) > 5e-4 {
+                                            Button("重置速率") {
+                                                resetSecondarySubtitleTimeScale()
+                                            }
+                                            .font(.system(size: 10, weight: .medium))
+                                            .buttonStyle(.plain)
+                                            .foregroundStyle(appState.accentColor)
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -2338,6 +2428,11 @@ public struct PlayerView: View {
         displayDownloadSpeedMBs = 0.0
         bufferedAheadSeconds = 0
         skipBannerLabel = nil
+        isAutoAligningSubtitle = false
+        lastAutoAlignSummary = nil
+        lastSubtitleAlignUndo = nil
+        secondarySubtitleTimeScale = 1.0
+        isSecondaryAlignedToPrimary = false
         guard activeHandle != nil || turboToClose != nil else { return }
         Task.detached(priority: .userInitiated) {
             if let handle = activeHandle {
@@ -2807,6 +2902,8 @@ public struct PlayerView: View {
     private func disableSecondarySubtitle() {
         activeSecondarySubtitleSelection = .off
         secondaryLocalSubtitleName = nil
+        secondarySubtitleTimeScale = 1.0
+        isSecondaryAlignedToPrimary = false
         appState.recordSecondarySubtitleChoice(
             serverId: session.server.id,
             item: currentItem,
@@ -2824,6 +2921,8 @@ public struct PlayerView: View {
             disableSecondarySubtitle()
         case .embedded(let avIdx):
             secondaryLocalSubtitleName = nil
+            secondarySubtitleTimeScale = 1.0
+            isSecondaryAlignedToPrimary = false
             activeSecondarySubtitleSelection = .embedded(avStreamIndex: avIdx)
             appState.recordSecondarySubtitleChoice(
                 serverId: session.server.id,
@@ -2882,6 +2981,8 @@ public struct PlayerView: View {
                 guard self.activePlaybackGeneration == expectedGeneration else { return }
                 if let handle = self.playerHandle {
                     if asSecondary {
+                        self.secondarySubtitleTimeScale = 1.0
+                        self.isSecondaryAlignedToPrimary = false
                         dk_player_load_secondary_external_subtitle(handle, text, isAss)
                     } else {
                         dk_player_load_external_subtitle(handle, text, isAss)
@@ -2931,6 +3032,8 @@ public struct PlayerView: View {
         if let handle = playerHandle {
             if asSecondary {
                 secondaryLocalSubtitleName = url.lastPathComponent
+                secondarySubtitleTimeScale = 1.0
+                isSecondaryAlignedToPrimary = false
                 activeSecondarySubtitleSelection = .localExternal(url: url)
                 dk_player_load_secondary_external_subtitle(handle, text, isAss)
             } else {
@@ -2962,6 +3065,193 @@ public struct PlayerView: View {
                 appState.showToast("\(tag): \(url.lastPathComponent) (\(decoded.encoding.rawValue))", icon: "captions.bubble.fill")
             }
         }
+    }
+
+    private static func formatSubtitleDelay(_ seconds: Double) -> String {
+        let roundedHalf = (seconds * 2.0).rounded() / 2.0
+        if abs(seconds - roundedHalf) < 0.015 {
+            return String(format: "%+.1fs", seconds)
+        }
+        return String(format: "%+.2fs", seconds)
+    }
+
+    private static func snapshotSubtitleIntervals(handle: OpaquePointer, isSecondary: Bool) -> [SubtitleCueInterval] {
+        let count = Int(dk_player_get_subtitle_intervals(handle, isSecondary, nil, 0))
+        guard count > 0 else { return [] }
+        let capped = min(count, 50_000)
+        var raw = [DKSubtitleInterval](repeating: DKSubtitleInterval(start_sec: 0, end_sec: 0), count: capped)
+        let copied = Int(raw.withUnsafeMutableBufferPointer { buf in
+            dk_player_get_subtitle_intervals(handle, isSecondary, buf.baseAddress, Int32(capped))
+        })
+        guard copied > 0 else { return [] }
+        var out: [SubtitleCueInterval] = []
+        out.reserveCapacity(copied)
+        for i in 0..<copied {
+            out.append(SubtitleCueInterval(startSeconds: raw[i].start_sec, endSeconds: raw[i].end_sec))
+        }
+        return out
+    }
+
+    private func runAutoAlignAudioToSubtitle() {
+        guard let handle = playerHandle, !isAutoAligningSubtitle, activeSubtitleSelection != .off else { return }
+
+        // Snapshot audio PCM & subtitle intervals synchronously on MainActor while handle is guaranteed alive
+        let availSamples = Int(dk_player_copy_recent_audio_16k(handle, nil, 0, nil))
+        guard availSamples >= SileroVAD.sampleRate * 6 else {
+            appState.showToast("已捕获音频不足 6 秒，请播放一小段对白后再点字音对齐", icon: "waveform.badge.magnifyingglass", isError: true)
+            return
+        }
+        var pcm = [Float](repeating: 0, count: availSamples)
+        var audioStartPTS: Double = 0
+        let copied = Int(pcm.withUnsafeMutableBufferPointer { buf in
+            dk_player_copy_recent_audio_16k(handle, buf.baseAddress, Int32(availSamples), &audioStartPTS)
+        })
+        if copied < pcm.count { pcm.removeLast(pcm.count - max(0, copied)) }
+
+        let primaryCues = Self.snapshotSubtitleIntervals(handle: handle, isSecondary: false)
+        guard primaryCues.count >= 4 else {
+            appState.showToast("当前窗口内可用字幕不足，请播放约 15 秒或使用外挂字幕后重试", icon: "captions.bubble", isError: true)
+            return
+        }
+
+        let generation = activePlaybackGeneration
+        let curPrimaryDelay = appState.subtitleStyle.primaryDelaySeconds
+        let curSecondaryDelay = appState.subtitleStyle.secondaryDelaySeconds
+        let curSecScale = secondarySubtitleTimeScale
+        let carrySecondary = (activeSecondarySubtitleSelection != .off && isSecondaryAlignedToPrimary)
+        isAutoAligningSubtitle = true
+
+        Task.detached(priority: .userInitiated) {
+            do {
+                let outcome = try SubtitleAutoAligner.alignSubtitleToAudio(
+                    pcm16k: pcm,
+                    audioStartPTS: audioStartPTS,
+                    cues: primaryCues,
+                    currentPrimaryDelay: curPrimaryDelay,
+                    maxShiftSeconds: 30.0
+                )
+                await MainActor.run {
+                    guard self.activePlaybackGeneration == generation else { return }
+                    self.isAutoAligningSubtitle = false
+                    switch outcome {
+                    case .aligned(let res):
+                        self.lastSubtitleAlignUndo = SubtitleAlignUndoState(
+                            primaryDelay: curPrimaryDelay,
+                            secondaryDelay: curSecondaryDelay,
+                            secondaryTimeScale: curSecScale,
+                            wasSecondaryAligned: self.isSecondaryAlignedToPrimary,
+                            label: "字音对齐"
+                        )
+                        let delta = res.suggestedPrimaryDelaySeconds - curPrimaryDelay
+                        self.appState.subtitleStyle.primaryDelaySeconds = res.suggestedPrimaryDelaySeconds
+                        if carrySecondary {
+                            self.appState.subtitleStyle.secondaryDelaySeconds = ((curSecondaryDelay + delta) * 100.0).rounded() / 100.0
+                        }
+                        let pct = Int((res.confidence * 100.0).rounded())
+                        let msg = String(format: "字音已对齐 %+.2fs · 置信度 %d%%", res.suggestedPrimaryDelaySeconds, pct)
+                        self.lastAutoAlignSummary = msg
+                        self.appState.showToast(msg, icon: "waveform.badge.magnifyingglass")
+                    case .insufficientData(let reason):
+                        self.appState.showToast(reason, icon: "exclamationmark.triangle.fill", isError: true)
+                    case .lowConfidence(_, _, let reason):
+                        self.appState.showToast(reason, icon: "exclamationmark.triangle.fill", isError: true)
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    guard self.activePlaybackGeneration == generation else { return }
+                    self.isAutoAligningSubtitle = false
+                    self.appState.showToast(error.localizedDescription, icon: "exclamationmark.triangle.fill", isError: true)
+                }
+            }
+        }
+    }
+
+    private func runAutoAlignDualSubtitles() {
+        guard let handle = playerHandle,
+              !isAutoAligningSubtitle,
+              activeSubtitleSelection != .off,
+              activeSecondarySubtitleSelection != .off else { return }
+
+        let primaryCues = Self.snapshotSubtitleIntervals(handle: handle, isSecondary: false)
+        let secondaryCues = Self.snapshotSubtitleIntervals(handle: handle, isSecondary: true)
+        guard primaryCues.count >= 5, secondaryCues.count >= 5 else {
+            appState.showToast("已缓冲主/副字幕不足 (主 \(primaryCues.count) / 副 \(secondaryCues.count))，请播放约 15 秒后再试", icon: "captions.bubble", isError: true)
+            return
+        }
+
+        let generation = activePlaybackGeneration
+        let curPrimaryDelay = appState.subtitleStyle.primaryDelaySeconds
+        let curSecondaryDelay = appState.subtitleStyle.secondaryDelaySeconds
+        let curSecScale = secondarySubtitleTimeScale
+        let prevAligned = isSecondaryAlignedToPrimary
+        isAutoAligningSubtitle = true
+
+        Task.detached(priority: .userInitiated) {
+            let outcome = SubtitleAutoAligner.alignDualSubtitles(
+                primaryCues: primaryCues,
+                secondaryCues: secondaryCues,
+                currentPrimaryDelay: curPrimaryDelay,
+                maxShiftSeconds: 120.0
+            )
+            await MainActor.run {
+                guard self.activePlaybackGeneration == generation else { return }
+                self.isAutoAligningSubtitle = false
+                guard let currentHandle = self.playerHandle else { return }
+                switch outcome {
+                case .aligned(let res):
+                    self.lastSubtitleAlignUndo = SubtitleAlignUndoState(
+                        primaryDelay: curPrimaryDelay,
+                        secondaryDelay: curSecondaryDelay,
+                        secondaryTimeScale: curSecScale,
+                        wasSecondaryAligned: prevAligned,
+                        label: "双字对齐"
+                    )
+                    dk_player_set_secondary_subtitle_time_scale(currentHandle, res.secondaryTimeScale)
+                    self.secondarySubtitleTimeScale = res.secondaryTimeScale
+                    self.isSecondaryAlignedToPrimary = true
+                    self.appState.subtitleStyle.secondaryDelaySeconds = res.suggestedSecondaryDelaySeconds
+                    self.applyKernelSubtitleStyle()
+                    let msg: String
+                    if res.detectedFrameRateDrift {
+                        msg = String(format: "双字已对齐 %+.2fs · 速率 %.4fx", res.suggestedSecondaryDelaySeconds, res.secondaryTimeScale)
+                    } else {
+                        msg = String(format: "双字已对齐 %+.2fs · 匹配 %d 条", res.suggestedSecondaryDelaySeconds, res.matchedPairCount)
+                    }
+                    self.lastAutoAlignSummary = msg
+                    self.appState.showToast(msg, icon: "arrow.left.arrow.right")
+                case .insufficientData(let reason):
+                    self.appState.showToast(reason, icon: "exclamationmark.triangle.fill", isError: true)
+                case .lowConfidence(let reason):
+                    self.appState.showToast(reason, icon: "exclamationmark.triangle.fill", isError: true)
+                }
+            }
+        }
+    }
+
+    private func undoLastSubtitleAlignment() {
+        guard let undo = lastSubtitleAlignUndo else { return }
+        lastSubtitleAlignUndo = nil
+        lastAutoAlignSummary = nil
+        secondarySubtitleTimeScale = undo.secondaryTimeScale
+        isSecondaryAlignedToPrimary = undo.wasSecondaryAligned
+        appState.subtitleStyle.primaryDelaySeconds = undo.primaryDelay
+        appState.subtitleStyle.secondaryDelaySeconds = undo.secondaryDelay
+        if let handle = playerHandle {
+            dk_player_set_secondary_subtitle_time_scale(handle, undo.secondaryTimeScale)
+            applyKernelSubtitleStyle()
+        }
+        appState.showToast("已撤销\(undo.label)", icon: "arrow.uturn.backward")
+    }
+
+    private func resetSecondarySubtitleTimeScale() {
+        secondarySubtitleTimeScale = 1.0
+        if let handle = playerHandle {
+            dk_player_set_secondary_subtitle_time_scale(handle, 1.0)
+            applyKernelSubtitleStyle()
+        }
+        lastAutoAlignSummary = "副字幕速率已重置为 1.0000x"
+        appState.showToast("副字幕速率已重置为 1.0x", icon: "arrow.counterclockwise")
     }
 
     private func playAdjacentEpisode(offset: Int) {

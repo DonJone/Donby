@@ -221,6 +221,14 @@ struct DKPlayer {
     std::atomic<int64_t> audio_steady_start_ns{0};
     std::atomic<bool> audio_hal_disabled{false};
 
+    // Contiguous recent 16kHz mono speech-focused PCM ring for Silero VAD subtitle-audio alignment
+    static constexpr size_t kVadRingMaxSamples = 60 * 16000; // 60 seconds (~3.84 MB)
+    std::mutex vad_audio_mtx;
+    std::deque<float> vad_audio_ring;
+    double vad_audio_end_pts{-1.0};
+    float vad_decim_accum{0.0f};
+    int vad_decim_count{0};
+
     // Bounded recent subtitle packet ring buffer for instant zero-seek track switching
     std::mutex sub_hist_mtx;
     std::deque<AVPacket*> sub_pkt_history;
@@ -274,6 +282,7 @@ struct DKPlayer {
     uint64_t paired_layout_hash{0};
     int sub_dirty_y0{0};
     int sub_dirty_y1{0};
+    double secondary_time_scale{1.0};
     DKSubtitleStyleConfig sub_style{1.0f, 2.2f, 92.0f, 0.0, 0.0, 0, false, false, true, true, 0.60f, 7.0f, true, 0, 0};
     struct OriginalAssStyle {
         std::string font_name;
@@ -316,6 +325,77 @@ struct DKPlayer {
     int64_t last_speed_bytes{0};
     std::chrono::steady_clock::time_point last_speed_time{std::chrono::steady_clock::now()};
 };
+
+static void dk_clear_vad_audio_ring(DKPlayer* player) {
+    if (!player) return;
+    std::lock_guard<std::mutex> lk(player->vad_audio_mtx);
+    player->vad_audio_ring.clear();
+    player->vad_audio_end_pts = -1.0;
+    player->vad_decim_accum = 0.0f;
+    player->vad_decim_count = 0;
+}
+
+static void dk_push_vad_audio_16k(
+    DKPlayer* player,
+    const AVFrame* frame,
+    const float* stereo_48k,
+    int stereo_samples,
+    double pts
+) {
+    if (!player || !stereo_48k || stereo_samples <= 0) return;
+
+    // Prefer Center-channel weighted blend on 5.1/7.1 48kHz FLTP cinema streams for +10-15dB dialogue SNR
+    const float* fc_plane = nullptr;
+    const float* fl_plane = nullptr;
+    const float* fr_plane = nullptr;
+    if (frame &&
+        frame->sample_rate == 48000 &&
+        frame->format == AV_SAMPLE_FMT_FLTP &&
+        frame->ch_layout.nb_channels >= 5 &&
+        frame->nb_samples == stereo_samples) {
+        const int fc_idx = av_channel_layout_index_from_channel(&frame->ch_layout, AV_CHAN_FRONT_CENTER);
+        const int fl_idx = av_channel_layout_index_from_channel(&frame->ch_layout, AV_CHAN_FRONT_LEFT);
+        const int fr_idx = av_channel_layout_index_from_channel(&frame->ch_layout, AV_CHAN_FRONT_RIGHT);
+        if (fc_idx >= 0 && fc_idx < frame->ch_layout.nb_channels &&
+            fl_idx >= 0 && fl_idx < frame->ch_layout.nb_channels &&
+            fr_idx >= 0 && fr_idx < frame->ch_layout.nb_channels &&
+            frame->data[fc_idx] && frame->data[fl_idx] && frame->data[fr_idx]) {
+            fc_plane = reinterpret_cast<const float*>(frame->data[fc_idx]);
+            fl_plane = reinterpret_cast<const float*>(frame->data[fl_idx]);
+            fr_plane = reinterpret_cast<const float*>(frame->data[fr_idx]);
+        }
+    }
+
+    std::lock_guard<std::mutex> lk(player->vad_audio_mtx);
+    if (pts >= 0.0 && player->vad_audio_end_pts >= 0.0 && std::fabs(pts - player->vad_audio_end_pts) > 0.35) {
+        player->vad_audio_ring.clear();
+        player->vad_decim_accum = 0.0f;
+        player->vad_decim_count = 0;
+    }
+
+    float accum = player->vad_decim_accum;
+    int cnt = player->vad_decim_count;
+    for (int i = 0; i < stereo_samples; i++) {
+        const float mono = fc_plane
+            ? (0.78f * fc_plane[i] + 0.11f * (fl_plane[i] + fr_plane[i]))
+            : (0.5f * (stereo_48k[i * 2] + stereo_48k[i * 2 + 1]));
+        accum += mono;
+        if (++cnt == 3) {
+            player->vad_audio_ring.push_back(accum * (1.0f / 3.0f));
+            accum = 0.0f;
+            cnt = 0;
+        }
+    }
+    player->vad_decim_accum = accum;
+    player->vad_decim_count = cnt;
+
+    while (player->vad_audio_ring.size() > DKPlayer::kVadRingMaxSamples) {
+        player->vad_audio_ring.pop_front();
+    }
+    if (pts >= 0.0) {
+        player->vad_audio_end_pts = pts + static_cast<double>(stereo_samples - cnt) / 48000.0;
+    }
+}
 
 static inline int64_t dk_steady_now_ns() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -1359,6 +1439,7 @@ static void dk_audio_decode_worker(DKPlayer* player) {
 
             if (converted > 0) {
                 pcm.resize(converted * 2);
+                dk_push_vad_audio_16k(player, frame, pcm.data(), converted, pts);
                 {
                     std::lock_guard<std::mutex> lock(player->audio_queue_mtx);
                     player->audio_chunks.push_back({ std::move(pcm), pts, 0 });
@@ -2501,6 +2582,7 @@ static void dk_demux_worker(DKPlayer* player) {
                 player->fallback_audio_clock.store(target_sec);
                 player->fallback_clock_ns.store(dk_steady_now_ns(), std::memory_order_relaxed);
             }
+            dk_clear_vad_audio_ring(player);
             player->audio_rebuffer_count.store(0, std::memory_order_relaxed);
             player->audio_start_fail_count.store(0, std::memory_order_relaxed);
             player->audio_hal_disabled.store(false, std::memory_order_relaxed);
@@ -3458,6 +3540,7 @@ void dk_player_close(DKPlayer* player) {
         player->audio_chunks.clear();
         player->buffered_audio_samples.store(0);
     }
+    dk_clear_vad_audio_ring(player);
 
     if (player->swr_ctx) {
         swr_free(&player->swr_ctx);
@@ -3493,6 +3576,7 @@ void dk_player_close(DKPlayer* player) {
         player->secondary_pgs_cues.clear();
         player->has_bitmap_subs = false;
         player->secondary_has_bitmap_subs = false;
+        player->secondary_time_scale = 1.0;
     }
 
     if (player->video_codec_ctx) { avcodec_free_context(&player->video_codec_ctx); }
@@ -3709,6 +3793,7 @@ void dk_player_select_track(DKPlayer* player, int track_type, int stream_index) 
             player->audio_underrun_samples.store(0);
             player->fallback_audio_clock.store(cur_pts);
         }
+        dk_clear_vad_audio_ring(player);
         player->ext_clock_base_pts.store(cur_pts);
         player->current_pos_sec.store(cur_pts);
 
@@ -3788,6 +3873,7 @@ void dk_player_select_secondary_subtitle_track(DKPlayer* player, int stream_inde
     {
         std::lock_guard<std::mutex> slk(player->ass_mtx);
         player->secondary_sub_stream_idx.store(stream_index);
+        player->secondary_time_scale = 1.0;
         dk_open_subtitle_decoder_for_slot_locked(player, stream_index, true);
     }
     if (stream_index >= 0) {
@@ -4002,6 +4088,7 @@ void dk_player_load_secondary_external_subtitle(DKPlayer* player, const char* co
     player->secondary_codec_private.clear();
     player->secondary_pgs_cues.clear();
     player->secondary_has_bitmap_subs = false;
+    player->secondary_time_scale = 1.0;
     player->rendered_secondary_pgs_gen = 0;
     player->sub_rgba_buf.clear();
     player->sub_last_non_empty = false;
@@ -4125,6 +4212,108 @@ bool dk_player_get_subtitle_vertical_bounds(DKPlayer* player, int32_t* out_y0, i
     *out_y1 = player->sub_dirty_y1;
     *out_canvas_h = player->ass_canvas_h;
     return true;
+}
+
+int32_t dk_player_copy_recent_audio_16k(DKPlayer* player, float* out_pcm, int32_t max_samples, double* out_start_pts) {
+    DKReaderGuard guard(player);
+    if (!guard) return 0;
+    std::lock_guard<std::mutex> lk(player->vad_audio_mtx);
+    const size_t avail = player->vad_audio_ring.size();
+    if (!out_pcm || max_samples <= 0) {
+        if (out_start_pts) {
+            *out_start_pts = (avail > 0 && player->vad_audio_end_pts >= 0.0)
+                ? (player->vad_audio_end_pts - static_cast<double>(avail) / 16000.0)
+                : 0.0;
+        }
+        return static_cast<int32_t>(std::min<size_t>(avail, static_cast<size_t>(INT32_MAX)));
+    }
+    const size_t n = std::min<size_t>(avail, static_cast<size_t>(max_samples));
+    const size_t start_idx = avail - n;
+    for (size_t i = 0; i < n; i++) {
+        out_pcm[i] = player->vad_audio_ring[start_idx + i];
+    }
+    if (out_start_pts) {
+        *out_start_pts = (n > 0 && player->vad_audio_end_pts >= 0.0)
+            ? (player->vad_audio_end_pts - static_cast<double>(n) / 16000.0)
+            : 0.0;
+    }
+    return static_cast<int32_t>(n);
+}
+
+static bool dk_ass_text_is_vector_drawing(const char* text) {
+    if (!text) return false;
+    for (const char* p = text; *p; p++) {
+        if (p[0] == '\\' && p[1] == 'p' && p[2] >= '1' && p[2] <= '9') {
+            return true;
+        }
+    }
+    return false;
+}
+
+int32_t dk_player_get_subtitle_intervals(DKPlayer* player, bool is_secondary, DKSubtitleInterval* out_intervals, int32_t max_count) {
+    DKReaderGuard guard(player);
+    if (!guard) return 0;
+    std::vector<DKSubtitleInterval> items;
+    {
+        std::lock_guard<std::mutex> slk(player->ass_mtx);
+        const bool is_bitmap = is_secondary ? player->secondary_has_bitmap_subs : player->has_bitmap_subs;
+        if (is_bitmap) {
+            const auto& cues = is_secondary ? player->secondary_pgs_cues : player->pgs_cues;
+            items.reserve(cues.size());
+            for (const auto& cue : cues) {
+                if (!cue.rects.empty() && cue.end_sec > cue.start_sec) {
+                    items.push_back({ cue.start_sec, cue.end_sec });
+                }
+            }
+        } else {
+            const ASS_Track* tr = is_secondary ? player->secondary_ass_track : player->ass_track;
+            if (tr && tr->events && tr->n_events > 0) {
+                items.reserve(static_cast<size_t>(tr->n_events));
+                for (int i = 0; i < tr->n_events; i++) {
+                    const ASS_Event& ev = tr->events[i];
+                    if (ev.Duration <= 0) continue;
+                    if (dk_ass_text_is_vector_drawing(ev.Text)) continue;
+                    const double s = static_cast<double>(ev.Start) * 0.001;
+                    const double e = static_cast<double>(ev.Start + ev.Duration) * 0.001;
+                    if (e > s && s >= 0.0) {
+                        items.push_back({ s, e });
+                    }
+                }
+            }
+        }
+    }
+    if (!out_intervals || max_count <= 0) {
+        return static_cast<int32_t>(std::min<size_t>(items.size(), static_cast<size_t>(INT32_MAX)));
+    }
+    std::sort(items.begin(), items.end(), [](const DKSubtitleInterval& a, const DKSubtitleInterval& b) {
+        return a.start_sec < b.start_sec;
+    });
+    const size_t n = std::min<size_t>(items.size(), static_cast<size_t>(max_count));
+    if (n > 0) {
+        std::memcpy(out_intervals, items.data(), n * sizeof(DKSubtitleInterval));
+    }
+    return static_cast<int32_t>(n);
+}
+
+void dk_player_set_secondary_subtitle_time_scale(DKPlayer* player, double scale) {
+    DKReaderGuard guard(player);
+    if (!guard) return;
+    const double safe_scale = (std::isfinite(scale) && scale >= 0.80 && scale <= 1.25) ? scale : 1.0;
+    std::lock_guard<std::mutex> slk(player->ass_mtx);
+    if (std::fabs(player->secondary_time_scale - safe_scale) < 1e-9) return;
+    player->secondary_time_scale = safe_scale;
+    player->sub_last_non_empty = false;
+    player->sub_style_dirty = true;
+    player->paired_layout_hash = 0;
+    player->rendered_secondary_pgs_gen = 0;
+    player->sub_serial++;
+}
+
+double dk_player_get_secondary_subtitle_time_scale(DKPlayer* player) {
+    DKReaderGuard guard(player);
+    if (!guard) return 1.0;
+    std::lock_guard<std::mutex> slk(player->ass_mtx);
+    return player->secondary_time_scale;
 }
 
 CVPixelBufferRef dk_player_acquire_frame(DKPlayer* player, double* out_pts, DKGpuColorUniforms* out_color) {
@@ -5762,7 +5951,9 @@ static bool dk_update_subtitle_rgba_locked(
 
     *out_serial = player->sub_serial;
     const double pri_pts = pts - player->sub_style.primary_delay_sec;
-    const double sec_pts = pts - player->sub_style.secondary_delay_sec;
+    const double sec_scale = (player->secondary_time_scale >= 0.80 && player->secondary_time_scale <= 1.25)
+        ? player->secondary_time_scale : 1.0;
+    const double sec_pts = (pts - player->sub_style.secondary_delay_sec) / sec_scale;
 
     const bool canvas_resized = (player->ass_canvas_w != canvas_w || player->ass_canvas_h != canvas_h);
     if (canvas_resized) {

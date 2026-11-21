@@ -1,12 +1,12 @@
 # Module Map: Playback Kernel (`DonbyKernelC`)
 
-> Last synced: `v1.4.12`. Load this doc for FFmpeg demuxing, VideoToolbox decoding, AudioQueue A/V sync, seek flush, rebuffer cushions, and libass/PGS subtitles.
+> Last synced: `v1.4.17`. Load this doc for FFmpeg demuxing, VideoToolbox decoding, AudioQueue A/V sync, seek flush, rebuffer cushions, and libass/PGS subtitles.
 
 ## 1. File Inventory & Core Symbols
-- `Sources/DonbyKernelC/include/donby_kernel.h` (~195L)
-  - Public C ABI bridging Swift <-> C++: `dk_player_create/destroy`, `dk_player_open_with_tracks`, `dk_player_set_custom_io`, `dk_player_play/pause/seek`, `dk_player_acquire_frame`, `dk_player_sync_subtitle_rgba`, `dk_player_should_yield_read`, subtitle/track setters, telemetry getters.
-- `Sources/DonbyKernelC/dk_engine.cpp` (~6160L)
-  - Core struct `DKPlayer`: FFmpeg contexts (`AVFormatContext`, `AVCodecContext`, `SwrContext`), custom `AVIOContext`, `AudioQueueRef`, `ASS_Library`/`ASS_Renderer`/primary+secondary `ASS_Track`, `VideoFrameEntry` queue, `AudioChunk` queue, `PgsCue` queue.
+- `Sources/DonbyKernelC/include/donby_kernel.h` (~204L)
+  - Public C ABI bridging Swift <-> C++: `dk_player_create/destroy`, `dk_player_open_with_tracks`, `dk_player_set_custom_io`, `dk_player_play/pause/seek`, `dk_player_acquire_frame`, `dk_player_sync_subtitle_rgba`, `dk_player_should_yield_read`, subtitle/track setters, telemetry getters, plus VAD/alignment bridges (`DKSubtitleInterval`, `dk_player_copy_recent_audio_16k`, `dk_player_get_subtitle_intervals`, `dk_player_set_secondary_subtitle_time_scale`, `dk_player_get_secondary_subtitle_time_scale`).
+- `Sources/DonbyKernelC/dk_engine.cpp` (~6350L)
+  - Core struct `DKPlayer`: FFmpeg contexts (`AVFormatContext`, `AVCodecContext`, `SwrContext`), custom `AVIOContext`, `AudioQueueRef`, `ASS_Library`/`ASS_Renderer`/primary+secondary `ASS_Track`, `VideoFrameEntry` queue, `AudioChunk` queue, `PgsCue` queue, `vad_audio_ring` (`60s` @ `16kHz` mono under dedicated `vad_audio_mtx`), and `secondary_time_scale` (`1.0` default non-destructive affine timeline scale).
   - Key RAII & sync guards: `DKReaderGuard`, `AudioStartingGuard`, `SeekScopeGuard`.
   - Key functions:
     - `dk_check_dovi_fel(const uint8_t*, size_t)` — inline HEVC NAL 62/63 Dolby Vision RPU/FEL detector (replaced standalone `KernelRust` crate in `v1.4.12`).
@@ -38,6 +38,7 @@
   - Uses native `libass` viewport/letterbox pipeline (`dk_player_set_subtitle_viewport` -> `ass_set_margins`, `ass_set_use_margins(1)`, `ass_set_font_scale`, `ass_set_line_position`) and uncropped full-viewport PGS rendering so ASS/SRT/PGS subtitles render freely into black letterbox bars.
   - PGS pixel overrides: dark-outline-preserving HDR highlight normalization (`luma > 32` smooth ramp to 230, max `1.65x`), pale-yellow enrichment to `#FFB22E`, automatic orange-gold glyph tinting for secondary PGS tracks, and subtle outline boost.
   - Unified two-layer compositor (`DKRenderedSubLayer` + `dk_composite_dual_layers_locked`) driven by `secondary_scale` (default `0.60`), `dual_gap_px` (default `7.0`), `primary_on_top` (default `true` = CN-top / EN-bottom), and `dual_layout_mode` (`0` stacked / `1` split top+bottom).
+  - **VAD Audio Tap & Non-Destructive Secondary Subtitle Affine Timing (`v1.4.17`)**: `dk_audio_decode_worker` decimates decoded audio (3:1 with remainder carryover to `16kHz` mono, blending `0.78*FC + 0.11*(FL+FR)` on 5.1/7.1 `FLTP@48kHz` for dialogue SNR) into `vad_audio_ring` under isolated `vad_audio_mtx` (cleared on seek/audio-switch/close/`>0.35s` PTS jump). Subtitle lookup evaluates `sec_pts = (pts - secondary_delay_sec) / secondary_time_scale`, supporting `23.976 <-> 25fps` drift correction non-destructively across ASS/SRT/PGS, style rebuilds, and instant undo.
 
 ## 3. Critical Invariants & Pitfalls (DO NOT BREAK)
 1. **CVDisplayLink Thread Purity**: NEVER call `AudioQueuePrime`, `AudioQueueStart`, `dk_try_start_audio_queue_if_ready`, or blocking locks inside `dk_player_acquire_frame`. Fallback `AudioQueue` startup belongs on `dk_audio_decode_worker`.

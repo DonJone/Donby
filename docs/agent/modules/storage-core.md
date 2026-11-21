@@ -1,6 +1,6 @@
 # Module Map: Core Models, Policies & Storage (`DonbyCore`)
 
-> Last synced: `v1.4.16`. Load this doc for shared data models, `DONBY_HOME` storage path isolation, unified `DonbyAppInfo.version`, AES-256-GCM local credential vault, async file logger, subtitle encoding/transform policies, diagnostics redaction, playback health state machine, update manifest parsing, and `DonbyCoreTests`.
+> Last synced: `v1.4.17`. Load this doc for shared data models, `DONBY_HOME` storage path isolation, unified `DonbyAppInfo.version`, AES-256-GCM local credential vault, async file logger, subtitle encoding/transform/auto-alignment policies (Silero VAD + dual-subtitle aligner), diagnostics redaction, playback health state machine, update manifest parsing, and `DonbyCoreTests`.
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyCore/DonbyStoragePaths.swift` (~52L)
@@ -24,8 +24,11 @@
   - `DonbyAppInfo` (single Swift source of truth for `version` & `fallbackVersion`), `AppReleaseInfo`, `AppVersionComparator`, `GitHubReleaseDTO`, `StaticManifestDTO` (`latest.json`).
 - `Sources/DonbyCore/ServerTextParser.swift` (~306L)
   - Bulk/paste server config importer (`ParsedServerImportResult`).
+- `Sources/DonbyCore/SubtitleAutoAligner.swift` (~540L)
+  - `SileroVAD` — zero-dependency native Apple `Accelerate` (`vDSP_mmul`) inference engine for official Silero VAD v5/v6 `16kHz` weights (`Resources/silero_vad_16k.safetensors`, 1.24 MB, MIT; verified `< 1e-4` against official `silero_vad.jit` golden outputs).
+  - `SubtitleAutoAligner` — (1) `alignSubtitleToAudio` / `alignSubtitleToVADProbabilities`: onset-boosted `32ms` vectorized Pearson cross-correlation (`vDSP_dotpr`) + parabolic sub-frame peak refinement + z-score/margin confidence gate; (2) `alignDualSubtitles`: 2-stage coarse-to-fine (`0.25s -> 0.04s`) multi-window envelope cross-correlation + nearest-neighbor median refinement + cinema frame-rate drift (`23.976 <-> 25fps`, `24fps`) detection.
 - `Tests/DonbyCoreTests/DonbyCoreTests.swift`
-  - Fast `swift test` regression suite covering encoding detection, ASS tag preservation, style v1->v2 migration, secret redaction, version comparison, and bounded health recovery.
+  - Fast `swift test` regression suite covering encoding detection, ASS tag preservation, style v1->v2 migration, secret redaction, version comparison, bounded health recovery, encrypted vault tamper rejection, Silero VAD golden parity, audio-to-subtitle shift recovery, and dual-subtitle shift + FPS drift alignment.
 
 ## 2. Critical Invariants & Pitfalls (DO NOT BREAK)
 1. **`DONBY_HOME` Isolation**: Every cache/storage path in `DonbyNetwork` and `DonbyApp` MUST route through `DonbyStoragePaths` (never hardcode `FileManager.default.urls(for: .cachesDirectory, ...)` directly), so automated tests with `DONBY_HOME=$(mktemp -d)` remain 100% isolated from user data.

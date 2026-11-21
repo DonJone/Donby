@@ -70,8 +70,11 @@ if [ -f "Resources/AppIcon.icns" ]; then
     cp "Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 fi
 cp Resources/uhdnow_*.png "$APP_DIR/Contents/Resources/" 2>/dev/null || true
+if [ -f "Resources/silero_vad_16k.safetensors" ]; then
+    cp "Resources/silero_vad_16k.safetensors" "$APP_DIR/Contents/Resources/silero_vad_16k.safetensors"
+fi
 
-APP_VERSION="${DONBY_VERSION:-1.4.16}"
+APP_VERSION="${DONBY_VERSION:-1.4.17}"
 BUILD_NUMBER="${DONBY_BUILD_NUMBER:-$(date -u +%Y%m%d%H%M)}"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST

@@ -56,6 +56,11 @@ typedef struct {
 } DKChapterInfo;
 
 typedef struct {
+    double  start_sec;
+    double  end_sec;
+} DKSubtitleInterval;
+
+typedef struct {
     float   scale;
     float   border_width;
     float   vertical_pos_percent;
@@ -175,6 +180,10 @@ void      dk_player_set_subtitle_viewport(
 void      dk_player_select_secondary_subtitle_track(DKPlayer* player, int stream_index);
 void      dk_player_load_secondary_external_subtitle(DKPlayer* player, const char* content_utf8, bool is_ass);
 bool      dk_player_get_subtitle_vertical_bounds(DKPlayer* player, int32_t* out_y0, int32_t* out_y1, int32_t* out_canvas_h);
+int32_t   dk_player_copy_recent_audio_16k(DKPlayer* player, float* out_pcm, int32_t max_samples, double* out_start_pts);
+int32_t   dk_player_get_subtitle_intervals(DKPlayer* player, bool is_secondary, DKSubtitleInterval* out_intervals, int32_t max_count);
+void      dk_player_set_secondary_subtitle_time_scale(DKPlayer* player, double scale);
+double    dk_player_get_secondary_subtitle_time_scale(DKPlayer* player);
 
 int       dk_player_get_chapter_count(DKPlayer* player);
 bool      dk_player_get_chapter_info(DKPlayer* player, int ordinal, DKChapterInfo* out_info);

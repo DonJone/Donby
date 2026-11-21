@@ -1,12 +1,12 @@
 # Module Map: Build, Packaging & Release Pipeline
 
-> Last synced: `v1.4.14`. Load this doc for compiling Swift/C++, bundling dylibs, signing `/Applications/Donby.app`, DMG/ZIP packaging, channel-aware local GitHub Releases, and CI.
+> Last synced: `v1.4.17`. Load this doc for compiling Swift/C++, bundling dylibs, signing `/Applications/Donby.app`, DMG/ZIP packaging, channel-aware local GitHub Releases, and CI.
 
 ## 1. File Inventory
 - `Package.swift` — SwiftPM manifest compiling `DonbyKernelC/dk_engine.cpp` directly at `-O3` (single compilation, cached by SwiftPM, no `-ldonby_kernel` duplicate link) plus `DonbyCoreTests`.
 - `scripts/dev.sh` (~58L) — Fast local CLI wrapper (`build` / `test` / `app` / `release`) that auto-selects valid CLT SDK, uses `--build-system native` (avoiding Swift 6.4 `swiftbuild` 54s no-op cache-invalidation bug), and passes CLT `Testing.framework` search paths + isolated `DONBY_HOME`.
 - `CMakeLists.txt` + `build_kernel.sh` — Standalone mtime-cached C++20 `libdonby_kernel.a` builder (only needed for standalone C++ test harnesses; skips compile when up to date).
-- `build_app.sh` (~144L) — Incremental Release build: uses `--build-system native` + multi-core incremental `-O` (`-no-whole-module-optimization -incremental`, opt-in `DONBY_WMO=1`), skips up-to-date `AppIcon.icns`, preserves `/Applications/Donby.app` inode and cached `Contents/Frameworks/` dylibs, signs app bundle (`codesign --force --sign -`), and verifies `--deep --strict`.
+- `build_app.sh` (~147L) — Incremental Release build: uses `--build-system native` + multi-core incremental `-O` (`-no-whole-module-optimization -incremental`, opt-in `DONBY_WMO=1`), skips up-to-date `AppIcon.icns`, bundles `Resources/silero_vad_16k.safetensors` into `Contents/Resources/`, preserves `/Applications/Donby.app` inode and cached `Contents/Frameworks/` dylibs, signs app bundle (`codesign --force --sign -`), and verifies `--deep --strict`.
 - `scripts/bundle_dylibs.py` (~248L) — Batches `install_name_tool` flags per binary, reuses valid cached `@rpath` dylibs in `Contents/Frameworks/` across incremental installs, prunes stale dylibs, signs only modified dylibs in parallel, and verifies zero external Homebrew refs.
 - `scripts/generate_icon.swift` (~361L) — Programmatically renders the sculptural obsidian D monogram `AppIcon.icns`.
 - `scripts/package_dmg.sh` (~139L) — Builds `dist/Donby-<ver>-macOS-<arch>.dmg`, `.app.zip`, `latest.json`, and `SHA256SUMS.txt`, and optionally syncs `/Applications/Donby.app/Contents` in-place (`SYNC_INSTALLED_APP=1`).
