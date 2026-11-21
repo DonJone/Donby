@@ -6,7 +6,7 @@
 ## 1. Repository Overview
 - **Product**: Donby — native macOS media player (macOS 14+, Apple Silicon) for Emby / Jellyfin / UHDNow / local media.
 - **Stack**: SwiftUI + AppKit (`DonbyApp`, `DonbyCore`, `DonbyNetwork`), Metal EDR renderer (`DonbyMetalRenderer`), C++20/FFmpeg/VideoToolbox/AudioToolbox/libass playback kernel (`DonbyKernelC`).
-- **Current Version**: `1.4.23` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
+- **Current Version**: `1.4.24` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
 
 ## 2. Task-to-Module Routing Table
 

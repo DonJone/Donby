@@ -1115,12 +1115,14 @@ public struct MediaArtworkView: View {
     }
 
     public var body: some View {
-        ZStack {
+        Group {
             if let img = resolvedImage {
-                Image(decorative: img, scale: 2.0)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment)
+                Color.clear
+                    .overlay(alignment: alignment) {
+                        Image(decorative: img, scale: 2.0)
+                            .resizable()
+                            .scaledToFill()
+                    }
                     .clipped()
             } else {
                 ZStack {

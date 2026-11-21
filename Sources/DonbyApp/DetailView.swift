@@ -244,21 +244,29 @@ public struct DetailView: View {
     private func heroHeaderSection(heroHeight: CGFloat) -> some View {
         let canvasCol = appState.isLightMode ? DonbyGlassPalette.canvasLight : DonbyGlassPalette.canvasBlack
         return ZStack(alignment: .bottomLeading) {
-            // 1. Clear High-Resolution Backdrop Fanart with stretchy pull-down blur & scroll parallax
+            // 1. Crisp top-aligned Backdrop Fanart + color-matched blurred top-edge extension on pull-down overscroll
             GeometryReader { bgGeo in
                 let minY = bgGeo.frame(in: .named("detailScroll")).minY
                 let pullDown = max(0, minY)
-                let scrollUp = max(0, -minY)
-                let stretchHeight = heroHeight + pullDown
-                let blurRadius = pullDown > 1
-                    ? min(18.0, pullDown * 0.14)
-                    : min(10.0, max(0, scrollUp - 50.0) * 0.03)
-                let zoomScale = pullDown > 1
-                    ? (1.0 + min(0.08, pullDown / 900.0))
-                    : 1.0
-                let offsetY = pullDown > 0 ? -pullDown : (scrollUp * 0.22)
 
-                ZStack {
+                ZStack(alignment: .top) {
+                    if pullDown > 0.5 {
+                        MediaArtworkView(
+                            server: effectiveDetailServer,
+                            item: item,
+                            kind: .backdrop,
+                            maxWidth: 640,
+                            alignment: .top
+                        )
+                        .frame(width: bgGeo.size.width, height: pullDown + 48)
+                        .scaleEffect(x: 1.08, y: -1.08, anchor: .center)
+                        .blur(radius: 30)
+                        .saturation(1.12)
+                        .frame(width: bgGeo.size.width, height: pullDown + 2)
+                        .clipped()
+                        .offset(y: -pullDown)
+                    }
+
                     MediaArtworkView(
                         server: effectiveDetailServer,
                         item: item,
@@ -266,20 +274,11 @@ public struct DetailView: View {
                         maxWidth: 3840,
                         alignment: .top
                     )
-                    .frame(width: bgGeo.size.width, height: stretchHeight)
-                    .scaleEffect(zoomScale, anchor: .top)
+                    .frame(width: bgGeo.size.width, height: heroHeight)
                     .saturation(1.10)
                     .contrast(1.04)
-                    .blur(radius: blurRadius)
-
-                    if pullDown > 2 {
-                        canvasCol
-                            .opacity(min(0.24, Double(pullDown) / 420.0))
-                    }
+                    .clipped()
                 }
-                .frame(width: bgGeo.size.width, height: stretchHeight)
-                .clipped()
-                .offset(y: offsetY)
             }
             .frame(height: heroHeight)
 
