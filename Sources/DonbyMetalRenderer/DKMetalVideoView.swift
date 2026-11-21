@@ -1114,6 +1114,52 @@ public final class DKMetalLayerView: NSView {
         return rendered
     }
 
+    /// Computes the full-window subtitle canvas (including letterbox black bars) and exact letterbox margins
+    /// so ASS, SRT, and PGS subtitles can render freely into top/bottom black bars at crisp resolution.
+    public func subtitleViewportMetrics(videoWidth: Int, videoHeight: Int) -> (canvasW: Int32, canvasH: Int32, marginT: Int32, marginB: Int32, marginL: Int32, marginR: Int32) {
+        sizeLock.lock()
+        let drawSize = cachedDrawableSize
+        sizeLock.unlock()
+
+        let vidW = max(1, videoWidth)
+        let vidH = max(1, videoHeight)
+        let viewW = drawSize.width > 16 ? drawSize.width : CGFloat(vidW)
+        let viewH = drawSize.height > 16 ? drawSize.height : CGFloat(vidH)
+        let viewAspect = max(0.25, min(6.0, viewW / max(1.0, viewH)))
+        let videoAspect = max(0.25, min(6.0, CGFloat(vidW) / CGFloat(vidH)))
+
+        // Normalize full-window subtitle canvas to <=1920px long edge for crisp typography & fast libass rasterization
+        let maxEdge: CGFloat = 1920.0
+        let canvasWFloat: CGFloat
+        let canvasHFloat: CGFloat
+        if viewAspect >= 1.0 {
+            canvasWFloat = min(maxEdge, max(960.0, viewW))
+            canvasHFloat = max(360.0, (canvasWFloat / viewAspect).rounded())
+        } else {
+            canvasHFloat = min(maxEdge, max(640.0, viewH))
+            canvasWFloat = max(360.0, (canvasHFloat * viewAspect).rounded())
+        }
+        let canvasW = Int32(max(360, Int(canvasWFloat.rounded())))
+        let canvasH = Int32(max(360, Int(canvasHFloat.rounded())))
+
+        let dispW: Int32
+        let dispH: Int32
+        if videoAspect > viewAspect {
+            // Letterboxed (black bars on top & bottom, e.g. 2.39:1 movie on 16:10 display)
+            dispW = canvasW
+            dispH = Int32(max(1, min(Int(canvasH), Int((CGFloat(canvasW) / videoAspect).rounded()))))
+        } else {
+            // Pillarboxed (black bars on left & right)
+            dispH = canvasH
+            dispW = Int32(max(1, min(Int(canvasW), Int((CGFloat(canvasH) * videoAspect).rounded()))))
+        }
+        let marginT = max(0, (canvasH - dispH) / 2)
+        let marginB = max(0, canvasH - dispH - marginT)
+        let marginL = max(0, (canvasW - dispW) / 2)
+        let marginR = max(0, canvasW - dispW - marginL)
+        return (canvasW, canvasH, marginT, marginB, marginL, marginR)
+    }
+
     private func encodeSubtitleOverlayIfNeeded(
         encoder: MTLRenderCommandEncoder,
         scale: SIMD2<Float>,
@@ -1126,10 +1172,12 @@ public final class DKMetalLayerView: NSView {
         }
         sizeLock.lock()
         let peakNits = _subtitleHDRPeakNits
-        let liftNDC = currentSubtitleLiftNDC * scale.y
+        // Subtitle texture already covers the full window viewport (including letterbox bars),
+        // so draw at full NDC scale (1, 1) and apply full-viewport liftNDC directly.
+        let liftNDC = currentSubtitleLiftNDC
         sizeLock.unlock()
         var subVU = DKVertexUniforms(
-            scale: scale,
+            scale: SIMD2<Float>(1.0, 1.0),
             pad: SIMD2<Float>(peakNits, liftNDC),
             uvRect: SIMD4<Float>(0, 0, 1, 1)
         )
@@ -1613,11 +1661,13 @@ public struct DKMetalVideoView: NSViewRepresentable {
 
             let masterPos = dk_player_get_position(p)
             let subClockPts = masterPos > 0 ? masterPos : max(0.0, pts)
-            let cleanW = Int32(max(640, CVPixelBufferGetWidth(pixbuf)))
-            let cleanH = Int32(max(360, CVPixelBufferGetHeight(pixbuf)))
+            let videoW = max(640, CVPixelBufferGetWidth(pixbuf))
+            let videoH = max(360, CVPixelBufferGetHeight(pixbuf))
+            let vp = v.subtitleViewportMetrics(videoWidth: videoW, videoHeight: videoH)
+            dk_player_set_subtitle_viewport(p, vp.canvasW, vp.canvasH, Int32(videoW), Int32(videoH), vp.marginT, vp.marginB, vp.marginL, vp.marginR)
             let syncBox = SubtitleSyncBox(view: v, serial: lastSubSerial)
             let boxPtr = Unmanaged.passUnretained(syncBox).toOpaque()
-            dk_player_sync_subtitle_rgba(p, subClockPts, cleanW, cleanH, lastSubSerial, { rgba, w, h, serial, ctx in
+            dk_player_sync_subtitle_rgba(p, subClockPts, vp.canvasW, vp.canvasH, lastSubSerial, { rgba, w, h, serial, ctx in
                 guard let ctx else { return }
                 let box = Unmanaged<SubtitleSyncBox>.fromOpaque(ctx).takeUnretainedValue()
                 box.updatedSerial = serial

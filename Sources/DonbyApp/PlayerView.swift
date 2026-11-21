@@ -78,11 +78,10 @@ public struct PlayerView: View {
     @State private var didHandlePlaybackEnded: Bool = false
     @State private var systemClockString: String = ""
     @State private var kernelStats = DKRuntimeStats()
-    @State private var autoHideTask: Task<Void, Never>? = nil
+    @State private var autoHideBox = PlayerAutoHideBox()
     @State private var mouseMonitor: Any? = nil
     @State private var keyMonitor: Any? = nil
     @State private var lastRecordedPosition: Double = -10
-    @State private var lastMouseMoveTimestamp: TimeInterval = 0
     @State private var activePlaybackGeneration: Int = 0
     @State private var displayDownloadSpeedMBs: Double = 0.0
     @State private var bottomControlBarHeight: CGFloat = 96
@@ -107,8 +106,10 @@ public struct PlayerView: View {
     @State private var isAdjustingSubtitleLayout: Bool = false
     @State private var showMoreSubtitleOptions: Bool = false
 
-    private let progressTimer = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
-    private let embySyncTimer = Timer.publish(every: 10.0, on: .main, in: .common).autoconnect()
+    // Use `.default` RunLoop mode so timers automatically pause during macOS NSMenu `.eventTracking`,
+    // preventing 0.25s body re-evaluations from flickering open subtitle/audio/speed dropdown menus.
+    private let progressTimer = Timer.publish(every: 0.25, on: .main, in: .default).autoconnect()
+    private let embySyncTimer = Timer.publish(every: 10.0, on: .main, in: .default).autoconnect()
 
     private static let clockFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -168,7 +169,7 @@ public struct PlayerView: View {
                         if showControls {
                             showControlsAndResetTimer()
                         } else {
-                            autoHideTask?.cancel()
+                            autoHideBox.autoHideTask?.cancel()
                         }
                     }
                 }
@@ -360,7 +361,7 @@ public struct PlayerView: View {
                     Spacer()
                     rightDrawerPanel(tab: drawer)
                         .transition(.move(edge: .trailing).combined(with: .opacity))
-                        .onContinuousHover { _ in autoHideTask?.cancel() }
+                        .onContinuousHover { _ in autoHideBox.autoHideTask?.cancel() }
                 }
             }
         }
@@ -393,8 +394,8 @@ public struct PlayerView: View {
             mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDown, .rightMouseDown]) { event in
                 guard NSApp.modalWindow == nil else { return event }
                 let now = ProcessInfo.processInfo.systemUptime
-                if event.type != .mouseMoved || now - lastMouseMoveTimestamp > 0.08 {
-                    lastMouseMoveTimestamp = now
+                if event.type != .mouseMoved || now - autoHideBox.lastMouseMoveTimestamp > 0.15 {
+                    autoHideBox.lastMouseMoveTimestamp = now
                     showControlsAndResetTimer()
                 }
                 return event
@@ -444,7 +445,7 @@ public struct PlayerView: View {
             }
         }
         .onDisappear {
-            autoHideTask?.cancel()
+            autoHideBox.autoHideTask?.cancel()
             if let mm = mouseMonitor { NSEvent.removeMonitor(mm); mouseMonitor = nil }
             if let km = keyMonitor { NSEvent.removeMonitor(km); keyMonitor = nil }
             stopNativeKernel()
@@ -1719,17 +1720,22 @@ public struct PlayerView: View {
     }
 
     private func showControlsAndResetTimer() {
+        // Avoid mutating SwiftUI state or scheduling hide while a macOS NSMenu is open
+        if RunLoop.current.currentMode == .eventTracking {
+            return
+        }
         if !showControls {
             withAnimation(.easeInOut(duration: 0.18)) {
                 showControls = true
             }
         }
-        autoHideTask?.cancel()
-        autoHideTask = Task {
+        autoHideBox.autoHideTask?.cancel()
+        autoHideBox.autoHideTask = Task {
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             if !Task.isCancelled {
                 await MainActor.run {
-                    if activeDrawer == nil && !isScrubbing && !isOpeningMedia && openingErrorMessage == nil {
+                    if RunLoop.current.currentMode != .eventTracking &&
+                        activeDrawer == nil && !isScrubbing && !isOpeningMedia && openingErrorMessage == nil {
                         withAnimation(.easeInOut(duration: 0.25)) {
                             showControls = false
                         }
@@ -1912,6 +1918,20 @@ public struct PlayerView: View {
                 dk_player_destroy(handle)
                 return
             }
+            let styleSnap = await MainActor.run { appState.subtitleStyle }
+            var initialSubCfg = DKSubtitleStyleConfig(
+                scale: Float(styleSnap.scale),
+                border_width: Float(styleSnap.borderWidth),
+                vertical_pos_percent: Float(styleSnap.verticalPositionPercent),
+                primary_delay_sec: styleSnap.primaryDelaySeconds,
+                secondary_delay_sec: styleSnap.secondaryDelaySeconds,
+                text_transform: Int32(styleSnap.transform.rawValue),
+                override_ass_style: styleSnap.overrideASSStyle,
+                forced_only: styleSnap.forcedOnly,
+                unify_pingfang_font: styleSnap.unifyPingFangFont,
+                enhance_secondary_yellow: styleSnap.enhanceSecondaryYellow
+            )
+            dk_player_set_subtitle_style(handle, &initialSubCfg)
             dk_player_set_buffer_limit_mb(handle, cachePoolMB)
             if let turboHandle = preparedTurboHandle {
                 let handleAddr = UInt(bitPattern: handle)
@@ -2420,7 +2440,7 @@ public struct PlayerView: View {
     }
 
     private func exportRedactedDiagnostics() {
-        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.6"
+        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.7"
         var lines: [String] = []
         lines.append("Donby Diagnostics Report (v\(appVer))")
         lines.append("Time: \(ISO8601DateFormatter().string(from: Date()))")
@@ -2887,7 +2907,7 @@ public struct PlayerView: View {
     private func toggleFullScreen() { NSApp.keyWindow?.toggleFullScreen(nil) }
 
     private func exitPlayer() {
-        autoHideTask?.cancel()
+        autoHideBox.autoHideTask?.cancel()
         if let mm = mouseMonitor { NSEvent.removeMonitor(mm); mouseMonitor = nil }
         if let km = keyMonitor { NSEvent.removeMonitor(km); keyMonitor = nil }
 

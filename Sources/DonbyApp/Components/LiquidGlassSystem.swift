@@ -447,16 +447,46 @@ public struct LiquidGlassVectorCircleButton<Icon: View>: View {
     }
 }
 
+/// Isolated hover chrome for `LiquidGlassCircleMenu` so hover changes never rebuild `menuContent`.
+private struct LiquidGlassCircleMenuVisual: View {
+    let systemImage: String
+    let iconColor: Color?
+    let size: CGFloat
+    @State private var isHovered: Bool = false
+
+    private var effectiveIconColor: Color {
+        if let iconColor { return iconColor }
+        return Color(red: 0.12, green: 0.12, blue: 0.14)
+    }
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(Color.white.opacity(isHovered ? 1.0 : 0.95))
+                .shadow(color: Color.black.opacity(isHovered ? 0.20 : 0.11), radius: isHovered ? 6 : 4, y: 2)
+
+            Circle()
+                .strokeBorder(Color.black.opacity(0.06), lineWidth: 0.65)
+
+            Image(systemName: systemImage)
+                .font(.system(size: size * 0.38, weight: .semibold))
+                .foregroundStyle(effectiveIconColor)
+        }
+        .frame(width: size, height: size)
+        .contentShape(Circle())
+        .scaleEffect(isHovered ? 1.05 : 1.0)
+        .animation(.easeOut(duration: 0.15), value: isHovered)
+        .onHover { isHovered = $0 }
+    }
+}
+
 /// Sculpted Liquid Glass circular Menu button with unified physical optics matching LiquidGlassCircleButton
 public struct LiquidGlassCircleMenu<MenuItems: View>: View {
-    @Environment(\.colorScheme) private var colorScheme
     public let systemImage: String
     public var iconColor: Color? = nil
     public var size: CGFloat = 38
     public var tooltip: String = ""
     @ViewBuilder public let menuContent: () -> MenuItems
-
-    @State private var isHovered: Bool = false
 
     public init(
         systemImage: String,
@@ -472,53 +502,93 @@ public struct LiquidGlassCircleMenu<MenuItems: View>: View {
         self.menuContent = menuContent
     }
 
-    private var effectiveIconColor: Color {
-        if let iconColor { return iconColor }
-        return Color(red: 0.12, green: 0.12, blue: 0.14)
-    }
-
     public var body: some View {
-        ZStack {
-            ZStack {
-                Circle()
-                    .fill(Color.white.opacity(isHovered ? 1.0 : 0.95))
-                    .shadow(color: Color.black.opacity(isHovered ? 0.20 : 0.11), radius: isHovered ? 6 : 4, y: 2)
-
-                Circle()
-                    .strokeBorder(Color.black.opacity(0.06), lineWidth: 0.65)
-
-                Image(systemName: systemImage)
-                    .font(.system(size: size * 0.38, weight: .semibold))
-                    .foregroundStyle(effectiveIconColor)
-            }
-            .frame(width: size, height: size)
-            .contentShape(Circle())
-            .scaleEffect(isHovered ? 1.05 : 1.0)
-            .animation(.easeOut(duration: 0.15), value: isHovered)
-
-            // Transparent Menu trigger on top to open menu with zero layout offset
-            Menu {
-                menuContent()
-            } label: {
-                Color.white.opacity(0.0001)
-                    .frame(width: size, height: size)
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .frame(width: size, height: size)
+        Menu {
+            menuContent()
+        } label: {
+            LiquidGlassCircleMenuVisual(systemImage: systemImage, iconColor: iconColor, size: size)
         }
+        .buttonStyle(.plain)
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
         .frame(width: size, height: size)
         .alignmentGuide(VerticalAlignment.center) { d in d[VerticalAlignment.center] }
-        .onHover { isHovered = $0 }
         .help(tooltip)
+    }
+}
+
+/// Isolated hover chrome for `LiquidGlassSelectorCard` so hover changes never rebuild `menuItems`.
+private struct LiquidGlassSelectorCardVisual: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let title: String
+    let icon: String
+    let valueText: String
+    let badgeText: String?
+    let accentColor: Color
+    let badgeForegroundColor: Color
+    @State private var isHovered: Bool = false
+
+    var body: some View {
+        HStack(spacing: 11) {
+            ZStack {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [accentColor.opacity(0.32), accentColor.opacity(0.10)],
+                            center: .topLeading,
+                            startRadius: 2,
+                            endRadius: 26
+                        )
+                    )
+                    .overlay(
+                        Circle().strokeBorder(accentColor.opacity(0.50), lineWidth: 0.75)
+                    )
+                    .frame(width: 33, height: 33)
+                Image(systemName: icon)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(accentColor)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(title)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(colorScheme == .light ? Color(red: 0.44, green: 0.44, blue: 0.48) : Color.white.opacity(0.66))
+                    if let badgeText, !badgeText.isEmpty {
+                        Text(badgeText)
+                            .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                            .foregroundStyle(badgeForegroundColor)
+                            .padding(.horizontal, 5.5)
+                            .padding(.vertical, 1.5)
+                            .background(accentColor.opacity(0.82))
+                            .clipShape(Capsule())
+                    }
+                }
+
+                Text(valueText)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(colorScheme == .light ? Color(red: 0.10, green: 0.10, blue: 0.12) : .white)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 6)
+
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.system(size: 10.5, weight: .bold))
+                .foregroundStyle(colorScheme == .light ? Color(red: 0.40, green: 0.40, blue: 0.44) : Color.white.opacity(isHovered ? 0.92 : 0.58))
+                .padding(.trailing, 2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 15)
+        .padding(.vertical, 12)
+        .donbyLiquidGlassRect(cornerRadius: 15, tint: nil, interactive: true, isHovered: isHovered)
+        .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .onHover { isHovered = $0 }
     }
 }
 
 /// Sculpted Liquid Glass selector card (`资源版本` / `音轨选择` / `主字幕`) replacing stock grey NSPopUpButton
 public struct LiquidGlassSelectorCard<MenuItems: View>: View {
-    @Environment(\.colorScheme) private var colorScheme
     public let title: String
     public let icon: String
     public let valueText: String
@@ -526,8 +596,6 @@ public struct LiquidGlassSelectorCard<MenuItems: View>: View {
     public let accentColor: Color
     public var badgeForegroundColor: Color = .white
     @ViewBuilder public let menuItems: () -> MenuItems
-
-    @State private var isHovered: Bool = false
 
     public init(
         title: String,
@@ -551,65 +619,18 @@ public struct LiquidGlassSelectorCard<MenuItems: View>: View {
         Menu {
             menuItems()
         } label: {
-            HStack(spacing: 11) {
-                ZStack {
-                    Circle()
-                        .fill(
-                            RadialGradient(
-                                colors: [accentColor.opacity(0.32), accentColor.opacity(0.10)],
-                                center: .topLeading,
-                                startRadius: 2,
-                                endRadius: 26
-                            )
-                        )
-                        .overlay(
-                            Circle().strokeBorder(accentColor.opacity(0.50), lineWidth: 0.75)
-                        )
-                        .frame(width: 33, height: 33)
-                    Image(systemName: icon)
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(accentColor)
-                }
-
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(title)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(colorScheme == .light ? Color(red: 0.44, green: 0.44, blue: 0.48) : Color.white.opacity(0.66))
-                        if let badgeText, !badgeText.isEmpty {
-                            Text(badgeText)
-                                .font(.system(size: 9.5, weight: .bold, design: .rounded))
-                                .foregroundStyle(badgeForegroundColor)
-                                .padding(.horizontal, 5.5)
-                                .padding(.vertical, 1.5)
-                                .background(accentColor.opacity(0.82))
-                                .clipShape(Capsule())
-                        }
-                    }
-
-                    Text(valueText)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(colorScheme == .light ? Color(red: 0.10, green: 0.10, blue: 0.12) : .white)
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: 6)
-
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 10.5, weight: .bold))
-                    .foregroundStyle(colorScheme == .light ? Color(red: 0.40, green: 0.40, blue: 0.44) : Color.white.opacity(isHovered ? 0.92 : 0.58))
-                    .padding(.trailing, 2)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
+            LiquidGlassSelectorCardVisual(
+                title: title,
+                icon: icon,
+                valueText: valueText,
+                badgeText: badgeText,
+                accentColor: accentColor,
+                badgeForegroundColor: badgeForegroundColor
+            )
         }
+        .buttonStyle(.plain)
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .padding(.horizontal, 15)
-        .padding(.vertical, 12)
-        .donbyLiquidGlassRect(cornerRadius: 15, tint: nil, interactive: true, isHovered: isHovered)
-        .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-        .onHover { isHovered = $0 }
     }
 }
 

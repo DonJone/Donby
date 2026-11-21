@@ -166,6 +166,17 @@ bool      dk_player_get_track_info(DKPlayer* player, int track_type, int ordinal
 void      dk_player_select_track(DKPlayer* player, int track_type, int stream_index);
 void      dk_player_load_external_subtitle(DKPlayer* player, const char* content_utf8, bool is_ass);
 void      dk_player_set_subtitle_style(DKPlayer* player, const DKSubtitleStyleConfig* config);
+void      dk_player_set_subtitle_viewport(
+    DKPlayer* player,
+    int32_t viewport_w,
+    int32_t viewport_h,
+    int32_t video_w,
+    int32_t video_h,
+    int32_t margin_top,
+    int32_t margin_bottom,
+    int32_t margin_left,
+    int32_t margin_right
+);
 void      dk_player_select_secondary_subtitle_track(DKPlayer* player, int stream_index);
 void      dk_player_load_secondary_external_subtitle(DKPlayer* player, const char* content_utf8, bool is_ass);
 bool      dk_player_get_subtitle_vertical_bounds(DKPlayer* player, int32_t* out_y0, int32_t* out_y1, int32_t* out_canvas_h);

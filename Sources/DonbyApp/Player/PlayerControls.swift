@@ -178,32 +178,48 @@ struct PlayerCircleButton<Content: View>: View {
     }
 }
 
+/// Non-observable reference box for high-frequency player control timers/timestamps so mouse motion
+/// never triggers SwiftUI body re-evaluations (which would cause open macOS NSMenus to flicker).
+final class PlayerAutoHideBox {
+    var autoHideTask: Task<Void, Never>? = nil
+    var lastMouseMoveTimestamp: TimeInterval = 0
+}
+
+private struct PlayerCircleMenuVisual<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+    @State private var isHovered = false
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .strokeBorder(Color.white.opacity(isHovered ? 0.95 : 0.65), lineWidth: 1.25)
+                .background(Circle().fill(isHovered ? Color.white.opacity(0.18) : Color.clear))
+            content()
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+        }
+        .frame(width: 28, height: 28)
+        .contentShape(Circle())
+        .onHover { isHovered = $0 }
+    }
+}
+
 struct PlayerCircleMenu<Content: View, MenuItems: View>: View {
     let tooltip: String
     @ViewBuilder let content: () -> Content
     @ViewBuilder let menuItems: () -> MenuItems
-    @State private var isHovered = false
 
     var body: some View {
         Menu {
             menuItems()
         } label: {
-            ZStack {
-                Circle()
-                    .strokeBorder(Color.white.opacity(isHovered ? 0.95 : 0.65), lineWidth: 1.25)
-                    .background(Circle().fill(isHovered ? Color.white.opacity(0.18) : Color.clear))
-                content()
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
-            }
-            .frame(width: 28, height: 28)
-            .contentShape(Circle())
+            PlayerCircleMenuVisual(content: content)
         }
+        .buttonStyle(.plain)
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .frame(width: 28, height: 28)
         .help(tooltip)
-        .onHover { isHovered = $0 }
     }
 }
 

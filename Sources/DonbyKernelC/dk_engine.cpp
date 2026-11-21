@@ -251,6 +251,10 @@ struct DKPlayer {
     int ass_canvas_h{0};
     int sub_storage_w{1920};
     int sub_storage_h{1080};
+    int sub_margin_t{0};
+    int sub_margin_b{0};
+    int sub_margin_l{0};
+    int sub_margin_r{0};
     bool has_bitmap_subs{false};
     std::deque<PgsCue> pgs_cues;
     uint64_t pgs_generation{0};
@@ -1577,8 +1581,13 @@ static std::string dk_cf_transform_segment(const std::string& seg, int32_t mode)
 }
 
 static bool dk_is_pale_yellow_rgb(uint8_t r, uint8_t g, uint8_t b) {
-    // Matches washed-out cream/pale yellow (e.g. #FFE8A8, #F5E6B3, #FFEEBB) while leaving pure white or cool hues untouched.
-    return (r >= 180 && g >= 155 && b >= 65 && b <= static_cast<int>(r) - 18 && std::abs(static_cast<int>(r) - static_cast<int>(g)) <= 65);
+    // Matches washed-out cream / pale yellow / light amber (e.g. #FFE8A8, #F5E6B3, #FFEE99, #FFFFAA)
+    // while leaving pure/near-white (b > 225 and r-b < 14) and cool hues untouched.
+    if (r < 175 || g < 145) return false;
+    if (static_cast<int>(r) - static_cast<int>(b) < 16) return false;
+    if (static_cast<int>(g) - static_cast<int>(b) < 12) return false;
+    if (std::abs(static_cast<int>(r) - static_cast<int>(g)) > 85) return false;
+    return true;
 }
 
 static bool dk_style_looks_like_foreign_secondary(const char* name) {
@@ -1641,11 +1650,14 @@ static std::string dk_filter_ass_tag_block(const std::string& block, bool strip_
         std::string tok = (next_bs == std::string::npos) ? inner.substr(i) : inner.substr(i, next_bs - i);
         i = (next_bs == std::string::npos) ? inner.size() : next_bs;
 
-        if (strip_font && tok.size() >= 3 && tok[1] == 'f' && tok[2] == 'n') {
-            continue; // Strip inline \fn<FontName> so PingFang SC applies uniformly while keeping layout tags intact
+        if (strip_font && tok.size() >= 3 &&
+            (tok[1] == 'f' || tok[1] == 'F') &&
+            (tok[2] == 'n' || tok[2] == 'N')) {
+            continue; // Strip inline \fn<FontName> (case-insensitive) so PingFang SC applies uniformly
         }
-        if (enhance_yellow && ((tok.size() >= 4 && tok[1] == 'c' && tok[2] == '&') ||
-                               (tok.size() >= 5 && tok[1] == '1' && tok[2] == 'c' && tok[3] == '&'))) {
+        if (enhance_yellow &&
+            ((tok.size() >= 3 && (tok[1] == 'c' || tok[1] == 'C') && tok[2] == '&') ||
+             (tok.size() >= 4 && tok[1] == '1' && (tok[2] == 'c' || tok[2] == 'C') && tok[3] == '&'))) {
             size_t h_pos = tok.find('H');
             if (h_pos == std::string::npos) h_pos = tok.find('h');
             if (h_pos != std::string::npos) {
@@ -1654,8 +1666,8 @@ static std::string dk_filter_ass_tag_block(const std::string& block, bool strip_
                     if (std::isxdigit(static_cast<unsigned char>(tok[k]))) hex.push_back(tok[k]);
                     else break;
                 }
-                if (hex.size() >= 6) {
-                    // ASS color tag is &H[AA]BBGGRR&
+                if (hex.size() >= 3 && hex.size() <= 8) {
+                    // ASS color tag is &H[AA]BBGGRR& (may omit leading zeros, e.g. &HFFFF& -> R=FF, G=FF, B=00)
                     unsigned long val = std::strtoul(hex.c_str(), nullptr, 16);
                     uint8_t r = static_cast<uint8_t>(val & 0xFF);
                     uint8_t g = static_cast<uint8_t>((val >> 8) & 0xFF);
@@ -1677,7 +1689,7 @@ static std::string dk_filter_ass_tag_block(const std::string& block, bool strip_
 static std::string dk_transform_ass_payload(const std::string& payload, int32_t mode, bool strip_font = false, bool enhance_yellow = false) {
     if ((mode == 0 && !strip_font && !enhance_yellow) || payload.empty()) return payload;
     std::string out;
-    out.reserve(payload.size() + 24);
+    out.reserve(payload.size() + 32);
     size_t i = 0;
     while (i < payload.size()) {
         if (payload[i] == '{') {
@@ -1705,6 +1717,21 @@ static std::string dk_transform_ass_payload(const std::string& payload, int32_t 
             out += dk_cf_transform_segment(payload.substr(start, i - start), mode);
         } else {
             out.append(payload, start, i - start);
+        }
+    }
+
+    // Bilingual inline polish: if a single dialogue contains CJK on line 1 and pure Latin/foreign on line 2
+    // without an explicit non-yellow color override, apply classic rich gold-yellow to line 2.
+    if (enhance_yellow) {
+        size_t br = out.find("\\N");
+        if (br != std::string::npos && br > 0 && br + 2 < out.size()) {
+            std::string line1 = out.substr(0, br);
+            std::string line2 = out.substr(br + 2);
+            bool has_color = (line2.find("\\1c&") != std::string::npos || line2.find("\\c&") != std::string::npos ||
+                              line2.find("\\1C&") != std::string::npos || line2.find("\\C&") != std::string::npos);
+            if (!has_color && dk_has_cjk_utf8(line1) && dk_is_mostly_latin_line(line2)) {
+                out = line1 + "\\N{\\1c&H003FD2FF&}" + line2;
+            }
         }
     }
     return out;
@@ -1749,6 +1776,26 @@ static std::string dk_transform_ass_document(const std::string& doc, int32_t mod
     return out;
 }
 
+static void dk_sync_ass_renderer_params_locked(DKPlayer* player, ASS_Renderer* ren) {
+    if (!player || !ren) return;
+    const float user_scale = std::clamp(player->sub_style.scale > 0.1f ? player->sub_style.scale : 1.0f, 0.5f, 2.5f);
+    const float pos_pct = std::clamp(player->sub_style.vertical_pos_percent > 10.0f ? player->sub_style.vertical_pos_percent : 92.0f, 50.0f, 100.0f);
+    // In libass, ass_set_line_position(0.0) places bottom dialogue right at the bottom edge of the full frame
+    // (including letterbox margins when ass_set_use_margins(1) is active); larger values lift subtitles upward.
+    const double line_pos = std::clamp(static_cast<double>(100.0f - pos_pct), 0.0, 50.0);
+
+    if (player->ass_canvas_w > 0 && player->ass_canvas_h > 0) {
+        ass_set_frame_size(ren, player->ass_canvas_w, player->ass_canvas_h);
+    }
+    if (player->sub_storage_w > 0 && player->sub_storage_h > 0) {
+        ass_set_storage_size(ren, player->sub_storage_w, player->sub_storage_h);
+    }
+    ass_set_margins(ren, player->sub_margin_t, player->sub_margin_b, player->sub_margin_l, player->sub_margin_r);
+    ass_set_use_margins(ren, 1);
+    ass_set_font_scale(ren, static_cast<double>(user_scale));
+    ass_set_line_position(ren, line_pos);
+}
+
 static void dk_apply_style_to_ass_track_locked(DKPlayer* player, ASS_Track* track, bool is_secondary) {
     if (!player || !track) return;
     const ASS_Track*& orig_ptr = is_secondary ? player->secondary_orig_track_ptr : player->primary_orig_track_ptr;
@@ -1773,23 +1820,11 @@ static void dk_apply_style_to_ass_track_locked(DKPlayer* player, ASS_Track* trac
         }
     }
 
-    float user_scale = std::clamp(player->sub_style.scale > 0.1f ? player->sub_style.scale : 1.0f, 0.5f, 2.5f);
-    float role_scale = is_secondary ? (user_scale * 0.80f) : user_scale;
     float border = std::clamp(player->sub_style.border_width >= 0.0f ? player->sub_style.border_width : 2.8f, 0.0f, 8.0f);
-    float pos_pct = std::clamp(player->sub_style.vertical_pos_percent > 10.0f ? player->sub_style.vertical_pos_percent : 92.0f, 50.0f, 100.0f);
     int play_res_y = (track->PlayResY > 0) ? track->PlayResY : 1080;
     double res_ratio = static_cast<double>(play_res_y) / 1080.0;
-
-    int target_margin_v = std::clamp(
-        static_cast<int>(std::lround((100.0f - pos_pct) * 0.01f * static_cast<float>(play_res_y))),
-        4,
-        play_res_y / 2
-    );
-    int default_baseline_margin = static_cast<int>(std::lround(0.08 * static_cast<double>(play_res_y))); // 92% baseline
-    int delta_margin_v = target_margin_v - default_baseline_margin;
-    if (is_secondary) {
-        target_margin_v = std::min(play_res_y / 2, target_margin_v + static_cast<int>(std::lround(58.0 * res_ratio)));
-    }
+    // Keep base MarginV compact so ass_set_line_position() can smoothly place ASS/SRT all the way down into black letterbox bars
+    int compact_margin_v = std::max(4, static_cast<int>(std::lround(14.0 * res_ratio)));
 
     constexpr uint32_t kClassicGoldYellowRGBA = 0xFFD23F00u; // Rich cinema gold-yellow (#FFD23F, alpha=0 opaque)
     const bool unify_pf = player->sub_style.unify_pingfang_font;
@@ -1800,8 +1835,9 @@ static void dk_apply_style_to_ass_track_locked(DKPlayer* player, ASS_Track* trac
         ASS_Style& st = track->styles[i];
         const auto& orig = orig_styles[static_cast<size_t>(i)];
         bool is_default = (st.Name && std::strcmp(st.Name, "Default") == 0) || (track->n_styles == 1);
-        int orig_align_v = orig.alignment & 0x0C; // libass Alignment: 0=bottom(SUB), 4=top(TOP), 8=mid(MID); fallback check 1..3
-        bool is_bottom_style = (orig.alignment >= 1 && orig.alignment <= 3) || (orig_align_v == 0);
+        // libass internal Alignment bitmask: VALIGN_SUB=0, VALIGN_TOP=4, VALIGN_CENTER=8
+        int orig_align_v = orig.alignment & 0x0C;
+        bool is_bottom_style = (orig_align_v == 0);
 
         // 1. Unified PingFang SC font (default ON)
         const char* desired_font = (unify_pf || override_all) ? "PingFang SC" : orig.font_name.c_str();
@@ -1817,12 +1853,15 @@ static void dk_apply_style_to_ass_track_locked(DKPlayer* player, ASS_Track* trac
         bool should_gold = enhance_yellow && (is_secondary || dk_style_looks_like_foreign_secondary(st.Name) || dk_is_pale_yellow_rgb(r, g, b));
         st.PrimaryColour = should_gold ? kClassicGoldYellowRGBA : orig.primary_colour;
 
-        // 3. Real-time scale & vertical position for ALL bottom dialogue styles (preserves top signs/annotations)
+        // 3. Base size & compact MarginV (overall user scale & vertical placement into letterbox are driven natively by
+        //    ass_set_font_scale + ass_set_line_position + ass_set_use_margins so even inline \fs tags scale cleanly!)
         if (override_all || is_default) {
-            double base_fs = (56.0 * res_ratio);
-            st.FontSize = base_fs * static_cast<double>(role_scale);
+            double base_fs = (is_default && orig.font_size > 10.0 && !override_all && track->n_styles > 1)
+                ? orig.font_size
+                : (56.0 * res_ratio);
+            st.FontSize = base_fs * (is_secondary ? 0.80 : 1.0);
             st.Outline = static_cast<double>(border) * (is_secondary ? 0.88 : 1.0) * res_ratio;
-            st.MarginV = target_margin_v;
+            st.MarginV = is_secondary ? (compact_margin_v + static_cast<int>(std::lround(52.0 * res_ratio))) : compact_margin_v;
             if (override_all) {
                 st.ScaleX = 1.0;
                 st.ScaleY = 1.0;
@@ -1835,16 +1874,34 @@ static void dk_apply_style_to_ass_track_locked(DKPlayer* player, ASS_Track* trac
                 st.BorderStyle = orig.border_style;
             }
         } else if (is_bottom_style) {
-            // Preserve relative bilingual hierarchy (e.g. larger CN + smaller EN) while scaling and shifting smoothly together
-            double base_fs = (orig.font_size > 4.0) ? orig.font_size : (48.0 * res_ratio);
-            st.FontSize = base_fs * static_cast<double>(role_scale);
+            st.FontSize = (orig.font_size > 4.0) ? (orig.font_size * (is_secondary ? 0.80 : 1.0)) : (48.0 * res_ratio);
             st.Outline = std::max(orig.outline, static_cast<double>(border) * 0.85 * res_ratio);
-            st.MarginV = std::clamp(orig.margin_v + delta_margin_v, 4, play_res_y / 2);
+            // Cap overly large MarginV on bottom dialogue styles so they can descend into the black letterbox bar
+            st.MarginV = std::min(orig.margin_v, compact_margin_v + static_cast<int>(std::lround(24.0 * res_ratio)));
             st.ScaleX = orig.scale_x;
             st.ScaleY = orig.scale_y;
             st.Alignment = orig.alignment;
             st.BorderStyle = orig.border_style;
         }
+    }
+
+    // Clear hard-coded per-event MarginV on bottom events so ass_set_line_position moves them smoothly into black bars
+    if (track->events) {
+        for (int i = 0; i < track->n_events; i++) {
+            ASS_Event& ev = track->events[i];
+            if (ev.Style >= 0 && ev.Style < track->n_styles) {
+                if ((track->styles[ev.Style].Alignment & 0x0C) == 0 && ev.MarginV > compact_margin_v) {
+                    ev.MarginV = 0;
+                }
+            }
+        }
+    }
+
+    if (player->ass_renderer) {
+        dk_sync_ass_renderer_params_locked(player, player->ass_renderer);
+    }
+    if (player->secondary_ass_renderer) {
+        dk_sync_ass_renderer_params_locked(player, player->secondary_ass_renderer);
     }
 }
 
@@ -3936,7 +3993,65 @@ void dk_player_set_subtitle_style(DKPlayer* player, const DKSubtitleStyleConfig*
     if (player->secondary_ass_track) {
         dk_apply_style_to_ass_track_locked(player, player->secondary_ass_track, true);
     }
+    if (player->ass_renderer) {
+        dk_sync_ass_renderer_params_locked(player, player->ass_renderer);
+    }
+    if (player->secondary_ass_renderer) {
+        dk_sync_ass_renderer_params_locked(player, player->secondary_ass_renderer);
+    }
     player->sub_last_non_empty = false;
+    player->sub_style_dirty = true;
+    player->rendered_pgs_gen = 0;
+    player->sub_serial++;
+}
+
+void dk_player_set_subtitle_viewport(
+    DKPlayer* player,
+    int32_t viewport_w,
+    int32_t viewport_h,
+    int32_t video_w,
+    int32_t video_h,
+    int32_t margin_top,
+    int32_t margin_bottom,
+    int32_t margin_left,
+    int32_t margin_right
+) {
+    DKReaderGuard guard(player);
+    if (!guard || viewport_w <= 0 || viewport_h <= 0) return;
+
+    std::lock_guard<std::mutex> slk(player->ass_mtx);
+    const int safe_vw = (video_w > 0) ? video_w : viewport_w;
+    const int safe_vh = (video_h > 0) ? video_h : viewport_h;
+    const int mt = std::max(0, margin_top);
+    const int mb = std::max(0, margin_bottom);
+    const int ml = std::max(0, margin_left);
+    const int mr = std::max(0, margin_right);
+
+    if (player->ass_canvas_w == viewport_w &&
+        player->ass_canvas_h == viewport_h &&
+        player->sub_storage_w == safe_vw &&
+        player->sub_storage_h == safe_vh &&
+        player->sub_margin_t == mt &&
+        player->sub_margin_b == mb &&
+        player->sub_margin_l == ml &&
+        player->sub_margin_r == mr) {
+        return;
+    }
+
+    player->ass_canvas_w = viewport_w;
+    player->ass_canvas_h = viewport_h;
+    player->sub_storage_w = safe_vw;
+    player->sub_storage_h = safe_vh;
+    player->sub_margin_t = mt;
+    player->sub_margin_b = mb;
+    player->sub_margin_l = ml;
+    player->sub_margin_r = mr;
+    if (player->ass_renderer) {
+        dk_sync_ass_renderer_params_locked(player, player->ass_renderer);
+    }
+    if (player->secondary_ass_renderer) {
+        dk_sync_ass_renderer_params_locked(player, player->secondary_ass_renderer);
+    }
     player->sub_style_dirty = true;
     player->rendered_pgs_gen = 0;
     player->sub_serial++;
@@ -4270,9 +4385,14 @@ static bool dk_update_subtitle_rgba_locked(
         if (active_cue) {
             int cue_w = std::max(1, active_cue->canvas_w);
             int cue_h = std::max(1, active_cue->canvas_h);
-            int dst_w = cue_w;
-            int dst_h = (canvas_w > 0 && canvas_h > 0) ? std::max(1, (cue_w * canvas_h) / canvas_w) : cue_h;
-            int crop_top = (cue_h > dst_h + 20) ? ((cue_h - dst_h) / 2) : 0;
+            int dst_w = (canvas_w > 0) ? canvas_w : cue_w;
+            int dst_h = (canvas_h > 0) ? canvas_h : cue_h;
+            int vid_area_w = std::max(1, dst_w - player->sub_margin_l - player->sub_margin_r);
+            int vid_area_h = std::max(1, dst_h - player->sub_margin_t - player->sub_margin_b);
+            float base_fit_scale = static_cast<float>(vid_area_w) / static_cast<float>(cue_w);
+            int crop_top = (cue_h > static_cast<int>(std::lround(static_cast<float>(vid_area_h) / base_fit_scale)) + 20)
+                ? ((cue_h - static_cast<int>(std::lround(static_cast<float>(vid_area_h) / base_fit_scale))) / 2)
+                : 0;
 
             if (player->rendered_pgs_gen != active_cue->id || player->sub_style_dirty || player->ass_canvas_w != dst_w || player->ass_canvas_h != dst_h) {
                 player->ass_canvas_w = dst_w;
@@ -4281,10 +4401,11 @@ static bool dk_update_subtitle_rgba_locked(
                 int new_y0 = dst_h;
                 int new_y1 = 0;
 
-                // Apply real-time user scale & vertical position to PGS bitmap subtitles
+                // Apply real-time user scale & full-viewport vertical position (including black letterbox bars!) to PGS bitmap subtitles
                 const float user_scale = std::clamp(player->sub_style.scale > 0.1f ? player->sub_style.scale : 1.0f, 0.5f, 2.5f);
+                const float total_scale = base_fit_scale * user_scale;
                 const float pos_pct = std::clamp(player->sub_style.vertical_pos_percent > 10.0f ? player->sub_style.vertical_pos_percent : 92.0f, 50.0f, 100.0f);
-                int union_x0 = dst_w, union_y0 = dst_h, union_x1 = 0, union_y1 = 0;
+                int union_x0 = cue_w, union_y0 = cue_h, union_x1 = 0, union_y1 = 0;
                 for (const auto& r : active_cue->rects) {
                     int my = r.y - crop_top;
                     union_x0 = std::min(union_x0, r.x);
@@ -4292,9 +4413,10 @@ static bool dk_update_subtitle_rgba_locked(
                     union_x1 = std::max(union_x1, r.x + r.w);
                     union_y1 = std::max(union_y1, my + r.h);
                 }
-                const float union_cx = 0.5f * static_cast<float>(union_x0 + union_x1);
-                const float union_h = std::max(1.0f, static_cast<float>(union_y1 - union_y0));
-                const float scaled_union_h = union_h * user_scale;
+                const float union_cx_src = 0.5f * static_cast<float>(union_x0 + union_x1);
+                const float union_cx_dst = static_cast<float>(player->sub_margin_l) + union_cx_src * base_fit_scale;
+                const float union_h_src = std::max(1.0f, static_cast<float>(union_y1 - union_y0));
+                const float scaled_union_h = union_h_src * total_scale;
                 const float target_bottom = std::clamp(
                     (pos_pct * 0.01f) * static_cast<float>(dst_h) - 6.0f,
                     scaled_union_h + 8.0f,
@@ -4304,11 +4426,11 @@ static bool dk_update_subtitle_rgba_locked(
                 for (const auto& r : active_cue->rects) {
                     if (r.w <= 0 || r.h <= 0 || r.rgba.empty()) continue;
                     int mapped_y = r.y - crop_top;
-                    int sw = std::max(1, static_cast<int>(std::lround(static_cast<float>(r.w) * user_scale)));
-                    int sh = std::max(1, static_cast<int>(std::lround(static_cast<float>(r.h) * user_scale)));
-                    float rel_x = (static_cast<float>(r.x) - union_cx) * user_scale;
-                    float rel_bottom = static_cast<float>(union_y1 - (mapped_y + r.h)) * user_scale;
-                    int base_x = static_cast<int>(std::lround(union_cx + rel_x));
+                    int sw = std::max(1, static_cast<int>(std::lround(static_cast<float>(r.w) * total_scale)));
+                    int sh = std::max(1, static_cast<int>(std::lround(static_cast<float>(r.h) * total_scale)));
+                    float rel_x = (static_cast<float>(r.x) - union_cx_src) * total_scale;
+                    float rel_bottom = static_cast<float>(union_y1 - (mapped_y + r.h)) * total_scale;
+                    int base_x = static_cast<int>(std::lround(union_cx_dst + rel_x));
                     int base_y = static_cast<int>(std::lround(target_bottom - rel_bottom - static_cast<float>(sh)));
                     base_x = std::clamp(base_x, 0, std::max(0, dst_w - sw));
                     base_y = std::clamp(base_y, 4, std::max(4, dst_h - sh - 4));
@@ -4318,14 +4440,14 @@ static bool dk_update_subtitle_rgba_locked(
                         if (dy < 0 || dy >= dst_h) continue;
                         new_y0 = std::min(new_y0, dy);
                         new_y1 = std::max(new_y1, dy + 1);
-                        float fy = (static_cast<float>(y) + 0.5f) / user_scale - 0.5f;
+                        float fy = (static_cast<float>(y) + 0.5f) / total_scale - 0.5f;
                         int sy0 = std::clamp(static_cast<int>(std::floor(fy)), 0, r.h - 1);
                         int sy1 = std::clamp(sy0 + 1, 0, r.h - 1);
                         float wy = std::clamp(fy - static_cast<float>(sy0), 0.0f, 1.0f);
                         for (int x = 0; x < sw; x++) {
                             int dx = base_x + x;
                             if (dx < 0 || dx >= dst_w) continue;
-                            float fx = (static_cast<float>(x) + 0.5f) / user_scale - 0.5f;
+                            float fx = (static_cast<float>(x) + 0.5f) / total_scale - 0.5f;
                             int sx0 = std::clamp(static_cast<int>(std::floor(fx)), 0, r.w - 1);
                             int sx1 = std::clamp(sx0 + 1, 0, r.w - 1);
                             float wx = std::clamp(fx - static_cast<float>(sx0), 0.0f, 1.0f);
@@ -4405,11 +4527,14 @@ static bool dk_update_subtitle_rgba_locked(
         player->ass_canvas_h = canvas_h;
         player->sub_dirty_y0 = 0;
         player->sub_dirty_y1 = 0;
-        ass_set_frame_size(player->ass_renderer, canvas_w, canvas_h);
-        ass_set_storage_size(player->ass_renderer, canvas_w, canvas_h);
+        dk_sync_ass_renderer_params_locked(player, player->ass_renderer);
         if (player->secondary_ass_renderer) {
-            ass_set_frame_size(player->secondary_ass_renderer, canvas_w, canvas_h);
-            ass_set_storage_size(player->secondary_ass_renderer, canvas_w, canvas_h);
+            dk_sync_ass_renderer_params_locked(player, player->secondary_ass_renderer);
+        }
+    } else if (player->sub_style_dirty) {
+        dk_sync_ass_renderer_params_locked(player, player->ass_renderer);
+        if (player->secondary_ass_renderer) {
+            dk_sync_ass_renderer_params_locked(player, player->secondary_ass_renderer);
         }
     }
 

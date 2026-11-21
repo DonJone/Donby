@@ -1,6 +1,6 @@
 # Module Map: App, Player HUD & Native UI (`DonbyApp`)
 
-> Last synced: `v1.4.6`. Load this doc for `PlayerView`, `AppState`, `DetailView`, 120Hz native collection views, artwork caching, Liquid Glass UI, and module views.
+> Last synced: `v1.4.7`. Load this doc for `PlayerView`, `AppState`, `DetailView`, 120Hz native collection views, artwork caching, Liquid Glass UI, and module views.
 
 ## 1. File Inventory & Core Symbols
 - **App Entry & Global State**:
@@ -32,5 +32,6 @@
 3. **Hero Backdrop & ClearLogo Hygiene**: In `DetailView.heroHeaderSection`, keep the upper ~46% of the backdrop completely clear and vivid (`.saturation(1.10).contrast(1.04)`), then dissolve smoothly in a single direction into `canvasCol` (`0.46 -> 1.0`) without dark-to-light muddy bands or double-blur ghosting. In `ClearLogoHeaderView`, never use white-halo glow on dark fallback text, and suppress duplicate text subtitle underneath a loaded movie/series ClearLogo.
 4. **Card Interaction, Badge & Copy Consistency**: Clicking any poster or landscape card always enters `DetailView` (no center hover play button triggering immediate playback). Cards omit resolution badges and rating stars; downloaded badges use unified monochrome smoked-glass pill + white `checkmark` with `"已下载"` copy (never `"已离线下载"`). Sidebar places concrete servers at top above `搜索 -> 服务器 -> 文件 -> 记录 -> 下载 -> IPTV -> 设置`.
 5. **Detail Preload Play-Button Binding (`v1.4.4`)**: `DetailView.effectivePlayButtonStartSeconds` binds background preloading directly to the Play button's exact start position (resume position, or automatic intro-skip landing position when starting at 0s) and re-evaluates whenever target/source/start position updates.
-5. **Version Fallback**: When bumping versions, update fallback version strings in `PlayerView.swift`, `AppUpdateManager.swift`, `EmbyClient.swift`, `UHDStreamClient.swift`, `build_app.sh` (and `scripts/package_dmg.sh` if hardcoded).
-6. **Log Redaction**: `AppState` `媒体流解析成功` log must keep stream URL host/query redacted.
+6. **Menu Flicker Prevention (`v1.4.7`)**: Keep `PlayerView` timers (`progressTimer`, `embySyncTimer`) on `.default` RunLoop mode (never `.common`, which fires during macOS `NSMenu` `.eventTracking`), store high-frequency mouse-move/auto-hide state in non-observable `PlayerAutoHideBox`, and keep hover `@State` inside isolated label child views (`PlayerCircleMenuVisual`, `LiquidGlassCircleMenuVisual`, `LiquidGlassSelectorCardVisual`) so hover changes never rebuild SwiftUI `Menu` items.
+7. **Version Fallback**: When bumping versions, update fallback version strings in `PlayerView.swift`, `AppUpdateManager.swift`, `EmbyClient.swift`, `UHDStreamClient.swift`, `build_app.sh` (and `scripts/package_dmg.sh` if hardcoded).
+8. **Log Redaction**: `AppState` `媒体流解析成功` log must keep stream URL host/query redacted.
