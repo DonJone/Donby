@@ -340,7 +340,8 @@ static void dk_push_vad_audio_16k(
     const AVFrame* frame,
     const float* stereo_48k,
     int stereo_samples,
-    double pts
+    double pts,
+    bool has_valid_pts
 ) {
     if (!player || !stereo_48k || stereo_samples <= 0) return;
 
@@ -367,7 +368,7 @@ static void dk_push_vad_audio_16k(
     }
 
     std::lock_guard<std::mutex> lk(player->vad_audio_mtx);
-    if (pts >= 0.0 && player->vad_audio_end_pts >= 0.0 && std::fabs(pts - player->vad_audio_end_pts) > 0.35) {
+    if (has_valid_pts && pts >= 0.0 && player->vad_audio_end_pts >= 0.0 && std::fabs(pts - player->vad_audio_end_pts) > 0.35) {
         player->vad_audio_ring.clear();
         player->vad_decim_accum = 0.0f;
         player->vad_decim_count = 0;
@@ -375,6 +376,7 @@ static void dk_push_vad_audio_16k(
 
     float accum = player->vad_decim_accum;
     int cnt = player->vad_decim_count;
+    int pushed = 0;
     for (int i = 0; i < stereo_samples; i++) {
         const float mono = fc_plane
             ? (0.78f * fc_plane[i] + 0.11f * (fl_plane[i] + fr_plane[i]))
@@ -384,6 +386,7 @@ static void dk_push_vad_audio_16k(
             player->vad_audio_ring.push_back(accum * (1.0f / 3.0f));
             accum = 0.0f;
             cnt = 0;
+            pushed++;
         }
     }
     player->vad_decim_accum = accum;
@@ -392,8 +395,10 @@ static void dk_push_vad_audio_16k(
     while (player->vad_audio_ring.size() > DKPlayer::kVadRingMaxSamples) {
         player->vad_audio_ring.pop_front();
     }
-    if (pts >= 0.0) {
+    if (has_valid_pts && pts >= 0.0) {
         player->vad_audio_end_pts = pts + static_cast<double>(stereo_samples - cnt) / 48000.0;
+    } else if (player->vad_audio_end_pts >= 0.0 && pushed > 0) {
+        player->vad_audio_end_pts += static_cast<double>(pushed) / 16000.0;
     }
 }
 
@@ -1402,10 +1407,13 @@ static void dk_audio_decode_worker(DKPlayer* player) {
             }
 
             double pts = 0.0;
+            bool has_valid_pts = false;
             if (frame->best_effort_timestamp != AV_NOPTS_VALUE && player->audio_stream_idx >= 0 && player->format_ctx) {
                 pts = frame->best_effort_timestamp * av_q2d(player->format_ctx->streams[player->audio_stream_idx]->time_base);
+                has_valid_pts = true;
             } else if (frame->pts != AV_NOPTS_VALUE && player->audio_stream_idx >= 0 && player->format_ctx) {
                 pts = frame->pts * av_q2d(player->format_ctx->streams[player->audio_stream_idx]->time_base);
+                has_valid_pts = true;
             }
 
             double drop_target = player->audio_seek_drop_until_pts.load(std::memory_order_relaxed);
@@ -1439,7 +1447,7 @@ static void dk_audio_decode_worker(DKPlayer* player) {
 
             if (converted > 0) {
                 pcm.resize(converted * 2);
-                dk_push_vad_audio_16k(player, frame, pcm.data(), converted, pts);
+                dk_push_vad_audio_16k(player, frame, pcm.data(), converted, pts, has_valid_pts);
                 {
                     std::lock_guard<std::mutex> lock(player->audio_queue_mtx);
                     player->audio_chunks.push_back({ std::move(pcm), pts, 0 });

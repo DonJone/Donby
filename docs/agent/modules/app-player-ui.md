@@ -1,6 +1,6 @@
 # Module Map: App, Player HUD & Native UI (`DonbyApp`)
 
-> Last synced: `v1.4.17`. Load this doc for `PlayerView`, `AppState`, `DetailView`, 120Hz native collection views, artwork caching, Liquid Glass UI, and module views.
+> Last synced: `v1.4.18`. Load this doc for `PlayerView`, `AppState`, `DetailView`, 120Hz native collection views, artwork caching, Liquid Glass UI, and module views.
 
 ## 1. File Inventory & Core Symbols
 - **App Entry & Global State**:
@@ -8,7 +8,7 @@
   - `Sources/DonbyApp/AppState.swift` (~2637L) — `@MainActor` central state: server configs, Emby/UHD clients, playback session lifecycle, watch history (max 300, deduplicated), search history, per-season skip prefs (`SeasonSkipPreference`), `ServerHomeCacheStore`.
   - `Sources/DonbyApp/MainWindowView.swift` (~450L) — sidebar navigation, `AppUpdatePromptSheet`.
 - **Player Surface & Controls**:
-  - `Sources/DonbyApp/PlayerView.swift` (~3490L) — playback orchestration: `computePreOpenTrackHints`, `makeKernelSubtitleStyleConfig`, `applySubtitleOptionOnStartup`, `prefetchNextEpisodeIfNearEnd`, `isSettlingSeek` guard (`2.5s`), loading pill (`hasRenderedFirstFrame`), delayed rebuffer pill (`>= 0.48s` `"正在缓冲..."`), track switching (`activeTurboHandle?.wakeWaitingReads()`), health recovery (`PlaybackHealthPolicy`), chapter/OP/ED skipping, and one-click subtitle drawer `字音对齐` (Silero VAD) / `双字对齐` (shift + FPS drift) / `撤销` / `重置速率`.
+  - `Sources/DonbyApp/PlayerView.swift` (~3540L) — playback orchestration: `computePreOpenTrackHints`, `makeKernelSubtitleStyleConfig`, `applySubtitleOptionOnStartup`, `prefetchNextEpisodeIfNearEnd`, `isSettlingSeek` guard (`2.5s`), loading pill (`hasRenderedFirstFrame`), delayed rebuffer pill (`>= 0.48s` `"正在缓冲..."`), track switching (`activeTurboHandle?.wakeWaitingReads()`), health recovery (`PlaybackHealthPolicy`), chapter/OP/ED skipping, Level-2 subtitle menu `字音自动对齐` / `双字幕自动对齐` / `撤销`, and decluttered 2-section `.tracks` drawer (`轨道` | `样式与对齐`).
   - `Sources/DonbyApp/Player/PlayerControls.swift` (~319L) — `PlayerTimelineScrubberView`, `PlayerDrawerTab`, `OpeningPlayerBox`, `PlayerAutoHideBox`, track option models.
 - **High-FPS Browse & Artwork Pipeline**:
   - `Sources/DonbyApp/Components/NativeCardLayers.swift` (~1928L) — AppKit `NSCollectionView` / `CALayer` cells (`InteractiveCollectionView`, `ScrollHoverGate`, `NativeCardLayerCache`, `CardTextBitmapCache`).

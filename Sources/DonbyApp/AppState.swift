@@ -123,8 +123,14 @@ public final class AppState: ObservableObject {
     // 字幕、跳过与 Turbo 多连接分片缓存配置
     @Published public var subtitleStyle: SubtitleStyleConfiguration = SubtitleStyleConfiguration() {
         didSet {
-            if !isLoadingFromDisk, let data = try? jsonEncoder.encode(subtitleStyle) {
-                UserDefaults.standard.set(data, forKey: "donby.subtitleStyle.v1")
+            if !isLoadingFromDisk {
+                // Delays are per-file playback state; never persist them globally across unrelated movies/episodes.
+                var persisted = subtitleStyle
+                persisted.primaryDelaySeconds = 0
+                persisted.secondaryDelaySeconds = 0
+                if let data = try? jsonEncoder.encode(persisted) {
+                    UserDefaults.standard.set(data, forKey: "donby.subtitleStyle.v1")
+                }
             }
         }
     }
@@ -307,7 +313,9 @@ public final class AppState: ObservableObject {
         loadIPTVChannelsFromDisk()
         loadWatchHistoryFromDisk()
         if let subData = UserDefaults.standard.data(forKey: "donby.subtitleStyle.v1"),
-           let decodedStyle = try? jsonDecoder.decode(SubtitleStyleConfiguration.self, from: subData) {
+           var decodedStyle = try? jsonDecoder.decode(SubtitleStyleConfiguration.self, from: subData) {
+            decodedStyle.primaryDelaySeconds = 0
+            decodedStyle.secondaryDelaySeconds = 0
             self.subtitleStyle = decodedStyle
         }
         if let skipData = UserDefaults.standard.data(forKey: "donby.seasonSkipPreferences.v1"),

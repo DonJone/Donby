@@ -7,7 +7,7 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "1.4.17")
+        #expect(DonbyAppInfo.fallbackVersion == "1.4.18")
     }
 
     @Test func subtitleDecoderUTF8BOMAndGB18030() {
@@ -421,6 +421,85 @@ struct DonbyCoreTests {
             #expect(res.residualMADSeconds < 0.15)
         } else {
             Issue.record("Expected aligned frame-rate drift result, got \(driftOutcome)")
+        }
+    }
+
+    @Test func audioAnchoredDualAlignPreventsDetourAndAlignsBothToAudio() {
+        let dt = SileroVAD.frameDurationSeconds // 0.032s
+        let audioStart = 795.8
+        let audioDuration = 32.0
+        let frameCount = Int(audioDuration / dt)
+
+        // Realistic sitcom dialogue inside [795.8s .. 827.8s] (embedded MKV post-seek: no cues before 795.8s!)
+        let trueSpeech: [(Double, Double)] = [
+            (796.6, 798.4),
+            (799.2, 801.3),
+            (802.8, 804.2),
+            (806.5, 809.1),
+            (811.0, 812.9),
+            (815.4, 818.2),
+            (819.7, 821.5),
+            (823.2, 825.8)
+        ]
+
+        var vadProbs = [Float](repeating: 0.03, count: frameCount)
+        for (s, e) in trueSpeech {
+            let i0 = max(0, Int((s - audioStart) / dt))
+            let i1 = min(frameCount - 1, Int((e - audioStart) / dt))
+            for idx in i0...i1 { vadProbs[idx] = 0.94 }
+        }
+
+        // Scenario 1: Primary is 3.20s off (t_pri = t_audio - 3.20 -> needs +3.20s), Secondary is ALREADY synced to Audio (0.0s)!
+        // Old naive dual align would drag Secondary to -3.20s (detour!). New audio-anchored dual align MUST keep Secondary at 0.0s and pull Primary to +3.20s!
+        let offPrimary = trueSpeech.map { SubtitleCueInterval(startSeconds: $0.0 - 3.20, endSeconds: $0.1 - 3.20) }
+        let syncedSecondary = trueSpeech.map { SubtitleCueInterval(startSeconds: $0.0, endSeconds: $0.1) }
+
+        let dualAnchored = SubtitleAutoAligner.alignDualAudioAnchored(
+            primaryCues: offPrimary,
+            secondaryCues: syncedSecondary,
+            vadProbabilities: vadProbs,
+            audioStartPTS: audioStart,
+            currentPrimaryDelay: 0.0,
+            currentSecondaryDelay: 0.0
+        )
+        if case .applied(let plan) = dualAnchored {
+            #expect(abs(plan.secondaryDelaySeconds) <= 0.08)
+            #expect(abs(plan.primaryDelaySeconds - 3.20) <= 0.10)
+        } else {
+            Issue.record("Expected audio-anchored dual align to rescue primary via synced secondary, got \(dualAnchored)")
+        }
+
+        // Scenario 2: Audio-first alignment ("字音对齐") with dual subs active where Primary is +0.10s and Secondary is -1.10s -> locks BOTH to Audio in one click!
+        let priNear = trueSpeech.map { SubtitleCueInterval(startSeconds: $0.0 - 0.10, endSeconds: $0.1 - 0.10) }
+        let secOff = trueSpeech.map { SubtitleCueInterval(startSeconds: $0.0 - 1.15, endSeconds: $0.1 - 1.15) }
+        let audioFirst = SubtitleAutoAligner.alignAudioFirst(
+            vadProbabilities: vadProbs,
+            audioStartPTS: audioStart,
+            primaryCues: priNear,
+            secondaryCues: secOff,
+            currentPrimaryDelay: 0.0,
+            currentSecondaryDelay: 0.0
+        )
+        if case .applied(let plan) = audioFirst {
+            #expect(abs(plan.primaryDelaySeconds - 0.10) <= 0.12)
+            #expect(abs(plan.secondaryDelaySeconds - 1.15) <= 0.12)
+        } else {
+            Issue.record("Expected alignAudioFirst to lock both tracks to audio, got \(audioFirst)")
+        }
+
+        // Scenario 3: Already-synced embedded subtitle right after seek must NOT jump away to a spurious lag!
+        let alreadySynced = SubtitleAutoAligner.alignSubtitleToVADProbabilities(
+            vadProbabilities: vadProbs,
+            audioStartPTS: audioStart,
+            cues: syncedSecondary,
+            currentPrimaryDelay: 0.0,
+            maxShiftSeconds: 30.0
+        )
+        if case .aligned(let res) = alreadySynced {
+            #expect(abs(res.suggestedPrimaryDelaySeconds) <= 0.10)
+            #expect(res.alreadyAligned == true)
+        } else {
+            Issue.record("Expected already-synced embedded subtitle to remain aligned, got \(alreadySynced)")
         }
     }
 }
