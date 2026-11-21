@@ -567,7 +567,7 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
             memoryLock.unlock()
             return
         }
-        let keysToRemove = memoryOrder.filter { $0 > 0 && $0 < threshold && $0 < protectedTailStart }
+        let keysToRemove = memoryOrder.filter { $0 >= 4 && $0 < threshold && $0 < protectedTailStart }
         for k in keysToRemove {
             if let removed = memoryChunks.removeValue(forKey: k) {
                 memoryBytes = max(0, memoryBytes - removed.count)
@@ -1185,10 +1185,12 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         }
         store.retainReader()
 
-        // Immediately start Chunk 0 (and EOF tail range in parallel if URL is direct CDN, pre-cached 302 redirect,
-        // or Chunk 0 is already cached on disk so tail prefetch warms CDN/Cues without waiting for Chunk 0).
+        // Immediately start Chunk 0 (or urgent Chunk 1 when Chunk 0 is already warm on disk/L1 so warm-header
+        // opens don't stall after exhausting Chunk 0's ~1.5s payload on high-TTFB edges).
         if !hasChunk0 {
             requestUrgentChunk(0)
+        } else if !store.hasChunk(1) {
+            requestUrgentChunk(1)
         }
         let pathLower = streamURL.path.lowercased()
         let looksLikeOriginRedirectEndpoint = pathLower.contains("/emby/") || pathLower.contains("/videos/") || pathLower.contains("/play/video/")
@@ -1969,7 +1971,8 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             }
         }
 
-        // Check genuinely stalled streams near cursor using adaptive CDN TTFB so slow edges never trigger rescue storms
+        // Check genuinely stalled or slow-crawling streams near cursor using adaptive CDN TTFB so slow edges
+        // never trigger rescue storms while throttled playhead streams get rescued before audio underruns.
         let adaptiveColdRescue: TimeInterval = max(2.2, min(4.5, smoothedResponseTTFB * 2.5))
         for rec in activeAttempts.values where rec.currentChunkIndex >= currentChunk && rec.currentChunkIndex <= currentChunk + 2 && rec.currentChunkIndex < rec.endChunkExclusive {
             let idx = rec.currentChunkIndex
@@ -1979,7 +1982,9 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                 let hasReceivedAny = (rec.currentChunkIndex > rec.startChunkIndex) || (partialBytes > 0)
                 let isImmediatePlayhead = (idx <= currentChunk + 1)
                 let threshold: TimeInterval = hasReceivedAny ? (isImmediatePlayhead ? 1.1 : 1.6) : adaptiveColdRescue
-                if byteIdle > threshold {
+                let chunkElapsed = now - rec.chunkStartTimestamp
+                let isSlowPlayheadCrawl = hasReceivedAny && isImmediatePlayhead && chunkElapsed > 1.8 && (Double(partialBytes) / max(0.1, chunkElapsed) < 280_000.0)
+                if byteIdle > threshold || isSlowPlayheadCrawl {
                     rescueChunks.insert(idx)
                     chunkStartTime[idx] = now
                     let rescueSkip = (idx == currentChunk) ? computeInitialByteSkipLocked(chunkIndex: idx, offsetInChunk: Int(max(0, cursorOffset) % Int64(chunkSize))) : 0
@@ -2048,15 +2053,18 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             // Bounded geometric ramp (2 MiB -> 2 MiB -> 4 MiB -> 6 MiB) from playhead outward:
             // delivering >=2 MiB usable bytes in Stream #1 satisfies 0.50s of 4K Remux preroll in a SINGLE RTT
             // without ever blocking first frame on Stream #2's cold TTFB, while capping steady spans at 6 MiB.
+            // When immediate playhead runway (< 4 contiguous chunks = 2 MiB) is shallow, keep outer lookahead
+            // spans compact (2 MiB) so large background streams cannot starve Stream #1 on shared H2 connections.
+            let shallowPlayhead = !(0..<4).allSatisfy { store.hasChunk(cursorChunk + $0) }
             let desired: Int
             if aheadFromCursor <= 1 {
                 desired = safeSkip >= 262_144 ? 5 : 4  // >= 2.0 MiB usable playhead sprint
             } else if aheadFromCursor <= 6 {
                 desired = 4       // 2 MiB immediate follow-up
             } else if aheadFromCursor <= 22 {
-                desired = 8       // 4 MiB near lookahead
+                desired = shallowPlayhead ? 4 : 8   // 4 MiB near lookahead (compact while playhead is cold)
             } else {
-                desired = 12      // 6 MiB steady-state bulk lookahead
+                desired = shallowPlayhead ? 4 : 12  // 6 MiB steady-state bulk lookahead
             }
             return min(desired, max(2, prefetchAheadChunks))
         }()
@@ -2226,11 +2234,15 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         if knownMultiplexed {
             isMultiplexedProtocol = true
         }
-        if let rec = activeAttempts[attemptId], rec.currentChunkIndex == rec.startChunkIndex {
+        if var rec = activeAttempts[attemptId], rec.currentChunkIndex == rec.startChunkIndex {
             let ttfb = now - rec.chunkStartTimestamp
             if ttfb > 0.02 && ttfb < 8.0 {
                 smoothedResponseTTFB = smoothedResponseTTFB * 0.65 + ttfb * 0.35
             }
+            // Reset chunkStartTimestamp to response-header arrival so slow-crawl detection measures
+            // post-TTFB body transfer rate rather than conflating cold TTFB.
+            rec.chunkStartTimestamp = now
+            activeAttempts[attemptId] = rec
         }
         if index == 0 {
             chunk0HeadersReceived = true
@@ -3163,9 +3175,13 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
                 return true
             }
 
-            // 1. Always ensure Chunk 0 (container header) is cached
-            if !store.hasChunk(0) {
-                guard await storeAlignedRange(startChunk: 0, chunkCount: 1) else { return }
+            // 1. Always ensure container header is cached. When starting at 0s, fetch Chunks 0..3 (2 MiB)
+            // in a single Range RTT so interrupting preload right after step 1 never leaves a warm-header /
+            // cold-body state (Chunk 0 only) that runs dry after ~1.5s of playback.
+            let initialHeadChunks = (resumePositionSeconds <= 0.5) ? 4 : 1
+            let needsHead = (0..<initialHeadChunks).contains { !store.hasChunk($0) }
+            if needsHead {
+                guard await storeAlignedRange(startChunk: 0, chunkCount: initialHeadChunks) else { return }
             }
             guard !Task.isCancelled else { return }
 
