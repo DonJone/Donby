@@ -132,6 +132,15 @@ DKPlayer* dk_player_create(void);
 void      dk_player_destroy(DKPlayer* player);
 
 int       dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, double start_sec, bool hw_decode);
+int       dk_player_open_with_tracks(
+    DKPlayer* player,
+    const char* url,
+    const char* headers_crlf,
+    double start_sec,
+    bool hw_decode,
+    int32_t preferred_audio_idx,
+    int32_t preferred_sub_idx
+);
 void      dk_player_set_custom_io(
     DKPlayer* player,
     void* opaque,

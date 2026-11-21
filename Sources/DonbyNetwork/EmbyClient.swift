@@ -33,6 +33,60 @@ public actor RedirectCacheStore {
     }
 }
 
+private actor EmbyPlaybackInfoCache {
+    static let shared = EmbyPlaybackInfoCache()
+    private var entries: [String: (response: EmbyPlaybackInfoResponse, expiresAt: Date)] = [:]
+    private static let maxEntries = 64
+
+    private func makeKey(serverId: UUID, baseURL: String, itemId: String, mediaSourceId: String?) -> String {
+        "\(serverId.uuidString)|\(baseURL)|\(itemId)|\(mediaSourceId ?? "")"
+    }
+
+    func get(serverId: UUID, baseURL: String, itemId: String, mediaSourceId: String?) -> EmbyPlaybackInfoResponse? {
+        let key = makeKey(serverId: serverId, baseURL: baseURL, itemId: itemId, mediaSourceId: mediaSourceId)
+        guard let hit = entries[key], hit.expiresAt > Date() else {
+            entries.removeValue(forKey: key)
+            return nil
+        }
+        return hit.response
+    }
+
+    func set(_ response: EmbyPlaybackInfoResponse, serverId: UUID, baseURL: String, itemId: String, mediaSourceId: String?, ttlSeconds: TimeInterval = 90) {
+        let key = makeKey(serverId: serverId, baseURL: baseURL, itemId: itemId, mediaSourceId: mediaSourceId)
+        let now = Date()
+        if entries.count >= Self.maxEntries {
+            entries = entries.filter { $0.value.expiresAt > now }
+            if entries.count >= Self.maxEntries, let oldest = entries.min(by: { $0.value.expiresAt < $1.value.expiresAt })?.key {
+                entries.removeValue(forKey: oldest)
+            }
+        }
+        entries[key] = (response, now.addingTimeInterval(ttlSeconds))
+    }
+
+    func invalidate(serverId: UUID? = nil) {
+        if let serverId {
+            let prefix = "\(serverId.uuidString)|"
+            entries = entries.filter { !$0.key.hasPrefix(prefix) }
+        } else {
+            entries.removeAll()
+        }
+    }
+}
+
+private actor EmbyHostWarmCache {
+    static let shared = EmbyHostWarmCache()
+    private var lastWarmedAt: [String: Date] = [:]
+
+    func shouldWarm(baseURL: String) -> Bool {
+        let now = Date()
+        if let prev = lastWarmedAt[baseURL], now.timeIntervalSince(prev) < 120 {
+            return false
+        }
+        lastWarmedAt[baseURL] = now
+        return true
+    }
+}
+
 public final class EmbyClient: Sendable {
     public static let shared = EmbyClient()
 
@@ -44,7 +98,7 @@ public final class EmbyClient: Sendable {
 
     public let clientName = "Donby"
     public var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.33"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.34"
     }
     public let deviceName: String
     public let deviceId: String
@@ -560,6 +614,12 @@ public final class EmbyClient: Sendable {
         audioStreamIndex: Int? = nil,
         subtitleStreamIndex: Int? = nil
     ) async throws -> EmbyPlaybackInfoResponse {
+        let base = server.activeBaseURL
+        if let cached = await EmbyPlaybackInfoCache.shared.get(serverId: server.id, baseURL: base, itemId: itemId, mediaSourceId: mediaSourceId),
+           (audioStreamIndex == nil && subtitleStreamIndex == nil) || (cached.mediaSources?.allSatisfy { ($0.transcodingUrl ?? "").isEmpty } == true) {
+            return cached
+        }
+
         var query: [URLQueryItem] = [
             URLQueryItem(name: "UserId", value: server.userId),
             URLQueryItem(name: "AutoOpenLiveStream", value: "true"),
@@ -570,7 +630,7 @@ public final class EmbyClient: Sendable {
         if let subtitleStreamIndex { query.append(URLQueryItem(name: "SubtitleStreamIndex", value: "\(subtitleStreamIndex)")) }
 
         let req = try makeRequest(
-            baseURL: server.activeBaseURL,
+            baseURL: base,
             path: "/Items/\(itemId)/PlaybackInfo",
             method: "POST",
             queryItems: query,
@@ -579,7 +639,32 @@ public final class EmbyClient: Sendable {
             bodyData: deviceProfilePayloadData,
             timeout: 15
         )
-        return try await requestJSON(EmbyPlaybackInfoResponse.self, for: req, priority: .playback)
+        let res = try await requestJSON(EmbyPlaybackInfoResponse.self, for: req, priority: .playback)
+        await EmbyPlaybackInfoCache.shared.set(res, serverId: server.id, baseURL: base, itemId: itemId, mediaSourceId: mediaSourceId)
+        return res
+    }
+
+    public func prewarmPlaybackInfo(server: EmbyServerConfig, itemId: String, mediaSourceId: String? = nil) async {
+        guard server.type != .uhdNative, !server.host.isEmpty else { return }
+        let base = server.activeBaseURL
+        if await EmbyPlaybackInfoCache.shared.get(serverId: server.id, baseURL: base, itemId: itemId, mediaSourceId: mediaSourceId) != nil {
+            return
+        }
+        _ = try? await fetchPlaybackInfo(server: server, itemId: itemId, mediaSourceId: mediaSourceId)
+    }
+
+    public func prewarmConnection(server: EmbyServerConfig) async {
+        guard server.type != .uhdNative, !server.host.isEmpty else { return }
+        let base = server.activeBaseURL
+        guard await EmbyHostWarmCache.shared.shouldWarm(baseURL: base) else { return }
+        guard let req = try? makeRequest(
+            baseURL: base,
+            path: "/System/Info/Public",
+            token: server.accessToken,
+            userId: server.userId,
+            timeout: 4
+        ) else { return }
+        _ = try? await apiSession.data(for: req)
     }
 
     public static func redirectCacheKey(
@@ -713,6 +798,7 @@ public final class EmbyClient: Sendable {
         let embyDownloadURL = URL(string: "\(baseURL)/emby/Items/\(item.id)/Download?MediaSourceId=\(selectedSource.id)&api_key=\(server.accessToken)")
         return ResolvedPlaybackResource(
             streamURL: resolvedURL,
+            originStreamURL: initialURL,
             downloadURL: embyDownloadURL ?? resolvedURL,
             headers: headers,
             playSessionId: playSessionId,

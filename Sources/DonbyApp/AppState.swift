@@ -6,6 +6,7 @@ import DonbyCore
 import DonbyNetwork
 import DonbyStorage
 import DonbyKernelC
+import DonbyMetalRenderer
 
 @MainActor
 public final class AppState: ObservableObject {
@@ -1466,6 +1467,12 @@ public final class AppState: ObservableObject {
             Task { await syncExtDomains(for: server.id, showFeedback: false) }
         }
         Task { await refreshServerCapabilities(for: server) }
+        Task.detached(priority: .utility) { DKMetalLayerView.prewarmPipelines() }
+        if server.type == .uhdNative {
+            Task { await UHDStreamClient.shared.prewarmPlaybackDomain(server: server) }
+        } else {
+            Task { await EmbyClient.shared.prewarmConnection(server: server) }
+        }
 
         if server.type == .uhdNative {
             do {
@@ -1486,6 +1493,16 @@ public final class AppState: ObservableObject {
                 if self.resumeItems != states.resume { self.resumeItems = states.resume }
                 if self.nextUpItems != states.nextUp { self.nextUpItems = states.nextUp }
                 if self.favoriteItems != favs { self.favoriteItems = favs }
+
+                // Silently prewarm top continue-watching / next-up asset metadata so clicking from Home resolves in 0ms
+                let homePrewarmTargets = Array((states.resume + states.nextUp).filter { !$0.isSeries }.prefix(3))
+                if !homePrewarmTargets.isEmpty {
+                    Task.detached(priority: .utility) {
+                        for target in homePrewarmTargets {
+                            _ = try? await UHDStreamClient.shared.fetchAssetMediaSources(server: server, item: target)
+                        }
+                    }
+                }
 
                 var latestMap: [String: [EmbyItem]] = [:]
                 var heroCandidates: [EmbyItem] = hotItems
@@ -1575,6 +1592,16 @@ public final class AppState: ObservableObject {
             if self.resumeItems != resumes { self.resumeItems = resumes }
             if self.nextUpItems != nextUps { self.nextUpItems = nextUps }
             if self.favoriteItems != favs { self.favoriteItems = favs }
+
+            // Silently prewarm top continue-watching / next-up PlaybackInfo so clicking from Home resolves in 0ms
+            let embyPrewarmTargets = Array((resumes + nextUps).filter { !$0.isSeries }.prefix(3))
+            if !embyPrewarmTargets.isEmpty {
+                Task.detached(priority: .utility) {
+                    for target in embyPrewarmTargets {
+                        await EmbyClient.shared.prewarmPlaybackInfo(server: server, itemId: target.id)
+                    }
+                }
+            }
 
             var latestMap: [String: [EmbyItem]] = [:]
             var heroCandidates: [EmbyItem] = []
@@ -1832,7 +1859,8 @@ public final class AppState: ObservableObject {
                     server: server,
                     item: targetItem,
                     preferredSourceId: preferredSourceId,
-                    preferredPreset: preferredVersionPreset
+                    preferredPreset: preferredVersionPreset,
+                    enable302Cache: enable302Cache && server.cache302Request
                 )
             } else {
                 resource = try await EmbyClient.shared.resolvePlaybackResource(
@@ -2578,8 +2606,7 @@ public final class ServerHomeCacheStore {
     }
 
     private init() {
-        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let base = DonbyStoragePaths.cachesDirectoryURL
         let dir = base.appendingPathComponent("com.don.Donby/ServerHomeCache", isDirectory: true)
         self.cacheDirectoryURL = dir
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)

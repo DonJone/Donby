@@ -40,7 +40,7 @@ public final class AppUpdateManager: ObservableObject {
     private init() {}
 
     public static var currentVersion: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.3.33"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.3.34"
     }
 
     public var lastCheckedDate: Date? {
@@ -175,10 +175,9 @@ public final class AppUpdateManager: ObservableObject {
         activeDownloadTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let updatesDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+                let updatesDir = DonbyStoragePaths.cachesDirectoryURL
                     .appendingPathComponent("DonbyUpdates", isDirectory: true)
                     .appendingPathComponent(release.tagName, isDirectory: true)
-                    ?? URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("DonbyUpdates/\(release.tagName)", isDirectory: true)
 
                 try FileManager.default.createDirectory(at: updatesDir, withIntermediateDirectories: true)
                 let destPackage = updatesDir.appendingPathComponent(asset.name)

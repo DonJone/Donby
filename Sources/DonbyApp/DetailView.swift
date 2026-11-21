@@ -91,6 +91,23 @@ public struct DetailView: View {
         .task(id: initialItem.id) {
             await loadFullDetailData()
         }
+        .task(id: "\(item.id)|\(heroTargetEpisode?.id ?? "")|\(selectedSourceId)|\(isLoadingDetails)") {
+            guard !isLoadingDetails else { return }
+            guard let server = effectiveDetailServer, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            if item.isSeries && heroTargetEpisode == nil { return }
+            let target = heroResolvedPlayTarget
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            guard !Task.isCancelled else { return }
+            let sourceHint = (target.id == item.id && !selectedSourceId.isEmpty) ? selectedSourceId : nil
+            if server.type == .uhdNative {
+                await UHDStreamClient.shared.prewarmPlaybackDomain(server: server)
+                if target.isEpisode {
+                    _ = try? await UHDStreamClient.shared.fetchAssetMediaSources(server: server, item: target)
+                }
+            } else {
+                await EmbyClient.shared.prewarmPlaybackInfo(server: server, itemId: target.id, mediaSourceId: sourceHint)
+            }
+        }
     }
 
     private var heroHeaderSection: some View {
@@ -1637,6 +1654,18 @@ public struct DetailView: View {
         if let selSub = selectedSubtitleIndex, subtitleStreams.contains(where: { $0.index == selSub }) {
             // keep valid subtitle selection
         } else if !didUserDisableSubtitle {
+            let candidates = subtitleStreams.map { stream in
+                SubtitleTrackCandidate(
+                    id: "emb-\(stream.index ?? -1)",
+                    language: stream.language,
+                    title: stream.readableLabel,
+                    codec: stream.codec,
+                    isExternal: stream.isExternal == true,
+                    embyIndex: stream.index,
+                    avStreamIndex: stream.index,
+                    isDefault: stream.isDefault == true
+                )
+            }
             if let srvId = effectiveDetailServer?.id ?? appState.activeServer?.id,
                let remembered = appState.resolvedPrimarySubtitleMemory(serverId: srvId, item: item) {
                 if remembered.isDisabled {
@@ -1644,24 +1673,16 @@ public struct DetailView: View {
                     selectedSubtitleIndex = nil
                     return
                 }
-                let candidates = subtitleStreams.map { stream in
-                    SubtitleTrackCandidate(
-                        id: "emb-\(stream.index ?? -1)",
-                        language: stream.language,
-                        title: stream.readableLabel,
-                        codec: stream.codec,
-                        isExternal: stream.isExternal == true,
-                        embyIndex: stream.index,
-                        avStreamIndex: stream.index,
-                        isDefault: stream.isDefault == true
-                    )
-                }
                 if let matchedIdx = SubtitleTrackMatcher.bestMatchIndex(in: candidates, for: remembered) {
                     selectedSubtitleIndex = subtitleStreams[matchedIdx].index
                     return
                 }
             }
-            selectedSubtitleIndex = (subtitleStreams.first(where: { $0.isDefault == true }) ?? subtitleStreams.first)?.index
+            if let smartDefaultIdx = SubtitleTrackMatcher.defaultPreferredIndex(in: candidates) {
+                selectedSubtitleIndex = subtitleStreams[smartDefaultIdx].index
+            } else {
+                selectedSubtitleIndex = (subtitleStreams.first(where: { $0.isDefault == true }) ?? subtitleStreams.first)?.index
+            }
         }
     }
 }

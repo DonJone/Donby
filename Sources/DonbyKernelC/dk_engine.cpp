@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -214,6 +215,17 @@ struct DKPlayer {
     std::deque<AudioChunk> audio_chunks;
     std::atomic<int64_t> buffered_audio_samples{0};
     std::atomic<bool> audio_queue_started{false};
+    std::atomic<uint32_t> audio_rebuffer_count{0};
+    std::atomic<uint32_t> audio_start_fail_count{0};
+    std::atomic<int64_t> last_audio_start_attempt_ns{0};
+    std::atomic<int64_t> audio_steady_start_ns{0};
+    std::atomic<bool> audio_hal_disabled{false};
+
+    // Bounded recent subtitle packet ring buffer for instant zero-seek track switching
+    std::mutex sub_hist_mtx;
+    std::deque<AVPacket*> sub_pkt_history;
+    size_t sub_hist_bytes{0};
+    std::atomic<bool> sub_hist_trimmed{false};
 
     // Master Clock Synchronization
     std::atomic<double> audio_clock_base_pts{-1.0};
@@ -874,7 +886,7 @@ static double dk_get_master_clock(DKPlayer* player) {
     if (player->seek_requested.load(std::memory_order_acquire) || player->seek_executing.load(std::memory_order_acquire)) {
         return player->seek_target_sec.load(std::memory_order_relaxed);
     }
-    if (player->audio_stream_idx >= 0 && player->audio_queue != nullptr) {
+    if (player->audio_stream_idx >= 0 && player->audio_queue != nullptr && !player->audio_hal_disabled.load(std::memory_order_acquire)) {
         return dk_get_audio_clock(player);
     }
     // Fallback: System monotonic clock when no audio track exists
@@ -983,7 +995,9 @@ static bool dk_init_audio_queue(DKPlayer* player) {
     AudioQueueSetProperty(player->audio_queue, kAudioQueueProperty_EnableTimePitch, &timePitch, sizeof(timePitch));
     AudioQueueSetParameter(player->audio_queue, kAudioQueueParam_PlayRate, player->playback_rate.load());
 
-    float vol = player->is_muted.load() ? 0.0f : player->volume.load();
+    const char* muted_env = std::getenv("DONBY_TEST_MUTED");
+    const bool env_muted = (muted_env && (muted_env[0] == '1' || muted_env[0] == 't' || muted_env[0] == 'T'));
+    float vol = (player->is_muted.load() || env_muted) ? 0.0f : player->volume.load();
     AudioQueueSetParameter(player->audio_queue, kAudioQueueParam_Volume, vol);
 
     for (int i = 0; i < DKPlayer::kNumAudioBuffers; i++) {
@@ -1000,8 +1014,18 @@ static inline bool dk_is_seeking(const DKPlayer* player) {
 
 // Start audio queue when sufficient initial audio samples are decoded
 static void dk_start_audio_queue_with_buffered_data(DKPlayer* player) {
-    if (!player || player->abort_requested.load() || player->is_closing.load() || !player->audio_queue || player->audio_queue_started.load()) return;
+    if (!player || player->abort_requested.load() || player->is_closing.load() ||
+        !player->audio_queue || player->audio_hal_disabled.load(std::memory_order_acquire) ||
+        player->audio_queue_started.load()) return;
     if (dk_is_seeking(player)) return;
+
+    int64_t now_ns = dk_steady_now_ns();
+    int64_t prev_attempt_ns = player->last_audio_start_attempt_ns.load(std::memory_order_relaxed);
+    if (player->audio_start_fail_count.load(std::memory_order_relaxed) > 0 && prev_attempt_ns > 0 &&
+        (now_ns - prev_attempt_ns) < 80'000'000LL) {
+        return;
+    }
+    player->last_audio_start_attempt_ns.store(now_ns, std::memory_order_relaxed);
 
     {
         std::lock_guard<std::mutex> lock(player->audio_queue_mtx);
@@ -1021,38 +1045,62 @@ static void dk_start_audio_queue_with_buffered_data(DKPlayer* player) {
     }
 
     if (player->state.load() == DK_STATE_PLAYING && !dk_is_seeking(player)) {
+        AudioQueuePrime(player->audio_queue, 0, nullptr);
         OSStatus startStatus = AudioQueueStart(player->audio_queue, nullptr);
         if (startStatus == noErr) {
-            dk_log(0, "DKEngine: AudioQueue started smoothly (base PTS: %.3fs)", player->audio_clock_base_pts.load());
+            player->audio_start_fail_count.store(0, std::memory_order_relaxed);
+            player->audio_steady_start_ns.store(dk_steady_now_ns(), std::memory_order_relaxed);
+            dk_log(0, "DKEngine: AudioQueue started smoothly (base PTS: %.3fs, rebuf=%u)",
+                   player->audio_clock_base_pts.load(), player->audio_rebuffer_count.load(std::memory_order_relaxed));
         } else {
             player->audio_queue_started.store(false, std::memory_order_release);
-            dk_log(2, "DKEngine Error: AudioQueueStart returned OSStatus %d", static_cast<int>(startStatus));
+            uint32_t fails = player->audio_start_fail_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (fails == 1 || fails == 6) {
+                dk_log(2, "DKEngine Error: AudioQueueStart returned OSStatus %d (attempt %u)", static_cast<int>(startStatus), fails);
+            }
+            if (fails >= 6) {
+                // CoreAudio HAL rejected AudioQueue repeatedly; switch seamlessly to monotonic clock so video never deadlocks
+                player->audio_hal_disabled.store(true, std::memory_order_release);
+                double base_pts = std::max(0.0, player->current_pos_sec.load(std::memory_order_relaxed));
+                player->ext_clock_base_pts.store(base_pts, std::memory_order_relaxed);
+                player->ext_clock_start_ns.store(dk_steady_now_ns(), std::memory_order_relaxed);
+                dk_log(1, "DKEngine: Falling back to system presentation clock after repeated AudioQueueStart errors");
+            }
         }
     } else {
         player->audio_queue_started.store(false, std::memory_order_release);
     }
 }
 
+static int64_t dk_required_audio_preroll_samples(const DKPlayer* player) {
+    uint32_t rebuf = player ? player->audio_rebuffer_count.load(std::memory_order_relaxed) : 0;
+    if (rebuf == 0) return 36000;   // 0.75s post-seek cushion absorbs ~1s CDN micro-stalls with zero rebuffer
+    if (rebuf == 1) return 84000;   // 1.75s buffer cushion after first underrun
+    return 120000;                  // 2.50s anti-choppy cushion on repeated slow-CDN starvation
+}
+
 static void dk_try_start_audio_queue_if_ready(DKPlayer* player) {
     if (!player || player->abort_requested.load() || player->is_closing.load() ||
-        !player->audio_queue || player->audio_queue_started.load(std::memory_order_acquire) ||
+        !player->audio_queue || player->audio_hal_disabled.load(std::memory_order_acquire) ||
+        player->audio_queue_started.load(std::memory_order_acquire) ||
         dk_is_seeking(player)) {
         return;
     }
     const int64_t buffered_samples = player->buffered_audio_samples.load(std::memory_order_relaxed);
     const bool eof_reached = player->audio_eof.load(std::memory_order_relaxed) ||
                              player->demux_eof.load(std::memory_order_relaxed);
-    // Require 24000 stereo samples (0.50s cushion, ~4x the 3 hardware AudioQueueBuffers)
-    // unless stream EOF is reached.
-    if (buffered_samples < 24000 && !eof_reached) return;
+    const uint32_t rebuf = player->audio_rebuffer_count.load(std::memory_order_relaxed);
+    const int64_t req_samples = dk_required_audio_preroll_samples(player);
+    if (buffered_samples < req_samples && !eof_reached) return;
 
+    const int64_t solo_samples = (rebuf == 0) ? 48000 : (rebuf == 1 ? 96000 : 144000);
     bool video_ready = (player->video_stream_idx < 0) ||
                        player->video_eof.load(std::memory_order_relaxed) ||
                        eof_reached ||
-                       (buffered_samples >= 44000);
+                       (buffered_samples >= solo_samples);
     if (!video_ready) {
         std::lock_guard<std::mutex> vql(player->video_queue_mtx);
-        const size_t min_frames = player->force_present_next_frame.load(std::memory_order_relaxed) ? 5 : 4;
+        const size_t min_frames = (rebuf >= 2) ? 8 : (rebuf == 1 ? 6 : (player->force_present_next_frame.load(std::memory_order_relaxed) ? 4 : 3));
         video_ready = (player->video_queue.size() >= min_frames) ||
                       player->video_eof.load(std::memory_order_relaxed) ||
                       player->demux_eof.load(std::memory_order_relaxed);
@@ -1085,11 +1133,20 @@ static void dk_audio_decode_worker(DKPlayer* player) {
             continue;
         }
 
-        // Flow control: keep ~2.5s of audio buffered in RAM (120,000 samples)
-        if (player->buffered_audio_samples.load() > 120000) {
+        if (player->audio_hal_disabled.load(std::memory_order_acquire)) {
+            std::lock_guard<std::mutex> lock(player->audio_queue_mtx);
+            player->audio_chunks.clear();
+            player->buffered_audio_samples.store(0);
+        }
+
+        // Flow control: keep up to 3.3s of audio buffered in RAM (160,000 samples) so rebuffer escalation up to 2.0s never deadlocks
+        if (player->buffered_audio_samples.load() > 160000) {
+            if (!player->audio_queue_started.load(std::memory_order_acquire)) {
+                dk_try_start_audio_queue_if_ready(player);
+            }
             std::unique_lock<std::mutex> lk(player->audio_queue_mtx);
             player->audio_decode_cv.wait_for(lk, std::chrono::milliseconds(15), [player] {
-                return player->abort_requested.load() || player->buffered_audio_samples.load() <= 96000 || dk_is_seeking(player);
+                return player->abort_requested.load() || player->buffered_audio_samples.load() <= 120000 || dk_is_seeking(player) || !player->audio_queue_started.load();
             });
             if (player->abort_requested.load() || dk_is_seeking(player)) continue;
         }
@@ -1838,6 +1895,67 @@ static void dk_decode_subtitle_packet_for_slot_locked(DKPlayer* player, AVPacket
     avsubtitle_free(&sub);
 }
 
+static void dk_clear_sub_pkt_history(DKPlayer* player) {
+    if (!player) return;
+    std::lock_guard<std::mutex> lk(player->sub_hist_mtx);
+    while (!player->sub_pkt_history.empty()) {
+        AVPacket* p = player->sub_pkt_history.front();
+        player->sub_pkt_history.pop_front();
+        if (p) av_packet_free(&p);
+    }
+    player->sub_hist_bytes = 0;
+    player->sub_hist_trimmed.store(false, std::memory_order_relaxed);
+}
+
+static void dk_record_sub_pkt_history(DKPlayer* player, AVPacket* pkt) {
+    if (!player || !pkt || pkt->size <= 0) return;
+    AVPacket* clone = av_packet_clone(pkt);
+    if (!clone) return;
+    constexpr size_t kMaxSubHistBytes = 4 * 1024 * 1024;
+    constexpr size_t kMaxSubHistPkts = 2500;
+    std::lock_guard<std::mutex> lk(player->sub_hist_mtx);
+    player->sub_hist_bytes += static_cast<size_t>(clone->size);
+    player->sub_pkt_history.push_back(clone);
+    while (player->sub_pkt_history.size() > kMaxSubHistPkts || player->sub_hist_bytes > kMaxSubHistBytes) {
+        AVPacket* old = player->sub_pkt_history.front();
+        player->sub_pkt_history.pop_front();
+        if (old) {
+            player->sub_hist_bytes -= std::min(player->sub_hist_bytes, static_cast<size_t>(std::max(0, old->size)));
+            av_packet_free(&old);
+        }
+        player->sub_hist_trimmed.store(true, std::memory_order_relaxed);
+    }
+}
+
+static void dk_replay_sub_pkt_history(DKPlayer* player, int target_stream_idx, bool is_secondary) {
+    if (!player || target_stream_idx < 0) return;
+    std::vector<AVPacket*> clones;
+    {
+        std::lock_guard<std::mutex> lk(player->sub_hist_mtx);
+        clones.reserve(64);
+        for (AVPacket* src : player->sub_pkt_history) {
+            if (src && src->stream_index == target_stream_idx) {
+                if (AVPacket* cp = av_packet_clone(src)) {
+                    clones.push_back(cp);
+                }
+            }
+        }
+    }
+    if (clones.empty()) return;
+    {
+        std::lock_guard<std::mutex> slk(player->ass_mtx);
+        for (AVPacket* cp : clones) {
+            dk_decode_subtitle_packet_for_slot_locked(player, cp, target_stream_idx, is_secondary);
+        }
+        player->sub_last_non_empty = false;
+        player->rendered_pgs_gen = 0;
+        player->sub_serial++;
+    }
+    for (AVPacket* cp : clones) {
+        av_packet_free(&cp);
+    }
+}
+
 static void dk_decode_subtitle_packet(DKPlayer* player, AVPacket* pkt) {
     if (!player || !pkt || !player->format_ctx) return;
     std::lock_guard<std::mutex> lk(player->ass_mtx);
@@ -1871,6 +1989,7 @@ static void dk_signal_seek_request(DKPlayer* player, double target_sec, bool acc
 static void dk_demux_worker(DKPlayer* player) {
     AVPacket* pkt = av_packet_alloc();
     int consecutive_io_errors = 0;
+    int dovi_probe_packets = 0;
 
     while (!player->abort_requested.load()) {
         // Thread-safe seek handling
@@ -1988,6 +2107,7 @@ static void dk_demux_worker(DKPlayer* player) {
                 player->sub_dirty_y1 = 0;
                 player->sub_serial++;
             }
+            dk_clear_sub_pkt_history(player);
 
             // Flush video decoded frames
             {
@@ -2009,8 +2129,11 @@ static void dk_demux_worker(DKPlayer* player) {
                 player->audio_clock_base_sample_time.store(0);
                 player->audio_underrun_samples.store(0);
                 player->fallback_audio_clock.store(target_sec);
-            player->fallback_clock_ns.store(dk_steady_now_ns(), std::memory_order_relaxed);
+                player->fallback_clock_ns.store(dk_steady_now_ns(), std::memory_order_relaxed);
             }
+            player->audio_rebuffer_count.store(0, std::memory_order_relaxed);
+            player->audio_start_fail_count.store(0, std::memory_order_relaxed);
+            player->audio_hal_disabled.store(false, std::memory_order_relaxed);
 
             if (player->audio_queue && player->audio_queue_started.exchange(false, std::memory_order_acq_rel)) {
                 AudioQueueStop(player->audio_queue, true);
@@ -2158,10 +2281,15 @@ static void dk_demux_worker(DKPlayer* player) {
 
         if (pkt->stream_index == player->video_stream_idx) {
             if (!player->dovi_detected.load(std::memory_order_relaxed) &&
-                dk_rs_check_dovi_fel(pkt->data, pkt->size)) {
-                player->dovi_detected.store(true, std::memory_order_relaxed);
-                std::lock_guard<std::mutex> lock(player->stats_mtx);
-                player->stats.is_dolby_vision = true;
+                dovi_probe_packets < 120 &&
+                player->format_ctx &&
+                player->format_ctx->streams[pkt->stream_index]->codecpar->codec_id == AV_CODEC_ID_HEVC) {
+                dovi_probe_packets++;
+                if (dk_rs_check_dovi_fel(pkt->data, pkt->size)) {
+                    player->dovi_detected.store(true, std::memory_order_relaxed);
+                    std::lock_guard<std::mutex> lock(player->stats_mtx);
+                    player->stats.is_dolby_vision = true;
+                }
             }
             AVPacket* v_copy = av_packet_alloc();
             av_packet_move_ref(v_copy, pkt);
@@ -2180,9 +2308,14 @@ static void dk_demux_worker(DKPlayer* player) {
                 player->queued_pkt_bytes.fetch_add(a_copy->size, std::memory_order_relaxed);
             }
             player->audio_decode_cv.notify_one();
-        } else if (pkt->stream_index == player->sub_stream_idx.load(std::memory_order_relaxed) ||
-                   pkt->stream_index == player->secondary_sub_stream_idx.load(std::memory_order_relaxed)) {
-            dk_decode_subtitle_packet(player, pkt);
+        } else if (pkt->stream_index >= 0 &&
+                   static_cast<unsigned>(pkt->stream_index) < player->format_ctx->nb_streams &&
+                   player->format_ctx->streams[pkt->stream_index]->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) {
+            dk_record_sub_pkt_history(player, pkt);
+            if (pkt->stream_index == player->sub_stream_idx.load(std::memory_order_relaxed) ||
+                pkt->stream_index == player->secondary_sub_stream_idx.load(std::memory_order_relaxed)) {
+                dk_decode_subtitle_packet(player, pkt);
+            }
             av_packet_unref(pkt);
         } else {
             av_packet_unref(pkt);
@@ -2358,6 +2491,55 @@ void dk_player_request_abort(DKPlayer* player) {
 }
 
 int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, double start_sec, bool hw_decode) {
+    return dk_player_open_with_tracks(player, url, headers_crlf, start_sec, hw_decode, -1, -1);
+}
+
+static int dk_score_auto_subtitle_stream(const AVStream* st) {
+    if (!st || !st->codecpar || st->codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE) return -1;
+    auto to_lower = [](const char* s) -> std::string {
+        std::string out = s ? s : "";
+        for (char& ch : out) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        return out;
+    };
+    const AVDictionaryEntry* lang_tag = av_dict_get(st->metadata, "language", nullptr, 0);
+    const AVDictionaryEntry* title_tag = av_dict_get(st->metadata, "title", nullptr, 0);
+    std::string lang = to_lower(lang_tag ? lang_tag->value : nullptr);
+    std::string title = to_lower(title_tag ? title_tag->value : nullptr);
+    std::string combined = lang + " " + title;
+
+    int score = 0;
+    bool is_chs = (combined.find("chs") != std::string::npos || combined.find("zh-cn") != std::string::npos ||
+                   combined.find("zh_cn") != std::string::npos || combined.find("hans") != std::string::npos ||
+                   combined.find("简") != std::string::npos);
+    bool is_cht = (combined.find("cht") != std::string::npos || combined.find("zh-tw") != std::string::npos ||
+                   combined.find("zh-hk") != std::string::npos || combined.find("hant") != std::string::npos ||
+                   combined.find("繁") != std::string::npos);
+    bool is_zh = is_chs || is_cht ||
+                 (lang.find("chi") != std::string::npos || lang.find("zho") != std::string::npos || lang.find("zh") != std::string::npos ||
+                  combined.find("中") != std::string::npos);
+
+    if (is_chs) score += 100;
+    else if (is_zh && !is_cht) score += 80;
+    else if (is_cht) score += 50;
+
+    enum AVCodecID cid = st->codecpar->codec_id;
+    if (cid == AV_CODEC_ID_ASS || cid == AV_CODEC_ID_SSA) score += 15;
+    else if (cid == AV_CODEC_ID_SUBRIP || cid == AV_CODEC_ID_SRT || cid == AV_CODEC_ID_TEXT) score += 12;
+
+    if (st->disposition & AV_DISPOSITION_DEFAULT) score += 6;
+    if (st->disposition & AV_DISPOSITION_FORCED) score -= 25;
+    return score;
+}
+
+int dk_player_open_with_tracks(
+    DKPlayer* player,
+    const char* url,
+    const char* headers_crlf,
+    double start_sec,
+    bool hw_decode,
+    int32_t preferred_audio_hint,
+    int32_t preferred_sub_hint
+) {
     if (!player || !url) return -1;
     if (player->external_abort_requested.load(std::memory_order_seq_cst)) {
         player->state.store(DK_STATE_ERROR);
@@ -2414,6 +2596,12 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
     player->video_seek_drop_until_pts.store(-1.0);
     player->audio_seek_drop_until_pts.store(-1.0);
     player->queued_pkt_bytes.store(0);
+    dk_clear_sub_pkt_history(player);
+    player->audio_rebuffer_count.store(0);
+    player->audio_start_fail_count.store(0);
+    player->last_audio_start_attempt_ns.store(0);
+    player->audio_steady_start_ns.store(0);
+    player->audio_hal_disabled.store(false);
     player->last_demuxed_pts.store(std::max(0.0, start_sec));
     player->last_decoded_video_pts = -1.0;
     player->abort_requested.store(false, std::memory_order_seq_cst);
@@ -2578,29 +2766,34 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
     }
 
     int preferred_audio_idx = -1;
+    if (preferred_audio_hint >= 0 &&
+        static_cast<unsigned int>(preferred_audio_hint) < player->format_ctx->nb_streams &&
+        player->format_ctx->streams[preferred_audio_hint]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+        preferred_audio_idx = preferred_audio_hint;
+    }
+
     int preferred_sub_idx = -1;
+    bool disable_auto_sub = (preferred_sub_hint == -2);
+    if (preferred_sub_hint >= 0 &&
+        static_cast<unsigned int>(preferred_sub_hint) < player->format_ctx->nb_streams &&
+        player->format_ctx->streams[preferred_sub_hint]->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) {
+        preferred_sub_idx = preferred_sub_hint;
+    }
+
+    int best_sub_score = -1000;
     for (unsigned int i = 0; i < player->format_ctx->nb_streams; i++) {
         AVStream* st = player->format_ctx->streams[i];
-        if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+        if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && preferred_audio_hint < 0) {
             if (preferred_audio_idx < 0 || (st->disposition & AV_DISPOSITION_DEFAULT)) {
                 if (preferred_audio_idx < 0 || !(player->format_ctx->streams[preferred_audio_idx]->disposition & AV_DISPOSITION_DEFAULT)) {
                     preferred_audio_idx = static_cast<int>(i);
                 }
             }
-        } else if (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) {
-            const AVDictionaryEntry* lang_tag = av_dict_get(st->metadata, "language", nullptr, 0);
-            std::string lang = lang_tag && lang_tag->value ? lang_tag->value : "";
-            bool is_zh = (lang.find("chi") != std::string::npos || lang.find("zho") != std::string::npos || lang.find("zh") != std::string::npos);
-            if (preferred_sub_idx < 0) {
+        } else if (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE && !disable_auto_sub && preferred_sub_hint < 0) {
+            int sc = dk_score_auto_subtitle_stream(st);
+            if (preferred_sub_idx < 0 || sc > best_sub_score) {
                 preferred_sub_idx = static_cast<int>(i);
-            } else if ((st->disposition & AV_DISPOSITION_DEFAULT) || is_zh) {
-                AVStream* cur_st = player->format_ctx->streams[preferred_sub_idx];
-                const AVDictionaryEntry* cur_lang_tag = av_dict_get(cur_st->metadata, "language", nullptr, 0);
-                std::string cur_lang = cur_lang_tag && cur_lang_tag->value ? cur_lang_tag->value : "";
-                bool cur_zh = (cur_lang.find("chi") != std::string::npos || cur_lang.find("zho") != std::string::npos || cur_lang.find("zh") != std::string::npos);
-                if (!cur_zh && is_zh) {
-                    preferred_sub_idx = static_cast<int>(i);
-                }
+                best_sub_score = sc;
             }
         }
     }
@@ -2720,7 +2913,7 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
                     player->audio_stream_idx = -1;
                 }
             }
-        } else if (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE && player->sub_stream_idx < 0 &&
+        } else if (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE && player->sub_stream_idx < 0 && !disable_auto_sub &&
                    (preferred_sub_idx < 0 || static_cast<int>(i) == preferred_sub_idx)) {
             player->sub_stream_idx = i;
         }
@@ -2746,8 +2939,10 @@ int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, 
     if (start_sec > 0.5) {
         int64_t target_ts = static_cast<int64_t>(start_sec * AV_TIME_BASE);
         avformat_seek_file(player->format_ctx, -1, INT64_MIN, target_ts, target_ts, AVSEEK_FLAG_BACKWARD);
-        player->video_seek_drop_until_pts.store(start_sec);
-        player->audio_seek_drop_until_pts.store(start_sec);
+        // Resume at nearest keyframe for instant startup without decoding & dropping seconds of remote 4K video
+        player->video_seek_drop_until_pts.store(-1.0);
+        player->audio_seek_drop_until_pts.store(-1.0);
+        player->force_present_next_frame.store(true, std::memory_order_release);
         player->current_pos_sec.store(start_sec);
         player->audio_clock_base_pts.store(start_sec);
         player->ext_clock_base_pts.store(start_sec);
@@ -2828,6 +3023,7 @@ void dk_player_close(DKPlayer* player) {
         }
     }
     player->queued_pkt_bytes.store(0);
+    dk_clear_sub_pkt_history(player);
 
     {
         std::lock_guard<std::mutex> lock(player->video_queue_mtx);
@@ -2968,7 +3164,9 @@ void dk_player_set_volume(DKPlayer* player, float volume, bool muted) {
     player->volume.store(volume);
     player->is_muted.store(muted);
     if (player->audio_queue) {
-        float effective_vol = muted ? 0.0f : volume;
+        const char* muted_env = std::getenv("DONBY_TEST_MUTED");
+        const bool env_muted = (muted_env && (muted_env[0] == '1' || muted_env[0] == 't' || muted_env[0] == 'T'));
+        float effective_vol = (muted || env_muted) ? 0.0f : volume;
         AudioQueueSetParameter(player->audio_queue, kAudioQueueParam_Volume, effective_vol);
     }
 }
@@ -3120,6 +3318,7 @@ void dk_player_select_track(DKPlayer* player, int track_type, int stream_index) 
         }
         dk_signal_seek_request(player, cur_pts, true);
     } else if (track_type == 2) { // Primary Subtitle
+        if (stream_index < 0) stream_index = -1;
         if (stream_index >= 0) {
             if (static_cast<unsigned int>(stream_index) >= player->format_ctx->nb_streams ||
                 player->format_ctx->streams[stream_index]->codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE) {
@@ -3127,14 +3326,23 @@ void dk_player_select_track(DKPlayer* player, int track_type, int stream_index) 
                 return;
             }
         }
-        double cur_pts = dk_get_master_clock(player);
+        if (player->sub_stream_idx.load(std::memory_order_relaxed) == stream_index) return;
+
+        double cur_pts = std::max(0.0, dk_get_master_clock(player));
+        bool is_bitmap = false;
         {
             std::lock_guard<std::mutex> slk(player->ass_mtx);
             player->sub_stream_idx.store(stream_index);
             dk_open_subtitle_decoder_locked(player, stream_index);
+            is_bitmap = player->has_bitmap_subs;
         }
         if (stream_index >= 0) {
-            dk_signal_seek_request(player, std::max(0.0, cur_pts), true);
+            dk_replay_sub_pkt_history(player, stream_index, false);
+            double demux_ahead = player->last_demuxed_pts.load(std::memory_order_relaxed) - cur_pts;
+            // Only force an AV seek if historical subtitle packets were evicted AND demuxer is far ahead (or bitmap cue started earlier)
+            if (player->sub_hist_trimmed.load(std::memory_order_relaxed) && (is_bitmap || demux_ahead > 2.0)) {
+                dk_signal_seek_request(player, cur_pts, true);
+            }
         } else {
             dk_log(0, "DKEngine: Subtitles disabled by user");
         }
@@ -3144,6 +3352,7 @@ void dk_player_select_track(DKPlayer* player, int track_type, int stream_index) 
 void dk_player_select_secondary_subtitle_track(DKPlayer* player, int stream_index) {
     DKReaderGuard guard(player);
     if (!guard || !player->format_ctx) return;
+    if (stream_index < 0) stream_index = -1;
     if (stream_index >= 0) {
         if (static_cast<unsigned int>(stream_index) >= player->format_ctx->nb_streams ||
             player->format_ctx->streams[stream_index]->codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE) {
@@ -3151,14 +3360,20 @@ void dk_player_select_secondary_subtitle_track(DKPlayer* player, int stream_inde
             return;
         }
     }
-    double cur_pts = dk_get_master_clock(player);
+    if (player->secondary_sub_stream_idx.load(std::memory_order_relaxed) == stream_index) return;
+
+    double cur_pts = std::max(0.0, dk_get_master_clock(player));
     {
         std::lock_guard<std::mutex> slk(player->ass_mtx);
         player->secondary_sub_stream_idx.store(stream_index);
         dk_open_subtitle_decoder_for_slot_locked(player, stream_index, true);
     }
     if (stream_index >= 0) {
-        dk_signal_seek_request(player, std::max(0.0, cur_pts), true);
+        dk_replay_sub_pkt_history(player, stream_index, true);
+        double demux_ahead = player->last_demuxed_pts.load(std::memory_order_relaxed) - cur_pts;
+        if (player->sub_hist_trimmed.load(std::memory_order_relaxed) && demux_ahead > 2.0) {
+            dk_signal_seek_request(player, cur_pts, true);
+        }
     }
 }
 
@@ -3413,12 +3628,16 @@ CVPixelBufferRef dk_player_acquire_frame(DKPlayer* player, double* out_pts, DKGp
                    !player->demux_eof.load(std::memory_order_relaxed) &&
                    !player->video_eof.load(std::memory_order_relaxed) &&
                    !player->audio_eof.load(std::memory_order_relaxed) &&
+                   !player->audio_hal_disabled.load(std::memory_order_relaxed) &&
                    player->buffered_audio_samples.load(std::memory_order_relaxed) <= 0 &&
+                   player->audio_underrun_samples.load(std::memory_order_relaxed) >= 4800 &&
                    player->audio_queue != nullptr &&
                    player->audio_queue_started.exchange(false, std::memory_order_acq_rel)) {
-            // Both video and audio buffers drained due to network starvation:
-            // pause AudioQueue so dk_try_start_audio_queue_if_ready refills a clean 0.50s+ cushion
-            // instead of playing 1 packet at a time ("play-freeze-play-freeze" stutter).
+            // Escalate refill cushion on consecutive underruns to break play-freeze-play stutter loops
+            uint32_t streak = player->audio_rebuffer_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (streak > 3) {
+                player->audio_rebuffer_count.store(3, std::memory_order_relaxed);
+            }
             lock.unlock();
             AudioQueueStop(player->audio_queue, true);
             AudioQueueReset(player->audio_queue);
@@ -3431,6 +3650,14 @@ CVPixelBufferRef dk_player_acquire_frame(DKPlayer* player, double* out_pts, DKGp
             return player->last_frame;
         }
         return nullptr;
+    }
+
+    if (player->audio_queue_started.load(std::memory_order_relaxed) &&
+        player->audio_rebuffer_count.load(std::memory_order_relaxed) > 0) {
+        int64_t steady_ns = player->audio_steady_start_ns.load(std::memory_order_relaxed);
+        if (steady_ns > 0 && dk_elapsed_since_ns(steady_ns) >= 15.0) {
+            player->audio_rebuffer_count.store(0, std::memory_order_relaxed);
+        }
     }
 
     // Always immediately deliver the very first frame to initialize the surface without black screen
@@ -3451,35 +3678,68 @@ CVPixelBufferRef dk_player_acquire_frame(DKPlayer* player, double* out_pts, DKGp
         return player->last_frame;
     }
 
-    if (player->force_present_next_frame.exchange(false, std::memory_order_acq_rel) && !player->video_queue.empty()) {
-        auto& front = player->video_queue.front();
-        if (player->last_frame) {
-            CVPixelBufferRelease(player->last_frame);
-        }
-        player->last_frame = front.pixel_buffer;
-        player->last_pts = front.pts;
-        player->last_color = front.color;
-        player->current_pos_sec.store(front.pts);
-        player->ext_clock_base_pts.store(front.pts, std::memory_order_relaxed);
-        player->ext_clock_start_ns.store(dk_steady_now_ns(), std::memory_order_relaxed);
-        if (!player->audio_queue_started.load(std::memory_order_acquire)) {
-            player->audio_clock_base_pts.store(front.pts, std::memory_order_relaxed);
-            player->fallback_audio_clock.store(front.pts, std::memory_order_relaxed);
-            player->fallback_clock_ns.store(dk_steady_now_ns(), std::memory_order_relaxed);
-        }
-        player->video_queue.pop();
-        player->video_frame_cv.notify_one();
+    if (player->force_present_next_frame.load(std::memory_order_acquire) && !player->video_queue.empty()) {
+        const bool wait_for_audio_sync =
+            (player->state.load(std::memory_order_relaxed) == DK_STATE_PLAYING) &&
+            (player->audio_stream_idx.load(std::memory_order_relaxed) >= 0) &&
+            (player->audio_queue != nullptr) &&
+            !player->audio_hal_disabled.load(std::memory_order_acquire) &&
+            !player->audio_queue_started.load(std::memory_order_acquire) &&
+            !player->audio_eof.load(std::memory_order_relaxed) &&
+            !player->demux_eof.load(std::memory_order_relaxed);
+        if (!wait_for_audio_sync && player->force_present_next_frame.exchange(false, std::memory_order_acq_rel)) {
+            auto& front = player->video_queue.front();
+            if (player->last_frame) {
+                CVPixelBufferRelease(player->last_frame);
+            }
+            player->last_frame = front.pixel_buffer;
+            player->last_pts = front.pts;
+            player->last_color = front.color;
+            player->current_pos_sec.store(front.pts);
+            player->ext_clock_base_pts.store(front.pts, std::memory_order_relaxed);
+            player->ext_clock_start_ns.store(dk_steady_now_ns(), std::memory_order_relaxed);
+            if (!player->audio_queue_started.load(std::memory_order_acquire)) {
+                player->audio_clock_base_pts.store(front.pts, std::memory_order_relaxed);
+                player->fallback_audio_clock.store(front.pts, std::memory_order_relaxed);
+                player->fallback_clock_ns.store(dk_steady_now_ns(), std::memory_order_relaxed);
+            }
+            player->video_queue.pop();
+            player->video_frame_cv.notify_one();
 
-        CVPixelBufferRetain(player->last_frame);
-        if (out_pts) *out_pts = player->last_pts;
-        if (out_color) *out_color = player->last_color;
-        return player->last_frame;
+            CVPixelBufferRetain(player->last_frame);
+            if (out_pts) *out_pts = player->last_pts;
+            if (out_color) *out_color = player->last_color;
+            return player->last_frame;
+        }
+    }
+
+    // Retry AudioQueue start outside video_queue_mtx if decoders already hit cap after a transient HAL failure
+    if (player->state.load() == DK_STATE_PLAYING &&
+        player->audio_stream_idx.load(std::memory_order_relaxed) >= 0 &&
+        player->audio_queue != nullptr &&
+        !player->audio_hal_disabled.load(std::memory_order_acquire) &&
+        !player->audio_queue_started.load(std::memory_order_acquire) &&
+        !player->audio_eof.load(std::memory_order_relaxed)) {
+        lock.unlock();
+        dk_try_start_audio_queue_if_ready(player);
+        lock.lock();
+        master_pts = dk_get_master_clock(player);
+        if (player->video_queue.empty()) {
+            if (player->last_frame) {
+                CVPixelBufferRetain(player->last_frame);
+                if (out_pts) *out_pts = player->last_pts;
+                if (out_color) *out_color = player->last_color;
+                return player->last_frame;
+            }
+            return nullptr;
+        }
     }
 
     // Wait for AudioQueue clock calibration after seek before dropping or advancing frames,
     // preventing post-seek fast-forward jitter when keyframe PTS precedes target_sec.
     if (player->audio_stream_idx.load(std::memory_order_relaxed) >= 0 &&
         player->audio_queue != nullptr &&
+        !player->audio_hal_disabled.load(std::memory_order_acquire) &&
         !player->audio_queue_started.load(std::memory_order_acquire) &&
         !player->audio_eof.load(std::memory_order_relaxed)) {
         if (player->last_frame) {

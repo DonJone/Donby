@@ -189,6 +189,8 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
     public let chunksDirectoryURL: URL
 
     private let lock = NSLock()
+    private let memoryLock = NSLock()
+    private let metaWriteLock = NSLock()
     private var meta: ChunkStoreMeta
     private var memoryChunks: [Int: Data] = [:]
     private var memoryOrder: [Int] = []
@@ -286,10 +288,14 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
     }
 
     public func updateConfiguration(maxMemoryBytes: Int, persistDisk: Bool) {
-        lock.lock()
-        self.maxMemoryBytes = max(32 * 1024 * 1024, min(2_147_483_648, maxMemoryBytes))
-        self.persistDisk = persistDisk || meta.pinned
+        let clampedMem = max(32 * 1024 * 1024, min(2_147_483_648, maxMemoryBytes))
+        memoryLock.lock()
+        self.maxMemoryBytes = clampedMem
         evictMemoryLockedIfNeeded(incomingBytes: 0)
+        memoryLock.unlock()
+
+        lock.lock()
+        self.persistDisk = persistDisk || meta.pinned
         lock.unlock()
     }
 
@@ -299,27 +305,37 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
         if pinned {
             persistDisk = true
         }
-        saveMetaLocked()
+        let snapshot = meta
         lock.unlock()
+        writeMetaSnapshotToDisk(snapshot)
     }
 
     public func setTotalSize(_ totalSize: Int64, sourceURL: String? = nil) {
+        var snapshot: ChunkStoreMeta? = nil
         lock.lock()
         if totalSize > 0 && meta.totalSize != totalSize {
             meta.totalSize = totalSize
             if let sourceURL, !sourceURL.isEmpty {
                 meta.sourceURLString = sourceURL
             }
-            saveMetaLocked()
+            snapshot = meta
         }
         lock.unlock()
+        if let snapshot {
+            writeMetaSnapshotToDisk(snapshot)
+        }
     }
 
     public func hasChunk(_ index: Int) -> Bool {
+        memoryLock.lock()
+        let inMem = (memoryChunks[index] != nil)
+        memoryLock.unlock()
+        if inMem { return true }
+
         lock.lock()
-        defer { lock.unlock() }
-        if memoryChunks[index] != nil { return true }
-        return meta.completedChunks.contains(index)
+        let inDisk = meta.completedChunks.contains(index)
+        lock.unlock()
+        return inDisk
     }
 
     public func expectedChunkLength(for index: Int) -> Int {
@@ -333,11 +349,9 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
 
     public func storeChunk(index: Int, data: Data) {
         guard !data.isEmpty else { return }
-        var completedMetaForNotify: ChunkStoreMeta? = nil
-        lock.lock()
 
-        meta.lastAccess = Date()
-        // 1. Store in L1 Memory cache
+        // 1. Store in L1 Memory cache under fast memoryLock (never blocked by disk spill/JSON I/O)
+        memoryLock.lock()
         if let prev = memoryChunks.removeValue(forKey: index) {
             memoryBytes = max(0, memoryBytes - prev.count)
             memoryOrder.removeAll { $0 == index }
@@ -348,6 +362,12 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
             memoryOrder.append(index)
             memoryBytes += data.count
         }
+        memoryLock.unlock()
+
+        var completedMetaForNotify: ChunkStoreMeta? = nil
+        var metaSnapshotToWrite: ChunkStoreMeta? = nil
+        lock.lock()
+        meta.lastAccess = Date()
 
         // 2. Store in L2 Disk cache if enabled or pinned.
         // Write contiguous prefix chunks [0..contiguousPrefixCount] directly to `media.bin`,
@@ -367,9 +387,9 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
                             foldConsecutiveSpillChunksIntoMediaBinLocked(wh: wh)
                         }
                         dirtyMetaOps += 1
-                        if dirtyMetaOps >= 32 || meta.isFullyCached {
+                        if dirtyMetaOps >= 48 || meta.isFullyCached {
                             dirtyMetaOps = 0
-                            saveMetaLocked()
+                            metaSnapshotToWrite = meta
                         }
                         if meta.isFullyCached && !meta.pinned && !didNotifyFullyCached {
                             didNotifyFullyCached = true
@@ -385,9 +405,9 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
                 if (try? data.write(to: spillURL, options: .atomic)) != nil {
                     meta.completedChunks.insert(index)
                     dirtyMetaOps += 1
-                    if dirtyMetaOps >= 32 || meta.isFullyCached {
+                    if dirtyMetaOps >= 48 || meta.isFullyCached {
                         dirtyMetaOps = 0
-                        saveMetaLocked()
+                        metaSnapshotToWrite = meta
                     }
                     if meta.isFullyCached && !meta.pinned && !didNotifyFullyCached {
                         ensureFileHandlesLocked()
@@ -402,65 +422,78 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
         }
         lock.unlock()
 
+        if let metaSnapshotToWrite {
+            writeMetaSnapshotToDisk(metaSnapshotToWrite)
+        }
         if let completedMetaForNotify {
             DonbyTurboCacheEngine.shared.notifyAssetFullyCached(completedMetaForNotify)
         }
     }
 
     public func readChunk(index: Int) -> Data? {
-        lock.lock()
-        defer { lock.unlock() }
-
+        memoryLock.lock()
         if let mem = memoryChunks[index] {
+            memoryLock.unlock()
             return mem
         }
-        guard meta.completedChunks.contains(index) else { return nil }
-        let len = expectedChunkLenLocked(index: index)
-        guard len > 0 else { return nil }
+        memoryLock.unlock()
 
+        lock.lock()
+        guard meta.completedChunks.contains(index) else {
+            lock.unlock()
+            return nil
+        }
+        let len = expectedChunkLenLocked(index: index)
+        guard len > 0 else {
+            lock.unlock()
+            return nil
+        }
+
+        var loadedSlice: Data? = nil
         // Check out-of-order spill file first if beyond contiguous prefix
         if index >= contiguousPrefixCount {
             let spillURL = chunkSpillFileURL(for: index)
             if let data = try? Data(contentsOf: spillURL), !data.isEmpty {
-                let slice = data.count > len ? data.prefix(len) : data
-                evictMemoryLockedIfNeeded(incomingBytes: slice.count)
-                if slice.count <= maxMemoryBytes {
-                    memoryChunks[index] = slice
-                    memoryOrder.append(index)
-                    memoryBytes += slice.count
-                }
-                return slice
+                loadedSlice = data.count > len ? data.prefix(len) : data
             }
         }
 
-        ensureFileHandlesLocked()
-        guard let rh = readHandle else { return nil }
-        let offset = UInt64(index) * UInt64(meta.chunkSize)
-        do {
-            try rh.seek(toOffset: offset)
-            if let data = try rh.read(upToCount: len), !data.isEmpty {
-                // Promote into L1 memory cache
-                evictMemoryLockedIfNeeded(incomingBytes: data.count)
-                if data.count <= maxMemoryBytes {
-                    memoryChunks[index] = data
-                    memoryOrder.append(index)
-                    memoryBytes += data.count
+        if loadedSlice == nil {
+            ensureFileHandlesLocked()
+            if let rh = readHandle {
+                let offset = UInt64(index) * UInt64(meta.chunkSize)
+                do {
+                    try rh.seek(toOffset: offset)
+                    if let data = try rh.read(upToCount: len), !data.isEmpty {
+                        loadedSlice = data
+                    }
+                } catch {
+                    meta.completedChunks.remove(index)
                 }
-                return data
             }
-        } catch {
-            meta.completedChunks.remove(index)
         }
-        return nil
+        lock.unlock()
+
+        guard let slice = loadedSlice else { return nil }
+        memoryLock.lock()
+        if memoryChunks[index] == nil {
+            evictMemoryLockedIfNeeded(incomingBytes: slice.count)
+            if slice.count <= maxMemoryBytes {
+                memoryChunks[index] = slice
+                memoryOrder.append(index)
+                memoryBytes += slice.count
+            }
+        }
+        memoryLock.unlock()
+        return slice
     }
 
     /// Sliding window eviction behind playhead cursor (skips disk eviction if `pinned == true`).
     public func evictBehindCursor(cursorChunk: Int, keepBackChunks: Int = 8) {
-        lock.lock()
-        defer { lock.unlock() }
         let threshold = cursorChunk - max(2, keepBackChunks)
         guard threshold > 0 else { return }
 
+        memoryLock.lock()
         let keysToRemove = memoryOrder.filter { $0 < threshold }
         for k in keysToRemove {
             if let removed = memoryChunks.removeValue(forKey: k) {
@@ -470,12 +503,17 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
         if !keysToRemove.isEmpty {
             memoryOrder.removeAll { $0 < threshold }
         }
+        memoryLock.unlock()
     }
 
     public func flushMeta() {
         lock.lock()
-        saveMetaLocked()
+        let snapshot = meta
+        let shouldPersist = persistDisk || meta.pinned
         lock.unlock()
+        if shouldPersist {
+            writeMetaSnapshotToDisk(snapshot)
+        }
     }
 
     public func closeFileHandles() {
@@ -637,10 +675,15 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
 
     private func saveMetaLocked() {
         guard persistDisk || meta.pinned else { return }
+        writeMetaSnapshotToDisk(meta)
+    }
+
+    private func writeMetaSnapshotToDisk(_ snapshot: ChunkStoreMeta) {
+        guard let encoded = try? JSONEncoder().encode(snapshot) else { return }
+        metaWriteLock.lock()
         try? FileManager.default.createDirectory(at: assetDirectory, withIntermediateDirectories: true)
-        if let encoded = try? JSONEncoder().encode(meta) {
-            try? encoded.write(to: metaFileURL, options: .atomic)
-        }
+        try? encoded.write(to: metaFileURL, options: .atomic)
+        metaWriteLock.unlock()
     }
 }
 
@@ -698,7 +741,7 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
     static let shared = TurboStreamingSessionHub()
 
     private let lock = NSLock()
-    private var contexts: [Int: StreamingChunkContext] = [:]
+    private var contexts: [ObjectIdentifier: StreamingChunkContext] = [:]
     private let delegateQueue: OperationQueue
     private lazy var session: URLSession = {
         let cfg = URLSessionConfiguration.default
@@ -722,20 +765,45 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
     }
 
     @discardableResult
-    fileprivate func startTask(request: URLRequest, context: StreamingChunkContext) -> URLSessionDataTask {
+    fileprivate func startTask(request: URLRequest, context: StreamingChunkContext, priority: Float = 0.35) -> URLSessionDataTask {
         let task = session.dataTask(with: request)
-        task.priority = context.isUrgent ? URLSessionTask.highPriority : URLSessionTask.defaultPriority
+        task.priority = context.isUrgent ? 1.0 : priority
         context.dataTask = task
         lock.lock()
-        contexts[task.taskIdentifier] = context
+        contexts[ObjectIdentifier(task)] = context
         lock.unlock()
         task.resume()
         return task
     }
 
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        lock.lock()
+        let ctx = contexts[ObjectIdentifier(task)]
+        let isCanceled = ctx?.cancelledIntentionally ?? false
+        let owner = ctx?.owner
+        let originURL = ctx?.requestOriginURL
+        let chunkIdx = ctx?.chunkIndex ?? -1
+        lock.unlock()
+
+        if isCanceled {
+            completionHandler(nil)
+            return
+        }
+        if let finalURL = request.url, let owner, let originURL {
+            owner.handleEarlyRedirectResolved(chunkIndex: chunkIdx, finalURL: finalURL, originURL: originURL)
+        }
+        completionHandler(request)
+    }
+
     func cancelTask(_ task: URLSessionDataTask, intentional: Bool) {
         lock.lock()
-        if let ctx = contexts[task.taskIdentifier], intentional {
+        if let ctx = contexts[ObjectIdentifier(task)], intentional {
             ctx.cancelledIntentionally = true
         }
         lock.unlock()
@@ -752,7 +820,7 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
         let status = http?.statusCode ?? 200
 
         lock.lock()
-        guard let ctx = contexts[dataTask.taskIdentifier] else {
+        guard let ctx = contexts[ObjectIdentifier(dataTask)] else {
             lock.unlock()
             completionHandler(.allow)
             return
@@ -794,7 +862,7 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
         guard !data.isEmpty else { return }
 
         lock.lock()
-        guard let ctx = contexts[dataTask.taskIdentifier],
+        guard let ctx = contexts[ObjectIdentifier(dataTask)],
               ctx.acceptBody,
               !ctx.cancelledIntentionally,
               !ctx.reached200Cap else {
@@ -842,7 +910,7 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         lock.lock()
-        guard let ctx = contexts.removeValue(forKey: task.taskIdentifier) else {
+        guard let ctx = contexts.removeValue(forKey: ObjectIdentifier(task)) else {
             lock.unlock()
             return
         }
@@ -906,6 +974,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
 
     private var inOpenProbePhase: Bool = true
     private var chunk0HeadersReceived: Bool = false
+    private var didTriggerProbeTailPrefetch: Bool = false
     private let openedUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
 
     private var nextAttemptId: UInt64 = 1
@@ -958,6 +1027,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
     public init(
         assetKey: String,
         streamURL: URL,
+        initialRedirectedURL: URL? = nil,
         headers: [String: String],
         store: TieredAssetChunkStore,
         knownTotalSize: Int64? = nil,
@@ -967,12 +1037,16 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
     ) {
         self.assetKey = assetKey
         self.streamURL = streamURL
+        if let initialRedirectedURL, initialRedirectedURL.absoluteString != streamURL.absoluteString {
+            self.effectiveStreamURL = initialRedirectedURL
+            self.effectiveRedirectEpoch = 1
+        }
         self.headers = headers
         self.store = store
         let clampedBudget = max(1, min(8, connectionBudget))
         self.configuredConcurrencyBudget = clampedBudget
         self.dynamicConcurrencyCap = clampedBudget
-        self.prefetchAheadChunks = max(12, min(360, prefetchAheadChunks))
+        self.prefetchAheadChunks = max(4, min(360, prefetchAheadChunks))
         self.onResolvedRedirectURL = onResolvedRedirectURL
 
         if let knownTotalSize, knownTotalSize > 0 {
@@ -983,9 +1057,17 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         }
         store.retainReader()
 
-        // Immediately start Chunk 0 uncontended so header bytes & redirect settle with zero queue competition.
+        // Immediately start Chunk 0 (and EOF tail range in parallel if URL is direct CDN or pre-cached 302 redirect)
+        // so MKV/MP4 header & tail index probes finish in 1 RTT instead of 2 serialized RTTs.
         if !store.hasChunk(0) {
             requestUrgentChunk(0)
+        }
+        let pathLower = streamURL.path.lowercased()
+        let looksLikeOriginRedirectEndpoint = pathLower.contains("/emby/") || pathLower.contains("/videos/") || pathLower.contains("/play/video/")
+        if self.effectiveStreamURL != nil || !looksLikeOriginRedirectEndpoint {
+            condition.lock()
+            maybePrefetchOpenProbeTailLocked()
+            condition.unlock()
         }
         startCoordinatorLoop()
     }
@@ -1005,7 +1087,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         let clampedBudget = max(1, min(8, connectionBudget))
         self.configuredConcurrencyBudget = clampedBudget
         self.dynamicConcurrencyCap = clampedBudget
-        self.prefetchAheadChunks = max(12, min(360, prefetchAheadChunks))
+        self.prefetchAheadChunks = max(4, min(360, prefetchAheadChunks))
         condition.broadcast()
         condition.unlock()
         _ = stepBulkPrefetchSchedule()
@@ -1093,12 +1175,20 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             return partialCopied
         }
 
-        // Fast path 3: exact-offset unaligned EOF tail read (check inFlightChunks under lock to avoid Swift Set race)
-        if meta.totalSize > 0,
-           currentOffset >= meta.totalSize - Int64(chunkSize),
-           offsetInChunk >= 16_384,
-           !isChunkInFlight(targetChunk) {
-            return readDirectTailRange(at: currentOffset, totalSize: meta.totalSize, into: buffer, count: count)
+        // Fast path 3: exact-offset unaligned EOF tail read (hit pre-fetched direct slices first, or direct tail fetch when chunk isn't in flight)
+        let tailWindowBytes: Int64 = meta.totalSize > 4_294_967_296 ? 524_288 : 262_144
+        if meta.totalSize > 0, currentOffset >= meta.totalSize - tailWindowBytes {
+            condition.lock()
+            if let copied = tryCopyDirectTailLocked(at: currentOffset, into: buffer, count: count) {
+                condition.unlock()
+                return copied
+            }
+            let hasDirectInFlight = directInFlightStarts.keys.contains { $0 <= currentOffset && currentOffset < $0 + tailWindowBytes }
+            let chunkInFlight = inFlightChunks.contains(targetChunk)
+            condition.unlock()
+            if hasDirectInFlight || (offsetInChunk >= 16_384 && !chunkInFlight) {
+                return readDirectTailRange(at: currentOffset, totalSize: meta.totalSize, into: buffer, count: count)
+            }
         }
 
         condition.lock()
@@ -1359,7 +1449,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         buf.reserveCapacity(Int(endByte - startOffset + 1))
         attemptBuffers[attemptId] = buf
         directInFlightStarts[startOffset] = attemptId
-        let task = TurboStreamingSessionHub.shared.startTask(request: req, context: ctx)
+        let task = TurboStreamingSessionHub.shared.startTask(request: req, context: ctx, priority: 1.0)
         activeAttempts[attemptId] = ActiveAttemptRecord(
             attemptId: attemptId,
             startChunkIndex: -1,
@@ -1429,21 +1519,20 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         var tasksToCancel: [URLSessionDataTask] = []
         let totalChunks = total > 0 ? Int((total + Int64(meta.chunkSize) - 1) / Int64(meta.chunkSize)) : 0
         let isNearTailProbe = totalChunks > 2 && newChunk >= totalChunks - 2
+        if inOpenProbePhase && chunk0HeadersReceived && !isNearTailProbe && newChunk >= 4 {
+            inOpenProbePhase = false
+        }
         if abs(newChunk - oldChunk) > 2 {
-            let keepStart = max(0, newChunk - 1)
-            let keepEnd = newChunk + prefetchAheadChunks
+            let aggressiveKeepEnd = newChunk + min(prefetchAheadChunks, 24)
             var attemptIdsToPurge: [UInt64] = []
             for (aid, rec) in activeAttempts {
                 if rec.startChunkIndex == 0 && inOpenProbePhase { continue }
                 if rec.currentChunkIndex < 0 && isNearTailProbe { continue }
                 if isNearTailProbe { continue }
-                // Keep an existing multi-chunk stream if it already covers newChunk within <= 2 chunks
-                // or is a lookahead stream inside [newChunk .. keepEnd].
+                // Keep an existing multi-chunk stream only if it covers newChunk closely or sits right ahead in the active near window.
                 let coversTargetSoon = rec.covers(newChunk) && (newChunk - rec.currentChunkIndex <= 2)
-                let inForwardWindow = (rec.currentChunkIndex >= newChunk && rec.currentChunkIndex <= keepEnd)
-                if !coversTargetSoon && !inForwardWindow && rec.currentChunkIndex < keepStart || rec.currentChunkIndex > keepEnd {
-                    attemptIdsToPurge.append(aid)
-                } else if !coversTargetSoon && rec.currentChunkIndex < newChunk {
+                let inNearForwardWindow = (rec.currentChunkIndex >= newChunk && rec.currentChunkIndex <= aggressiveKeepEnd)
+                if !coversTargetSoon && !inNearForwardWindow {
                     attemptIdsToPurge.append(aid)
                 }
             }
@@ -1565,8 +1654,12 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         } else if let nearbyStream, let task = nearbyStream.task {
             task.priority = URLSessionTask.highPriority
         }
+        let shouldLaunchLookaheadNow = !inOpenProbePhase && chunkIndex > 0 && !isAborted && !isClosed
         condition.broadcast()
         condition.unlock()
+        if shouldLaunchLookaheadNow {
+            _ = stepBulkPrefetchSchedule()
+        }
     }
 
     private func startCoordinatorLoop() {
@@ -1602,17 +1695,63 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             inOpenProbePhase = false
         }
 
-        // During open probe phase, keep initial Chunk 0 & tail seek uncontended until Chunk 0 headers arrive,
-        // and allow at most 1 lookahead stream right behind cursor until `markInitialOpenCompleted()` fires.
+        // Focus bandwidth on playhead recovery until a safe >= 2 MiB lead exists ahead of cursor:
+        // avoid splitting slow/high-TTFB CDN links across 4 distant 8 MiB streams while cursor itself is cold.
+        let totalChunks = meta.totalChunks
+        let ahead = prefetchAheadChunks
+
+        var leadCachedChunks = 0
+        while leadCachedChunks < 6 {
+            let probeIdx = currentChunk + leadCachedChunks
+            if totalChunks > 0 && probeIdx >= totalChunks {
+                leadCachedChunks = 6
+                break
+            }
+            if store.hasChunk(probeIdx) {
+                leadCachedChunks += 1
+            } else {
+                break
+            }
+        }
+
+        let playheadAttempt = activeAttempts.values.first {
+            $0.currentChunkIndex >= 0 && $0.covers(currentChunk) && (currentChunk - $0.currentChunkIndex <= 3)
+        }
+        let playheadReceivingBytes: Bool = {
+            guard let rec = playheadAttempt else { return leadCachedChunks > 0 }
+            let bufCount = attemptBuffers[rec.attemptId]?.count ?? 0
+            return bufCount > 0 || rec.currentChunkIndex > rec.startChunkIndex
+        }()
+
         let effectiveCap: Int
         if inOpenProbePhase {
             effectiveCap = chunk0HeadersReceived ? min(1, dynamicConcurrencyCap) : 0
-        } else {
+        } else if effectiveStreamURL != nil || playheadReceivingBytes || leadCachedChunks > 0 {
+            // Once out of initial open probe (and either CDN redirect is known or playhead is flowing),
+            // engage full concurrency budget immediately. Demux consumes chunks as fast as they arrive
+            // into its 256 MiB packet buffer, so `leadCachedChunks` stays near 0 during uncached playback
+            // and must never throttle high-bitrate 4K streams down to 1-2 connections.
             effectiveCap = dynamicConcurrencyCap
+        } else {
+            effectiveCap = min(2, dynamicConcurrencyCap)
         }
 
-        let totalChunks = meta.totalChunks
-        let ahead = max(prefetchAheadChunks, 64)
+        // Dynamically promote HTTP/2 stream priority as playhead approaches previously-remote bulk streams
+        for rec in activeAttempts.values where rec.currentChunkIndex >= 0 {
+            guard let task = rec.task else { continue }
+            let dist = rec.currentChunkIndex - currentChunk
+            let desiredPriority: Float
+            if rec.isUrgent || rec.isRescue || dist <= 6 {
+                desiredPriority = 1.0
+            } else if dist <= 18 {
+                desiredPriority = 0.65
+            } else {
+                desiredPriority = 0.20
+            }
+            if abs(task.priority - desiredPriority) > 0.05 {
+                task.priority = desiredPriority
+            }
+        }
 
         // Check genuinely stalled streams near cursor (respecting ~1.3s CDN TTFB on cold/MISS edges)
         for rec in activeAttempts.values where rec.currentChunkIndex >= currentChunk && rec.currentChunkIndex <= currentChunk + 2 {
@@ -1620,7 +1759,8 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             if !rescueChunks.contains(idx) {
                 let byteIdle = now - rec.lastByteTimestamp
                 let hasReceivedAny = (rec.currentChunkIndex > rec.startChunkIndex) || ((attemptBuffers[rec.attemptId]?.count ?? 0) > 0)
-                let threshold: TimeInterval = hasReceivedAny ? 1.8 : 2.8
+                let isImmediatePlayhead = (idx <= currentChunk + 1)
+                let threshold: TimeInterval = hasReceivedAny ? (isImmediatePlayhead ? 0.9 : 1.6) : 2.6
                 if byteIdle > threshold {
                     rescueChunks.insert(idx)
                     chunkStartTime[idx] = now
@@ -1679,17 +1819,37 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         }
 
         let now = ProcessInfo.processInfo.systemUptime
+        let cursorChunk = Int(max(0, cursorOffset) / Int64(chunkSize))
+        let aheadFromCursor = max(0, index - cursorChunk)
         let maxSpanChunks: Int = {
-            if index == 0 && !chunk0HeadersReceived { return 2 }   // 1 MiB fast initial header probe
-            if isRescue { return 4 }                               // 2 MiB rescue span
-            if isUrgent { return 8 }                               // 4 MiB urgent playhead stream
-            return 16                                              // 8 MiB bulk lookahead stream
+            if index == 0 && !chunk0HeadersReceived { return 4 }              // 2 MiB fast initial probe covering 40+ track headers in 1 RTT
+            if isRescue { return 2 }                                          // 1 MiB ultra-fast rescue span
+            // Geometric ramp (1 MiB -> 2 MiB -> 4 MiB -> 8 MiB -> 12 MiB) from playhead outward:
+            // eliminates HTTP/2 head-of-line starvation when per-stream rate < 4K bitrate by delivering
+            // the immediate post-seek bytes at full aggregate multi-stream throughput.
+            let desired: Int
+            if aheadFromCursor <= 1 {
+                desired = 2       // 1 MiB playhead sprint
+            } else if aheadFromCursor <= 5 {
+                desired = 4       // 2 MiB immediate follow-up
+            } else if aheadFromCursor <= 21 {
+                desired = 8       // 4 MiB near lookahead (covers 2 consecutive 4 MiB waves)
+            } else if aheadFromCursor <= 37 {
+                desired = 16      // 8 MiB mid lookahead
+            } else {
+                desired = 24      // 12 MiB steady-state bulk lookahead
+            }
+            return min(desired, max(2, prefetchAheadChunks))
         }()
 
         var spanEnd = index + 1
         if meta.totalSize > 0 {
             let totalChunks = meta.totalChunks
-            let limit = min(totalChunks, index + max(1, maxSpanChunks))
+            let horizonChunk = (index == 0 && !chunk0HeadersReceived)
+                ? totalChunks
+                : (Int(max(0, cursorOffset) / Int64(chunkSize)) + prefetchAheadChunks + 1)
+            let spanBound = (isUrgent || isRescue || index == 0) ? totalChunks : min(totalChunks, horizonChunk)
+            let limit = min(spanBound, index + max(1, maxSpanChunks))
             while spanEnd < limit && !store.hasChunk(spanEnd) && !inFlightChunks.contains(spanEnd) {
                 inFlightChunks.insert(spanEnd)
                 chunkStartTime[spanEnd] = now
@@ -1742,7 +1902,12 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         if activeDisplayAttempt[index] == nil {
             activeDisplayAttempt[index] = attemptId
         }
-        let task = TurboStreamingSessionHub.shared.startTask(request: req, context: ctx)
+        let taskPriority: Float = {
+            if isUrgent || isRescue || aheadFromCursor <= 5 { return 1.0 }
+            if aheadFromCursor <= 13 { return 0.65 }
+            return 0.20
+        }()
+        let task = TurboStreamingSessionHub.shared.startTask(request: req, context: ctx, priority: taskPriority)
         activeAttempts[attemptId] = ActiveAttemptRecord(
             attemptId: attemptId,
             startChunkIndex: index,
@@ -1753,6 +1918,59 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             task: task,
             lastByteTimestamp: now
         )
+    }
+
+    private func maybePrefetchOpenProbeTailLocked() {
+        guard inOpenProbePhase, !didTriggerProbeTailPrefetch, !isAborted, !isClosed else { return }
+        let meta = store.currentMeta()
+        let chunkSize = meta.chunkSize
+        let totalChunks = meta.totalChunks
+        guard totalChunks > 3, meta.totalSize > Int64(chunkSize * 3) else { return }
+        // Prefetch the final 256 KiB (or 512 KiB for >4 GiB 4K remuxes) directly starting near EOF so Cues/moov tail reads never stall.
+        let tailWindowBytes: Int64 = meta.totalSize > 4_294_967_296 ? 524_288 : 262_144
+        let tailStartOffset = max(Int64(chunkSize * 2), meta.totalSize - tailWindowBytes)
+        let alreadyCovered = directSlices.contains { $0.startOffset <= tailStartOffset }
+            || directInFlightStarts.keys.contains { $0 <= tailStartOffset }
+        didTriggerProbeTailPrefetch = true
+        if !alreadyCovered {
+            spawnDirectRangeFetchLocked(startOffset: tailStartOffset, totalSize: meta.totalSize)
+        }
+    }
+
+    private func recordResolvedRedirectLocked(finalURL: URL, originURL: URL) -> URL? {
+        guard finalURL.absoluteString != originURL.absoluteString,
+              finalURL.absoluteString != streamURL.absoluteString else {
+            return nil
+        }
+        if effectiveStreamURL?.absoluteString != finalURL.absoluteString {
+            effectiveStreamURL = finalURL
+            effectiveRedirectEpoch &+= 1
+        }
+        guard !didNotifyRedirectCallback else { return nil }
+        didNotifyRedirectCallback = true
+        return finalURL
+    }
+
+    fileprivate func handleEarlyRedirectResolved(chunkIndex: Int, finalURL: URL, originURL: URL) {
+        condition.lock()
+        let notifyRedirectURL = recordResolvedRedirectLocked(finalURL: finalURL, originURL: originURL)
+        guard effectiveStreamURL?.absoluteString == finalURL.absoluteString else {
+            condition.unlock()
+            return
+        }
+        if chunkIndex == 0 {
+            maybePrefetchOpenProbeTailLocked()
+        }
+        let shouldStepNow = !inOpenProbePhase && !isAborted && !isClosed
+        condition.broadcast()
+        condition.unlock()
+
+        if let notifyRedirectURL {
+            onResolvedRedirectURL?(notifyRedirectURL)
+        }
+        if shouldStepNow {
+            _ = stepBulkPrefetchSchedule()
+        }
     }
 
     fileprivate func handleChunkResponseHeaders(
@@ -1766,22 +1984,13 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             store.setTotalSize(parsedTotalSize, sourceURL: streamURL.absoluteString)
         }
 
-        var notifyRedirectURL: URL? = nil
         condition.lock()
         if index == 0 {
             chunk0HeadersReceived = true
         }
-        if let finalURL,
-           finalURL.absoluteString != originURL.absoluteString,
-           finalURL.absoluteString != streamURL.absoluteString {
-            if effectiveStreamURL?.absoluteString != finalURL.absoluteString {
-                effectiveStreamURL = finalURL
-                effectiveRedirectEpoch &+= 1
-            }
-            if !didNotifyRedirectCallback {
-                didNotifyRedirectCallback = true
-                notifyRedirectURL = finalURL
-            }
+        let notifyRedirectURL = finalURL.flatMap { recordResolvedRedirectLocked(finalURL: $0, originURL: originURL) }
+        if index == 0 {
+            maybePrefetchOpenProbeTailLocked()
         }
         condition.broadcast()
         condition.unlock()
@@ -2201,8 +2410,7 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
     }
 
     private init() {
-        let cachesDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let cachesDir = DonbyStoragePaths.cachesDirectoryURL
         self.cacheRootDirectory = cachesDir.appendingPathComponent("DonbyMedia", isDirectory: true)
         try? FileManager.default.createDirectory(at: cacheRootDirectory, withIntermediateDirectories: true)
     }
@@ -2666,8 +2874,7 @@ public final class DonbyDownloadManager: ObservableObject {
 
     private init() {
         DonbyOfflineLibraryStorage.ensureRootDirectories()
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let appSupport = DonbyStoragePaths.applicationSupportDirectoryURL
         let dir = appSupport.appendingPathComponent("Donby", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         self.storageFileURL = dir.appendingPathComponent("downloads_v1.json")

@@ -97,6 +97,8 @@ public struct PlayerView: View {
     @State private var didAutoSkipIntroForCurrentItem: Bool = false
     @State private var didAutoSkipOutroForCurrentItem: Bool = false
     @State private var finishedItemPendingCleanup: (itemId: String, mediaSourceId: String)? = nil
+    @State private var prefetchedNextEpisodeResource: (itemId: String, resource: ResolvedPlaybackResource)? = nil
+    @State private var prefetchedNextEpisodeInFlightId: String? = nil
 
     private let progressTimer = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
     private let embySyncTimer = Timer.publish(every: 10.0, on: .main, in: .common).autoconnect()
@@ -522,6 +524,7 @@ public struct PlayerView: View {
 
             // Intro / outro chapter + per-season skip detector
             evaluateIntroOutroSkipWindow()
+            prefetchNextEpisodeIfNearEnd()
 
             // Update watch history periodically (every 5s) to avoid UI frame drops
             if abs(currentTime - lastRecordedPosition) >= 5.0 {
@@ -1633,6 +1636,8 @@ public struct PlayerView: View {
         skipBannerLabel = nil
         didAutoSkipIntroForCurrentItem = false
         didAutoSkipOutroForCurrentItem = false
+        prefetchedNextEpisodeResource = nil
+        prefetchedNextEpisodeInFlightId = nil
         seekGeneration += 1
         healthPolicy.reset()
 
@@ -1657,6 +1662,12 @@ public struct PlayerView: View {
         let audioIdx = selectedAudioIdx
         let subIdx = selectedSubIdx
         let isExplicitSubOff = explicitSubtitleOff
+        let (preAudioHint, preSubHint, preExternalSub) = computePreOpenTrackHints(
+            audioIdx: audioIdx,
+            subIdx: subIdx,
+            isExplicitSubOff: isExplicitSubOff
+        )
+        let reqHeadersForSub = currentResource.headers
         let openBox = OpeningPlayerBox()
         self.openingBox = openBox
 
@@ -1704,9 +1715,14 @@ public struct PlayerView: View {
             let redirectCallback: (@Sendable (URL) -> Void)? = enableRedirectCache
                 ? Self.makeRedirectStoreHandler(key: redirectKey)
                 : nil
+            let originURL = currentResource.originStreamURL ?? currentResource.streamURL
+            let cachedRedirectURL: URL? = (currentResource.originStreamURL != nil && currentResource.originStreamURL != currentResource.streamURL)
+                ? currentResource.streamURL
+                : nil
             preparedTurboHandle = TurboStreamByteHandle(
                 assetKey: assetKey,
-                streamURL: currentResource.streamURL,
+                streamURL: originURL,
+                initialRedirectedURL: cachedRedirectURL,
                 headers: currentResource.headers,
                 store: store,
                 knownTotalSize: currentResource.mediaSource.size,
@@ -1722,8 +1738,23 @@ public struct PlayerView: View {
         DonbyLogger.shared.log("启动原生播放内核 (URL: \(PlaybackDiagnosticsRedactor.redact(urlStr)), Turbo: \(preparedTurboHandle != nil))", level: .info, subsystem: "Player")
 
         Task.detached(priority: .userInitiated) {
+            let prefetchedExtSubTask: Task<(url: URL, text: String, isAss: Bool)?, Never>? = preExternalSub.map { extItem in
+                Task.detached(priority: .utility) {
+                    var req = URLRequest(url: extItem.url, timeoutInterval: 15)
+                    for (k, v) in reqHeadersForSub { req.setValue(v, forHTTPHeaderField: k) }
+                    let ext = extItem.url.pathExtension.lowercased()
+                    guard let (data, _) = try? await URLSession.shared.data(for: req),
+                          let decoded = SubtitleTextDecoder.decode(data: data, fileExtension: ext) else {
+                        return nil
+                    }
+                    let isAss = (ext == "ass" || ext == "ssa" || decoded.text.contains("[Script Info]"))
+                    return (extItem.url, decoded.text, isAss)
+                }
+            }
+
             let handle = dk_player_create()
             guard let handle else {
+                prefetchedExtSubTask?.cancel()
                 preparedTurboHandle?.close()
                 await MainActor.run {
                     if self.openingBox === openBox { self.openingBox = nil }
@@ -1735,6 +1766,7 @@ public struct PlayerView: View {
                 return
             }
             guard openBox.setHandle(handle) else {
+                prefetchedExtSubTask?.cancel()
                 preparedTurboHandle?.close()
                 dk_player_destroy(handle)
                 return
@@ -1749,9 +1781,11 @@ public struct PlayerView: View {
                 let opaque = Unmanaged.passRetained(turboHandle).toOpaque()
                 dk_player_set_custom_io(handle, opaque, dkTurboReadCB, dkTurboSeekCB, dkTurboAbortCB, dkTurboCloseCB)
             }
-            let ret = dk_player_open(handle, urlStr, headersStr, startSeconds, hwDecode)
+            let ret = dk_player_open_with_tracks(handle, urlStr, headersStr, startSeconds, hwDecode, preAudioHint, preSubHint)
             if ret == 0 {
                 preparedTurboHandle?.markInitialOpenCompleted()
+            } else {
+                prefetchedExtSubTask?.cancel()
             }
             openBox.clear()
             let addr = UInt(bitPattern: handle)
@@ -1816,7 +1850,7 @@ public struct PlayerView: View {
                             if case .embedded(let avIdx) = $0.selection { return avIdx == requestedEmbySub }
                             return false
                         }) {
-                        self.applySubtitleOptionOnStartup(matchedOpt, handle: validHandle, defaultSelectedAV: discovered.selectedSubIndex)
+                        self.applySubtitleOptionOnStartup(matchedOpt, handle: validHandle, defaultSelectedAV: discovered.selectedSubIndex, generation: thisGeneration, prefetchedExternalTask: prefetchedExtSubTask)
                     } else if let autoSub = discovered.selectedSubIndex {
                         self.activeSubtitleSelection = .embedded(avStreamIndex: autoSub)
                     }
@@ -1835,18 +1869,18 @@ public struct PlayerView: View {
                             persist: false
                         )
                     } else if let matchedIdx = SubtitleTrackMatcher.bestMatchIndex(in: candidates, for: remembered) {
-                        self.applySubtitleOptionOnStartup(subOpts[matchedIdx], handle: validHandle, defaultSelectedAV: discovered.selectedSubIndex)
+                        self.applySubtitleOptionOnStartup(subOpts[matchedIdx], handle: validHandle, defaultSelectedAV: discovered.selectedSubIndex, generation: thisGeneration, prefetchedExternalTask: prefetchedExtSubTask)
                     } else if let autoSub = discovered.selectedSubIndex {
                         self.activeSubtitleSelection = .embedded(avStreamIndex: autoSub)
                     } else if let fallbackIdx = SubtitleTrackMatcher.defaultPreferredIndex(in: candidates) {
-                        self.applySubtitleOptionOnStartup(subOpts[fallbackIdx], handle: validHandle, defaultSelectedAV: discovered.selectedSubIndex)
+                        self.applySubtitleOptionOnStartup(subOpts[fallbackIdx], handle: validHandle, defaultSelectedAV: discovered.selectedSubIndex, generation: thisGeneration, prefetchedExternalTask: prefetchedExtSubTask)
                     } else {
                         self.activeSubtitleSelection = .off
                     }
                 } else if let autoSub = discovered.selectedSubIndex {
                     self.activeSubtitleSelection = .embedded(avStreamIndex: autoSub)
                 } else if let fallbackIdx = SubtitleTrackMatcher.defaultPreferredIndex(in: candidates) {
-                    self.applySubtitleOptionOnStartup(subOpts[fallbackIdx], handle: validHandle, defaultSelectedAV: discovered.selectedSubIndex)
+                    self.applySubtitleOptionOnStartup(subOpts[fallbackIdx], handle: validHandle, defaultSelectedAV: discovered.selectedSubIndex, generation: thisGeneration, prefetchedExternalTask: prefetchedExtSubTask)
                 } else {
                     self.activeSubtitleSelection = .off
                 }
@@ -1902,6 +1936,154 @@ public struct PlayerView: View {
                     playSessionId: psId,
                     positionSeconds: startSeconds
                 )
+            }
+        }
+    }
+
+    private func computePreOpenTrackHints(
+        audioIdx: Int?,
+        subIdx: Int?,
+        isExplicitSubOff: Bool
+    ) -> (preAudioHint: Int32, preSubHint: Int32, preExternalSub: SubtitleResourceItem?) {
+        let preAudioHint: Int32 = {
+            guard let req = audioIdx else { return -1 }
+            if let matched = embyAudioStreams.first(where: { $0.index == req }),
+               let idx = matched.index {
+                return Int32(idx)
+            }
+            return Int32(req)
+        }()
+
+        if isExplicitSubOff {
+            return (preAudioHint, -2, nil)
+        }
+
+        let embeddedSubs = embySubtitleStreams.filter { $0.isExternal != true }
+        var preOptions: [PlayerSubtitleTrackOption] = []
+        for s in embeddedSubs {
+            guard let idx = s.index else { continue }
+            preOptions.append(PlayerSubtitleTrackOption(
+                id: "pre-emb-\(idx)",
+                selection: .embedded(avStreamIndex: idx),
+                embyIndex: idx,
+                label: s.readableLabel,
+                badge: s.codec?.uppercased(),
+                externalItem: nil,
+                language: s.language,
+                codec: s.codec,
+                isDefault: s.isDefault == true
+            ))
+        }
+        var seenURLs = Set<String>()
+        for ext in currentResource.subtitleURLs where ext.isExternal || embeddedSubs.isEmpty {
+            guard seenURLs.insert(ext.url.absoluteString).inserted else { continue }
+            preOptions.append(PlayerSubtitleTrackOption(
+                id: "pre-ext-\(ext.id)",
+                selection: .remoteExternal(url: ext.url),
+                embyIndex: ext.streamIndex,
+                label: ext.name,
+                badge: "外挂",
+                externalItem: ext,
+                language: nil,
+                codec: ext.codec,
+                isDefault: false
+            ))
+        }
+        let preCandidates = preOptions.map(\.trackCandidate)
+
+        if let reqSub = subIdx, reqSub >= 0 {
+            if let opt = preOptions.first(where: { $0.embyIndex == reqSub }) {
+                switch opt.selection {
+                case .embedded(let avIdx):
+                    return (preAudioHint, Int32(avIdx), nil)
+                case .remoteExternal:
+                    return (preAudioHint, -2, opt.externalItem)
+                case .off, .localExternal:
+                    return (preAudioHint, -2, nil)
+                }
+            }
+            return (preAudioHint, Int32(reqSub), nil)
+        }
+
+        if let remembered = appState.resolvedPrimarySubtitleMemory(serverId: session.server.id, item: currentItem) {
+            if remembered.isDisabled || remembered.localFilePath != nil {
+                return (preAudioHint, -2, nil)
+            }
+            if let matchedIdx = SubtitleTrackMatcher.bestMatchIndex(in: preCandidates, for: remembered) {
+                let opt = preOptions[matchedIdx]
+                switch opt.selection {
+                case .embedded(let avIdx):
+                    return (preAudioHint, Int32(avIdx), nil)
+                case .remoteExternal:
+                    return (preAudioHint, -2, opt.externalItem)
+                case .off, .localExternal:
+                    return (preAudioHint, -2, nil)
+                }
+            }
+        }
+
+        if let fallbackIdx = SubtitleTrackMatcher.defaultPreferredIndex(in: preCandidates) {
+            let opt = preOptions[fallbackIdx]
+            switch opt.selection {
+            case .embedded(let avIdx):
+                return (preAudioHint, Int32(avIdx), nil)
+            case .remoteExternal:
+                return (preAudioHint, -2, opt.externalItem)
+            case .off, .localExternal:
+                return (preAudioHint, -2, nil)
+            }
+        }
+        return (preAudioHint, -1, nil)
+    }
+
+    private func prefetchNextEpisodeIfNearEnd() {
+        guard duration > 90, currentTime >= max(duration * 0.72, duration - 120) else { return }
+        guard let idx = session.episodesQueue.firstIndex(where: { $0.id == currentItem.id }),
+              session.episodesQueue.indices.contains(idx + 1) else {
+            return
+        }
+        let nextEp = session.episodesQueue[idx + 1]
+        if prefetchedNextEpisodeResource?.itemId == nextEp.id || prefetchedNextEpisodeInFlightId == nextEp.id {
+            return
+        }
+        if DonbyDownloadManager.shared.completedEntry(for: nextEp.id, serverId: session.server.id) != nil {
+            return
+        }
+        let server = session.server
+        guard !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let preset = appState.preferredVersionPreset
+        let audioIdx = selectedAudioIdx
+        let enable302 = appState.enable302Cache
+        let defer302 = appState.turboEnabled
+        prefetchedNextEpisodeInFlightId = nextEp.id
+
+        Task {
+            let resolved: ResolvedPlaybackResource? = try? await {
+                if server.type == .uhdNative {
+                    return try await UHDStreamClient.shared.resolvePlaybackResource(
+                        server: server,
+                        item: nextEp,
+                        preferredPreset: preset
+                    )
+                } else {
+                    return try await EmbyClient.shared.resolvePlaybackResource(
+                        server: server,
+                        item: nextEp,
+                        preferredPreset: preset,
+                        audioStreamIndex: audioIdx,
+                        subtitleStreamIndex: nil,
+                        enable302Cache: enable302,
+                        defer302ProbeWhenTurbo: defer302
+                    )
+                }
+            }()
+            await MainActor.run {
+                if self.prefetchedNextEpisodeInFlightId == nextEp.id {
+                    self.prefetchedNextEpisodeInFlightId = nil
+                }
+                if let resolved {
+                    self.prefetchedNextEpisodeResource = (itemId: nextEp.id, resource: resolved)
+                }
             }
         }
     }
@@ -2092,7 +2274,7 @@ public struct PlayerView: View {
     }
 
     private func exportRedactedDiagnostics() {
-        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.29"
+        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.34"
         var lines: [String] = []
         lines.append("Donby Diagnostics Report (v\(appVer))")
         lines.append("Time: \(ISO8601DateFormatter().string(from: Date()))")
@@ -2210,7 +2392,13 @@ public struct PlayerView: View {
         }
     }
 
-    private func applySubtitleOptionOnStartup(_ option: PlayerSubtitleTrackOption, handle: OpaquePointer, defaultSelectedAV: Int?) {
+    private func applySubtitleOptionOnStartup(
+        _ option: PlayerSubtitleTrackOption,
+        handle: OpaquePointer,
+        defaultSelectedAV: Int?,
+        generation: Int,
+        prefetchedExternalTask: Task<(url: URL, text: String, isAss: Bool)?, Never>? = nil
+    ) {
         explicitSubtitleOff = false
         switch option.selection {
         case .off:
@@ -2223,8 +2411,26 @@ public struct PlayerView: View {
                 dk_player_select_track(handle, 2, Int32(avIdx))
             }
             applyKernelSubtitleStyle()
-        case .remoteExternal:
-            if let ext = option.externalItem {
+        case .remoteExternal(let extURL):
+            if let preTask = prefetchedExternalTask {
+                selectedSubIdx = option.embyIndex
+                activeSubtitleSelection = .remoteExternal(url: extURL)
+                let fallbackItem = option.externalItem
+                let fallbackEmbyIdx = option.embyIndex
+                Task { @MainActor in
+                    let pre = await preTask.value
+                    guard self.activePlaybackGeneration == generation,
+                          let currentHandle = self.playerHandle,
+                          case .remoteExternal(let curURL) = self.activeSubtitleSelection,
+                          curURL == extURL else { return }
+                    if let pre, pre.url == extURL {
+                        dk_player_load_external_subtitle(currentHandle, pre.text, pre.isAss)
+                        self.applyKernelSubtitleStyle()
+                    } else if let fallbackItem {
+                        self.loadRemoteExternalSubtitle(item: fallbackItem, embyStreamIndex: fallbackEmbyIdx, silentToast: true)
+                    }
+                }
+            } else if let ext = option.externalItem {
                 loadRemoteExternalSubtitle(item: ext, embyStreamIndex: option.embyIndex, silentToast: true)
             }
         case .localExternal:
@@ -2472,7 +2678,9 @@ public struct PlayerView: View {
         episodeSwitchTask = Task {
             do {
                 let res: ResolvedPlaybackResource
-                if let offlineEntry = DonbyDownloadManager.shared.completedEntry(
+                if let cachedNext = prefetchedNextEpisodeResource, cachedNext.itemId == nextEp.id {
+                    res = cachedNext.resource
+                } else if let offlineEntry = DonbyDownloadManager.shared.completedEntry(
                     for: nextEp.id,
                     serverId: server.id
                 ) ?? DonbyDownloadManager.shared.completedEntry(for: nextEp.id),

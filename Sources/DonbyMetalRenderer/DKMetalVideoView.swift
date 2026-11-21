@@ -168,14 +168,61 @@ private struct DKVertexUniforms {
     var uvRect: SIMD4<Float>
 }
 
-private struct DKMetalPipelineSet {
+private final class DKMetalPipelineSet: @unchecked Sendable {
     let videoPipeline: MTLRenderPipelineState?
     let bgraPipeline: MTLRenderPipelineState?
     let subPipeline: MTLRenderPipelineState?
 
-    init?(device: MTLDevice, shaderSource: String, pixelFormat: MTLPixelFormat) {
-        guard let library = try? device.makeLibrary(source: shaderSource, options: nil),
-              let vert = library.makeFunction(name: "vertex_main") else {
+    private static let cacheLock = NSLock()
+    private static var libraryCache: [UInt64: MTLLibrary] = [:]
+    private static var pipelineCache: [String: DKMetalPipelineSet] = [:]
+
+    static func cached(device: MTLDevice, shaderSource: String, pixelFormat: MTLPixelFormat) -> DKMetalPipelineSet? {
+        let key = "\(device.registryID)|\(pixelFormat.rawValue)"
+        cacheLock.lock()
+        if let hit = pipelineCache[key] {
+            cacheLock.unlock()
+            return hit
+        }
+        let cachedLib = libraryCache[device.registryID]
+        cacheLock.unlock()
+
+        let library: MTLLibrary
+        if let cachedLib {
+            library = cachedLib
+        } else {
+            guard let compiled = try? device.makeLibrary(source: shaderSource, options: nil) else {
+                return nil
+            }
+            cacheLock.lock()
+            library = libraryCache[device.registryID] ?? {
+                libraryCache[device.registryID] = compiled
+                return compiled
+            }()
+            cacheLock.unlock()
+        }
+
+        guard let created = DKMetalPipelineSet(library: library, device: device, pixelFormat: pixelFormat) else {
+            return nil
+        }
+        cacheLock.lock()
+        let result = pipelineCache[key] ?? {
+            pipelineCache[key] = created
+            return created
+        }()
+        cacheLock.unlock()
+        return result
+    }
+
+    private convenience init?(device: MTLDevice, shaderSource: String, pixelFormat: MTLPixelFormat) {
+        guard let library = try? device.makeLibrary(source: shaderSource, options: nil) else {
+            return nil
+        }
+        self.init(library: library, device: device, pixelFormat: pixelFormat)
+    }
+
+    private init?(library: MTLLibrary, device: MTLDevice, pixelFormat: MTLPixelFormat) {
+        guard let vert = library.makeFunction(name: "vertex_main") else {
             return nil
         }
 
@@ -846,6 +893,11 @@ public final class DKMetalLayerView: NSView {
     }
     """
 
+    nonisolated public static func prewarmPipelines() {
+        guard let dev = MTLCreateSystemDefaultDevice() else { return }
+        _ = DKMetalPipelineSet.cached(device: dev, shaderSource: Self.metalShaderSource, pixelFormat: .rgba16Float)
+    }
+
     private func setupMetal() {
         guard let dev = MTLCreateSystemDefaultDevice() else { return }
         assert(MemoryLayout<DKGpuColorUniforms>.stride == 3088, "Swift DKGpuColorUniforms stride mismatch")
@@ -859,7 +911,7 @@ public final class DKMetalLayerView: NSView {
         self.commandQueue = dev.makeCommandQueue()
         CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, dev, nil, &textureCache)
 
-        if let pipelines = DKMetalPipelineSet(device: dev, shaderSource: Self.metalShaderSource, pixelFormat: .rgba16Float) {
+        if let pipelines = DKMetalPipelineSet.cached(device: dev, shaderSource: Self.metalShaderSource, pixelFormat: .rgba16Float) {
             self.pipelineVideoMaster = pipelines.videoPipeline
             self.pipelineBGRA = pipelines.bgraPipeline
             self.pipelineSubtitle = pipelines.subPipeline
@@ -1219,7 +1271,7 @@ public final class DKMetalLayerView: NSView {
             self.queue = q
             self.texCache = cache
 
-            let pipelines = DKMetalPipelineSet(
+            let pipelines = DKMetalPipelineSet.cached(
                 device: dev,
                 shaderSource: DKMetalLayerView.metalShaderSource,
                 pixelFormat: .rgba8Unorm_srgb

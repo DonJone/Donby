@@ -62,8 +62,7 @@ public final class ArtworkImageCache: @unchecked Sendable {
         fullCGMemoryCache.countLimit = 48
         fullCGMemoryCache.totalCostLimit = 160 * 1024 * 1024 // 160 MB
 
-        let base = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let base = DonbyStoragePaths.cachesDirectoryURL
         let dir = base.appendingPathComponent("com.don.Donby/ArtworkCache", isDirectory: true)
         self.cacheDirectoryURL = dir
         try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)

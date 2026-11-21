@@ -64,7 +64,7 @@ public final class DonbyLogger: ObservableObject {
 
     private init() {
         let fileManager = FileManager.default
-        let logsDir = fileManager.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+        let logsDir = DonbyStoragePaths.libraryDirectoryURL
             .appendingPathComponent("Logs", isDirectory: true)
             .appendingPathComponent("Donby", isDirectory: true)
 

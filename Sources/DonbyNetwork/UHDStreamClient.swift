@@ -556,7 +556,7 @@ private actor UHDResolvedDomainCache {
         return nil
     }
 
-    func set(_ url: URL, serverId: UUID, domainId: String, ttlSeconds: TimeInterval = 60) {
+    func set(_ url: URL, serverId: UUID, domainId: String, ttlSeconds: TimeInterval = 300) {
         let key = "\(serverId.uuidString)|\(domainId)"
         entries[key] = (url: url, expiresAt: Date().addingTimeInterval(ttlSeconds))
     }
@@ -564,6 +564,48 @@ private actor UHDResolvedDomainCache {
     func invalidate(serverId: UUID) {
         let prefix = "\(serverId.uuidString)|"
         entries = entries.filter { !$0.key.hasPrefix(prefix) }
+    }
+}
+
+private actor UHDAssetResponseCache {
+    static let shared = UHDAssetResponseCache()
+    private var entries: [String: (dto: UHDAssetResponseDTO, expiresAt: Date)] = [:]
+
+    func get(serverId: UUID, itemType: String, itemId: String) -> UHDAssetResponseDTO? {
+        let key = "\(serverId.uuidString)|\(itemType)|\(itemId)"
+        if let hit = entries[key], hit.expiresAt > Date() {
+            return hit.dto
+        }
+        entries.removeValue(forKey: key)
+        return nil
+    }
+
+    func set(_ dto: UHDAssetResponseDTO, serverId: UUID, itemType: String, itemId: String, ttlSeconds: TimeInterval = 90) {
+        if entries.count > 128 {
+            let now = Date()
+            entries = entries.filter { $0.value.expiresAt > now }
+        }
+        let key = "\(serverId.uuidString)|\(itemType)|\(itemId)"
+        entries[key] = (dto: dto, expiresAt: Date().addingTimeInterval(ttlSeconds))
+    }
+
+    func invalidate(serverId: UUID) {
+        let prefix = "\(serverId.uuidString)|"
+        entries = entries.filter { !$0.key.hasPrefix(prefix) }
+    }
+}
+
+private actor UHDHostWarmCache {
+    static let shared = UHDHostWarmCache()
+    private var lastWarmedAt: [String: Date] = [:]
+
+    func shouldWarm(hostKey: String) -> Bool {
+        let now = Date()
+        if let prev = lastWarmedAt[hostKey], now.timeIntervalSince(prev) < 120 {
+            return false
+        }
+        lastWarmedAt[hostKey] = now
+        return true
     }
 }
 
@@ -577,7 +619,7 @@ public final class UHDStreamClient: Sendable {
     }
 
     public var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.33"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.34"
     }
 
     private func normalizedAPIBase(_ raw: String) -> String {
@@ -787,6 +829,34 @@ public final class UHDStreamClient: Sendable {
 
     public func invalidateResolvedDomainCache(serverId: UUID) async {
         await UHDResolvedDomainCache.shared.invalidate(serverId: serverId)
+        await UHDAssetResponseCache.shared.invalidate(serverId: serverId)
+    }
+
+    public func prewarmPlaybackDomain(server: EmbyServerConfig) async {
+        guard server.type == .uhdNative, !server.mainLineURL.isEmpty, !server.accessToken.isEmpty else { return }
+        let domainId: String? = {
+            if let selectedId = server.selectedLineId,
+               let line = server.backupLines.first(where: { $0.id == selectedId }),
+               let id = line.domainId, !id.isEmpty {
+                return id
+            }
+            return server.backupLines.first(where: { $0.domainId?.isEmpty == false })?.domainId
+        }()
+        if let domainId {
+            let resolvedURL: URL?
+            if let cached = await UHDResolvedDomainCache.shared.get(serverId: server.id, domainId: domainId) {
+                resolvedURL = cached
+            } else {
+                resolvedURL = try? await resolvePlaybackDomain(server: server, domainId: domainId)
+            }
+            if let resolvedURL, let host = resolvedURL.host, await UHDHostWarmCache.shared.shouldWarm(hostKey: host) {
+                var headReq = URLRequest(url: resolvedURL, timeoutInterval: 3.0)
+                headReq.httpMethod = "HEAD"
+                headReq.cachePolicy = .reloadIgnoringLocalCacheData
+                headReq.setValue("Donby/\(appVersion) (macOS; UHDNow Client)", forHTTPHeaderField: "User-Agent")
+                _ = try? await apiSession.data(for: headReq)
+            }
+        }
     }
 
     public func pingLine(server: EmbyServerConfig, line: ServerLineInfo?) async -> Int? {
@@ -1146,7 +1216,8 @@ public final class UHDStreamClient: Sendable {
     // MARK: - Assets & Playback Resolution
 
     public func fetchAssetMediaSources(server: EmbyServerConfig, item: EmbyItem) async throws -> [MediaSourceInfo] {
-        let isEpisode = resolveItemType(item) == "episode"
+        let itemKind = resolveItemType(item)
+        let isEpisode = (itemKind == "episode")
         let assetPath = isEpisode
             ? "/api/v1/stream/episodes/\(item.id)/assets"
             : "/api/v1/stream/movies/\(item.id)/assets"
@@ -1157,6 +1228,7 @@ public final class UHDStreamClient: Sendable {
             timeout: 15
         )
         let assets = try await performRequest(UHDAssetResponseDTO.self, request: assetReq, priority: .normal)
+        await UHDAssetResponseCache.shared.set(assets, serverId: server.id, itemType: itemKind, itemId: item.id)
         return assets.videos.map { mapVideoAsset($0, resolvedBase: server.activeBaseURL) }
     }
 
@@ -1164,9 +1236,11 @@ public final class UHDStreamClient: Sendable {
         server: EmbyServerConfig,
         item: EmbyItem,
         preferredSourceId: String? = nil,
-        preferredPreset: PreferredVersionPreset = .higherBitrate
+        preferredPreset: PreferredVersionPreset = .higherBitrate,
+        enable302Cache: Bool = true
     ) async throws -> ResolvedPlaybackResource {
-        let isEpisode = resolveItemType(item) == "episode"
+        let itemKind = resolveItemType(item)
+        let isEpisode = (itemKind == "episode")
         let assetPath = isEpisode
             ? "/api/v1/stream/episodes/\(item.id)/assets"
             : "/api/v1/stream/movies/\(item.id)/assets"
@@ -1190,7 +1264,7 @@ public final class UHDStreamClient: Sendable {
             return nil
         }()
 
-        async let assetsTask = performRequest(UHDAssetResponseDTO.self, request: assetReq, priority: .playback)
+        let cachedAssets = await UHDAssetResponseCache.shared.get(serverId: server.id, itemType: itemKind, itemId: item.id)
         async let knownDomainURLTask: URL? = {
             guard let knownDomainId else { return nil }
             if let cached = await UHDResolvedDomainCache.shared.get(serverId: server.id, domainId: knownDomainId) {
@@ -1199,7 +1273,13 @@ public final class UHDStreamClient: Sendable {
             return try? await resolvePlaybackDomain(server: server, domainId: knownDomainId)
         }()
 
-        let assets = try await assetsTask
+        let assets: UHDAssetResponseDTO
+        if let cachedAssets {
+            assets = cachedAssets
+        } else {
+            assets = try await performRequest(UHDAssetResponseDTO.self, request: assetReq, priority: .playback)
+            await UHDAssetResponseCache.shared.set(assets, serverId: server.id, itemType: itemKind, itemId: item.id)
+        }
         guard !assets.videos.isEmpty else {
             throw EmbyClientError.noPlayableStream
         }
@@ -1238,10 +1318,25 @@ public final class UHDStreamClient: Sendable {
             selectedSource = mediaSources[0]
         }
 
-        guard let streamURL = resolveAbsoluteMediaURL(resolvedBase: resolvedBase, path: selectedVideoDTO.playURL) else {
+        guard let originStreamURL = resolveAbsoluteMediaURL(resolvedBase: resolvedBase, path: selectedVideoDTO.playURL) else {
             throw EmbyClientError.noPlayableStream
         }
         let downloadURL = resolveAbsoluteMediaURL(resolvedBase: resolvedBase, path: selectedVideoDTO.downloadURL)
+
+        var resolvedStreamURL = originStreamURL
+        var routeSuffix = ""
+        if enable302Cache {
+            let cacheKey = EmbyClient.redirectCacheKey(
+                serverId: server.id,
+                itemId: item.id,
+                mediaSourceId: selectedSource.id,
+                baseURL: server.activeBaseURL
+            )
+            if let cachedRedirect = await RedirectCacheStore.shared.cachedRedirect(for: cacheKey) {
+                resolvedStreamURL = cachedRedirect
+                routeSuffix = " · 302缓存命中"
+            }
+        }
 
         let subtitleItems: [SubtitleResourceItem] = assets.subtitles.compactMap { sub in
             guard let url = resolveAbsoluteMediaURL(resolvedBase: resolvedBase, path: sub.playURL) else { return nil }
@@ -1260,14 +1355,15 @@ public final class UHDStreamClient: Sendable {
             headers["Authorization"] = server.accessToken
         }
         return ResolvedPlaybackResource(
-            streamURL: streamURL,
+            streamURL: resolvedStreamURL,
+            originStreamURL: originStreamURL,
             downloadURL: downloadURL,
             headers: headers,
             playSessionId: selectedVideoDTO.assetId,
             mediaSource: selectedSource,
             subtitleURLs: subtitleItems,
             isDirectStream: true,
-            routeNote: "UHD 原生直连 · \(selectedVideoDTO.displayName)"
+            routeNote: "UHD 原生直连 · \(selectedVideoDTO.displayName)\(routeSuffix)"
         )
     }
 

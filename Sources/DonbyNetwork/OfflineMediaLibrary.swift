@@ -139,9 +139,7 @@ public enum DonbyOfflineLibraryStorage {
     ]
 
     public static var moviesDonbyRootURL: URL {
-        let moviesDir = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies", isDirectory: true)
-        return moviesDir.appendingPathComponent("Donby", isDirectory: true)
+        return DonbyStoragePaths.moviesDirectoryURL.appendingPathComponent("Donby", isDirectory: true)
     }
 
     public static func ensureRootDirectories() {
