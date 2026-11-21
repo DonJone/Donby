@@ -36,6 +36,7 @@ let package = Package(
             publicHeadersPath: "include",
             cxxSettings: [
                 .unsafeFlags([
+                    "-O3",
                     "-I\(homebrewPrefix)/include",
                     "-I\(homebrewPrefix)/opt/ffmpeg/include",
                     "-I\(homebrewPrefix)/opt/libass/include"
@@ -46,8 +47,6 @@ let package = Package(
                     "-L\(homebrewPrefix)/lib",
                     "-L\(homebrewPrefix)/opt/ffmpeg/lib",
                     "-L\(homebrewPrefix)/opt/libass/lib",
-                    "-L\(packageRoot)/build_kernel",
-                    "-ldonby_kernel",
                     "-lavformat",
                     "-lavcodec",
                     "-lavutil",
@@ -56,6 +55,7 @@ let package = Package(
                     "-lass"
                 ]),
                 .linkedFramework("CoreVideo"),
+                .linkedFramework("CoreGraphics"),
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("AudioToolbox"),
                 .linkedFramework("CoreFoundation")

@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DEFAULT_VERSION="$(sed -n 's/^APP_VERSION="\${DONBY_VERSION:-\(.*\)}"$/\1/p' build_app.sh | head -n 1)"
-VERSION="${DONBY_VERSION:-${DEFAULT_VERSION:-1.4.13}}"
+VERSION="${DONBY_VERSION:-${DEFAULT_VERSION:-1.4.14}}"
 ARCH="$(uname -m)"
 APP_NAME="Donby"
 DIST_DIR="dist"
@@ -37,6 +37,15 @@ mkdir -p "$DIST_DIR"
 rm -f "$ZIP_PATH"
 ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$ZIP_PATH"
 unzip -tq "$ZIP_PATH" >/dev/null
+
+if [ -z "${CI:-}" ] && [ "${SYNC_INSTALLED_APP:-0}" = "1" ]; then
+    echo "==> Syncing verified Donby.app in-place to /Applications/Donby.app..."
+    mkdir -p "/Applications/Donby.app"
+    rm -rf "/Applications/Donby.app/Contents"
+    ditto "${APP_DIR}/Contents" "/Applications/Donby.app/Contents"
+    touch "/Applications/Donby.app"
+    codesign --verify --deep --strict "/Applications/Donby.app"
+fi
 
 if [ "$APP_DIR" != "${STAGING_DIR}/${APP_NAME}.app" ]; then
     cp -R "$APP_DIR" "${STAGING_DIR}/${APP_NAME}.app"

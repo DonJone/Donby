@@ -6,7 +6,7 @@
 ## 1. Repository Overview
 - **Product**: Donby — native macOS media player (macOS 14+, Apple Silicon) for Emby / Jellyfin / UHDNow / local media.
 - **Stack**: SwiftUI + AppKit (`DonbyApp`, `DonbyCore`, `DonbyNetwork`), Metal EDR renderer (`DonbyMetalRenderer`), C++20/FFmpeg/VideoToolbox/AudioToolbox/libass playback kernel (`DonbyKernelC`).
-- **Current Version**: `1.4.13` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
+- **Current Version**: `1.4.14` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
 
 ## 2. Task-to-Module Routing Table
 
@@ -35,15 +35,15 @@
 
 ## 6. Quick Commands
 ```bash
-# L1 Swift incremental check
-swift build --sdk /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
+# L1 Fast incremental Swift + C++20 (-O3) debug check (~1.3s incremental)
+./scripts/dev.sh build
 
-# L1 Kernel C++ rebuild (required after editing dk_engine.cpp / donby_kernel.h)
-./build_kernel.sh
+# L2 Core unit tests (isolated DONBY_HOME, ~0.9s warm)
+./scripts/dev.sh test
 
-# L2 Core unit tests
-swift test --sdk /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk --disable-xctest
-
-# L3 Release build & in-place /Applications/Donby.app install (only on release/explicit request)
+# L3 Fast incremental Release build & in-place /Applications/Donby.app install (~3-5s incremental)
 ./build_app.sh
+
+# Standalone C++ static lib (only needed for standalone C++ harnesses like tmp/test_pair_a.cpp; mtime-cached)
+./build_kernel.sh
 ```

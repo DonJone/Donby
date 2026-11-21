@@ -97,15 +97,11 @@ jobs:
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "Resolved Donby version: ${VER}"
 
-      - name: Build native kernel
-        run: |
-          chmod +x build_kernel.sh build_app.sh scripts/package_dmg.sh
-          ./build_kernel.sh
-
       - name: Package self-contained Donby.app & DMG
         env:
           DONBY_VERSION: ${{ steps.meta.outputs.version }}
         run: |
+          chmod +x build_app.sh scripts/package_dmg.sh
           ./scripts/package_dmg.sh
 
       - name: Verify standalone dylib closure & bundle signature

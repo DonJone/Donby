@@ -35,8 +35,8 @@ Every **code commit** MUST bind **Version Bump + Structured Commit + `docs/agent
 - **Zero Secrets in Tracked Files**: Never write real server hostnames, URLs, API tokens, or user credentials into `AGENTS.md` or tracked files under `docs/agent/`. Keep environment-specific notes in `docs/agent/local/` (git-ignored).
 - **Zero Emojis**: Do not use Unicode emojis in code, comments, commit messages, or docs.
 - **Audio & Storage Isolation in Tests**: Always run CLI/automated playback tests with `DONBY_TEST_MUTED=1` and an isolated `DONBY_HOME=$(mktemp -d)` so user audio and production caches/settings are never touched.
-- **macOS CLT SDK**: When `xcode-select -p` points to `/Library/Developer/CommandLineTools`, pass `--sdk /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk` to `swift build` / `swiftc` (or run `./build_app.sh` which auto-selects it).
+- **macOS CLT SDK & Fast Build**: Use `./scripts/dev.sh build` / `./scripts/dev.sh test` (or pass `--build-system native --sdk /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk` to `swift build`) to avoid Swift 6.4 `swiftbuild` explicit-module cache invalidation on CLT. SwiftPM compiles `DonbyKernelC/dk_engine.cpp` once directly at `-O3`.
 - **Tiered Verification**:
-  - L1 (quick edit): `swift build --sdk /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk` (and `cmake --build build_kernel` if C++ changed).
-  - L2 (subsystem logic): run targeted regression / real-server harness with `DONBY_TEST_MUTED=1`.
-  - L3 (release): `./build_app.sh` or `./scripts/release_local.sh` only when explicitly requested.
+  - L1 (quick edit): `./scripts/dev.sh build` (~1.3s incremental).
+  - L2 (subsystem logic): `./scripts/dev.sh test` (~0.9s isolated `DonbyCoreTests`) or targeted real-server harness with `DONBY_TEST_MUTED=1`.
+  - L3 (release): `./build_app.sh` or `./scripts/release_local.sh` only when explicitly requested (`release_local.sh` auto-syncs `/Applications/Donby.app` in-place).

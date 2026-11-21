@@ -5,6 +5,7 @@ cd "$(dirname "$0")/.."
 
 DEFAULT_VERSION="$(sed -n 's/^APP_VERSION="\${DONBY_VERSION:-\(.*\)}"$/\1/p' build_app.sh | head -n 1)"
 ALLOW_DIRTY=0
+SYNC_APP=1
 CHANNEL="prerelease"
 VERSION=""
 
@@ -13,6 +14,9 @@ for arg in "$@"; do
         --allow-dirty)
             ALLOW_DIRTY=1
             ;;
+        --no-install)
+            SYNC_APP=0
+            ;;
         --stable)
             CHANNEL="stable"
             ;;
@@ -20,8 +24,8 @@ for arg in "$@"; do
             CHANNEL="prerelease"
             ;;
         -h|--help)
-            echo "Usage: $0 [version] [--prerelease|--stable] [--allow-dirty]"
-            echo "Builds Donby locally on macOS and publishes Release artifacts directly via gh CLI."
+            echo "Usage: $0 [version] [--prerelease|--stable] [--allow-dirty] [--no-install]"
+            echo "Builds Donby locally on macOS, syncs /Applications/Donby.app in-place, and publishes Release artifacts via gh CLI."
             echo "Default channel is --prerelease unless --stable is explicitly passed."
             exit 0
             ;;
@@ -68,7 +72,7 @@ if [ "$ALLOW_DIRTY" != "1" ] && [ -n "$(git status --porcelain)" ]; then
 fi
 
 echo "==> [1/4] Packaging local macOS build (${TAG}, ${ARCH})..."
-DONBY_VERSION="$VERSION" ./scripts/package_dmg.sh
+DONBY_VERSION="$VERSION" SYNC_INSTALLED_APP="$SYNC_APP" ./scripts/package_dmg.sh
 
 for f in "$DMG_PATH" "$ZIP_PATH" "$MANIFEST_PATH" "$SUMS_PATH"; do
     if [ ! -f "$f" ]; then

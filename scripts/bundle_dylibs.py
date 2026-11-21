@@ -5,6 +5,7 @@ Donby.app/Contents/Frameworks and rewrite Mach-O install names to @rpath.
 """
 
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import os
 import shutil
 import subprocess
@@ -93,6 +94,31 @@ def ensure_rpath(binary_path: str, target_rpath: str) -> None:
         )
 
 
+def get_dylib_id(dylib_path: str) -> str:
+    out = run_cmd(["otool", "-D", dylib_path])
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    return lines[1] if len(lines) >= 2 else ""
+
+
+def is_cached_dylib_valid(dest_path: str, real_src: str) -> bool:
+    if not os.path.exists(dest_path):
+        return False
+    try:
+        src_st = os.stat(real_src)
+        dst_st = os.stat(dest_path)
+    except OSError:
+        return False
+    if int(src_st.st_mtime) != int(dst_st.st_mtime):
+        return False
+    expected_id = f"@rpath/{os.path.basename(dest_path)}"
+    if get_dylib_id(dest_path) != expected_id:
+        return False
+    for dep in get_dependencies(dest_path, is_dylib=True):
+        if not is_system_lib(dep) and not dep.startswith("@rpath/"):
+            return False
+    return True
+
+
 def bundle_app(app_path: str) -> None:
     app_path = os.path.abspath(app_path)
     exec_dir = os.path.join(app_path, "Contents", "MacOS")
@@ -106,8 +132,8 @@ def bundle_app(app_path: str) -> None:
 
     # real_source_path -> bundled filename inside Contents/Frameworks
     bundled_by_realpath: dict[str, str] = {}
-    # source binary on disk -> original rpaths for resolution
-    source_origin_for_bundled: dict[str, str] = {}
+    dirty_dylibs: set[str] = set()
+    kept_dylib_names: set[str] = set()
 
     queue: deque[tuple[str, str, bool]] = deque()
     # tuple: (target_binary_to_patch, origin_binary_for_resolving, is_dylib)
@@ -123,19 +149,23 @@ def bundle_app(app_path: str) -> None:
         origin_rpaths = get_rpaths(origin_bin)
         deps = get_dependencies(target_bin, is_dylib=is_dylib)
 
+        patch_args: list[str] = []
         if is_dylib:
             dylib_name = os.path.basename(target_bin)
-            subprocess.run(
-                ["install_name_tool", "-id", f"@rpath/{dylib_name}", target_bin],
-                check=True,
-            )
+            expected_id = f"@rpath/{dylib_name}"
+            if get_dylib_id(target_bin) != expected_id:
+                patch_args.extend(["-id", expected_id])
 
         for raw_dep in deps:
             if is_system_lib(raw_dep):
                 continue
             if raw_dep.startswith("@rpath/"):
-                cand_in_fw = os.path.join(frameworks_dir, raw_dep[len("@rpath/") :])
+                cand_name = raw_dep[len("@rpath/") :]
+                cand_in_fw = os.path.join(frameworks_dir, cand_name)
                 if os.path.exists(cand_in_fw):
+                    kept_dylib_names.add(cand_name)
+                    if cand_in_fw not in processed_targets:
+                        queue.append((cand_in_fw, cand_in_fw, True))
                     continue
 
             real_src = resolve_dep_path(raw_dep, origin_bin, exec_dir, origin_rpaths)
@@ -143,30 +173,62 @@ def bundle_app(app_path: str) -> None:
             if canonical_name is None:
                 canonical_name = os.path.basename(real_src)
                 dest_path = os.path.join(frameworks_dir, canonical_name)
-                if not os.path.exists(dest_path):
+                kept_dylib_names.add(canonical_name)
+                bundled_by_realpath[real_src] = canonical_name
+                if is_cached_dylib_valid(dest_path, real_src):
+                    # Walk cached dylib's @rpath closure so transitive libs stay marked as kept
+                    for sub_dep in get_dependencies(dest_path, is_dylib=True):
+                        if sub_dep.startswith("@rpath/"):
+                            sub_name = sub_dep[len("@rpath/") :]
+                            sub_dest = os.path.join(frameworks_dir, sub_name)
+                            if os.path.exists(sub_dest) and sub_dest not in processed_targets:
+                                kept_dylib_names.add(sub_name)
+                                queue.append((sub_dest, sub_dest, True))
+                else:
                     shutil.copy2(real_src, dest_path)
                     os.chmod(dest_path, 0o755)
-                bundled_by_realpath[real_src] = canonical_name
-                source_origin_for_bundled[dest_path] = real_src
-                queue.append((dest_path, real_src, True))
+                    dirty_dylibs.add(dest_path)
+                    queue.append((dest_path, real_src, True))
 
             new_ref = f"@rpath/{canonical_name}"
             if raw_dep != new_ref:
-                subprocess.run(
-                    ["install_name_tool", "-change", raw_dep, new_ref, target_bin],
-                    check=True,
-                )
+                patch_args.extend(["-change", raw_dep, new_ref])
+
+        if patch_args:
+            subprocess.run(["install_name_tool", *patch_args, target_bin], check=True)
+            if is_dylib:
+                # Preserve source mtime on patched dylib so subsequent builds detect cache hit
+                src_match = next((s for s, n in bundled_by_realpath.items() if n == os.path.basename(target_bin)), None)
+                if src_match and os.path.exists(src_match):
+                    st = os.stat(src_match)
+                    os.utime(target_bin, (st.st_atime, st.st_mtime))
+                dirty_dylibs.add(target_bin)
 
     ensure_rpath(main_bin, "@executable_path/../Frameworks")
 
-    # Re-sign each bundled dylib individually before outer bundle signature
+    # Prune any stale dylibs left over from previous Homebrew versions
+    for fname in os.listdir(frameworks_dir):
+        if fname.endswith(".dylib") and fname not in kept_dylib_names:
+            try:
+                os.remove(os.path.join(frameworks_dir, fname))
+            except OSError:
+                pass
+
+    # Re-sign only newly copied/modified dylibs in parallel (preserving source mtime)
+    if dirty_dylibs:
+        def sign_one(path: str) -> None:
+            st = os.stat(path)
+            subprocess.run(["codesign", "--force", "--sign", "-", path], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            os.utime(path, (st.st_atime, st.st_mtime))
+
+        with ThreadPoolExecutor(max_workers=min(8, len(dirty_dylibs))) as pool:
+            list(pool.map(sign_one, sorted(dirty_dylibs)))
+
     bundled_files = sorted(
         os.path.join(frameworks_dir, f)
         for f in os.listdir(frameworks_dir)
         if f.endswith(".dylib")
     )
-    for dylib in bundled_files:
-        subprocess.run(["codesign", "--force", "--sign", "-", dylib], check=True)
 
     # Verify zero external Homebrew/local references remain
     leaked: list[str] = []
@@ -177,7 +239,8 @@ def bundle_app(app_path: str) -> None:
     if leaked:
         raise RuntimeError("Unbundled non-system dependencies remain:\n" + "\n".join(leaked))
 
-    print(f"==> Bundled {len(bundled_files)} standalone dylibs into Contents/Frameworks")
+    reused = len(bundled_files) - len(dirty_dylibs)
+    print(f"==> Bundled {len(bundled_files)} standalone dylibs into Contents/Frameworks ({reused} cached, {len(dirty_dylibs)} updated)")
 
 
 if __name__ == "__main__":

@@ -3,9 +3,6 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-echo "==> Building native playback kernel..."
-./build_kernel.sh
-
 DEV_DIR="$(xcode-select -p 2>/dev/null || true)"
 if [ -n "${DONBY_SDK_PATH:-}" ] && [ -d "${DONBY_SDK_PATH}" ]; then
     SDK_PATH="${DONBY_SDK_PATH}"
@@ -27,10 +24,22 @@ if [ ! -d "$SDK_PATH" ]; then
     exit 1
 fi
 
-echo "==> Building Donby release binary..."
-swift build --sdk "$SDK_PATH" -c release
+BUILD_CONFIG="${DONBY_BUILD_CONFIG:-release}"
+BUILD_SYS_ARGS=()
+if swift build --help 2>/dev/null | grep -q -- '--build-system'; then
+    BUILD_SYS_ARGS=(--build-system "${DONBY_BUILD_SYSTEM:-native}")
+fi
 
-BIN_PATH="$(swift build --sdk "$SDK_PATH" -c release --show-bin-path)/Donby"
+SWIFT_OPT_ARGS=()
+if [ "$BUILD_CONFIG" = "release" ] && [ "${DONBY_WMO:-0}" != "1" ]; then
+    # Multi-core incremental -O avoids single-threaded WMO stalls on 1-file edits (~46s -> ~2s)
+    SWIFT_OPT_ARGS=(-Xswiftc -no-whole-module-optimization -Xswiftc -incremental)
+fi
+
+echo "==> Building Donby (${BUILD_CONFIG}) binary..."
+swift build "${BUILD_SYS_ARGS[@]}" --sdk "$SDK_PATH" -c "$BUILD_CONFIG" "${SWIFT_OPT_ARGS[@]}"
+
+BIN_PATH="$(swift build "${BUILD_SYS_ARGS[@]}" --sdk "$SDK_PATH" -c "$BUILD_CONFIG" --show-bin-path)/Donby"
 APP_DIR="${DONBY_APP_DIR:-/Applications/Donby.app}"
 
 # Always remove any stray workspace ./Donby.app so LaunchServices & Dock never see two Donby.app bundles
@@ -42,23 +51,27 @@ if [ "$APP_DIR" != "Donby.app" ] && [ "$APP_DIR" != "$(pwd)/Donby.app" ] && [ -e
     rm -rf "Donby.app"
 fi
 
-# Update Contents/ in-place to preserve top-level /Applications/Donby.app directory inode for macOS Dock
-mkdir -p "$APP_DIR"
-rm -rf "$APP_DIR/Contents"
-mkdir -p "$APP_DIR/Contents/MacOS"
+# Update Contents/ in-place to preserve top-level /Applications/Donby.app inode (Dock) and cached Frameworks/
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+rm -rf "$APP_DIR/Contents/MacOS/Donby" "$APP_DIR/Contents/Resources"
 mkdir -p "$APP_DIR/Contents/Resources"
+if [ "${FORCE_BUNDLE_DYLIBS:-0}" = "1" ]; then
+    rm -rf "$APP_DIR/Contents/Frameworks"
+fi
 
 cp "$BIN_PATH" "$APP_DIR/Contents/MacOS/Donby"
 chmod +x "$APP_DIR/Contents/MacOS/Donby"
 
-echo "==> Generating native macOS AppIcon..."
-swift -sdk "$SDK_PATH" scripts/generate_icon.swift
+if [ ! -f "Resources/AppIcon.icns" ] || [ "scripts/generate_icon.swift" -nt "Resources/AppIcon.icns" ]; then
+    echo "==> Generating native macOS AppIcon..."
+    swift -sdk "$SDK_PATH" scripts/generate_icon.swift
+fi
 if [ -f "Resources/AppIcon.icns" ]; then
     cp "Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 fi
 cp Resources/uhdnow_*.png "$APP_DIR/Contents/Resources/" 2>/dev/null || true
 
-APP_VERSION="${DONBY_VERSION:-1.4.13}"
+APP_VERSION="${DONBY_VERSION:-1.4.14}"
 BUILD_NUMBER="${DONBY_BUILD_NUMBER:-$(date -u +%Y%m%d%H%M)}"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
@@ -119,7 +132,7 @@ if [ "${BUNDLE_DYLIBS:-1}" = "1" ]; then
     python3 scripts/bundle_dylibs.py "$APP_DIR"
 fi
 
-codesign --force --deep --sign - "$APP_DIR"
+codesign --force --sign - "$APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"
 ABS_APP_DIR="$(cd "$(dirname "$APP_DIR")" && pwd)/$(basename "$APP_DIR")"
 if [ -z "${CI:-}" ] && [ "$ABS_APP_DIR" != "/Applications/Donby.app" ]; then
