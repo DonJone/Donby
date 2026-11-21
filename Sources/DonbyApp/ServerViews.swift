@@ -465,32 +465,29 @@ public struct ServerLinePickSheet: View {
                     ServerIconView(server: server, size: 34)
 
                     VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 8) {
-                            Text(isUHDExtensionActive ? "线路与测速 · \(server.name)" : "切换线路 · \(server.name)")
-                                .font(.system(size: 16, weight: .bold))
-                                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                            if server.autoSyncedLineCount > 0 {
-                                Text("\(server.autoSyncedLineCount) 条")
-                                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 2)
-                                    .background(Capsule().fill(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.08)))
-                            }
-                        }
-                        Text("当前线路：\(server.activeLineName)")
+                        Text(isUHDExtensionActive ? "线路与测速" : "切换线路")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        Text("\(server.name) · 当前：\(server.activeLineName)")
                             .font(.system(size: 11.5))
                             .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                            .lineLimit(1)
                     }
 
                     Spacer()
 
                     if isUHDExtensionActive {
-                        Picker("", selection: $activeTab) {
-                            ForEach(SheetTab.allCases) { t in Text(t.rawValue).tag(t) }
-                        }
-                        .pickerStyle(.segmented)
-                        .frame(width: 136)
+                        DonbySegmentedControl(
+                            options: SheetTab.allCases,
+                            selection: $activeTab,
+                            isLightMode: appState.isLightMode,
+                            accentColor: appState.accentColor,
+                            accentTextColor: appState.accentTextColor,
+                            fontSize: 12,
+                            horizontalPadding: 14,
+                            verticalPadding: 5,
+                            title: { $0.rawValue }
+                        )
                     }
 
                     ToolbarVectorButton(tooltip: "关闭", action: {
@@ -573,10 +570,14 @@ public struct ServerLinePickSheet: View {
 
                 ForEach(server.backupLines) { line in
                     let exitStr: String? = {
+                        #if canImport(DonbyUHDModule)
+                        return UHDDisplayNormalizer.formatExitBadge(location: line.lastExitLocation, isp: line.lastExitISP)
+                        #else
                         var parts: [String] = []
                         if let loc = line.lastExitLocation, !loc.isEmpty { parts.append(loc) }
                         if let isp = line.lastExitISP, !isp.isEmpty { parts.append(isp) }
                         return parts.isEmpty ? nil : parts.joined(separator: " · ")
+                        #endif
                     }()
 
                     #if canImport(DonbyUHDModule)
@@ -601,12 +602,12 @@ public struct ServerLinePickSheet: View {
                     #endif
 
                     ServerLineOptionRow(
-                        title: line.name,
-                        url: line.url,
+                        title: line.cleanDisplayName,
+                        url: line.cleanDisplayHost,
                         latencyMs: line.latencyMs,
                         lastSpeedMbps: line.lastSpeedMbps,
                         exitBadge: exitStr,
-                        isAutoSynced: line.isAutoSynced,
+                        isAutoSynced: false,
                         isSelected: server.selectedLineId == line.id,
                         isFastest: fastestLineId == line.id && server.backupLines.count > 1,
                         isTesting: isTestingLine,
@@ -1313,12 +1314,17 @@ public struct ServerConfigSheet: View {
                 .font(.system(size: 12.5, weight: .medium))
                 .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
             Spacer()
-            Picker("", selection: $uhdAuthMode) {
-                ForEach(UHDAuthMode.allCases) { m in Text(m.rawValue).tag(m) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 215)
+            DonbySegmentedControl(
+                options: UHDAuthMode.allCases,
+                selection: $uhdAuthMode,
+                isLightMode: appState.isLightMode,
+                accentColor: appState.accentColor,
+                accentTextColor: appState.accentTextColor,
+                fontSize: 11.5,
+                horizontalPadding: 10,
+                verticalPadding: 4.5,
+                title: { $0.rawValue }
+            )
         }
 
         Divider().opacity(appState.isLightMode ? 0.25 : 0.10)
@@ -1366,13 +1372,17 @@ public struct ServerConfigSheet: View {
     @ViewBuilder
     private var standardServerFormContent: some View {
         HStack(spacing: 8) {
-            Picker("", selection: $draft.isHttps) {
-                Text("HTTPS").tag(true)
-                Text("HTTP").tag(false)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 112)
+            DonbySegmentedControl(
+                options: [true, false],
+                selection: $draft.isHttps,
+                isLightMode: appState.isLightMode,
+                accentColor: appState.accentColor,
+                accentTextColor: appState.accentTextColor,
+                fontSize: 11.5,
+                horizontalPadding: 9,
+                verticalPadding: 6,
+                title: { $0 ? "HTTPS" : "HTTP" }
+            )
             .onChange(of: draft.isHttps) { _, isHttps in
                 if isHttps && (portText == "80" || portText.isEmpty) {
                     portText = "443"; draft.port = 443

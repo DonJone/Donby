@@ -214,6 +214,7 @@ public struct EmbyMainView: View {
                         .font(.system(size: 15.5, weight: .bold))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                         .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
 
                     if server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Button {
@@ -250,6 +251,7 @@ public struct EmbyMainView: View {
                                     .font(.system(size: 12.5, weight: .medium))
                                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                                     .lineLimit(1)
+                                    .truncationMode(.tail)
 
                                 Image(systemName: "chevron.down")
                                     .font(.system(size: 8.5, weight: .semibold))
@@ -257,6 +259,7 @@ public struct EmbyMainView: View {
                             }
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
+                            .frame(maxWidth: 168)
                             .background(
                                 Capsule()
                                     .fill(appState.isLightMode ? Color.white : Color(white: 0.16))
@@ -269,13 +272,8 @@ public struct EmbyMainView: View {
                             .contentShape(Capsule())
                         }
                         .buttonStyle(.plain)
-                        .fixedSize(horizontal: true, vertical: false)
                         .onHover { isLinePillHovered = $0 }
                         .help("切换服务器线路 (⌘L)")
-
-                        #if canImport(DonbyUHDModule)
-                        UHDEmbyAccountBadgePill(server: server)
-                        #endif
                     }
                 }
             }
@@ -284,14 +282,16 @@ public struct EmbyMainView: View {
 
             if let server = appState.activeServer {
                 #if canImport(DonbyUHDModule)
-                UHDEmbyToolbarButtons(server: server)
+                UHDEmbyToolbarMenuButton(server: server)
                 #endif
-                ToolbarVectorButton(
-                    tooltip: "切换线路 (⌘L)",
-                    action: { appState.linePickerServer = server }
-                ) { hovered in
-                    let iconColor = appState.isLightMode ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28)) : (hovered ? .white : Color(white: 0.88))
-                    RouteSwitchVectorIcon(size: 15, color: iconColor)
+                if server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    ToolbarVectorButton(
+                        tooltip: "切换线路 (⌘L)",
+                        action: { appState.linePickerServer = server }
+                    ) { hovered in
+                        let iconColor = appState.isLightMode ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28)) : (hovered ? .white : Color(white: 0.88))
+                        RouteSwitchVectorIcon(size: 15, color: iconColor)
+                    }
                 }
 
                 ToolbarVectorButton(
@@ -422,9 +422,9 @@ public struct EmbyMainView: View {
             }
 
             DonbySearchPillField(
-                placeholder: appState.activeServer?.type == .uhdNative ? "搜索媒体或 tmdb:ID" : "搜索媒体",
+                placeholder: "搜索媒体",
                 text: $appState.embyInlineSearchQuery,
-                width: 185,
+                width: 175,
                 onSubmit: {
                     appState.recordSearchHistory(appState.embyInlineSearchQuery)
                 }

@@ -181,37 +181,41 @@ public struct UHDCapabilitySummaryStrip: View {
     public var body: some View {
         let snap = uhd.accountSnapshots[server.id]
         let cap = appState.serverCapabilities[server.id]
-        HStack(spacing: 10) {
-            if let plan = snap?.subscription?.plan?.name ?? cap?.planName {
-                Text(plan)
-                    .font(.system(size: 11.5, weight: .semibold))
+        let planName = UHDDisplayNormalizer.formatPlanName(snap?.subscription?.plan?.name ?? cap?.planName)
+        let metaParts: [String] = {
+            var arr: [String] = []
+            if let cap { arr.append("并发 \(cap.activeVideoDeliveryLimit) 路") }
+            if let days = snap?.subscription?.remainingDays {
+                arr.append(days >= 0 ? "剩 \(days) 天" : "已到期")
+            }
+            return arr
+        }()
+        HStack(spacing: 8) {
+            if let planName {
+                Text(planName)
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
             }
-            if let cap {
-                Text("并发 \(cap.activeVideoDeliveryLimit) 路")
-                    .font(.system(size: 11))
+            if !metaParts.isEmpty {
+                Text(metaParts.joined(separator: " · "))
+                    .font(.system(size: 11.5))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-            }
-            if let days = snap?.subscription?.remainingDays {
-                Text(days >= 0 ? "剩 \(days) 天" : "已到期")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(days <= 7 ? .orange : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }
             Spacer()
             if let t = snap?.traffic {
                 if t.displayUnlimitedTraffic {
                     Text("不限流量")
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(size: 11.5, design: .monospaced))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 } else {
                     Text("剩 \(UHDTrafficSummary.formatBytes(t.remainingBytes)) / \(UHDTrafficSummary.formatBytes(t.limitBytes))")
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .font(.system(size: 11.5, weight: .medium, design: .monospaced))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                 }
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 13)
+        .padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -242,14 +246,19 @@ public struct UHDSpeedTestConsoleView: View {
                     .font(.system(size: 12.5, weight: .bold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
-                Picker("", selection: $model.selectedSizeMiB) {
-                    Text("32 MiB").tag(32)
-                    Text("64 MiB").tag(64)
-                    Text("100 MiB").tag(100)
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 190)
+                DonbySegmentedControl(
+                    options: [32, 64, 100],
+                    selection: $model.selectedSizeMiB,
+                    isLightMode: appState.isLightMode,
+                    accentColor: appState.accentColor,
+                    accentTextColor: appState.accentTextColor,
+                    fontSize: 11.5,
+                    horizontalPadding: 9,
+                    verticalPadding: 4.5,
+                    title: { "\($0) MiB" }
+                )
                 .disabled(model.isSpeedTesting)
+                .opacity(model.isSpeedTesting ? 0.6 : 1.0)
 
                 Spacer()
 

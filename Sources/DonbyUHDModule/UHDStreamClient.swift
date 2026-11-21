@@ -1486,11 +1486,11 @@ public final class UHDStreamClient: Sendable {
 
         return sorted.map { dom in
             let prev = existingByDomainId[dom.id]
-            let displayName = (dom.description?.isEmpty == false) ? "\(dom.name) · \(dom.description!)" : dom.name
+            let displayName = dom.name.trimmingCharacters(in: .whitespacesAndNewlines)
             let baseURL = (dom.domain?.isEmpty == false) ? dom.domain! : (prev?.url ?? server.mainLineURL)
             return ServerLineInfo(
                 id: prev?.id ?? UUID(),
-                name: displayName,
+                name: displayName.isEmpty ? baseURL : displayName,
                 url: baseURL,
                 domainId: dom.id,
                 isAutoSynced: true,

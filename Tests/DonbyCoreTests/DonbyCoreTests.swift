@@ -8,7 +8,7 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "1.4.34")
+        #expect(DonbyAppInfo.fallbackVersion == "1.4.35")
     }
 
     @Test func heroTopEdgeSynthesizerPreservesExactColorContrastAndSuppressesOutlierSpike() {
@@ -789,5 +789,23 @@ struct DonbyCoreTests {
 
         DonbyUHDModule.uninstall()
         #expect(!DonbyUHDModule.isInstalled)
+    }
+
+    @Test func uhdDisplayNormalizerStripsVerboseLineDescriptionsAndNormalizesExitCopy() {
+        let noisyLine = ServerLineInfo(
+            name: "中国大陆优化 · 智能调配的中国大陆三网优化 CDN",
+            url: "https://smart.uhdnow.com/"
+        )
+        #expect(noisyLine.cleanDisplayName == "中国大陆优化")
+        #expect(noisyLine.cleanDisplayHost == "smart.uhdnow.com")
+
+        let cleanLine = ServerLineInfo(name: "国际方向-备用", url: "https://v1.uhdgo.com")
+        #expect(cleanLine.cleanDisplayName == "国际方向-备用")
+        #expect(cleanLine.cleanDisplayHost == "v1.uhdgo.com")
+
+        #expect(UHDDisplayNormalizer.formatPlanName("China 优化版") == "中国优化版")
+        #expect(UHDDisplayNormalizer.formatExitBadge(location: "陕西省", isp: "cmcc") == "陕西 · 中国移动")
+        #expect(UHDDisplayNormalizer.formatExitBadge(location: "GB / 欧洲", isp: "") == "英国")
+        #expect(UHDDisplayNormalizer.formatExitBadge(location: "广东省", isp: "ctcc") == "广东 · 中国电信")
     }
 }

@@ -171,6 +171,25 @@ public struct ServerLineInfo: Codable, Identifiable, Hashable, Sendable {
         if trimmed.lowercased().hasSuffix("/emby") { trimmed = String(trimmed.dropLast(5)) }
         return trimmed
     }
+
+    /// Strips any verbose backend marketing description appended after `" · "` so UI labels stay concise.
+    public var cleanDisplayName: String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let range = trimmed.range(of: " · ") {
+            let head = String(trimmed[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !head.isEmpty { return head }
+        }
+        return trimmed
+    }
+
+    /// Concise host-only representation (strips `https://` / `http://` scheme prefix) for clean UI display.
+    public var cleanDisplayHost: String {
+        var s = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("https://") { s = String(s.dropFirst(8)) }
+        else if s.hasPrefix("http://") { s = String(s.dropFirst(7)) }
+        while s.hasSuffix("/") { s.removeLast() }
+        return s
+    }
 }
 
 public struct EmbyServerConfig: Codable, Identifiable, Hashable, Sendable {
@@ -299,7 +318,7 @@ public struct EmbyServerConfig: Codable, Identifiable, Hashable, Sendable {
     }
 
     public var activeLineName: String {
-        if let selectedLineId, let line = backupLines.first(where: { $0.id == selectedLineId }) { return line.name }
+        if let selectedLineId, let line = backupLines.first(where: { $0.id == selectedLineId }) { return line.cleanDisplayName }
         return "主线路"
     }
 

@@ -197,16 +197,21 @@ public struct SettingsView: View {
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
-                Picker("", selection: Binding(
-                    get: { appState.appearanceMode },
-                    set: { appState.appearanceMode = $0 }
-                )) {
-                    ForEach(AppAppearanceMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+                DonbySegmentedControl(
+                    options: AppAppearanceMode.allCases,
+                    selection: Binding(
+                        get: { appState.appearanceMode },
+                        set: { appState.appearanceMode = $0 }
+                    ),
+                    isLightMode: appState.isLightMode,
+                    accentColor: appState.accentColor,
+                    accentTextColor: appState.accentTextColor,
+                    fontSize: 12.5,
+                    horizontalPadding: 14,
+                    verticalPadding: 6,
+                    expandsEqually: true,
+                    title: { $0.title }
+                )
                 .frame(maxWidth: 360, alignment: .leading)
             }
 
@@ -291,13 +296,20 @@ public struct SettingsView: View {
                             .font(.system(size: 13, weight: .medium))
                             .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                         Spacer()
-                        Picker("", selection: $appState.preferredVersionPresetRaw) {
-                            ForEach(PreferredVersionPreset.allCases) { preset in
-                                Text(preset.title).tag(preset.rawValue)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .frame(width: 220)
+                        DonbySegmentedControl(
+                            options: PreferredVersionPreset.allCases,
+                            selection: Binding(
+                                get: { appState.preferredVersionPreset },
+                                set: { appState.preferredVersionPreset = $0 }
+                            ),
+                            isLightMode: appState.isLightMode,
+                            accentColor: appState.accentColor,
+                            accentTextColor: appState.accentTextColor,
+                            fontSize: 11.5,
+                            horizontalPadding: 10,
+                            verticalPadding: 5,
+                            title: { $0.title }
+                        )
                     }
                     Text(appState.preferredVersionPreset.subtitle)
                         .font(.system(size: 11.5))
@@ -311,12 +323,20 @@ public struct SettingsView: View {
                         .font(.system(size: 13))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
-                    Picker("", selection: $appState.controlBarStyleRaw) {
-                        Text("悬浮胶囊栏").tag(ControlBarPositionStyle.float.rawValue)
-                        Text("通栏底部栏").tag(ControlBarPositionStyle.bottom.rawValue)
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 180)
+                    DonbySegmentedControl(
+                        options: [ControlBarPositionStyle.float, ControlBarPositionStyle.bottom],
+                        selection: Binding(
+                            get: { appState.controlBarStyle },
+                            set: { appState.controlBarStyleRaw = $0.rawValue }
+                        ),
+                        isLightMode: appState.isLightMode,
+                        accentColor: appState.accentColor,
+                        accentTextColor: appState.accentTextColor,
+                        fontSize: 11.5,
+                        horizontalPadding: 10,
+                        verticalPadding: 5,
+                        title: { $0 == .float ? "悬浮胶囊栏" : "通栏底部栏" }
+                    )
                 }
 
                 HStack {

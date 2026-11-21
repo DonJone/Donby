@@ -76,6 +76,8 @@ public struct MainWindowView: View {
                             .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
                         }
                     }
+                    .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
                 }
                 .ignoresSafeArea(.container, edges: .top)
             }

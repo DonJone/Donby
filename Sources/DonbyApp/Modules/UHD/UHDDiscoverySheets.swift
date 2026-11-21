@@ -204,11 +204,17 @@ public struct UHDFavoritesSheet: View {
                     }
                 }
                 Spacer()
-                Picker("", selection: $tab) {
-                    ForEach(FavTab.allCases) { t in Text(t.rawValue).tag(t) }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 210)
+                DonbySegmentedControl(
+                    options: FavTab.allCases,
+                    selection: $tab,
+                    isLightMode: appState.isLightMode,
+                    accentColor: appState.accentColor,
+                    accentTextColor: appState.accentTextColor,
+                    fontSize: 12,
+                    horizontalPadding: 13,
+                    verticalPadding: 5,
+                    title: { $0.rawValue }
+                )
 
                 ToolbarVectorButton(tooltip: "关闭", action: { dismiss() }) { hovered in
                     let col = appState.isLightMode ? (hovered ? Color.black : Color(white: 0.35)) : (hovered ? .white : Color(white: 0.72))
@@ -470,13 +476,23 @@ public struct UHDPersonDetailSheet: View {
             }
 
             HStack(spacing: 10) {
-                Picker("类型", selection: $mediaTypeFilter) {
-                    Text("全部").tag("")
-                    Text("电影").tag("movie")
-                    Text("剧集").tag("tv")
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 200)
+                DonbySegmentedControl(
+                    options: ["", "movie", "tv"],
+                    selection: $mediaTypeFilter,
+                    isLightMode: appState.isLightMode,
+                    accentColor: appState.accentColor,
+                    accentTextColor: appState.accentTextColor,
+                    fontSize: 12,
+                    horizontalPadding: 12,
+                    verticalPadding: 5,
+                    title: { key in
+                        switch key {
+                        case "movie": return "电影"
+                        case "tv": return "剧集"
+                        default: return "全部"
+                        }
+                    }
+                )
 
                 Spacer()
 

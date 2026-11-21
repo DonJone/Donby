@@ -345,6 +345,117 @@ public struct UHDAccountSnapshot: Codable, Equatable, Sendable {
 
 // MARK: - Speed Test Models & Official Reference Metrics Engine
 
+public enum UHDDisplayNormalizer {
+    private static let countryMap: [String: String] = [
+        "CN": "中国",
+        "HK": "香港",
+        "TW": "台湾",
+        "MO": "澳门",
+        "JP": "日本",
+        "SG": "新加坡",
+        "KR": "韩国",
+        "US": "美国",
+        "GB": "英国",
+        "UK": "英国",
+        "DE": "德国",
+        "NL": "荷兰",
+        "FR": "法国",
+        "CA": "加拿大",
+        "AU": "澳大利亚",
+        "RU": "俄罗斯",
+        "MY": "马来西亚",
+        "TH": "泰国",
+        "IN": "印度",
+        "SE": "瑞典",
+        "CH": "瑞士"
+    ]
+
+    private static let ispMap: [String: String] = [
+        "cmcc": "中国移动",
+        "chinamobile": "中国移动",
+        "china mobile": "中国移动",
+        "ctcc": "中国电信",
+        "chinanet": "中国电信",
+        "chinatelecom": "中国电信",
+        "china telecom": "中国电信",
+        "cucc": "中国联通",
+        "unicom": "中国联通",
+        "chinaunicom": "中国联通",
+        "china unicom": "中国联通",
+        "cernet": "教育网",
+        "cbn": "中国广电"
+    ]
+
+    /// Normalizes awkward mixed-language plan names from upstream API into restrained Donby Chinese UI copy.
+    public static func formatPlanName(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return nil }
+        if s.hasPrefix("China ") {
+            s = "中国" + s.dropFirst(6)
+        } else if s.hasPrefix("CHINA ") {
+            s = "中国" + s.dropFirst(6)
+        }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Normalizes raw upstream exit location strings (e.g. `"GB / 欧洲"` -> `"英国"`, `"陕西省"` -> `"陕西"`).
+    public static func formatLocation(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "未知" else { return nil }
+
+        let segments = trimmed
+            .components(separatedBy: "/")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        if let first = segments.first {
+            let upper = first.uppercased()
+            if let mappedCountry = countryMap[upper] {
+                if segments.count > 1 {
+                    let second = segments[1]
+                    let genericContinents: Set<String> = ["欧洲", "亚洲", "北美洲", "南美洲", "大洋洲", "非洲", "Europe", "Asia", "North America"]
+                    if !genericContinents.contains(second) {
+                        return "\(mappedCountry) · \(stripAdminSuffix(second))"
+                    }
+                }
+                return mappedCountry
+            }
+            return stripAdminSuffix(first)
+        }
+        return stripAdminSuffix(trimmed)
+    }
+
+    /// Normalizes raw lowercase carrier identifiers (e.g. `"cmcc"` -> `"中国移动"`).
+    public static func formatISP(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lower = trimmed.lowercased()
+        if let mapped = ispMap[lower] {
+            return mapped
+        }
+        return trimmed
+    }
+
+    public static func formatExitBadge(location: String?, isp: String?) -> String? {
+        var parts: [String] = []
+        if let loc = formatLocation(location) { parts.append(loc) }
+        if let carrier = formatISP(isp) { parts.append(carrier) }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private static func stripAdminSuffix(_ s: String) -> String {
+        for suffix in ["省", "市", "特别行政区", "维吾尔自治区", "壮族自治区", "回族自治区", "自治区"] {
+            if s.hasSuffix(suffix) && s.count > suffix.count + 1 {
+                return String(s.dropLast(suffix.count))
+            }
+        }
+        return s
+    }
+}
+
 public struct UHDSpeedTestNetworkInfo: Codable, Equatable, Sendable {
     public let ip: String
     public let country: String
@@ -383,16 +494,8 @@ public struct UHDSpeedTestNetworkInfo: Codable, Equatable, Sendable {
     }
 
     public var compactSummary: String {
-        var parts: [String] = []
-        if !displayLocation.isEmpty && displayLocation != "未知" {
-            parts.append(displayLocation)
-        } else if !country.isEmpty {
-            parts.append(country)
-        }
-        if !isp.isEmpty {
-            parts.append(isp)
-        }
-        return parts.isEmpty ? "未知出口" : parts.joined(separator: " · ")
+        let locCandidate = (!displayLocation.isEmpty && displayLocation != "未知") ? displayLocation : country
+        return UHDDisplayNormalizer.formatExitBadge(location: locCandidate, isp: isp) ?? "未知出口"
     }
 }
 

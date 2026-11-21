@@ -1,6 +1,6 @@
 # Module Map: App, Player HUD & Native UI (`DonbyApp`)
 
-> Last synced: `v1.4.34`. Load this doc for `PlayerView`, `AppState`, `DetailView`, 120Hz native collection views, artwork caching, Liquid Glass UI, optional `Modules/UHD/` plugin UI, and module views.
+> Last synced: `v1.4.35`. Load this doc for `PlayerView`, `AppState`, `DetailView`, 120Hz native collection views, artwork caching, Liquid Glass UI (`DonbySegmentedControl`), optional `Modules/UHD/` plugin UI, and module views.
 
 ## 1. File Inventory & Core Symbols
 - **App Entry & Global State**:

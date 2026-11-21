@@ -35,6 +35,84 @@ public enum DonbyGlassPalette {
     }
 }
 
+/// Theme-faithful Donby Liquid Glass segmented control (replaces macOS default blue `.segmented` Picker).
+public struct DonbySegmentedControl<Option: Hashable>: View {
+    public let options: [Option]
+    @Binding public var selection: Option
+    public let title: (Option) -> String
+    public let isLightMode: Bool
+    public let accentColor: Color
+    public let accentTextColor: Color
+    public var fontSize: CGFloat = 12
+    public var horizontalPadding: CGFloat = 11
+    public var verticalPadding: CGFloat = 5
+    public var expandsEqually: Bool = false
+
+    public init(
+        options: [Option],
+        selection: Binding<Option>,
+        isLightMode: Bool,
+        accentColor: Color,
+        accentTextColor: Color,
+        fontSize: CGFloat = 12,
+        horizontalPadding: CGFloat = 11,
+        verticalPadding: CGFloat = 5,
+        expandsEqually: Bool = false,
+        title: @escaping (Option) -> String
+    ) {
+        self.options = options
+        self._selection = selection
+        self.isLightMode = isLightMode
+        self.accentColor = accentColor
+        self.accentTextColor = accentTextColor
+        self.fontSize = fontSize
+        self.horizontalPadding = horizontalPadding
+        self.verticalPadding = verticalPadding
+        self.expandsEqually = expandsEqually
+        self.title = title
+    }
+
+    public var body: some View {
+        HStack(spacing: 3) {
+            ForEach(options, id: \.self) { opt in
+                let isSelected = (selection == opt)
+                Button {
+                    withAnimation(.easeOut(duration: 0.14)) {
+                        selection = opt
+                    }
+                } label: {
+                    Text(title(opt))
+                        .font(.system(size: fontSize, weight: isSelected ? .semibold : .medium))
+                        .foregroundStyle(
+                            isSelected
+                                ? accentTextColor
+                                : DonbyGlassPalette.secondaryText(isLight: isLightMode)
+                        )
+                        .lineLimit(1)
+                        .padding(.horizontal, horizontalPadding)
+                        .padding(.vertical, verticalPadding)
+                        .frame(maxWidth: expandsEqually ? .infinity : nil)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(isSelected ? accentColor : Color.clear)
+                        )
+                        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(DonbyGlassPalette.separator(isLight: isLightMode), lineWidth: 0.5)
+        )
+    }
+}
+
 /// Optical Visual Effect View for sidebar translucency and desktop-bleed
 public struct DonbyVisualEffectView: NSViewRepresentable {
     public var material: NSVisualEffectView.Material = .sidebar

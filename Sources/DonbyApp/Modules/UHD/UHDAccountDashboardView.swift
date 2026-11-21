@@ -208,7 +208,7 @@ public struct UHDAccountDashboardContent: View {
         let sub = snapshot?.subscription
         return dashboardCard {
             HStack(spacing: 8) {
-                Text(sub?.plan?.name ?? "订阅信息")
+                Text(UHDDisplayNormalizer.formatPlanName(sub?.plan?.name) ?? "订阅信息")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
