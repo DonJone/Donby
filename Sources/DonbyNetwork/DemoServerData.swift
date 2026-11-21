@@ -1,13 +1,14 @@
 import Foundation
 import DonbyCore
 
-/// Default UHDNow server configuration preset slot (empty configuration to be filled in by the user)
+/// Default starter server slot factory (decoupled from any specific service module).
 public enum DemoServerData {
     public static func makeDefaultUHDServer() -> EmbyServerConfig {
-        EmbyServerConfig(
-            name: "UHDNow",
-            note: "待配置服务器地址与账号",
-            type: .emby,
+        let uhdAvailable = DonbyMediaServiceRegistry.shared.isRegistered(.uhdNative)
+        return EmbyServerConfig(
+            name: uhdAvailable ? "UHDNow" : "Emby",
+            note: "",
+            type: uhdAvailable ? .uhdNative : .emby,
             host: "",
             port: 443,
             isHttps: true,
@@ -19,7 +20,7 @@ public enum DemoServerData {
             serverId: "",
             serverName: "",
             serverVersion: "",
-            iconURL: "uhd",
+            iconURL: uhdAvailable ? "uhd" : "emby",
             isDefaultHome: false,
             isEncrypted: false,
             enableGlobalSearch: true,

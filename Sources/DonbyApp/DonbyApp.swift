@@ -203,9 +203,8 @@ public struct DonbyApp: App {
             }
 
             CommandMenu("服务器与线路") {
-                Button("新增 Emby / UHDNow 服务器…") {
-                    appState.editingServer = nil
-                    appState.showAddServerSheet = true
+                Button("添加服务…") {
+                    appState.presentServerEditor()
                 }
                 .keyboardShortcut("n", modifiers: [.command])
 
@@ -214,7 +213,7 @@ public struct DonbyApp: App {
                 }
                 .keyboardShortcut("l", modifiers: [.command])
 
-                Button("同步 UHDNow 云端线路 (ServerDomains)") {
+                Button("同步云端线路") {
                     if let id = appState.activeServer?.id {
                         Task { await appState.syncExtDomains(for: id, showFeedback: true) }
                     }

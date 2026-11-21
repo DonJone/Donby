@@ -43,6 +43,7 @@ public struct IPTVModuleView: View {
                         DonbyToolbarCircleView(systemName: "sidebar.left")
                     }
                     .buttonStyle(.plain)
+                    .focusable(false)
                     .padding(.leading, appState.isWindowFullScreen ? 0 : 54)
                 }
 

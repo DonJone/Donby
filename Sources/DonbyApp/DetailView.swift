@@ -2,6 +2,9 @@ import SwiftUI
 import AppKit
 import DonbyCore
 import DonbyNetwork
+#if canImport(DonbyUHDModule)
+import DonbyUHDModule
+#endif
 import DonbyKernelC
 
 public struct DetailView: View {
@@ -142,7 +145,8 @@ public struct DetailView: View {
             EpisodeInfoSheet(episode: ep, isLightMode: appState.isLightMode)
         }
         .sheet(isPresented: $showWatchPartyCreateSheet) {
-            if let srv = effectiveDetailServer, srv.type == .uhdNative {
+            #if canImport(DonbyUHDModule)
+            if let srv = effectiveDetailServer, UHDModuleManager.shared.isActive(for: srv) {
                 let target = heroResolvedPlayTarget
                 UHDWatchPartyCreateSheet(
                     server: srv,
@@ -152,6 +156,7 @@ public struct DetailView: View {
                 .environmentObject(appState)
                 .preferredColorScheme(appState.colorScheme)
             }
+            #endif
         }
         .onChange(of: selectedSourceId) { _, _ in
             syncStreamsForSelectedSource()
@@ -192,11 +197,8 @@ public struct DetailView: View {
         try? await Task.sleep(nanoseconds: 120_000_000)
         guard !Task.isCancelled else { return }
         let sourceHint = (target.id == item.id && !selectedSourceId.isEmpty) ? selectedSourceId : nil
-        if server.type == .uhdNative {
-            await UHDStreamClient.shared.prewarmPlaybackDomain(server: server)
-            if target.isEpisode {
-                _ = try? await UHDStreamClient.shared.fetchAssetMediaSources(server: server, item: target)
-            }
+        if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+            await ext.prewarmPlayback(server: server, item: target)
         } else {
             await EmbyClient.shared.prewarmPlaybackInfo(server: server, itemId: target.id, mediaSourceId: sourceHint)
         }
@@ -214,12 +216,13 @@ public struct DetailView: View {
         let preset = appState.preferredVersionPreset
         let enable302 = appState.enable302Cache && server.cache302Request
         let resolved: ResolvedPlaybackResource?
-        if server.type == .uhdNative {
-            resolved = try? await UHDStreamClient.shared.resolvePlaybackResource(
+        if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+            resolved = try? await ext.resolvePlaybackResource(
                 server: server,
                 item: target,
                 preferredSourceId: sourceHint,
-                preferredPreset: preset
+                preferredPreset: preset,
+                enable302Cache: enable302
             )
         } else {
             resolved = try? await EmbyClient.shared.resolvePlaybackResource(
@@ -347,13 +350,15 @@ public struct DetailView: View {
                         } label: {
                             Label("切换线路 (\(server.activeLineName))", systemImage: "arrow.triangle.swap")
                         }
-                        if server.type == .uhdNative {
+                        #if canImport(DonbyUHDModule)
+                        if UHDModuleManager.shared.isActive(for: server) {
                             Button {
                                 showWatchPartyCreateSheet = true
                             } label: {
-                                Label("发起 UHD 同看房间", systemImage: "person.2.wave.2")
+                                Label("发起同看", systemImage: "person.2.wave.2")
                             }
                         }
+                        #endif
                     }
 
                     Button {
@@ -572,15 +577,17 @@ public struct DetailView: View {
 
                                 detailDownloadButton
 
-                                if effectiveDetailServer?.type == .uhdNative {
+                                #if canImport(DonbyUHDModule)
+                                if UHDModuleManager.shared.isActive(for: effectiveDetailServer) {
                                     LiquidGlassCircleButton(
                                         systemImage: "person.2.wave.2",
                                         size: 38,
-                                        tooltip: "发起 UHD 同看房间"
+                                        tooltip: "发起同看"
                                     ) {
                                         showWatchPartyCreateSheet = true
                                     }
                                 }
+                                #endif
                             }
 
                             // Main Wide Frosted Capsule Play Button (as in better1.png)
@@ -1379,11 +1386,19 @@ public struct DetailView: View {
                 LazyHStack(alignment: .top, spacing: 18) {
                     ForEach(people.prefix(20)) { person in
                         let subtitle = Self.localizedPersonSubtitle(for: person)
-                        let canOpenPerson = (effectiveDetailServer?.type == .uhdNative)
+                        let canOpenPerson: Bool = {
+                            #if canImport(DonbyUHDModule)
+                            return UHDModuleManager.shared.isActive(for: effectiveDetailServer)
+                            #else
+                            return false
+                            #endif
+                        }()
                         Button {
-                            if let srv = effectiveDetailServer, srv.type == .uhdNative {
-                                appState.activeUHDPersonSheet = UHDPersonSheetTarget(server: srv, person: person)
+                            #if canImport(DonbyUHDModule)
+                            if let srv = effectiveDetailServer, UHDModuleManager.shared.isActive(for: srv) {
+                                UHDModuleManager.shared.activePersonSheet = UHDPersonSheetTarget(server: srv, person: person)
                             }
+                            #endif
                         } label: {
                             VStack(spacing: 8) {
                                 PersonAvatarView(
@@ -1652,7 +1667,8 @@ public struct DetailView: View {
 
         let targetSeriesId: String? = initialItem.isSeries ? initialItem.id : (initialItem.isEpisode ? initialItem.seriesId : nil)
 
-        if server.type == .uhdNative {
+        #if canImport(DonbyUHDModule)
+        if UHDModuleManager.shared.isActive(for: server) {
             async let detailTask = try? UHDStreamClient.shared.fetchItemDetail(server: server, item: initialItem)
             let creditMediaId = initialItem.isEpisode ? (initialItem.seriesId ?? initialItem.id) : initialItem.id
             async let creditsTask = try? UHDStreamClient.shared.fetchCredits(server: server, mediaId: creditMediaId)
@@ -1698,6 +1714,7 @@ public struct DetailView: View {
             self.similarItems = []
             return
         }
+        #endif
 
         async let detailTask = try? EmbyClient.shared.fetchItemDetail(server: server, itemId: initialItem.id)
         async let similarTask = try? EmbyClient.shared.fetchSimilarItems(server: server, itemId: initialItem.id)
@@ -1848,17 +1865,17 @@ public struct DetailView: View {
         guard let server = effectiveDetailServer, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return localEps
         }
-        if server.type == .uhdNative {
+        if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
             let tvId = item.isEpisode ? (item.seriesId ?? item.id) : item.id
             let sName = item.isEpisode ? item.seriesName : item.name
-            if let page = try? await UHDStreamClient.shared.fetchSeasonEpisodes(
+            if let eps = try? await ext.fetchSeasonEpisodes(
                 server: server,
                 tvId: tvId,
                 seasonId: season.id,
                 seasonNumber: seasonNumber,
                 seriesName: sName
             ) {
-                return mergeEpisodes(remote: page.items, local: localEps)
+                return mergeEpisodes(remote: eps, local: localEps)
             }
             return localEps
         }

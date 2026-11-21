@@ -1,6 +1,6 @@
 # Module Map: Core Models, Policies & Storage (`DonbyCore`)
 
-> Last synced: `v1.4.33`. Load this doc for shared data models, UHD core policies/metrics engine, `DONBY_HOME` storage path isolation, unified `DonbyAppInfo.version`, AES-256-GCM local credential vault, async file logger, subtitle encoding/transform/auto-alignment policies (Silero VAD + audio-first dual-subtitle aligner), diagnostics redaction, playback health state machine, update manifest parsing, and `DonbyCoreTests`.
+> Last synced: `v1.4.34`. Load this doc for shared data models, generic service-provider extension seam (`DonbyMediaServiceRegistry`), `DONBY_HOME` storage path isolation, unified `DonbyAppInfo.version`, AES-256-GCM local credential vault, async file logger, subtitle encoding/transform/auto-alignment policies (Silero VAD + audio-first dual-subtitle aligner), diagnostics redaction, playback health state machine, update manifest parsing, and `DonbyCoreTests`.
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyCore/DonbyStoragePaths.swift` (~52L)
@@ -16,8 +16,8 @@
   - `SeasonSkipPreference` (`introEnabled`, `outroEnabled`, `introSeconds`, `outroSeconds`, `SeasonSkipMode`: `.manual` / `.automatic`, `chapterDetection`), `ChapterSkipDetector`.
   - `PlaybackHealthPolicy` & `PlaybackHealthEvaluation` — bounded stall detection (monitors time progress `>= 0.1s` or buffer progress `>= 0.5s`; triggers `.recover` once before `.fail`).
   - `PlaybackDiagnosticsRedactor` — regex secret & host redaction (`token|password|passwd|pwd|authorization|api_key|x-emby-token|delivery_key` + `https?://<HOST>`).
-- `Sources/DonbyCore/EmbyModels.swift` (~885L) & `EmbyChapterInfo.swift` (~18L) & `ResolvedPlaybackResource.swift` (~40L) & `UHDModels.swift` (~700L)
-  - `ServerType` (`.emby`, `.jellyfin`, `.uhdNative`, etc.), `EmbyServerConfig` (backward-compatible `keepSignedIn`, `lastLoginDate`, `tokenExpiresAt`), `ServerLineInfo` (optional speed/exit cache), `UHDSpeedTestMetricsEngine`, `UHDLoginCodeNormalizer`, `UHDWatchPartyInviteParser`, `UHDTmdbSearchQueryParser`, `UHDRatingNormalizer`, UHD subscription/traffic/calendar/person/team/watch-party/danmu models.
+- `Sources/DonbyCore/EmbyModels.swift` (~885L) & `EmbyChapterInfo.swift` (~18L) & `ResolvedPlaybackResource.swift` (~40L) & `MediaServiceProvider.swift` (~80L)
+  - `ServerType`, `EmbyServerConfig` (backward-compatible `keepSignedIn`, `lastLoginDate`, `tokenExpiresAt`), `ServerLineInfo` (optional speed/exit cache), and `DonbyMediaServiceProvider` / `DonbyMediaServiceRegistry` (decoupled extension seam allowing optional modules like `DonbyUHDModule` to register/unregister at runtime without coupling `DonbyCore` or `DonbyNetwork`).
 - `Sources/DonbyCore/AppStateModels.swift` (~485L)
   - `MainNavigationTab`, `ActivePlaybackSession`, `WatchRecordItem`, `LocalMediaFolder`, `IPTVChannelItem`, `AppThemeColor`, `AppAppearanceMode`.
 - `Sources/DonbyCore/AppUpdatePolicies.swift` (~334L)

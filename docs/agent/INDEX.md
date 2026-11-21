@@ -5,17 +5,17 @@
 
 ## 1. Repository Overview
 - **Product**: Donby — native macOS media player (macOS 14+, Apple Silicon) for Emby / Jellyfin / UHDNow / local media.
-- **Stack**: SwiftUI + AppKit (`DonbyApp`, `DonbyCore`, `DonbyNetwork`), Metal EDR renderer (`DonbyMetalRenderer`), C++20/FFmpeg/VideoToolbox/AudioToolbox/libass playback kernel (`DonbyKernelC`).
-- **Current Version**: `1.4.33` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
+- **Stack**: SwiftUI + AppKit (`DonbyApp`, `DonbyCore`, `DonbyNetwork`, optional `DonbyUHDModule`), Metal EDR renderer (`DonbyMetalRenderer`), C++20/FFmpeg/VideoToolbox/AudioToolbox/libass playback kernel (`DonbyKernelC`).
+- **Current Version**: `1.4.34` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
 
 ## 2. Task-to-Module Routing Table
 
 | If your task involves... | Read FIRST (L1) | Key Source Files |
 | :--- | :--- | :--- |
-| Streaming, seek latency, HTTP/2, Range, L1/L2 cache, offline downloads, Emby/UHD API, auto-updater | [modules/turbo-network.md](modules/turbo-network.md) | `Sources/DonbyNetwork/TurboCacheAndDownloadEngine.swift`, `EmbyClient.swift`, `UHDStreamClient.swift`, `OfflineMediaLibrary.swift`, `AppUpdateManager.swift` |
+| Streaming, seek latency, HTTP/2, Range, L1/L2 cache, offline downloads, Emby/UHD API, auto-updater | [modules/turbo-network.md](modules/turbo-network.md) | `Sources/DonbyNetwork/*`, `Sources/DonbyUHDModule/*` |
 | Demuxing, decoding, A/V sync, AudioQueue, rebuffer, seek flush, libass/PGS subtitles, FFmpeg AVIO | [modules/kernel-cpp.md](modules/kernel-cpp.md) | `Sources/DonbyKernelC/dk_engine.cpp`, `include/donby_kernel.h` |
 | Video presentation, CVDisplayLink, HDR10/DoVi EDR, Metal shaders, first-frame callback, subtitle lift | [modules/metal-renderer.md](modules/metal-renderer.md) | `Sources/DonbyMetalRenderer/DKMetalVideoView.swift` |
-| Player HUD, scrubber, seek debounce, AppState, Liquid Glass UI, 120Hz home/grid, artwork cache, views | [modules/app-player-ui.md](modules/app-player-ui.md) | `Sources/DonbyApp/PlayerView.swift`, `AppState.swift`, `DetailView.swift`, `Components/*`, `Views/*` |
+| Player HUD, scrubber, seek debounce, AppState, Liquid Glass UI, 120Hz home/grid, artwork cache, views | [modules/app-player-ui.md](modules/app-player-ui.md) | `Sources/DonbyApp/PlayerView.swift`, `AppState.swift`, `DetailView.swift`, `Components/*`, `Views/*`, `Modules/UHD/*` |
 | Core models, storage paths (`DONBY_HOME`), logger, AES-256-GCM credential vault, subtitle encoding/policies, version info, core tests | [modules/storage-core.md](modules/storage-core.md) | `Sources/DonbyCore/*`, `Tests/DonbyCoreTests/DonbyCoreTests.swift` |
 | Building, CMake, `.app` signing, Dock inode preservation, DMG/ZIP packaging, local release, CI | [modules/build-release.md](modules/build-release.md) | `build_app.sh`, `build_kernel.sh`, `scripts/*`, `.github/workflows/build-dmg.yml` |
 

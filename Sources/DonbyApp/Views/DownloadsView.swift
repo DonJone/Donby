@@ -125,7 +125,8 @@ public struct DownloadsView: View {
                         .font(.system(size: 13.5, weight: .semibold))
                         .foregroundStyle(iconColor)
                 }
-                .padding(.leading, 58)
+                .focusable(false)
+                .padding(.leading, appState.collapsedSidebarLeadingPadding)
             }
 
             Text(displayMode == .library ? "已下载" : "下载队列与缓存")

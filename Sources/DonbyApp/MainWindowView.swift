@@ -23,6 +23,7 @@ public struct MainWindowView: View {
                     if !appState.isSidebarCollapsed {
                         appSidebarView
                             .frame(width: appState.isWindowFullScreen ? 228 : 206)
+                            .layoutPriority(1)
                             .background(
                                 ZStack {
                                     DonbyVisualEffectView(material: .sidebar, blendingMode: .behindWindow)
@@ -158,8 +159,8 @@ public struct MainWindowView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
             appState.isWindowFullScreen = false
         }
-        .sheet(isPresented: $appState.showAddServerSheet) {
-            ServerConfigSheet(existingServer: appState.editingServer)
+        .sheet(item: $appState.serverEditorRequest) { req in
+            ServerConfigSheet(existingServer: req.existingServer, preferredType: req.preferredType)
                 .environmentObject(appState)
                 .preferredColorScheme(appState.colorScheme)
         }
@@ -168,37 +169,9 @@ public struct MainWindowView: View {
                 .environmentObject(appState)
                 .preferredColorScheme(appState.colorScheme)
         }
-        .sheet(item: $appState.uhdAccountSheetServer) { server in
-            UHDAccountSheet(serverId: server.id)
-                .environmentObject(appState)
-                .preferredColorScheme(appState.colorScheme)
-        }
-        .sheet(isPresented: $appState.showUHDAnimeCalendarSheet) {
-            if let server = appState.activeServer, server.type == .uhdNative {
-                UHDAnimeCalendarSheet(server: server)
-                    .environmentObject(appState)
-                    .preferredColorScheme(appState.colorScheme)
-            }
-        }
-        .sheet(isPresented: $appState.showUHDFavoritesSheet) {
-            if let server = appState.activeServer, server.type == .uhdNative {
-                UHDFavoritesSheet(server: server)
-                    .environmentObject(appState)
-                    .preferredColorScheme(appState.colorScheme)
-            }
-        }
-        .sheet(isPresented: $appState.showUHDWatchPartyJoinSheet) {
-            if let server = appState.activeServer, server.type == .uhdNative {
-                UHDWatchPartyJoinSheet(server: server)
-                    .environmentObject(appState)
-                    .preferredColorScheme(appState.colorScheme)
-            }
-        }
-        .sheet(item: $appState.activeUHDPersonSheet) { target in
-            UHDPersonDetailSheet(target: target)
-                .environmentObject(appState)
-                .preferredColorScheme(appState.colorScheme)
-        }
+        #if canImport(DonbyUHDModule)
+        .donbyUHDModuleSheets()
+        #endif
         .sheet(isPresented: $appState.showLogViewer) {
             LogViewerSheet()
                 .environmentObject(appState)
@@ -239,6 +212,7 @@ public struct MainWindowView: View {
                     DonbyToolbarCircleView(systemName: "sidebar.left")
                 }
                 .buttonStyle(.plain)
+                .focusable(false)
                 .padding(.trailing, 12)
                 .padding(.top, appState.isWindowFullScreen ? 4 : 8)
             }

@@ -4,8 +4,22 @@ import Combine
 import AppKit
 import DonbyCore
 import DonbyNetwork
+#if canImport(DonbyUHDModule)
+import DonbyUHDModule
+#endif
 import DonbyKernelC
 import DonbyMetalRenderer
+
+public struct ServerEditorRequest: Identifiable {
+    public let id = UUID()
+    public let existingServer: EmbyServerConfig?
+    public let preferredType: ServerType?
+
+    public init(existingServer: EmbyServerConfig? = nil, preferredType: ServerType? = nil) {
+        self.existingServer = existingServer
+        self.preferredType = preferredType
+    }
+}
 
 @MainActor
 public final class AppState: ObservableObject {
@@ -25,18 +39,15 @@ public final class AppState: ObservableObject {
         isWindowFullScreen ? 0 : 58
     }
 
-    @Published public var showAddServerSheet: Bool = false
-    @Published public var editingServer: EmbyServerConfig? = nil
+    @Published public var serverEditorRequest: ServerEditorRequest? = nil
     @Published public var linePickerServer: EmbyServerConfig? = nil
-    @Published public var uhdAccountSheetServer: EmbyServerConfig? = nil
-    @Published public var showUHDAnimeCalendarSheet: Bool = false
-    @Published public var showUHDFavoritesSheet: Bool = false
-    @Published public var showUHDWatchPartyJoinSheet: Bool = false
-    @Published public var activeUHDPersonSheet: UHDPersonSheetTarget? = nil
-    @Published public var activeWatchPartySession: UHDWatchPartySession? = nil
     @Published public var toastMessage: ToastMessage? = nil
     @Published public var showLogViewer: Bool = false
     @Published public var isStartingPlayback: Bool = false
+
+    public func presentServerEditor(for server: EmbyServerConfig? = nil, preferredType: ServerType? = nil) {
+        serverEditorRequest = ServerEditorRequest(existingServer: server, preferredType: preferredType)
+    }
 
     @Published public var servers: [EmbyServerConfig] = [] {
         didSet { if !isLoadingFromDisk { saveServersToDisk() } }
@@ -66,8 +77,6 @@ public final class AppState: ObservableObject {
     @Published public var nextUpItems: [EmbyItem] = []
     @Published public var latestByLibrary: [String: [EmbyItem]] = [:]
     @Published public var favoriteItems: [EmbyItem] = []
-    @Published public var uhdHotItems: [EmbyItem] = []
-    @Published public var uhdAnimeHotItems: [EmbyItem] = []
     @Published public var iconSets: [IconLibrarySet] = []
 
     @Published public var urlMediaItems: [LocalOrURLMediaItem] = [] {
@@ -198,7 +207,6 @@ public final class AppState: ObservableObject {
     @AppStorage("donby.autoSaveFullCacheToOffline") public var autoSaveFullCacheToOffline: Bool = false
     @AppStorage("donby.autoDeleteAutoArchivedAfterPlayback") public var autoDeleteAutoArchivedAfterPlayback: Bool = false
     @Published public var serverCapabilities: [UUID: ServerDeliveryCapabilities] = [:]
-    @Published public var uhdAccountSnapshots: [UUID: UHDAccountSnapshot] = [:]
 
     public static var appleMusicRed: Color {
         let rgb = ThemeColorPalette.appleMusicRedRGB
@@ -283,7 +291,13 @@ public final class AppState: ObservableObject {
     public var allLoadedMediaItems: [EmbyItem] {
         var seen = Set<String>()
         var result: [EmbyItem] = []
-        let sources = [carouselItems, resumeItems, nextUpItems, favoriteItems, uhdHotItems, uhdAnimeHotItems] + Array(latestByLibrary.values)
+        var sources = [carouselItems, resumeItems, nextUpItems, favoriteItems] + Array(latestByLibrary.values)
+        #if canImport(DonbyUHDModule)
+        if UHDModuleManager.shared.isEnabled {
+            sources.append(UHDModuleManager.shared.hotItems)
+            sources.append(UHDModuleManager.shared.animeHotItems)
+        }
+        #endif
         for list in sources {
             for item in list where !seen.contains(item.id) {
                 seen.insert(item.id)
@@ -318,6 +332,9 @@ public final class AppState: ObservableObject {
 
     public init() {
         AppState.sharedInstance = self
+        #if canImport(DonbyUHDModule)
+        _ = UHDModuleManager.shared
+        #endif
         self.isSidebarCollapsed = UserDefaults.standard.bool(forKey: "donby.defaultSidebarCollapsed")
         self.searchHistory = UserDefaults.standard.stringArray(forKey: searchHistoryStorageKey) ?? []
         isLoadingFromDisk = true
@@ -459,10 +476,27 @@ public final class AppState: ObservableObject {
         }
         let filtered = decoded.filter { !$0.isDemoServer }
         let (hydrated, needsMigration) = ServerCredentialStore.shared.hydrate(filtered)
-        self.servers = hydrated
-        if needsMigration {
+        var migrated = hydrated
+        var didMigratePlaceholder = false
+        let uhdRegistered = DonbyMediaServiceRegistry.shared.isRegistered(.uhdNative)
+        for i in migrated.indices {
+            if migrated[i].host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if migrated[i].note == "待配置服务器地址与账号" {
+                    migrated[i].note = ""
+                    didMigratePlaceholder = true
+                }
+                if uhdRegistered && migrated[i].type == .emby && migrated[i].usesUHDLogo {
+                    migrated[i].type = .uhdNative
+                    didMigratePlaceholder = true
+                }
+            }
+        }
+        self.servers = migrated
+        if needsMigration || didMigratePlaceholder {
             saveServersToDisk()
-            DonbyLogger.shared.log("已完成服务器凭证向本地 AES-256-GCM 加密凭证库的自动迁移", level: .info, subsystem: "Credentials")
+            if needsMigration {
+                DonbyLogger.shared.log("已完成服务器凭证向本地 AES-256-GCM 加密凭证库的自动迁移", level: .info, subsystem: "Credentials")
+            }
         }
     }
 
@@ -885,8 +919,8 @@ public final class AppState: ObservableObject {
                 return
             }
             Task {
-                let fetchedItem: EmbyItem? = if server.type == .uhdNative {
-                    try? await UHDStreamClient.shared.fetchItemDetail(server: server, item: EmbyItem(id: itemId, name: record.title, type: "Movie"))
+                let fetchedItem: EmbyItem? = if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+                    try? await ext.fetchItemDetail(server: server, item: EmbyItem(id: itemId, name: record.title, type: "Movie"))
                 } else {
                     try? await EmbyClient.shared.fetchItemDetail(server: server, itemId: itemId)
                 }
@@ -916,8 +950,8 @@ public final class AppState: ObservableObject {
                 return
             }
             Task {
-                let fetchedItem: EmbyItem? = if server.type == .uhdNative {
-                    try? await UHDStreamClient.shared.fetchItemDetail(server: server, item: EmbyItem(id: itemId, name: record.title, type: "Movie"))
+                let fetchedItem: EmbyItem? = if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+                    try? await ext.fetchItemDetail(server: server, item: EmbyItem(id: itemId, name: record.title, type: "Movie"))
                 } else {
                     try? await EmbyClient.shared.fetchItemDetail(server: server, itemId: itemId)
                 }
@@ -1011,8 +1045,9 @@ public final class AppState: ObservableObject {
             embyInlineSearchLastServerId = nil
             embyInlineSearchLastFetchedQuery = ""
             librarySearchQueryById.removeAll()
-            uhdHotItems = []
-            uhdAnimeHotItems = []
+            #if canImport(DonbyUHDModule)
+            UHDModuleManager.shared.resetHomeShelves()
+            #endif
         }
 
         // Instantaneous switch from memory/disk snapshot
@@ -1181,8 +1216,7 @@ public final class AppState: ObservableObject {
         let targetSlot = existingSlot ?? servers.first(where: { $0.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
         var draft = targetSlot ?? EmbyServerConfig(name: "UHDNow", host: "", port: 443, isHttps: true, username: "", iconURL: "uhd")
         draft.apply(parsed: parsed, overwriteName: true)
-        editingServer = draft
-        showAddServerSheet = true
+        presentServerEditor(for: draft)
         showToast("已识别服务器「\(draft.name)」", icon: "wand.and.stars")
     }
 
@@ -1194,7 +1228,11 @@ public final class AppState: ObservableObject {
         showToast(wasDefault ? "已取消默认首页" : "已设为默认首页", icon: "house.fill")
     }
 
-    public func connectAndSaveServer(_ draft: EmbyServerConfig, uhdLoginCode: String? = nil) async throws {
+    public func connectAndSaveServer(
+        _ draft: EmbyServerConfig,
+        uhdLoginCode: String? = nil,
+        customEndpointOverride: String? = nil
+    ) async throws {
         var server = draft
         server.isDemoServer = false
         if server.note == "待配置服务器地址与账号" {
@@ -1204,65 +1242,25 @@ public final class AppState: ObservableObject {
         let hasToken = !server.accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasPassword = !server.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasUsername = !server.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let trimmedLoginCode = uhdLoginCode?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var usedChinaOptimizedLine = false
 
         if server.type == .uhdNative {
-            if !trimmedLoginCode.isEmpty {
-                let auth = try await UHDStreamClient.shared.loginWithCode(
-                    baseURL: server.mainLineURL,
-                    rawCode: trimmedLoginCode
-                )
-                server.accessToken = auth.token
-                server.tokenExpiresAt = auth.expiresAt
-                server.lastLoginDate = Date()
-                if server.serverId.isEmpty { server.serverId = server.host }
-                if server.name.isEmpty { server.name = "UHDNow" }
-                server.serverName = "UHDNow Streaming API"
-            } else if hasUsername && hasPassword {
-                let auth = try await UHDStreamClient.shared.login(
-                    baseURL: server.mainLineURL,
-                    username: server.username,
-                    password: server.password
-                )
-                server.accessToken = auth.token
-                server.tokenExpiresAt = auth.expiresAt
-                server.lastLoginDate = Date()
-                if server.userId.isEmpty { server.userId = server.username }
-                if server.serverId.isEmpty { server.serverId = server.host }
-                if server.name.isEmpty { server.name = "UHDNow · \(server.username)" }
-                server.serverName = "UHDNow Streaming API"
-            } else if hasToken {
-                // Validate token via subscriptions/me
-                let sub = try await UHDStreamClient.shared.fetchSubscriptionDetail(server: server)
-                if !sub.userId.isEmpty { server.userId = sub.userId }
-                server.lastLoginDate = Date()
-                if server.serverId.isEmpty { server.serverId = server.host }
-                if server.name.isEmpty { server.name = "UHDNow" }
-                server.serverName = "UHDNow Streaming API"
+            #if canImport(DonbyUHDModule)
+            guard UHDModuleManager.shared.isEnabled else {
+                throw EmbyClientError.httpStatus(400, "UHDNow 扩展模块未启用")
             }
-            if !server.accessToken.isEmpty {
-                let snap = await UHDStreamClient.shared.fetchAccountSnapshot(server: server)
-                uhdAccountSnapshots[server.id] = snap
-                if let sub = snap.subscription {
-                    if !sub.userId.isEmpty { server.userId = sub.userId }
-                    serverCapabilities[server.id] = ServerDeliveryCapabilities(
-                        allowDownload: sub.allowDownload,
-                        activeVideoDeliveryLimit: max(1, sub.activeVideoDeliveryLimit),
-                        planName: sub.plan?.name,
-                        displayUnlimitedTraffic: sub.displayUnlimitedTraffic,
-                        trafficLimitBytes: sub.trafficLimitBytes
-                    )
-                }
-                if autoSyncDomains,
-                   let uhdLines = try? await UHDStreamClient.shared.fetchPlaybackDomains(server: server) {
-                    let manual = server.backupLines.filter { !$0.isAutoSynced }
-                    server.backupLines = manual + uhdLines
-                    server.lastExtDomainSyncDate = Date()
-                    if server.selectedLineId == nil, let first = uhdLines.first {
-                        server.selectedLineId = first.id
-                    }
-                }
-            }
+            let result = try await UHDModuleManager.shared.authenticateAndConfigureServer(
+                draft: server,
+                uhdLoginCode: uhdLoginCode,
+                customEndpointOverride: customEndpointOverride,
+                autoSyncDomains: autoSyncDomains,
+                appState: self
+            )
+            server = result.server
+            usedChinaOptimizedLine = result.usedChinaOptimizedLine
+            #else
+            throw EmbyClientError.httpStatus(400, "当前构建未包含 UHDNow 扩展模块")
+            #endif
         } else {
             if hasUsername && hasPassword {
                 let auth = try await EmbyClient.shared.authenticate(
@@ -1326,10 +1324,12 @@ public final class AppState: ObservableObject {
         detailFocusedEpisodeMemory.removeAll()
 
         let syncedCount = server.autoSyncedLineCount
-        if syncedCount > 0 {
-            showToast("登录成功，已自动同步 \(syncedCount) 条云端线路", icon: "icloud.and.arrow.down.fill")
+        if server.type == .uhdNative && usedChinaOptimizedLine {
+            showToast("已登录 \(server.name) · 中国优化线路", icon: "checkmark.circle.fill")
+        } else if syncedCount > 0 {
+            showToast("已登录 \(server.name) · \(syncedCount) 条线路", icon: "checkmark.circle.fill")
         } else {
-            showToast("登录成功：\(server.name)", icon: "checkmark.circle.fill")
+            showToast("已登录 \(server.name)", icon: "checkmark.circle.fill")
         }
 
         await loadActiveServerHome(syncDomains: false)
@@ -1339,7 +1339,7 @@ public final class AppState: ObservableObject {
         guard let idx = servers.firstIndex(where: { $0.id == serverId }) else { return }
         var server = servers[idx]
         guard !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            if showFeedback { showToast("请先填写服务器地址与账号", icon: "exclamationmark.triangle.fill", isError: true) }
+            if showFeedback { showToast("请先配置服务器", icon: "exclamationmark.triangle.fill", isError: true) }
             return
         }
         activeSyncDomainsCount += 1
@@ -1350,33 +1350,9 @@ public final class AppState: ObservableObject {
         }
 
         if server.type == .uhdNative {
-            if server.accessToken.isEmpty && !server.username.isEmpty && !server.password.isEmpty {
-                if let auth = try? await UHDStreamClient.shared.login(baseURL: server.activeBaseURL, username: server.username, password: server.password) {
-                    server.accessToken = auth.token
-                    if let currentIdx = servers.firstIndex(where: { $0.id == serverId }) {
-                        servers[currentIdx].accessToken = auth.token
-                    }
-                }
-            }
-            guard !server.accessToken.isEmpty else {
-                if showFeedback { showToast("请先登录 UHD 服务器后再同步线路", icon: "exclamationmark.triangle.fill", isError: true) }
-                return
-            }
-            if let uhdLines = try? await UHDStreamClient.shared.fetchPlaybackDomains(server: server) {
-                if let currentIdx = servers.firstIndex(where: { $0.id == serverId }) {
-                    let manual = servers[currentIdx].backupLines.filter { !$0.isAutoSynced }
-                    servers[currentIdx].backupLines = manual + uhdLines
-                    servers[currentIdx].lastExtDomainSyncDate = Date()
-                    let currentSel = servers[currentIdx].selectedLineId
-                    if currentSel == nil || !servers[currentIdx].backupLines.contains(where: { $0.id == currentSel }) {
-                        servers[currentIdx].selectedLineId = uhdLines.first?.id
-                    }
-                }
-                if showFeedback { showToast("已同步 \(uhdLines.count) 条 UHD 原生线路", icon: "icloud.and.arrow.down.fill") }
-                await pingAllLines(for: serverId)
-            } else if showFeedback {
-                showToast("获取 UHD 线路列表失败", icon: "exclamationmark.triangle.fill", isError: true)
-            }
+            #if canImport(DonbyUHDModule)
+            await UHDModuleManager.shared.syncPlaybackDomains(for: serverId, appState: self, showFeedback: showFeedback)
+            #endif
             return
         }
 
@@ -1413,8 +1389,11 @@ public final class AppState: ObservableObject {
 
     public func switchLineImmediate(to lineId: UUID?, for serverId: UUID, triggerReload: Bool = true) {
         guard let idx = servers.firstIndex(where: { $0.id == serverId }) else { return }
+        let sType = servers[idx].type
         servers[idx].selectedLineId = lineId
-        Task { await UHDStreamClient.shared.invalidateResolvedDomainCache(serverId: serverId) }
+        if let ext = DonbyMediaServiceRegistry.shared.provider(for: sType) {
+            Task { await ext.invalidateCaches(serverId: serverId) }
+        }
         let newLineName = servers[idx].activeLineName
         showToast("已切换至线路：\(newLineName)", icon: "checkmark.circle.fill")
 
@@ -1438,19 +1417,23 @@ public final class AppState: ObservableObject {
         let token = server.accessToken
         let backupSnapshot = server.backupLines
         let pingTimeout = TimeInterval(max(1, pingTimeoutSeconds))
-        let isUHDNative = (server.type == .uhdNative)
+        let extProvider = DonbyMediaServiceRegistry.shared.provider(for: server.type)
 
-        async let mainPing: Int? = isUHDNative
-            ? await UHDStreamClient.shared.pingLine(server: server, line: nil)
-            : await EmbyClient.shared.pingLine(baseURL: mainURL, token: token, timeout: pingTimeout)
+        async let mainPing: Int? = if let extProvider {
+            await extProvider.pingLine(server: server, line: nil)
+        } else {
+            await EmbyClient.shared.pingLine(baseURL: mainURL, token: token, timeout: pingTimeout)
+        }
 
         var linePings: [UUID: Int?] = [:]
         await withTaskGroup(of: (UUID, Int?).self) { group in
             for line in backupSnapshot {
                 group.addTask {
-                    let ms: Int? = isUHDNative
-                        ? await UHDStreamClient.shared.pingLine(server: server, line: line)
-                        : await EmbyClient.shared.pingLine(baseURL: line.url, token: token, timeout: pingTimeout)
+                    let ms: Int? = if let extProvider {
+                        await extProvider.pingLine(server: server, line: line)
+                    } else {
+                        await EmbyClient.shared.pingLine(baseURL: line.url, token: token, timeout: pingTimeout)
+                    }
                     return (line.id, ms)
                 }
             }
@@ -1496,127 +1479,23 @@ public final class AppState: ObservableObject {
         }
         Task { await refreshServerCapabilities(for: server) }
         Task.detached(priority: .utility) { DKMetalLayerView.prewarmPipelines() }
-        if server.type == .uhdNative {
-            Task { await UHDStreamClient.shared.prewarmPlaybackDomain(server: server) }
+        if let extProvider = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+            Task { await extProvider.prewarmPlayback(server: server, item: nil) }
         } else {
             Task { await EmbyClient.shared.prewarmConnection(server: server) }
         }
 
         if server.type == .uhdNative {
-            do {
-                async let collectionsTask = UHDStreamClient.shared.fetchCollections(server: server)
-                async let statesTask = UHDStreamClient.shared.fetchPlaybackStates(server: server, limit: 16)
-                async let favTask = UHDStreamClient.shared.fetchFavorites(server: server, limit: 24)
-                async let hotTask = UHDStreamClient.shared.fetchHot(server: server, limit: 20)
-                async let animeHotTask = UHDStreamClient.shared.fetchAnimeHot(server: server, limit: 20)
-
-                let views = try await collectionsTask
-                guard currentGen == homeLoadGeneration else { return }
-                if self.libraryViews != views { self.libraryViews = views }
-
-                let states = (try? await statesTask) ?? (resume: [], nextUp: [])
-                let favs = (try? await favTask)?.items ?? []
-                let hotItems = (try? await hotTask) ?? []
-                let animeHot = (try? await animeHotTask) ?? []
-
-                guard currentGen == homeLoadGeneration else { return }
-                if self.resumeItems != states.resume { self.resumeItems = states.resume }
-                if self.nextUpItems != states.nextUp { self.nextUpItems = states.nextUp }
-                if self.favoriteItems != favs { self.favoriteItems = favs }
-                if self.uhdHotItems != hotItems { self.uhdHotItems = hotItems }
-                if self.uhdAnimeHotItems != animeHot { self.uhdAnimeHotItems = animeHot }
-
-                // Silently prewarm top continue-watching / next-up asset metadata so clicking from Home resolves in 0ms
-                let homePrewarmTargets = Array((states.resume + states.nextUp).filter { !$0.isSeries }.prefix(3))
-                if !homePrewarmTargets.isEmpty {
-                    Task.detached(priority: .utility) {
-                        for target in homePrewarmTargets {
-                            _ = try? await UHDStreamClient.shared.fetchAssetMediaSources(server: server, item: target)
-                        }
-                    }
-                }
-
-                var latestMap: [String: [EmbyItem]] = [:]
-                var heroCandidates: [EmbyItem] = hotItems
-                let hadCachedLatest = !self.latestByLibrary.isEmpty
-
-                await withTaskGroup(of: (String, [EmbyItem]).self) { group in
-                    for view in views {
-                        group.addTask { [hideWatchedInLatest] in
-                            let fetched = (try? await UHDStreamClient.shared.fetchCollectionItems(
-                                server: server,
-                                collectionId: view.id,
-                                mediaType: nil,
-                                sortBy: "asset_updated_at",
-                                sortOrder: "desc",
-                                limit: 16
-                            ).items) ?? []
-                            let filtered = hideWatchedInLatest ? fetched.filter { $0.userData?.played != true } : fetched
-                            return (view.id, filtered)
-                        }
-                    }
-                    for await (viewId, items) in group {
-                        guard currentGen == self.homeLoadGeneration else { return }
-                        latestMap[viewId] = items
-                        if !hadCachedLatest && self.latestByLibrary[viewId] != items {
-                            self.latestByLibrary[viewId] = items
-                        }
-                        for item in items.prefix(3) where !heroCandidates.contains(where: { $0.id == item.id }) {
-                            heroCandidates.append(item)
-                        }
-                    }
-                }
-
-                guard currentGen == homeLoadGeneration else { return }
-                if self.latestByLibrary != latestMap { self.latestByLibrary = latestMap }
-                let nextCarousel = Array((heroCandidates.isEmpty ? states.resume : heroCandidates).prefix(8))
-                if self.carouselItems != nextCarousel { self.carouselItems = nextCarousel }
-
-                let snapshot = ServerHomeCacheStore.ServerHomeSnapshot(
-                    libraryViews: views,
-                    resumeItems: states.resume,
-                    nextUpItems: states.nextUp,
-                    favoriteItems: favs,
-                    latestByLibrary: latestMap,
-                    carouselItems: self.carouselItems,
-                    cachedAt: Date()
-                )
-                ServerHomeCacheStore.shared.save(snapshot, for: server.id)
-                self.isLoadingHome = false
-            } catch {
-                guard currentGen == homeLoadGeneration else { return }
-                let isAuthExpired: Bool = {
-                    if let clientErr = error as? EmbyClientError {
-                        if case .unauthorized = clientErr { return true }
-                        if case .httpStatus(401, _) = clientErr { return true }
-                    }
-                    return false
-                }()
-                if isAuthExpired,
-                   server.keepSignedIn,
-                   !server.username.isEmpty,
-                   !server.password.isEmpty,
-                   let auth = try? await UHDStreamClient.shared.login(
-                        baseURL: server.mainLineURL,
-                        username: server.username,
-                        password: server.password
-                   ) {
-                    if let idx = self.servers.firstIndex(where: { $0.id == server.id }) {
-                        self.servers[idx].accessToken = auth.token
-                        self.servers[idx].tokenExpiresAt = auth.expiresAt
-                        self.servers[idx].lastLoginDate = Date()
-                    }
-                    await loadActiveServerHome(syncDomains: false)
-                    return
-                }
-                if isAuthExpired, let idx = self.servers.firstIndex(where: { $0.id == server.id }) {
-                    self.servers[idx].accessToken = ""
-                    self.homeErrorMessage = "UHD 登录凭证已失效 (401)，请点击重新登录"
-                } else {
-                    self.homeErrorMessage = error.localizedDescription
-                }
-                self.isLoadingHome = false
-            }
+            #if canImport(DonbyUHDModule)
+            await UHDModuleManager.shared.loadHomeContent(
+                for: server,
+                appState: self,
+                isCurrentGeneration: { [weak self] in self?.homeLoadGeneration == currentGen }
+            )
+            #else
+            self.homeErrorMessage = "当前构建未包含 UHDNow 扩展模块"
+            self.isLoadingHome = false
+            #endif
             return
         }
 
@@ -1878,34 +1757,15 @@ public final class AppState: ObservableObject {
                         targetItem = allOfflineEps.first(where: { !isItemWatchedOfflineOrLocal($0) }) ?? allOfflineEps[0]
                     }
                 } else if server.type == .uhdNative {
-                    let uhdServer = server
-                    async let seasonsTask = UHDStreamClient.shared.fetchSeasons(server: uhdServer, tvId: item.id)
-                    async let tvStateTask = try? UHDStreamClient.shared.fetchTVPlaybackState(server: uhdServer, tvId: item.id)
-                    let seasons = try await seasonsTask
-                    let tvState = await tvStateTask
-                    if let preferredEp = tvState?.preferredEpisode,
-                       let matchedSeason = seasons.first(where: { $0.id == preferredEp.seasonId || $0.indexNumber == preferredEp.seasonNumber }) {
-                        eps = try await UHDStreamClient.shared.fetchSeasonEpisodes(
-                            server: server,
-                            tvId: item.id,
-                            seasonId: matchedSeason.id,
-                            seasonNumber: matchedSeason.indexNumber,
-                            seriesName: item.name
-                        ).items
-                        if let exact = eps.first(where: { $0.id == preferredEp.episodeId }) {
-                            targetItem = exact
-                        }
-                    } else if let season = seasons.first(where: { ($0.indexNumber ?? 1) > 0 }) ?? seasons.first {
-                        eps = try await UHDStreamClient.shared.fetchSeasonEpisodes(
-                            server: server,
-                            tvId: item.id,
-                            seasonId: season.id,
-                            seasonNumber: season.indexNumber,
-                            seriesName: item.name
-                        ).items
-                    } else {
-                        eps = []
+                    #if canImport(DonbyUHDModule)
+                    let uhdRes = try await UHDModuleManager.shared.resolveSeriesStartEpisode(server: server, seriesItem: item)
+                    eps = uhdRes.episodes
+                    if let exact = uhdRes.preferredTarget {
+                        targetItem = exact
                     }
+                    #else
+                    eps = []
+                    #endif
                 } else {
                     eps = try await EmbyClient.shared.fetchEpisodes(server: server, seriesId: item.id)
                 }
@@ -1929,8 +1789,8 @@ public final class AppState: ObservableObject {
             ) ?? DonbyDownloadManager.shared.completedEntry(for: targetItem.id, mediaSourceId: preferredSourceId),
                let offlineRes = DonbyDownloadManager.shared.offlinePlayableResource(for: offlineEntry) {
                 resource = offlineRes
-            } else if server.type == .uhdNative {
-                resource = try await UHDStreamClient.shared.resolvePlaybackResource(
+            } else if let extProvider = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+                resource = try await extProvider.resolvePlaybackResource(
                     server: server,
                     item: targetItem,
                     preferredSourceId: preferredSourceId,
@@ -1965,10 +1825,12 @@ public final class AppState: ObservableObject {
                     let capturedTarget = targetItem
                     let capturedServer = server
                     Task { [weak self] in
-                        if let seriesDetail = capturedServer.type == .uhdNative
-                            ? (try? await UHDStreamClient.shared.fetchItemDetail(server: capturedServer, item: EmbyItem(id: sid, name: "", type: "Series", uhdMediaType: "tv")))
-                            : (try? await EmbyClient.shared.fetchItemDetail(server: capturedServer, itemId: sid)),
-                           !seriesDetail.name.isEmpty {
+                        let seriesDetail: EmbyItem? = if let ext = DonbyMediaServiceRegistry.shared.provider(for: capturedServer.type) {
+                            try? await ext.fetchItemDetail(server: capturedServer, item: EmbyItem(id: sid, name: "", type: "Series", uhdMediaType: "tv"))
+                        } else {
+                            try? await EmbyClient.shared.fetchItemDetail(server: capturedServer, itemId: sid)
+                        }
+                        if let seriesDetail, !seriesDetail.name.isEmpty {
                             await MainActor.run {
                                 self?.cachedSeriesNames[capturedTarget.id] = seriesDetail.name
                                 self?.cachedSeriesNames[sid] = seriesDetail.name
@@ -2079,12 +1941,13 @@ public final class AppState: ObservableObject {
     ) async {
         guard let server = activeServer else { return }
         do {
-            let resource: ResolvedPlaybackResource = if server.type == .uhdNative {
-                try await UHDStreamClient.shared.resolvePlaybackResource(
+            let resource: ResolvedPlaybackResource = if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+                try await ext.resolvePlaybackResource(
                     server: server,
                     item: item,
                     preferredSourceId: preferredSourceId,
-                    preferredPreset: preferredVersionPreset
+                    preferredPreset: preferredVersionPreset,
+                    enable302Cache: enable302Cache && server.cache302Request
                 )
             } else {
                 try await EmbyClient.shared.resolvePlaybackResource(
@@ -2110,8 +1973,8 @@ public final class AppState: ObservableObject {
         uData.isFavorite = newFav
         updated.userData = uData
 
-        if server.type == .uhdNative {
-            try? await UHDStreamClient.shared.setFavorite(server: server, item: item, isFavorite: newFav)
+        if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+            try? await ext.setFavorite(server: server, item: item, isFavorite: newFav)
         } else {
             try? await EmbyClient.shared.setFavorite(server: server, itemId: item.id, isFavorite: newFav)
         }
@@ -2142,8 +2005,8 @@ public final class AppState: ObservableObject {
         )
 
         if let server = activeServer, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if server.type == .uhdNative {
-                try? await UHDStreamClient.shared.setPlayed(server: server, item: item, isPlayed: newPlayed)
+            if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+                try? await ext.setPlayed(server: server, item: item, isPlayed: newPlayed)
             } else {
                 try? await EmbyClient.shared.setPlayed(server: server, itemId: item.id, played: newPlayed)
             }
@@ -2313,221 +2176,12 @@ public final class AppState: ObservableObject {
     public func refreshServerCapabilities(for server: EmbyServerConfig) async {
         guard !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         if server.type == .uhdNative {
-            guard !server.accessToken.isEmpty else { return }
-            let snap = await UHDStreamClient.shared.fetchAccountSnapshot(server: server)
-            uhdAccountSnapshots[server.id] = snap
-            if let sub = snap.subscription {
-                serverCapabilities[server.id] = ServerDeliveryCapabilities(
-                    allowDownload: sub.allowDownload,
-                    activeVideoDeliveryLimit: max(1, sub.activeVideoDeliveryLimit),
-                    planName: sub.plan?.name,
-                    displayUnlimitedTraffic: sub.displayUnlimitedTraffic,
-                    trafficLimitBytes: sub.trafficLimitBytes
-                )
-                if !sub.userId.isEmpty,
-                   let idx = servers.firstIndex(where: { $0.id == server.id }),
-                   servers[idx].userId != sub.userId {
-                    servers[idx].userId = sub.userId
-                }
-            }
+            #if canImport(DonbyUHDModule)
+            await UHDModuleManager.shared.refreshAccountSnapshot(for: server, appState: self)
+            #endif
         } else {
             let allowDl = await EmbyClient.shared.fetchUserDownloadPermission(server: server)
             serverCapabilities[server.id] = ServerDeliveryCapabilities(allowDownload: allowDl)
-        }
-    }
-
-    public func logoutUHDServer(_ server: EmbyServerConfig) async {
-        let ok = await UHDStreamClient.shared.logout(server: server)
-        if ok, let idx = servers.firstIndex(where: { $0.id == server.id }) {
-            servers[idx].accessToken = ""
-            servers[idx].password = ""
-            servers[idx].tokenExpiresAt = nil
-            uhdAccountSnapshots.removeValue(forKey: server.id)
-            serverCapabilities.removeValue(forKey: server.id)
-            if openedServerId == server.id {
-                openedServerId = nil
-                selectedTab = .servers
-            }
-            showToast("已安全退出 \(server.name) 登录会话", icon: "checkmark.circle.fill")
-        } else {
-            showToast("退出登录请求失败，请检查网络后重试", icon: "exclamationmark.triangle.fill", isError: true)
-        }
-    }
-
-    public func updateUHDLineSpeedResult(
-        serverId: UUID,
-        domainId: String,
-        result: UHDSpeedTestResult,
-        latencyMs: Int? = nil
-    ) {
-        guard let sIdx = servers.firstIndex(where: { $0.id == serverId }) else { return }
-        if let lIdx = servers[sIdx].backupLines.firstIndex(where: { $0.domainId == domainId }) {
-            servers[sIdx].backupLines[lIdx].lastSpeedMbps = result.averageMbps
-            servers[sIdx].backupLines[lIdx].lastPeakMbps = result.peakMbps
-            servers[sIdx].backupLines[lIdx].lastExitLocation = result.networkInfo.displayLocation
-            servers[sIdx].backupLines[lIdx].lastExitISP = result.networkInfo.isp
-            if let latencyMs {
-                servers[sIdx].backupLines[lIdx].latencyMs = latencyMs
-            }
-            servers[sIdx].backupLines[lIdx].lastCheckedAt = Date()
-        }
-    }
-
-    public func updateUHDLineExitInfo(
-        serverId: UUID,
-        domainId: String,
-        info: UHDSpeedTestNetworkInfo,
-        latencyMs: Int
-    ) {
-        guard let sIdx = servers.firstIndex(where: { $0.id == serverId }) else { return }
-        if let lIdx = servers[sIdx].backupLines.firstIndex(where: { $0.domainId == domainId }) {
-            servers[sIdx].backupLines[lIdx].lastExitLocation = info.displayLocation
-            servers[sIdx].backupLines[lIdx].lastExitISP = info.isp
-            servers[sIdx].backupLines[lIdx].latencyMs = latencyMs
-            servers[sIdx].backupLines[lIdx].lastCheckedAt = Date()
-        }
-    }
-
-    // MARK: - UHD Watch Party (同看)
-
-    public func createAndStartWatchParty(
-        server: EmbyServerConfig,
-        item: EmbyItem,
-        preferredSourceId: String? = nil,
-        maxMembers: Int = 4
-    ) async throws {
-        guard server.type == .uhdNative, !server.accessToken.isEmpty else {
-            throw EmbyClientError.unauthorized
-        }
-        await refreshServerCapabilities(for: server)
-        let freshServer = servers.first(where: { $0.id == server.id }) ?? server
-
-        var targetItem = item
-        if item.isSeries {
-            let seasons = try await UHDStreamClient.shared.fetchSeasons(server: freshServer, tvId: item.id)
-            if let firstSeason = seasons.first(where: { ($0.indexNumber ?? 1) > 0 }) ?? seasons.first {
-                let eps = try await UHDStreamClient.shared.fetchSeasonEpisodes(
-                    server: freshServer,
-                    tvId: item.id,
-                    seasonId: firstSeason.id,
-                    seasonNumber: firstSeason.indexNumber,
-                    seriesName: item.name
-                ).items
-                if let firstEp = eps.first {
-                    targetItem = firstEp
-                }
-            }
-        }
-
-        let resource = try await UHDStreamClient.shared.resolvePlaybackResource(
-            server: freshServer,
-            item: targetItem,
-            preferredSourceId: preferredSourceId,
-            preferredPreset: preferredVersionPreset,
-            enable302Cache: enable302Cache && freshServer.cache302Request
-        )
-        let assetId = resource.mediaSource.id
-        let created = try await UHDWatchPartyClient.shared.createRoom(
-            server: freshServer,
-            assetId: assetId,
-            maxMembers: maxMembers
-        )
-
-        leaveOrEndActiveWatchParty(endRoom: false, notifyServer: false)
-        let uid = freshServer.userId.isEmpty ? (uhdAccountSnapshots[freshServer.id]?.subscription?.userId ?? "") : freshServer.userId
-        let wpSession = UHDWatchPartySession(
-            server: freshServer,
-            roomId: created.id,
-            inviteCode: created.invite,
-            currentUserId: uid
-        )
-        wpSession.connect()
-        self.activeWatchPartySession = wpSession
-
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(created.invite, forType: .string)
-        showToast("已创建同看房间，邀请码 \(UHDLoginCodeNormalizer.formattedDisplay(created.invite)) 已复制", icon: "person.2.wave.2.fill")
-
-        self.activePlayback = ActivePlaybackSession(
-            server: freshServer,
-            item: targetItem,
-            episodesQueue: [targetItem],
-            resource: resource,
-            startPositionSeconds: targetItem.resumePositionSeconds,
-            selectedAudioIndex: nil,
-            selectedSubtitleIndex: nil
-        )
-    }
-
-    public func joinAndStartWatchParty(server: EmbyServerConfig, rawInvite: String) async throws {
-        guard server.type == .uhdNative, !server.accessToken.isEmpty else {
-            throw EmbyClientError.unauthorized
-        }
-        await refreshServerCapabilities(for: server)
-        let freshServer = servers.first(where: { $0.id == server.id }) ?? server
-        let roomId = try await UHDWatchPartyClient.shared.joinRoom(server: freshServer, inviteCode: rawInvite)
-
-        leaveOrEndActiveWatchParty(endRoom: false, notifyServer: false)
-        let uid = freshServer.userId.isEmpty ? (uhdAccountSnapshots[freshServer.id]?.subscription?.userId ?? "") : freshServer.userId
-        let normalizedInvite = UHDWatchPartyInviteParser.extractInviteCode(from: rawInvite)
-        let wpSession = UHDWatchPartySession(
-            server: freshServer,
-            roomId: roomId,
-            inviteCode: normalizedInvite,
-            currentUserId: uid
-        )
-        wpSession.connect()
-
-        guard let firstSnap = await wpSession.waitForFirstSnapshot(timeoutSeconds: 8.0) else {
-            wpSession.disconnect(permanently: true)
-            throw EmbyClientError.httpStatus(504, "连接同看房间超时，请确认房间仍在开放")
-        }
-
-        let isEpisode = firstSnap.media.itemType.lowercased() == "episode"
-        let stubItem = EmbyItem(
-            id: firstSnap.media.itemId,
-            name: "同看影片",
-            serverId: freshServer.serverId,
-            type: isEpisode ? "Episode" : "Movie",
-            uhdMediaType: isEpisode ? "episode" : "movie"
-        )
-        let detailedItem = (try? await UHDStreamClient.shared.fetchItemDetail(server: freshServer, item: stubItem)) ?? stubItem
-        let resource = try await UHDStreamClient.shared.resolvePlaybackResource(
-            server: freshServer,
-            item: detailedItem,
-            preferredSourceId: firstSnap.media.assetId,
-            preferredPreset: preferredVersionPreset,
-            enable302Cache: enable302Cache && freshServer.cache302Request
-        )
-        self.activeWatchPartySession = wpSession
-        let targetSec = firstSnap.extrapolatedPositionSeconds(estimatedServerNowMs: wpSession.estimatedServerNowMs)
-        showToast("已加入同看房间 · \(detailedItem.name)", icon: "person.2.wave.2.fill")
-
-        self.activePlayback = ActivePlaybackSession(
-            server: freshServer,
-            item: detailedItem,
-            episodesQueue: [detailedItem],
-            resource: resource,
-            startPositionSeconds: targetSec,
-            selectedAudioIndex: nil,
-            selectedSubtitleIndex: nil
-        )
-    }
-
-    public func leaveOrEndActiveWatchParty(endRoom: Bool, notifyServer: Bool = true) {
-        guard let wp = activeWatchPartySession else { return }
-        activeWatchPartySession = nil
-        let srv = wp.server
-        let rid = wp.roomId
-        wp.disconnect(permanently: true)
-        if notifyServer {
-            Task {
-                if endRoom {
-                    try? await UHDWatchPartyClient.shared.endRoom(server: srv, roomId: rid)
-                } else {
-                    try? await UHDWatchPartyClient.shared.leaveRoom(server: srv, roomId: rid)
-                }
-            }
         }
     }
 
@@ -2547,13 +2201,13 @@ public final class AppState: ObservableObject {
             var resolvedSeries: EmbyItem? = seriesItemHint ?? (item.isSeries ? item : nil)
             if item.isSeries {
                 let eps: [EmbyItem]
-                if server.type == .uhdNative {
-                    let seasons = try await UHDStreamClient.shared.fetchSeasons(server: server, tvId: item.id)
+                if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+                    let seasons = try await ext.fetchSeasons(server: server, tvId: item.id)
                     let preferredSeason = seasons.first(where: { ($0.indexNumber ?? 1) > 0 }) ?? seasons.first
                     if let s = preferredSeason {
-                        eps = try await UHDStreamClient.shared.fetchSeasonEpisodes(
+                        eps = try await ext.fetchSeasonEpisodes(
                             server: server, tvId: item.id, seasonId: s.id, seasonNumber: s.indexNumber, seriesName: item.name
-                        ).items
+                        )
                     } else { eps = [] }
                 } else {
                     eps = try await EmbyClient.shared.fetchEpisodes(server: server, seriesId: item.id)
@@ -2566,8 +2220,8 @@ public final class AppState: ObservableObject {
             if targetItem.isEpisode && resolvedSeries == nil, let sid = targetItem.seriesId, !sid.isEmpty {
                 resolvedSeries = allLoadedMediaItems.first(where: { $0.id == sid })
                 if resolvedSeries == nil {
-                    resolvedSeries = if server.type == .uhdNative {
-                        try? await UHDStreamClient.shared.fetchItemDetail(
+                    resolvedSeries = if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+                        try? await ext.fetchItemDetail(
                             server: server,
                             item: EmbyItem(id: sid, name: targetItem.seriesName ?? "", type: "Series", uhdMediaType: "tv")
                         )
@@ -2577,12 +2231,13 @@ public final class AppState: ObservableObject {
                 }
             }
 
-            let resource: ResolvedPlaybackResource = if server.type == .uhdNative {
-                try await UHDStreamClient.shared.resolvePlaybackResource(
+            let resource: ResolvedPlaybackResource = if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+                try await ext.resolvePlaybackResource(
                     server: server,
                     item: targetItem,
                     preferredSourceId: preferredSourceId,
-                    preferredPreset: preferredVersionPreset
+                    preferredPreset: preferredVersionPreset,
+                    enable302Cache: enable302Cache && server.cache302Request
                 )
             } else {
                 try await EmbyClient.shared.resolvePlaybackResource(
@@ -2706,8 +2361,8 @@ public final class AppState: ObservableObject {
         if targetItem.isEpisode, let sid = targetItem.seriesId, !sid.isEmpty {
             resolvedSeries = allLoadedMediaItems.first(where: { $0.id == sid })
             if resolvedSeries == nil && !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                resolvedSeries = if server.type == .uhdNative {
-                    try? await UHDStreamClient.shared.fetchItemDetail(
+                resolvedSeries = if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+                    try? await ext.fetchItemDetail(
                         server: server,
                         item: EmbyItem(id: sid, name: targetItem.seriesName ?? "", type: "Series", uhdMediaType: "tv")
                     )
@@ -2721,12 +2376,13 @@ public final class AppState: ObservableObject {
         if !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            summary.itemSnapshot != nil,
            let fresh = try? await (
-                server.type == .uhdNative
-                ? UHDStreamClient.shared.resolvePlaybackResource(
+                DonbyMediaServiceRegistry.shared.provider(for: server.type) != nil
+                ? DonbyMediaServiceRegistry.shared.provider(for: server.type)!.resolvePlaybackResource(
                     server: server,
                     item: targetItem,
                     preferredSourceId: summary.mediaSourceId,
-                    preferredPreset: preferredVersionPreset
+                    preferredPreset: preferredVersionPreset,
+                    enable302Cache: enable302Cache && server.cache302Request
                 )
                 : EmbyClient.shared.resolvePlaybackResource(
                     server: server,

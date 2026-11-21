@@ -75,6 +75,7 @@ public struct GlobalSearchView: View {
                             DonbyToolbarCircleView(systemName: "sidebar.left")
                         }
                         .buttonStyle(.plain)
+                        .focusable(false)
                         .padding(.leading, appState.isWindowFullScreen ? 0 : 54)
                     }
 
@@ -285,8 +286,8 @@ public struct GlobalSearchView: View {
             isSearchingRemote = true
             try? await Task.sleep(nanoseconds: 250_000_000)
             guard !Task.isCancelled else { return }
-            if server.type == .uhdNative {
-                if let res = try? await UHDStreamClient.shared.searchWithMeta(server: server, query: q, limit: 48),
+            if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+                if let res = try? await ext.search(server: server, query: q, limit: 48),
                    !Task.isCancelled {
                     appState.globalSearchRemoteResults = res.items
                     appState.globalSearchLastServerId = server.id

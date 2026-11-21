@@ -1,10 +1,16 @@
 import SwiftUI
 import DonbyCore
 import DonbyNetwork
+#if canImport(DonbyUHDModule)
+import DonbyUHDModule
+#endif
 import DonbyKernelC
 
 public struct EmbyMainView: View {
     @EnvironmentObject private var appState: AppState
+    #if canImport(DonbyUHDModule)
+    @ObservedObject private var uhdModule = UHDModuleManager.shared
+    #endif
     @State private var isSearchingInline: Bool = false
     @State private var showViewOptionsPopover: Bool = false
     @State private var showSearchHistoryPopover: Bool = false
@@ -93,8 +99,8 @@ public struct EmbyMainView: View {
                     isSearchingInline = true
                     try? await Task.sleep(nanoseconds: 250_000_000)
                     guard !Task.isCancelled else { return }
-                    if server.type == .uhdNative {
-                        if let res = try? await UHDStreamClient.shared.searchWithMeta(server: server, query: q, limit: 60),
+                    if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+                        if let res = try? await ext.search(server: server, query: q, limit: 60),
                            !Task.isCancelled {
                             appState.embyInlineSearchResults = res.items
                             appState.embyInlineSearchTruncated = res.truncated
@@ -151,24 +157,26 @@ public struct EmbyMainView: View {
                 items: appState.resumeItems
             ))
         }
-        if appState.activeServer?.type == .uhdNative {
-            if !appState.uhdHotItems.isEmpty {
+        #if canImport(DonbyUHDModule)
+        if uhdModule.isActive(for: appState.activeServer) {
+            if !uhdModule.hotItems.isEmpty {
                 result.append(HomeShelfSection(
                     id: "uhd_hot",
                     title: "热门影视",
                     kind: .poster,
-                    items: appState.uhdHotItems
+                    items: uhdModule.hotItems
                 ))
             }
-            if !appState.uhdAnimeHotItems.isEmpty {
+            if !uhdModule.animeHotItems.isEmpty {
                 result.append(HomeShelfSection(
                     id: "uhd_anime_hot",
                     title: "热门动漫",
                     kind: .poster,
-                    items: appState.uhdAnimeHotItems
+                    items: uhdModule.animeHotItems
                 ))
             }
         }
+        #endif
         for lib in appState.libraryViews {
             if let items = appState.latestByLibrary[lib.id], !items.isEmpty {
                 result.append(HomeShelfSection(
@@ -194,6 +202,7 @@ public struct EmbyMainView: View {
                     DonbyToolbarCircleView(systemName: "sidebar.left")
                 }
                 .buttonStyle(.plain)
+                .focusable(false)
                 .padding(.leading, appState.collapsedSidebarLeadingPadding)
             }
 
@@ -208,14 +217,13 @@ public struct EmbyMainView: View {
 
                     if server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Button {
-                            appState.editingServer = server
-                            appState.showAddServerSheet = true
+                            appState.presentServerEditor(for: server)
                         } label: {
                             HStack(spacing: 5) {
                                 Circle()
                                     .fill(Color.orange)
                                     .frame(width: 5.5, height: 5.5)
-                                Text("待配置账号")
+                                Text("点击登录")
                                     .font(.system(size: 11.5, weight: .semibold))
                                     .foregroundStyle(.orange)
                             }
@@ -265,51 +273,9 @@ public struct EmbyMainView: View {
                         .onHover { isLinePillHovered = $0 }
                         .help("切换服务器线路 (⌘L)")
 
-                        if server.type == .uhdNative {
-                            let snap = appState.uhdAccountSnapshots[server.id]
-                            let badgeText: String = {
-                                if let t = snap?.traffic {
-                                    if let plan = snap?.subscription?.plan?.name, !plan.isEmpty {
-                                        return "\(plan) · \(t.shortToolbarBadgeText)"
-                                    }
-                                    return t.shortToolbarBadgeText
-                                }
-                                if let plan = appState.serverCapabilities[server.id]?.planName, !plan.isEmpty {
-                                    return plan
-                                }
-                                return "账户与流量"
-                            }()
-                            Button {
-                                appState.uhdAccountSheetServer = server
-                            } label: {
-                                HStack(spacing: 5) {
-                                    Image(systemName: "gauge.with.dots.needle.67percent")
-                                        .font(.system(size: 11, weight: .semibold))
-                                        .foregroundStyle(appState.accentColor)
-                                    Text(badgeText)
-                                        .font(.system(size: 11.5, weight: .semibold))
-                                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                                        .lineLimit(1)
-                                        .truncationMode(.tail)
-                                }
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5.5)
-                                .frame(maxWidth: 168)
-                                .background(
-                                    Capsule()
-                                        .fill(appState.isLightMode ? Color.white : Color(white: 0.16))
-                                        .shadow(color: Color.black.opacity(appState.isLightMode ? 0.04 : 0.18), radius: 2, y: 1)
-                                )
-                                .overlay(
-                                    Capsule()
-                                        .strokeBorder(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08), lineWidth: 0.5)
-                                )
-                                .contentShape(Capsule())
-                            }
-                            .buttonStyle(.plain)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .help("查看 UHD 套餐、到期时间与流量余额")
-                        }
+                        #if canImport(DonbyUHDModule)
+                        UHDEmbyAccountBadgePill(server: server)
+                        #endif
                     }
                 }
             }
@@ -317,37 +283,9 @@ public struct EmbyMainView: View {
             Spacer(minLength: 10)
 
             if let server = appState.activeServer {
-                if server.type == .uhdNative && !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    ToolbarVectorButton(
-                        tooltip: "动漫追番日历",
-                        action: { appState.showUHDAnimeCalendarSheet = true }
-                    ) { hovered in
-                        let iconColor = appState.isLightMode ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28)) : (hovered ? .white : Color(white: 0.88))
-                        Image(systemName: "calendar")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(iconColor)
-                    }
-
-                    ToolbarVectorButton(
-                        tooltip: "我的收藏（电影 / 剧集 / 人物）",
-                        action: { appState.showUHDFavoritesSheet = true }
-                    ) { hovered in
-                        let iconColor = appState.isLightMode ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28)) : (hovered ? .white : Color(white: 0.88))
-                        Image(systemName: "heart")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(iconColor)
-                    }
-
-                    ToolbarVectorButton(
-                        tooltip: "加入 UHD 同看房间",
-                        action: { appState.showUHDWatchPartyJoinSheet = true }
-                    ) { hovered in
-                        let iconColor = appState.isLightMode ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28)) : (hovered ? .white : Color(white: 0.88))
-                        Image(systemName: "person.2.wave.2")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(iconColor)
-                    }
-                }
+                #if canImport(DonbyUHDModule)
+                UHDEmbyToolbarButtons(server: server)
+                #endif
                 ToolbarVectorButton(
                     tooltip: "切换线路 (⌘L)",
                     action: { appState.linePickerServer = server }
@@ -394,8 +332,7 @@ public struct EmbyMainView: View {
                         Divider()
                         Button {
                             showViewOptionsPopover = false
-                            appState.editingServer = server
-                            appState.showAddServerSheet = true
+                            appState.presentServerEditor(for: server)
                         } label: {
                             HStack(spacing: 8) {
                                 Image(systemName: "slider.horizontal.3")
@@ -608,8 +545,7 @@ public struct EmbyMainView: View {
             if let server = appState.activeServer {
                 if message.contains("401") || message.contains("凭证") || message.contains("登录") {
                     Button {
-                        appState.editingServer = server
-                        appState.showAddServerSheet = true
+                        appState.presentServerEditor(for: server)
                     } label: {
                         HStack(spacing: 5) {
                             Image(systemName: "person.badge.key.fill")
@@ -667,30 +603,29 @@ public struct EmbyMainView: View {
                     )
                     .frame(width: 170, height: 170)
 
-                UHDNowVectorLogo(size: 74)
+                ServerIconView(server: server, size: 70)
             }
 
             VStack(spacing: 8) {
-                Text("尚未配置 UHDNow 服务器")
+                Text("尚未登录 \(server.name)")
                     .font(.system(size: 20, weight: .bold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
-                Text("当前为预置 UHDNow 空槽，请填写服务器域名与账号信息，登录成功后将自动同步全部 ServerDomains 加速线路。")
+                Text(server.type == .uhdNative ? "登录后自动接入优选节点并同步媒体库" : "配置服务器地址与账号后即可浏览媒体库")
                     .font(.system(size: 13))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     .multilineTextAlignment(.center)
-                    .frame(maxWidth: 450)
+                    .frame(maxWidth: 420)
             }
 
             HStack(spacing: 12) {
                 Button {
-                    appState.editingServer = server
-                    appState.showAddServerSheet = true
+                    appState.presentServerEditor(for: server)
                 } label: {
                     HStack(spacing: 7) {
-                        Image(systemName: "square.and.pencil")
+                        Image(systemName: "person.badge.key")
                             .font(.system(size: 12.5, weight: .semibold))
-                        Text("填写服务器与账号信息")
+                        Text("立即登录")
                             .font(.system(size: 13, weight: .semibold))
                     }
                     .foregroundStyle(appState.accentTextColor)
@@ -774,7 +709,7 @@ public struct MLibListView: View {
     @State private var filterUnwatchedOnly: Bool = false
     @State private var filterFavoritesOnly: Bool = false
     @State private var selectedGenreFilter: String = ""
-    @State private var availableUHDGenres: [UHDGenreInfo] = []
+    @State private var availableGenreNames: [String] = []
     @State private var showSortPopover: Bool = false
 
     private var searchQuery: String {
@@ -855,15 +790,15 @@ public struct MLibListView: View {
                         Toggle("升序排列", isOn: $ascending)
                         Toggle("仅显示未观看", isOn: $filterUnwatchedOnly)
                         Toggle("仅显示收藏", isOn: $filterFavoritesOnly)
-                        if appState.activeServer?.type == .uhdNative && !availableUHDGenres.isEmpty {
+                        if !availableGenreNames.isEmpty {
                             Divider()
                             Text("按类型筛选")
                                 .font(.system(size: 11.5, weight: .semibold))
                                 .foregroundStyle(.secondary)
                             Picker("类型", selection: $selectedGenreFilter) {
                                 Text("全部类型").tag("")
-                                ForEach(availableUHDGenres) { g in
-                                    Text(g.name).tag(g.name)
+                                ForEach(availableGenreNames, id: \.self) { g in
+                                    Text(g).tag(g)
                                 }
                             }
                             .labelsHidden()
@@ -923,11 +858,13 @@ public struct MLibListView: View {
             await loadLibraryItems(reset: true)
         }
         .task(id: appState.activeServer?.id) {
-            if let srv = appState.activeServer, srv.type == .uhdNative, availableUHDGenres.isEmpty {
+            #if canImport(DonbyUHDModule)
+            if let srv = appState.activeServer, UHDModuleManager.shared.isActive(for: srv), availableGenreNames.isEmpty {
                 if let genres = try? await UHDStreamClient.shared.fetchGenres(server: srv) {
-                    availableUHDGenres = genres
+                    availableGenreNames = genres.map(\.name)
                 }
             }
+            #endif
         }
     }
 
@@ -953,7 +890,8 @@ public struct MLibListView: View {
 
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
-            if server.type == .uhdNative {
+            #if canImport(DonbyUHDModule)
+            if UHDModuleManager.shared.isActive(for: server) {
                 if !q.isEmpty {
                     let found = try await UHDStreamClient.shared.search(server: server, query: q, limit: 50)
                     guard !Task.isCancelled, currentGen == loadGeneration else { return }
@@ -1001,6 +939,7 @@ public struct MLibListView: View {
                 self.totalCount = max(self.items.count, library.childCount ?? self.items.count)
                 return
             }
+            #endif
 
             let resp = try await EmbyClient.shared.fetchItems(
                 server: server,

@@ -2,12 +2,13 @@ import Foundation
 import Security
 import Testing
 @testable import DonbyCore
+@testable import DonbyUHDModule
 
 @Suite("DonbyCore Policy Tests")
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "1.4.33")
+        #expect(DonbyAppInfo.fallbackVersion == "1.4.34")
     }
 
     @Test func heroTopEdgeSynthesizerPreservesExactColorContrastAndSuppressesOutlierSpike() {
@@ -738,5 +739,55 @@ struct DonbyCoreTests {
         #expect(rehydratedEphemeral?.accessToken == "")
         #expect(rehydratedPersisted?.password == "saved-password")
         #expect(rehydratedPersisted?.accessToken == "saved-token")
+    }
+
+    @Test func uhdModuleEndpointsSmartToV1FallbackAndChinaOptimizedSelection() {
+        // Default zero-URL order must try China-optimized smart.uhdnow.com first, then v1.uhdnow.com
+        let defaults = UHDModuleEndpoints.candidateBaseURLs(customBaseURL: nil)
+        #expect(defaults == ["https://smart.uhdnow.com", "https://v1.uhdnow.com"])
+
+        let blankCustom = UHDModuleEndpoints.candidateBaseURLs(customBaseURL: "   ")
+        #expect(blankCustom == ["https://smart.uhdnow.com", "https://v1.uhdnow.com"])
+
+        let custom = UHDModuleEndpoints.candidateBaseURLs(customBaseURL: "custom.example.com/")
+        #expect(custom == ["https://custom.example.com"])
+
+        // Fallback policy: password/token fall back on 403/404/401/5xx/network; loginCode preserves 401
+        #expect(UHDModuleEndpoints.shouldFallbackToStandardEndpoint(after: EmbyClientError.httpStatus(403, "no plan"), authKind: .password))
+        #expect(UHDModuleEndpoints.shouldFallbackToStandardEndpoint(after: EmbyClientError.unauthorized, authKind: .password))
+        #expect(UHDModuleEndpoints.shouldFallbackToStandardEndpoint(after: URLError(.timedOut), authKind: .password))
+        #expect(!UHDModuleEndpoints.shouldFallbackToStandardEndpoint(after: CancellationError(), authKind: .password))
+        #expect(UHDModuleEndpoints.shouldFallbackToStandardEndpoint(after: EmbyClientError.httpStatus(403, "no plan"), authKind: .loginCode))
+        #expect(!UHDModuleEndpoints.shouldFallbackToStandardEndpoint(after: EmbyClientError.unauthorized, authKind: .loginCode))
+
+        // China-optimized playback line auto-selection
+        let globalLine = ServerLineInfo(name: "Global Proxy", url: "https://v1.uhdnow.com", domainId: "d1", isAutoSynced: true)
+        let chinaLine = ServerLineInfo(name: "中国大陆优化直连", url: "https://cn.uhdnow.online", domainId: "d2", isAutoSynced: true)
+        let pickedForSmart = UHDModuleEndpoints.pickPreferredDefaultLine(
+            from: [globalLine, chinaLine],
+            loggedInBaseURL: "https://smart.uhdnow.com"
+        )
+        #expect(pickedForSmart?.id == chinaLine.id)
+
+        // Standard account without China-optimized line falls back to first line
+        let standardLine2 = ServerLineInfo(name: "Backup Proxy", url: "https://v1-vod1.uhdnow.com", domainId: "d3", isAutoSynced: true)
+        let pickedForStandard = UHDModuleEndpoints.pickPreferredDefaultLine(
+            from: [globalLine, standardLine2],
+            loggedInBaseURL: "https://v1.uhdnow.com"
+        )
+        #expect(pickedForStandard?.id == globalLine.id)
+    }
+
+    @Test func uhdModuleInstallUninstallRegistryIsolation() {
+        DonbyUHDModule.uninstall()
+        #expect(!DonbyUHDModule.isInstalled)
+        #expect(DonbyMediaServiceRegistry.shared.provider(for: .uhdNative) == nil)
+
+        DonbyUHDModule.install()
+        #expect(DonbyUHDModule.isInstalled)
+        #expect(DonbyMediaServiceRegistry.shared.provider(for: .uhdNative) != nil)
+
+        DonbyUHDModule.uninstall()
+        #expect(!DonbyUHDModule.isInstalled)
     }
 }

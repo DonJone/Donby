@@ -823,6 +823,13 @@ private final class StreamingChunkContext {
     }
 }
 
+/// Shared HTTP/2 connection pool accessor for optional service extension modules.
+public enum DonbyNetworkSession {
+    public static var sharedURLSession: URLSession {
+        TurboStreamingSessionHub.shared.sharedURLSession
+    }
+}
+
 internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     static let shared = TurboStreamingSessionHub()
 
@@ -4762,8 +4769,8 @@ private actor DownloadBatchCoordinator {
                     }
                 }
                 if resolvedSeries == nil, let server {
-                    if server.type == .uhdNative {
-                        resolvedSeries = try? await UHDStreamClient.shared.fetchItemDetail(
+                    if let extProvider = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+                        resolvedSeries = try? await extProvider.fetchItemDetail(
                             server: server,
                             item: EmbyItem(
                                 id: sid,
@@ -4772,7 +4779,7 @@ private actor DownloadBatchCoordinator {
                                 uhdMediaType: "tv"
                             )
                         )
-                    } else {
+                    } else if server.type != .uhdNative {
                         resolvedSeries = try? await EmbyClient.shared.fetchItemDetail(server: server, itemId: sid)
                     }
                 }

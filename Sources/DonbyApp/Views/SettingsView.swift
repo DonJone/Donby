@@ -46,6 +46,7 @@ public struct SettingsView: View {
                             DonbyToolbarCircleView(systemName: "sidebar.left")
                         }
                         .buttonStyle(.plain)
+                        .focusable(false)
                         .padding(.trailing, 12)
                         .padding(.top, appState.isWindowFullScreen ? 4 : 8)
                     }
@@ -264,6 +265,10 @@ public struct SettingsView: View {
                 Toggle("卡片显示评分", isOn: $appState.showRatingBadge)
                 Toggle("显示媒体规格统计", isOn: $appState.displayMediaStatistics)
             }
+
+            #if canImport(DonbyUHDModule)
+            UHDSettingsModuleCard()
+            #endif
         }
     }
 

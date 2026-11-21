@@ -1,5 +1,6 @@
 import Foundation
 import DonbyCore
+import DonbyNetwork
 
 private struct WPCreateEnvelope: Decodable {
     let ok: Bool
@@ -47,7 +48,7 @@ public final class UHDWatchPartyClient: Sendable {
     private let session: URLSession
 
     private init() {
-        self.session = TurboStreamingSessionHub.shared.sharedURLSession
+        self.session = DonbyNetworkSession.sharedURLSession
     }
 
     private func normalizedBase(_ raw: String) -> String {

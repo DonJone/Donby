@@ -13,6 +13,7 @@ let package = Package(
     products: [
         .library(name: "DonbyCore", targets: ["DonbyCore"]),
         .library(name: "DonbyNetwork", targets: ["DonbyNetwork"]),
+        .library(name: "DonbyUHDModule", targets: ["DonbyUHDModule"]),
         .library(name: "DonbyKernelC", targets: ["DonbyKernelC"]),
         .library(name: "DonbyMetalRenderer", targets: ["DonbyMetalRenderer"]),
         .executable(name: "Donby", targets: ["DonbyApp"])
@@ -31,6 +32,14 @@ let package = Package(
             name: "DonbyNetwork",
             dependencies: ["DonbyCore"],
             path: "Sources/DonbyNetwork"
+        ),
+        // Optional, cleanly removable UHDNow service integration module.
+        // Removing this target along with Sources/DonbyUHDModule and Sources/DonbyApp/Modules/UHD
+        // leaves a standalone core Emby / Jellyfin / Local / IPTV Donby build.
+        .target(
+            name: "DonbyUHDModule",
+            dependencies: ["DonbyCore", "DonbyNetwork"],
+            path: "Sources/DonbyUHDModule"
         ),
         .target(
             name: "DonbyKernelC",
@@ -70,7 +79,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "DonbyApp",
-            dependencies: ["DonbyCore", "DonbyNetwork", "DonbyKernelC", "DonbyMetalRenderer"],
+            dependencies: ["DonbyCore", "DonbyNetwork", "DonbyUHDModule", "DonbyKernelC", "DonbyMetalRenderer"],
             path: "Sources/DonbyApp",
             linkerSettings: [
                 .unsafeFlags(["-Xlinker", "-headerpad_max_install_names"])
@@ -78,7 +87,7 @@ let package = Package(
         ),
         .testTarget(
             name: "DonbyCoreTests",
-            dependencies: ["DonbyCore"],
+            dependencies: ["DonbyCore", "DonbyUHDModule"],
             path: "Tests/DonbyCoreTests"
         )
     ],

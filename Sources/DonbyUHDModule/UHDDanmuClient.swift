@@ -1,5 +1,6 @@
 import Foundation
 import DonbyCore
+import DonbyNetwork
 
 private struct DanmuMatchResponseDTO: Decodable {
     let matches: [DanmuMatchEntryDTO]?
@@ -56,7 +57,7 @@ public final class UHDDanmuClient: Sendable {
     private let session: URLSession
 
     private init() {
-        self.session = TurboStreamingSessionHub.shared.sharedURLSession
+        self.session = DonbyNetworkSession.sharedURLSession
     }
 
     private func danmuBaseURL(server: EmbyServerConfig) async throws -> String {

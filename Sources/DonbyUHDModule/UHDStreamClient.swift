@@ -1,5 +1,6 @@
 import Foundation
 import DonbyCore
+import DonbyNetwork
 
 public struct UHDLoginResult: Sendable {
     public let token: String
@@ -1026,7 +1027,7 @@ public final class UHDStreamClient: Sendable {
     private let apiSession: URLSession
 
     private init() {
-        self.apiSession = TurboStreamingSessionHub.shared.sharedURLSession
+        self.apiSession = DonbyNetworkSession.sharedURLSession
     }
 
     public var appVersion: String {
@@ -1178,6 +1179,44 @@ public final class UHDStreamClient: Sendable {
         return UHDLoginResult(token: res.token, expiresAt: res.expiresAt)
     }
 
+    /// Zero-URL UHD password login: tries `https://smart.uhdnow.com` first, and automatically falls back
+    /// to `https://v1.uhdnow.com` if the account lacks a China-optimized plan or the smart endpoint rejects/fails.
+    public func loginWithAutoFallback(
+        customBaseURL: String? = nil,
+        username: String,
+        password: String
+    ) async throws -> UHDResolvedLoginOutcome {
+        let candidates = UHDModuleEndpoints.candidateBaseURLs(customBaseURL: customBaseURL)
+        var lastError: Error?
+        for (idx, base) in candidates.enumerated() {
+            do {
+                let auth = try await login(baseURL: base, username: username, password: password)
+                let parsed = UHDModuleEndpoints.parseEndpointComponents(from: base)
+                return UHDResolvedLoginOutcome(
+                    auth: auth,
+                    baseURL: base,
+                    host: parsed.host,
+                    isHttps: parsed.isHttps,
+                    port: parsed.port,
+                    usedChinaOptimizedEndpoint: UHDModuleEndpoints.isChinaOptimizedHost(base)
+                )
+            } catch {
+                lastError = error
+                let hasNext = idx + 1 < candidates.count
+                if hasNext && UHDModuleEndpoints.shouldFallbackToStandardEndpoint(after: error, authKind: .password) {
+                    DonbyLogger.shared.log(
+                        "UHD 优先节点 \(base) 登录回退至标准节点: \(error.localizedDescription)",
+                        level: .info,
+                        subsystem: "UHD"
+                    )
+                    continue
+                }
+                throw error
+            }
+        }
+        throw lastError ?? EmbyClientError.unauthorized
+    }
+
     /// Exchanges an 8-digit code generated in the UHD Web Portal (`概览 -> 设备 -> 登录码`) for a Stream session token.
     public func loginWithCode(baseURL: String, rawCode: String) async throws -> UHDLoginResult {
         guard let normalized = UHDLoginCodeNormalizer.normalize(rawCode) else {
@@ -1199,6 +1238,89 @@ public final class UHDStreamClient: Sendable {
         )
         guard !res.token.isEmpty else { throw EmbyClientError.emptyToken }
         return UHDLoginResult(token: res.token, expiresAt: res.expiresAt)
+    }
+
+    /// Zero-URL UHD 8-digit code login with `smart.uhdnow.com` -> `v1.uhdnow.com` fallback.
+    public func loginWithCodeAutoFallback(
+        customBaseURL: String? = nil,
+        rawCode: String
+    ) async throws -> UHDResolvedLoginOutcome {
+        let candidates = UHDModuleEndpoints.candidateBaseURLs(customBaseURL: customBaseURL)
+        var lastError: Error?
+        for (idx, base) in candidates.enumerated() {
+            do {
+                let auth = try await loginWithCode(baseURL: base, rawCode: rawCode)
+                let parsed = UHDModuleEndpoints.parseEndpointComponents(from: base)
+                return UHDResolvedLoginOutcome(
+                    auth: auth,
+                    baseURL: base,
+                    host: parsed.host,
+                    isHttps: parsed.isHttps,
+                    port: parsed.port,
+                    usedChinaOptimizedEndpoint: UHDModuleEndpoints.isChinaOptimizedHost(base)
+                )
+            } catch {
+                lastError = error
+                let hasNext = idx + 1 < candidates.count
+                if hasNext && UHDModuleEndpoints.shouldFallbackToStandardEndpoint(after: error, authKind: .loginCode) {
+                    DonbyLogger.shared.log(
+                        "UHD 登录码优先节点 \(base) 回退至标准节点: \(error.localizedDescription)",
+                        level: .info,
+                        subsystem: "UHD"
+                    )
+                    continue
+                }
+                throw error
+            }
+        }
+        throw lastError ?? EmbyClientError.unauthorized
+    }
+
+    /// Zero-URL UHD token / API key validation with `smart.uhdnow.com` -> `v1.uhdnow.com` fallback.
+    public func validateTokenAutoFallback(
+        customBaseURL: String? = nil,
+        token: String
+    ) async throws -> UHDResolvedTokenOutcome {
+        let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedToken.isEmpty else { throw EmbyClientError.emptyToken }
+        let candidates = UHDModuleEndpoints.candidateBaseURLs(customBaseURL: customBaseURL)
+        var lastError: Error?
+        for (idx, base) in candidates.enumerated() {
+            let parsed = UHDModuleEndpoints.parseEndpointComponents(from: base)
+            let probeServer = EmbyServerConfig(
+                name: "UHDNow",
+                type: .uhdNative,
+                host: parsed.host,
+                port: parsed.port,
+                isHttps: parsed.isHttps,
+                username: "",
+                accessToken: trimmedToken
+            )
+            do {
+                let sub = try await fetchSubscriptionDetail(server: probeServer)
+                return UHDResolvedTokenOutcome(
+                    subscription: sub,
+                    baseURL: base,
+                    host: parsed.host,
+                    isHttps: parsed.isHttps,
+                    port: parsed.port,
+                    usedChinaOptimizedEndpoint: UHDModuleEndpoints.isChinaOptimizedHost(base)
+                )
+            } catch {
+                lastError = error
+                let hasNext = idx + 1 < candidates.count
+                if hasNext && UHDModuleEndpoints.shouldFallbackToStandardEndpoint(after: error, authKind: .token) {
+                    DonbyLogger.shared.log(
+                        "UHD 令牌校验优先节点 \(base) 回退至标准节点: \(error.localizedDescription)",
+                        level: .info,
+                        subsystem: "UHD"
+                    )
+                    continue
+                }
+                throw error
+            }
+        }
+        throw lastError ?? EmbyClientError.unauthorized
     }
 
     @discardableResult
