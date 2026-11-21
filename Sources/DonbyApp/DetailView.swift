@@ -244,41 +244,23 @@ public struct DetailView: View {
     private func heroHeaderSection(heroHeight: CGFloat) -> some View {
         let canvasCol = appState.isLightMode ? DonbyGlassPalette.canvasLight : DonbyGlassPalette.canvasBlack
         return ZStack(alignment: .bottomLeading) {
-            // 1. Crisp top-aligned Backdrop Fanart + color-matched blurred top-edge extension on pull-down overscroll
+            // 1. Crisp top-aligned Backdrop Fanart with seamless Apple-TV-style upward stretch across top safe-area & overscroll
             GeometryReader { bgGeo in
                 let minY = bgGeo.frame(in: .named("detailScroll")).minY
                 let pullDown = max(0, minY)
 
-                ZStack(alignment: .top) {
-                    if pullDown > 0.5 {
-                        MediaArtworkView(
-                            server: effectiveDetailServer,
-                            item: item,
-                            kind: .backdrop,
-                            maxWidth: 640,
-                            alignment: .top
-                        )
-                        .frame(width: bgGeo.size.width, height: pullDown + 48)
-                        .scaleEffect(x: 1.08, y: -1.08, anchor: .center)
-                        .blur(radius: 30)
-                        .saturation(1.12)
-                        .frame(width: bgGeo.size.width, height: pullDown + 2)
-                        .clipped()
-                        .offset(y: -pullDown)
-                    }
-
-                    MediaArtworkView(
-                        server: effectiveDetailServer,
-                        item: item,
-                        kind: .backdrop,
-                        maxWidth: 3840,
-                        alignment: .top
-                    )
-                    .frame(width: bgGeo.size.width, height: heroHeight)
-                    .saturation(1.10)
-                    .contrast(1.04)
-                    .clipped()
-                }
+                MediaArtworkView(
+                    server: effectiveDetailServer,
+                    item: item,
+                    kind: .backdrop,
+                    maxWidth: 3840,
+                    alignment: .top
+                )
+                .frame(width: bgGeo.size.width, height: heroHeight + pullDown)
+                .saturation(1.10)
+                .contrast(1.04)
+                .clipped()
+                .offset(y: -pullDown)
             }
             .frame(height: heroHeight)
 
@@ -405,7 +387,7 @@ public struct DetailView: View {
                     .fixedSize()
                 }
                 .padding(.horizontal, 28)
-                .padding(.top, appState.isWindowFullScreen ? 18 : 26)
+                .padding(.top, 16)
 
                 Spacer()
 

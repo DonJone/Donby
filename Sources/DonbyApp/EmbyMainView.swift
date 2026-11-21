@@ -147,14 +147,6 @@ public struct EmbyMainView: View {
                 items: appState.resumeItems
             ))
         }
-        if appState.showNextUp && !appState.nextUpItems.isEmpty {
-            result.append(HomeShelfSection(
-                id: "next_up",
-                title: "接下来观看",
-                kind: .landscape,
-                items: appState.nextUpItems
-            ))
-        }
         for lib in appState.libraryViews {
             if let items = appState.latestByLibrary[lib.id], !items.isEmpty {
                 result.append(HomeShelfSection(
@@ -299,7 +291,6 @@ public struct EmbyMainView: View {
                         Toggle("显示轮播大图", isOn: $appState.showCarousel)
                         Toggle("显示我的媒体", isOn: $appState.showMyMedia)
                         Toggle("显示继续观看", isOn: $appState.showContinueWatching)
-                        Toggle("显示接下来观看", isOn: $appState.showNextUp)
                         Toggle("隐藏已观看项目", isOn: $appState.hideWatchedInLatest)
                         Divider()
                         Button {

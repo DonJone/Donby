@@ -1549,7 +1549,6 @@ public final class AppState: ObservableObject {
         do {
             async let viewsTask = EmbyClient.shared.fetchViews(server: server)
             async let resumeTask = EmbyClient.shared.fetchResumeItems(server: server, limit: 16)
-            async let nextUpTask = EmbyClient.shared.fetchNextUp(server: server, limit: 16)
             async let favTask = EmbyClient.shared.fetchItems(server: server, isFavorite: true, limit: 24)
 
             let views = try await viewsTask
@@ -1559,16 +1558,16 @@ public final class AppState: ObservableObject {
             }
 
             let resumes = (try? await resumeTask) ?? []
-            let nextUps = (try? await nextUpTask) ?? []
+            let nextUps: [EmbyItem] = []
             let favs = (try? await favTask)?.items ?? []
 
             guard currentGen == homeLoadGeneration else { return }
             if self.resumeItems != resumes { self.resumeItems = resumes }
-            if self.nextUpItems != nextUps { self.nextUpItems = nextUps }
+            if !self.nextUpItems.isEmpty { self.nextUpItems = [] }
             if self.favoriteItems != favs { self.favoriteItems = favs }
 
-            // Silently prewarm top continue-watching / next-up PlaybackInfo so clicking from Home resolves in 0ms
-            let embyPrewarmTargets = Array((resumes + nextUps).filter { !$0.isSeries }.prefix(3))
+            // Silently prewarm top continue-watching PlaybackInfo so clicking from Home resolves in 0ms
+            let embyPrewarmTargets = Array(resumes.filter { !$0.isSeries }.prefix(3))
             if !embyPrewarmTargets.isEmpty {
                 Task.detached(priority: .utility) {
                     for target in embyPrewarmTargets {
