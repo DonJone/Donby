@@ -1186,7 +1186,7 @@ public struct PersonAvatarView: View {
     }
 
     private var cacheKey: String {
-        "\(server?.activeBaseURL ?? "local")|person|\(person.id)|\(person.name)|\(person.primaryImageTag ?? "")"
+        "\(server?.activeBaseURL ?? "local")|person|\(person.id)|\(person.name)|\(person.primaryImageTag ?? "")|\(person.uhdImageURL ?? "")"
     }
 
     public var body: some View {
@@ -1249,6 +1249,7 @@ public struct PersonAvatarView: View {
                 self.avatarImage = cached
                 return
             }
+            self.avatarImage = nil
             if let diskImg = await ArtworkImageCache.shared.imageFromDiskAsync(for: cacheKey, maxPixelSize: Int(size * 3.5)) {
                 if !Task.isCancelled {
                     await MainActor.run {

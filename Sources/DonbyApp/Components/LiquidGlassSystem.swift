@@ -396,11 +396,29 @@ public struct LiquidGlassVectorCircleButton<Icon: View>: View {
     }
 }
 
-/// Isolated hover chrome for `LiquidGlassCircleMenu` so hover changes never rebuild `menuContent`.
+/// Non-observable hover signal bridge so hovering a Menu trigger updates detached visual chrome
+/// without re-evaluating `Menu { menuContent() }` (preserving macOS NSMenu stability & full custom chrome).
+public final class DonbyMenuHoverBox {
+    private var current: Bool = false
+    public var onHoverChange: ((Bool) -> Void)?
+
+    public init() {}
+
+    public func setHovered(_ next: Bool) {
+        guard current != next else { return }
+        current = next
+        onHoverChange?(next)
+    }
+
+    public var isHovered: Bool { current }
+}
+
+/// Isolated hover chrome for `LiquidGlassCircleMenu` rendered outside `Menu` so macOS never strips its circle/shadow.
 private struct LiquidGlassCircleMenuVisual: View {
     let systemImage: String
     let iconColor: Color?
     let size: CGFloat
+    let hoverBox: DonbyMenuHoverBox
     @State private var isHovered: Bool = false
 
     private var effectiveIconColor: Color {
@@ -422,10 +440,12 @@ private struct LiquidGlassCircleMenuVisual: View {
                 .foregroundStyle(effectiveIconColor)
         }
         .frame(width: size, height: size)
-        .contentShape(Circle())
         .scaleEffect(isHovered ? 1.05 : 1.0)
         .animation(.easeOut(duration: 0.15), value: isHovered)
-        .onHover { isHovered = $0 }
+        .onAppear {
+            hoverBox.onHoverChange = { isHovered = $0 }
+            isHovered = hoverBox.isHovered
+        }
     }
 }
 
@@ -436,6 +456,7 @@ public struct LiquidGlassCircleMenu<MenuItems: View>: View {
     public var size: CGFloat = 38
     public var tooltip: String = ""
     @ViewBuilder public let menuContent: () -> MenuItems
+    @State private var hoverBox = DonbyMenuHoverBox()
 
     public init(
         systemImage: String,
@@ -452,21 +473,35 @@ public struct LiquidGlassCircleMenu<MenuItems: View>: View {
     }
 
     public var body: some View {
-        Menu {
-            menuContent()
-        } label: {
-            LiquidGlassCircleMenuVisual(systemImage: systemImage, iconColor: iconColor, size: size)
+        ZStack {
+            LiquidGlassCircleMenuVisual(
+                systemImage: systemImage,
+                iconColor: iconColor,
+                size: size,
+                hoverBox: hoverBox
+            )
+            .allowsHitTesting(false)
+
+            Menu {
+                menuContent()
+            } label: {
+                Color.white.opacity(0.0001)
+                    .frame(width: size, height: size)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: size, height: size)
+            .onHover { hoverBox.setHovered($0) }
         }
-        .buttonStyle(.plain)
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
         .frame(width: size, height: size)
         .alignmentGuide(VerticalAlignment.center) { d in d[VerticalAlignment.center] }
         .help(tooltip)
     }
 }
 
-/// Isolated hover chrome for `LiquidGlassSelectorCard` so hover changes never rebuild `menuItems`.
+/// Isolated hover chrome for `LiquidGlassSelectorCard` rendered outside `Menu` so macOS never strips Liquid Glass chrome.
 private struct LiquidGlassSelectorCardVisual: View {
     @Environment(\.colorScheme) private var colorScheme
     let title: String
@@ -475,6 +510,7 @@ private struct LiquidGlassSelectorCardVisual: View {
     let badgeText: String?
     let accentColor: Color
     let badgeForegroundColor: Color
+    let hoverBox: DonbyMenuHoverBox
     @State private var isHovered: Bool = false
 
     var body: some View {
@@ -531,8 +567,10 @@ private struct LiquidGlassSelectorCardVisual: View {
         .padding(.horizontal, 15)
         .padding(.vertical, 12)
         .donbyLiquidGlassRect(cornerRadius: 15, tint: nil, interactive: true, isHovered: isHovered)
-        .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-        .onHover { isHovered = $0 }
+        .onAppear {
+            hoverBox.onHoverChange = { isHovered = $0 }
+            isHovered = hoverBox.isHovered
+        }
     }
 }
 
@@ -545,6 +583,7 @@ public struct LiquidGlassSelectorCard<MenuItems: View>: View {
     public let accentColor: Color
     public var badgeForegroundColor: Color = .white
     @ViewBuilder public let menuItems: () -> MenuItems
+    @State private var hoverBox = DonbyMenuHoverBox()
 
     public init(
         title: String,
@@ -565,21 +604,31 @@ public struct LiquidGlassSelectorCard<MenuItems: View>: View {
     }
 
     public var body: some View {
-        Menu {
-            menuItems()
-        } label: {
+        ZStack {
             LiquidGlassSelectorCardVisual(
                 title: title,
                 icon: icon,
                 valueText: valueText,
                 badgeText: badgeText,
                 accentColor: accentColor,
-                badgeForegroundColor: badgeForegroundColor
+                badgeForegroundColor: badgeForegroundColor,
+                hoverBox: hoverBox
             )
+            .allowsHitTesting(false)
         }
-        .buttonStyle(.plain)
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+        .overlay {
+            Menu {
+                menuItems()
+            } label: {
+                Color.white.opacity(0.0001)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .onHover { hoverBox.setHovered($0) }
+        }
     }
 }
 

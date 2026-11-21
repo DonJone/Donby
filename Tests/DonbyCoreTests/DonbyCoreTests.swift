@@ -7,7 +7,7 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "1.4.14")
+        #expect(DonbyAppInfo.fallbackVersion == "1.4.15")
     }
 
     @Test func subtitleDecoderUTF8BOMAndGB18030() {

@@ -1207,7 +1207,14 @@ public final class UHDStreamClient: Sendable {
         let data = try await performRequest(UHDCreditsPageDTO.self, request: req, priority: .normal)
         let apiBase = server.mainLineURL
         return data.items.map { c in
-            let embyRole = c.role.lowercased() == "director" ? "Director" : "Actor"
+            let embyRole: String
+            switch c.role.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "director": embyRole = "Director"
+            case "writer", "screenplay": embyRole = "Writer"
+            case "producer", "executive producer": embyRole = "Producer"
+            case "composer": embyRole = "Composer"
+            default: embyRole = "Actor"
+            }
             return EmbyPerson(
                 id: c.personId,
                 name: c.name,

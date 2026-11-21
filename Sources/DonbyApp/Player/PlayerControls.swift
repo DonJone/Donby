@@ -162,6 +162,7 @@ final class PlayerAutoHideBox {
 
 private struct PlayerCircleMenuVisual<Content: View>: View {
     @ViewBuilder let content: () -> Content
+    let hoverBox: DonbyMenuHoverBox
     @State private var isHovered = false
 
     var body: some View {
@@ -174,8 +175,10 @@ private struct PlayerCircleMenuVisual<Content: View>: View {
                 .foregroundStyle(.white)
         }
         .frame(width: 28, height: 28)
-        .contentShape(Circle())
-        .onHover { isHovered = $0 }
+        .onAppear {
+            hoverBox.onHoverChange = { isHovered = $0 }
+            isHovered = hoverBox.isHovered
+        }
     }
 }
 
@@ -183,16 +186,26 @@ struct PlayerCircleMenu<Content: View, MenuItems: View>: View {
     let tooltip: String
     @ViewBuilder let content: () -> Content
     @ViewBuilder let menuItems: () -> MenuItems
+    @State private var hoverBox = DonbyMenuHoverBox()
 
     var body: some View {
-        Menu {
-            menuItems()
-        } label: {
-            PlayerCircleMenuVisual(content: content)
+        ZStack {
+            PlayerCircleMenuVisual(content: content, hoverBox: hoverBox)
+                .allowsHitTesting(false)
+
+            Menu {
+                menuItems()
+            } label: {
+                Color.white.opacity(0.0001)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 28, height: 28)
+            .onHover { hoverBox.setHovered($0) }
         }
-        .buttonStyle(.plain)
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
         .frame(width: 28, height: 28)
         .help(tooltip)
     }

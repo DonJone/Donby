@@ -953,7 +953,7 @@ public struct DetailView: View {
                 ScrollViewReader { proxy in
                     ZStack(alignment: .leading) {
                     ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 16) {
+                        HStack(alignment: .top, spacing: 16) {
                             ForEach(episodes) { ep in
                                 let isSelected = (ep.id == (focusedEpisodeId ?? episodes.first?.id))
                                 episodeCardItem(ep, isSelected: isSelected)
@@ -1256,16 +1256,31 @@ public struct DetailView: View {
         .frame(width: 256)
     }
 
+    private static func localizedPersonSubtitle(for person: EmbyPerson) -> String? {
+        if let role = person.role?.trimmingCharacters(in: .whitespacesAndNewlines), !role.isEmpty {
+            return role
+        }
+        switch person.type?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "director": return "导演"
+        case "writer", "screenplay": return "编剧"
+        case "producer", "executive producer": return "制片"
+        case "composer": return "配乐"
+        case "gueststar", "guest star": return "客串"
+        default: return nil
+        }
+    }
+
     private func castSection(people: [EmbyPerson]) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             SectionHeaderView(title: "演职人员")
                 .padding(.horizontal, 28)
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 18) {
+                HStack(alignment: .top, spacing: 18) {
                     ForEach(people.prefix(20)) { person in
+                        let subtitle = Self.localizedPersonSubtitle(for: person)
                         VStack(spacing: 8) {
                             PersonAvatarView(
-                                server: appState.activeServer,
+                                server: effectiveDetailServer,
                                 person: person,
                                 width: 78,
                                 height: 100,
@@ -1277,9 +1292,11 @@ public struct DetailView: View {
                                     .font(.system(size: 12, weight: .semibold))
                                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                                     .lineLimit(1)
-                                if let role = person.role, !role.isEmpty {
-                                    Text(role).font(.system(size: 11)).foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode)).lineLimit(1)
-                                }
+                                Text(subtitle ?? " ")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                                    .opacity(subtitle == nil ? 0 : 1)
+                                    .lineLimit(1)
                             }
                             .frame(width: 82)
                         }
@@ -1326,7 +1343,7 @@ public struct DetailView: View {
             SectionHeaderView(title: "类似作品")
                 .padding(.horizontal, 28)
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 15) {
+                LazyHStack(alignment: .top, spacing: 15) {
                     ForEach(similarItems) { sim in
                         PosterCardView(
                             item: sim,

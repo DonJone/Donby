@@ -1495,15 +1495,7 @@ public struct PlayerView: View {
 
                         VStack(alignment: .leading, spacing: 6) {
                             Text("双语副字幕").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
-                            Menu {
-                                Button("关闭副字幕") { disableSecondarySubtitle() }
-                                Divider()
-                                ForEach(subOptions) { opt in
-                                    Button(opt.label) { selectSecondarySubtitleOption(opt) }
-                                }
-                                Divider()
-                                Button("加载本地副字幕文件...") { promptLocalExternalSubtitleFile(asSecondary: true) }
-                            } label: {
+                            ZStack {
                                 HStack {
                                     Image(systemName: "captions.bubble")
                                     Text(secondarySubtitleStatusTitle(options: subOptions))
@@ -1516,6 +1508,25 @@ public struct PlayerView: View {
                                 .padding(9)
                                 .background(Color.white.opacity(0.06))
                                 .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                .allowsHitTesting(false)
+                            }
+                            .overlay {
+                                Menu {
+                                    Button("关闭副字幕") { disableSecondarySubtitle() }
+                                    Divider()
+                                    ForEach(subOptions) { opt in
+                                        Button(opt.label) { selectSecondarySubtitleOption(opt) }
+                                    }
+                                    Divider()
+                                    Button("加载本地副字幕文件...") { promptLocalExternalSubtitleFile(asSecondary: true) }
+                                } label: {
+                                    Color.white.opacity(0.0001)
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                        .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                }
+                                .buttonStyle(.plain)
+                                .menuStyle(.borderlessButton)
+                                .menuIndicator(.hidden)
                             }
                         }
 
