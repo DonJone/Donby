@@ -5633,10 +5633,9 @@ static int dk_try_render_paired_bilingual_locked(
 
     const bool dual_tracks_loaded = (player->ass_track != nullptr && player->secondary_ass_track != nullptr);
     if (dual_tracks_loaded) {
-        // Dual-Track Cluster-Synchronized Collection in UNIFIED VIDEO DISPLAY TIME (pts_ms):
-        // 1. Entry/Overhang Snap (+/-450ms): eliminates staggered pop-in/out flicker.
-        // 2. Intra-Cluster Gap Bridge (<=900ms): bridges short split-sentence gaps while partner track stays active (handles 1-to-2, 2-to-1 & staggered 2-to-2 translations with 0ms solo hang).
-        // 3. Bidirectional Safe Tail-Hold (<=1800ms, clamped to next cue start): shorter line holds until longer paired line exits so both vanish on the exact same frame.
+        // Dual-Track Time-Invariant Cluster Interval Pre-Pass in UNIFIED VIDEO DISPLAY TIME (pts_ms):
+        // Every cue gets ONE deterministic contiguous effective interval [eff_s, eff_e] independent of now_ms,
+        // making ON->OFF->ON blink flashes and early next-cue mismatches (CN2 leaking onto EN1) mathematically impossible.
         constexpr long long kSnapMs = 450;
         constexpr long long kBridgeGapMs = 900;
         constexpr long long kTailHoldMs = 1800;
@@ -5650,6 +5649,8 @@ static int dk_try_render_paired_bilingual_locked(
             int idx{0};
             long long ds{0};
             long long de{0};
+            long long eff_s{0};
+            long long eff_e{0};
             long long dur() const { return std::max<long long>(1, de - ds); }
         };
 
@@ -5662,7 +5663,7 @@ static int dk_try_render_paired_bilingual_locked(
                 long long ds = 0, de = 0;
                 event_display_span(ev, is_sec, ds, de);
                 if (de < now_ms - kLocalWinMs || ds > now_ms + kLocalWinMs) continue;
-                out.push_back({ i, ds, de });
+                out.push_back({ i, ds, de, ds, de });
             }
             std::sort(out.begin(), out.end(), [](const DispEv& a, const DispEv& b) {
                 return (a.ds != b.ds) ? (a.ds < b.ds) : (a.de < b.de);
@@ -5670,173 +5671,152 @@ static int dk_try_render_paired_bilingual_locked(
             return out;
         };
 
-        auto find_next_cue_start = [](const std::vector<DispEv>& evs, size_t cur_pos) -> long long {
+        auto find_next_idx = [](const std::vector<DispEv>& evs, size_t cur_pos) -> int {
             const long long cur_de = evs[cur_pos].de;
-            long long best = LLONG_MAX;
             for (size_t m = cur_pos + 1; m < evs.size(); m++) {
-                // Skip concurrent multi-speaker events starting alongside cur_pos; only clamp against subsequent cues
-                if (evs[m].ds >= cur_de - 80) {
-                    best = std::min(best, evs[m].ds);
-                    break;
+                // Skip concurrent multi-speaker events starting alongside cur_pos
+                if (evs[m].ds >= cur_de - 120) {
+                    return static_cast<int>(m);
                 }
             }
-            return best;
+            return -1;
         };
 
         auto cues_pair_overlap = [](const DispEv& a, const DispEv& b) -> bool {
             const long long ov = std::min(a.de, b.de) - std::max(a.ds, b.ds);
-            const long long min_ov = std::min<long long>(280, std::max<long long>(1, std::min(a.dur(), b.dur()) * 35 / 100));
-            return ov >= min_ov;
+            if (ov <= 0) return false;
+            const long long min_dur = std::min(a.dur(), b.dur());
+            // Require >= 35% of the shorter cue to overlap so 200-350ms boundary grazes between adjacent sentences never falsely pair!
+            const long long req_ov = std::max<long long>(1, min_dur * 35 / 100);
+            return ov >= req_ov;
         };
 
-        const auto anchor_evs = collect_nearby(anchor_tr, anchor_is_secondary);
-        const auto other_evs  = collect_nearby(other_tr, other_is_sec);
+        auto anchor_evs = collect_nearby(anchor_tr, anchor_is_secondary);
+        auto other_evs  = collect_nearby(other_tr, other_is_sec);
 
-        bool has_anchor_active = false;
-        long long anchor_win_s = LLONG_MAX;
-        long long anchor_win_e = LLONG_MIN;
+        // Pass 1: Compute deterministic paired anchor window & effective START (eff_s) for each `other` cue.
+        // Because eff_s is resolved against the cue's OWN paired anchor cue (not whichever anchor happens to be active at now_ms),
+        // an early-starting CN2 (e.g. -240ms before EN2) snaps cleanly to EN2.ds and NEVER leaks onto EN1 or blinks in the EN1->EN2 gap!
+        std::vector<long long> other_pair_a_s(other_evs.size(), LLONG_MAX);
+        std::vector<long long> other_pair_a_e(other_evs.size(), LLONG_MIN);
+        std::vector<bool> other_has_pair(other_evs.size(), false);
 
-        for (const auto& ae : anchor_evs) {
-            if (now_ms < ae.ds || now_ms >= ae.de) continue;
-            if (!append_event_lines(anchor_tr, anchor_tr->events[ae.idx], anchor_is_secondary)) return -1;
-            has_anchor_active = true;
-            anchor_win_s = std::min(anchor_win_s, ae.ds);
-            anchor_win_e = std::max(anchor_win_e, ae.de);
-        }
-
-        // Track naturally active `other` cues when anchor is currently silent
-        std::vector<size_t> active_other_pos;
-        if (!has_anchor_active) {
-            for (size_t i = 0; i < other_evs.size(); i++) {
-                const auto& oe = other_evs[i];
-                if (now_ms < oe.ds || now_ms >= oe.de) continue;
-                // Suppress brief <=450ms leading/trailing overhang tied to an adjacent anchor cue
-                bool suppressed_edge = false;
-                for (const auto& ae : anchor_evs) {
-                    if (!cues_pair_overlap(oe, ae)) continue;
-                    if (now_ms < ae.ds && (ae.ds - now_ms) <= kSnapMs && std::llabs(oe.ds - ae.ds) <= kSnapMs) {
-                        suppressed_edge = true;
-                        break;
-                    }
-                    if (now_ms >= ae.de && (now_ms - ae.de) <= kSnapMs && std::llabs(oe.de - ae.de) <= kSnapMs) {
-                        suppressed_edge = true;
-                        break;
-                    }
-                }
-                if (!suppressed_edge) {
-                    active_other_pos.push_back(i);
+        for (size_t oi = 0; oi < other_evs.size(); oi++) {
+            const auto& oe = other_evs[oi];
+            long long pa_s = LLONG_MAX;
+            long long pa_e = LLONG_MIN;
+            for (const auto& ae : anchor_evs) {
+                if (cues_pair_overlap(oe, ae)) {
+                    pa_s = std::min(pa_s, ae.ds);
+                    pa_e = std::max(pa_e, ae.de);
                 }
             }
+            if (pa_s < LLONG_MAX) {
+                other_has_pair[oi] = true;
+                other_pair_a_s[oi] = pa_s;
+                other_pair_a_e[oi] = pa_e;
 
-            // Symmetric reverse hold/bridge on anchor: if `other` genuinely continues (>450ms past anchor, or across an anchor split gap),
-            // hold the immediately preceding paired anchor cue across the gap (<=900ms) or to `other` end (<=1800ms) so `other` never hangs solo!
-            if (!active_other_pos.empty()) {
-                long long other_win_e = LLONG_MIN;
-                for (size_t pos : active_other_pos) {
-                    other_win_e = std::max(other_win_e, other_evs[pos].de);
-                }
-                int best_prev_anchor = -1;
-                for (size_t ai = 0; ai < anchor_evs.size(); ai++) {
-                    const auto& ae = anchor_evs[ai];
-                    if (ae.de > now_ms) continue;
-                    bool overlaps_any_active_other = false;
-                    for (size_t pos : active_other_pos) {
-                        if (cues_pair_overlap(other_evs[pos], ae)) {
-                            overlaps_any_active_other = true;
+                bool has_prior_in_anchor = false;
+                if (oe.ds > pa_s && (oe.ds - pa_s) <= kSnapMs) {
+                    for (size_t pi = 0; pi < oi; pi++) {
+                        if (other_evs[pi].de > pa_s && other_evs[pi].ds < oe.ds) {
+                            has_prior_in_anchor = true;
                             break;
                         }
                     }
-                    if (!overlaps_any_active_other) continue;
-                    const long long next_a_ds = find_next_cue_start(anchor_evs, ai);
-                    if (now_ms >= next_a_ds) continue;
-                    const bool can_bridge = (next_a_ds < LLONG_MAX && (next_a_ds - ae.de) <= kBridgeGapMs && now_ms < next_a_ds);
-                    const bool can_tail_hold = (other_win_e > ae.de && (other_win_e - ae.de) <= kTailHoldMs && now_ms < std::min(other_win_e, next_a_ds));
-                    if (can_bridge || can_tail_hold) {
-                        if (best_prev_anchor < 0 || ae.de > anchor_evs[static_cast<size_t>(best_prev_anchor)].de) {
-                            best_prev_anchor = static_cast<int>(ai);
-                        }
-                    }
                 }
-                if (best_prev_anchor >= 0) {
-                    const auto& held_ae = anchor_evs[static_cast<size_t>(best_prev_anchor)];
-                    if (!append_event_lines(anchor_tr, anchor_tr->events[held_ae.idx], anchor_is_secondary)) return -1;
-                }
-                for (size_t pos : active_other_pos) {
-                    const auto& oe = other_evs[pos];
-                    if (!append_event_lines(other_tr, other_tr->events[oe.idx], other_is_sec)) return -1;
+                if (!has_prior_in_anchor && std::llabs(oe.ds - pa_s) <= kSnapMs) {
+                    other_evs[oi].eff_s = pa_s;
                 }
             }
-        } else {
-            // Anchor is active: apply entry snap (+/-450ms), intra-cluster gap bridge (<=900ms), and safe tail-hold (<=1800ms) on `other`
-            const DispEv anchor_win{ -1, anchor_win_s, anchor_win_e };
-            int included_other_count = 0;
+        }
 
-            for (size_t oi = 0; oi < other_evs.size(); oi++) {
-                const auto& oe = other_evs[oi];
-                const long long next_o_ds = find_next_cue_start(other_evs, oi);
-                bool include = false;
+        // Helper: checks whether any cue in `partner` continuously covers the gap [g_s, g_e]
+        auto partner_covers_gap = [](const std::vector<DispEv>& partner, long long g_s, long long g_e) -> bool {
+            if (g_e <= g_s) return false;
+            const long long mid = g_s + (g_e - g_s) / 2;
+            for (const auto& pe : partner) {
+                if (pe.eff_s <= mid && pe.eff_e >= mid) return true;
+            }
+            return false;
+        };
 
-                if (cues_pair_overlap(oe, anchor_win)) {
-                    // Snap start to anchor entry only if no earlier `other` cue already occupies [anchor_win_s, oe.ds]
-                    bool has_prior_in_anchor = false;
-                    if (oe.ds > anchor_win_s && (oe.ds - anchor_win_s) <= kSnapMs) {
-                        for (size_t pi = 0; pi < oi; pi++) {
-                            if (other_evs[pi].de > anchor_win_s && other_evs[pi].ds < oe.ds) {
-                                has_prior_in_anchor = true;
-                                break;
-                            }
-                        }
+        // Pass 2: Compute deterministic effective END (eff_e) for each `other` cue using next cue's effective start (next_eff_s):
+        // - Trim brief <=450ms trailing overhang after paired anchor end
+        // - Bridge <=900ms intra-cluster split gap directly up to next_eff_s whenever an anchor cue covers that gap
+        // - Tail-hold <=1800ms up to min(pair_a_e, next_eff_s) so shorter-ending CN exits on exact same frame as EN
+        for (size_t oi = 0; oi < other_evs.size(); oi++) {
+            auto& oe = other_evs[oi];
+            const int next_i = find_next_idx(other_evs, oi);
+            const long long next_eff_s = (next_i >= 0) ? other_evs[static_cast<size_t>(next_i)].eff_s : LLONG_MAX;
+
+            if (other_has_pair[oi]) {
+                const long long pa_e = other_pair_a_e[oi];
+                if (oe.de > pa_e) {
+                    oe.eff_e = ((oe.de - pa_e) <= kSnapMs) ? pa_e : oe.de;
+                } else if (oe.de < pa_e) {
+                    const long long gap_to_next = (next_eff_s < LLONG_MAX) ? (next_eff_s - oe.de) : LLONG_MAX;
+                    const long long gap_to_pair_end = pa_e - oe.de;
+                    if (next_eff_s < pa_e && gap_to_next >= 0 && gap_to_next <= kBridgeGapMs) {
+                        oe.eff_e = next_eff_s;
+                    } else if (gap_to_pair_end <= kTailHoldMs) {
+                        oe.eff_e = std::min(pa_e, next_eff_s);
                     }
-                    const long long eff_s = (!has_prior_in_anchor && std::llabs(oe.ds - anchor_win_s) <= kSnapMs)
-                        ? anchor_win_s : oe.ds;
-
-                    long long eff_e = oe.de;
-                    if (oe.de > anchor_win_e) {
-                        // Trim brief <=450ms trailing overhang so both exit together on anchor end
-                        eff_e = ((oe.de - anchor_win_e) <= kSnapMs) ? anchor_win_e : oe.de;
-                    } else if (oe.de < anchor_win_e) {
-                        // Other ended early while anchor is still showing:
-                        // 1) Bridge short intra-cluster split gap directly up to next_other_ds (<=900ms)
-                        // 2) Otherwise tail-hold up to anchor_win_e (<=1800ms, clamped to next_other_ds)
-                        const long long gap_to_next = (next_o_ds < LLONG_MAX) ? (next_o_ds - oe.de) : LLONG_MAX;
-                        const long long gap_to_anchor_end = anchor_win_e - oe.de;
-                        if (next_o_ds < anchor_win_e && gap_to_next <= kBridgeGapMs) {
-                            eff_e = next_o_ds;
-                        } else if (gap_to_anchor_end <= kTailHoldMs) {
-                            eff_e = std::min(anchor_win_e, next_o_ds);
-                        }
-                    }
-                    include = (now_ms >= eff_s && now_ms < eff_e);
-                } else {
-                    include = (now_ms >= oe.ds && now_ms < oe.de);
-                }
-
-                if (include) {
-                    if (!append_event_lines(other_tr, other_tr->events[oe.idx], other_is_sec)) return -1;
-                    included_other_count++;
                 }
             }
+            // Staggered 2-to-2 split bridge: if next_eff_s is within <=900ms and an anchor cue is actively spanning the gap, bridge seamlessly
+            if (next_eff_s < LLONG_MAX && next_eff_s > oe.eff_e && (next_eff_s - oe.eff_e) <= kBridgeGapMs) {
+                if (partner_covers_gap(anchor_evs, oe.eff_e, next_eff_s)) {
+                    oe.eff_e = next_eff_s;
+                }
+            }
+            // Safety invariant: never overlap into the next subsequent cue's effective start
+            if (next_eff_s < LLONG_MAX && oe.eff_e > next_eff_s && oe.eff_s < next_eff_s) {
+                oe.eff_e = next_eff_s;
+            }
+        }
 
-            // Staggered 2-to-2 split fallback: if anchor just rolled over to EN2 while `other` is inside a brief <=900ms
-            // gap between CN1 (which overlapped EN1) and CN2 (which overlaps EN2), hold CN1 right up to CN2 so EN2 never hangs solo!
-            if (included_other_count == 0) {
-                int bridge_pos = -1;
-                for (size_t oi = 0; oi < other_evs.size(); oi++) {
-                    const auto& oe = other_evs[oi];
-                    if (oe.de > now_ms) continue;
-                    const long long since_end = now_ms - oe.de;
-                    if (since_end > kBridgeGapMs) continue;
-                    const long long next_o_ds = find_next_cue_start(other_evs, oi);
-                    if (next_o_ds < LLONG_MAX && now_ms < next_o_ds && (next_o_ds - oe.de) <= kBridgeGapMs) {
-                        if (bridge_pos < 0 || oe.de > other_evs[static_cast<size_t>(bridge_pos)].de) {
-                            bridge_pos = static_cast<int>(oi);
-                        }
-                    }
+        // Pass 3: Symmetric reverse gap-bridge & safe tail-hold on `anchor` cues when a paired `other` cue genuinely runs >450ms longer
+        // or spans across a <=900ms split gap between consecutive anchor cues (e.g. EN1 -> EN2 while CN1 stays active).
+        for (size_t ai = 0; ai < anchor_evs.size(); ai++) {
+            auto& ae = anchor_evs[ai];
+            const int next_a = find_next_idx(anchor_evs, ai);
+            const long long next_a_s = (next_a >= 0) ? anchor_evs[static_cast<size_t>(next_a)].eff_s : LLONG_MAX;
+
+            long long paired_other_max_e = ae.eff_e;
+            for (const auto& oe : other_evs) {
+                if (cues_pair_overlap(oe, ae)) {
+                    paired_other_max_e = std::max(paired_other_max_e, oe.eff_e);
                 }
-                if (bridge_pos >= 0) {
-                    const auto& held_oe = other_evs[static_cast<size_t>(bridge_pos)];
-                    if (!append_event_lines(other_tr, other_tr->events[held_oe.idx], other_is_sec)) return -1;
+            }
+            if (paired_other_max_e > ae.eff_e) {
+                const long long gap_to_next = (next_a_s < LLONG_MAX) ? (next_a_s - ae.eff_e) : LLONG_MAX;
+                const long long gap_to_other_end = paired_other_max_e - ae.eff_e;
+                if (next_a_s < paired_other_max_e && gap_to_next >= 0 && gap_to_next <= kBridgeGapMs) {
+                    ae.eff_e = next_a_s;
+                } else if (gap_to_other_end <= kTailHoldMs) {
+                    ae.eff_e = std::min(paired_other_max_e, next_a_s);
                 }
+            }
+            if (next_a_s < LLONG_MAX && next_a_s > ae.eff_e && (next_a_s - ae.eff_e) <= kBridgeGapMs) {
+                if (partner_covers_gap(other_evs, ae.eff_e, next_a_s)) {
+                    ae.eff_e = next_a_s;
+                }
+            }
+            if (next_a_s < LLONG_MAX && ae.eff_e > next_a_s && ae.eff_s < next_a_s) {
+                ae.eff_e = next_a_s;
+            }
+        }
+
+        // Final collection: simple, flicker-free interval membership on both tracks!
+        for (const auto& ae : anchor_evs) {
+            if (now_ms >= ae.eff_s && now_ms < ae.eff_e) {
+                if (!append_event_lines(anchor_tr, anchor_tr->events[ae.idx], anchor_is_secondary)) return -1;
+            }
+        }
+        for (const auto& oe : other_evs) {
+            if (now_ms >= oe.eff_s && now_ms < oe.eff_e) {
+                if (!append_event_lines(other_tr, other_tr->events[oe.idx], other_is_sec)) return -1;
             }
         }
     } else {
@@ -6098,8 +6078,8 @@ static bool dk_update_subtitle_rgba_locked(
             player->sub_dirty_y1 = 0;
             return;
         }
-        int y0 = std::clamp(player->sub_dirty_y0, 0, target_h);
-        int y1 = std::clamp(player->sub_dirty_y1, y0, target_h);
+        int y0 = std::clamp(player->sub_dirty_y0 - 2, 0, target_h);
+        int y1 = std::clamp(player->sub_dirty_y1 + 2, y0, target_h);
         if (y1 > y0) {
             const size_t row_bytes = static_cast<size_t>(target_w) * 4;
             std::memset(

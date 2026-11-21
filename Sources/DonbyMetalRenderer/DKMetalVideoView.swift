@@ -285,6 +285,8 @@ public final class DKMetalLayerView: NSView {
     private var screenObserver: NSObjectProtocol?
 
     // Subtitle GPU texture cache (updated only when subtitle serial changes)
+    private var subtitleTextures: [MTLTexture?] = [nil, nil, nil]
+    private var subtitleTextureWriteIdx: Int = 0
     private var subtitleTexture: MTLTexture?
     private var subtitleTexWidth: Int = 0
     private var subtitleTexHeight: Int = 0
@@ -900,7 +902,18 @@ public final class DKMetalLayerView: NSView {
             return
         }
 
-        if subtitleTexture == nil || subtitleTexWidth != width || subtitleTexHeight != height {
+        if subtitleTexWidth != width || subtitleTexHeight != height {
+            subtitleTextures = [nil, nil, nil]
+            subtitleTexture = nil
+            subtitleTextureWriteIdx = 0
+            subtitleTexWidth = width
+            subtitleTexHeight = height
+        }
+
+        // Rotate across a 3-slot MTLTexture ring so CPU replace(region:) NEVER overwrites a texture still read by an in-flight GPU frame!
+        let slot = subtitleTextureWriteIdx
+        subtitleTextureWriteIdx = (slot + 1) % 3
+        if subtitleTextures[slot] == nil {
             let texDesc = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: .rgba8Unorm,
                 width: width,
@@ -908,14 +921,13 @@ public final class DKMetalLayerView: NSView {
                 mipmapped: false
             )
             texDesc.usage = [.shaderRead]
-            subtitleTexture = dev.makeTexture(descriptor: texDesc)
-            subtitleTexWidth = width
-            subtitleTexHeight = height
+            subtitleTextures[slot] = dev.makeTexture(descriptor: texDesc)
         }
 
-        if let tex = subtitleTexture {
+        if let tex = subtitleTextures[slot] {
             let region = MTLRegionMake2D(0, 0, width, height)
             tex.replace(region: region, mipmapLevel: 0, withBytes: ptr, bytesPerRow: width * 4)
+            subtitleTexture = tex
             hasActiveSubtitle = true
         }
     }

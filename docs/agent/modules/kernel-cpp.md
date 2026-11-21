@@ -1,6 +1,6 @@
 # Module Map: Playback Kernel (`DonbyKernelC`)
 
-> Last synced: `v1.4.20`. Load this doc for FFmpeg demuxing, VideoToolbox decoding, AudioQueue A/V sync, seek flush, rebuffer cushions, and libass/PGS subtitles.
+> Last synced: `v1.4.21`. Load this doc for FFmpeg demuxing, VideoToolbox decoding, AudioQueue A/V sync, seek flush, rebuffer cushions, and libass/PGS subtitles.
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyKernelC/include/donby_kernel.h` (~204L)
