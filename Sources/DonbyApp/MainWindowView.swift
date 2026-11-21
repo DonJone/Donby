@@ -35,15 +35,10 @@ public struct MainWindowView: View {
                             .frame(width: 1)
                     }
 
+                    let hasDetail = (appState.currentDetailItem != nil)
                     ZStack(alignment: .topLeading) {
                         Group {
-                            if let detailItem = appState.currentDetailItem {
-                                DetailView(
-                                    item: detailItem,
-                                    preferOfflineFocus: appState.detailOfflineFocusIds.contains(detailItem.id)
-                                )
-                                .id(detailItem.id)
-                            } else if appState.openedServerId != nil {
+                            if appState.openedServerId != nil {
                                 EmbyMainView()
                             } else {
                                 switch appState.selectedTab {
@@ -66,6 +61,19 @@ public struct MainWindowView: View {
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+                        .opacity(hasDetail ? 0 : 1)
+                        .allowsHitTesting(!hasDetail)
+                        .accessibilityHidden(hasDetail)
+
+                        if let detailItem = appState.currentDetailItem {
+                            DetailView(
+                                item: detailItem,
+                                preferOfflineFocus: appState.detailOfflineFocusIds.contains(detailItem.id)
+                            )
+                            .id(detailItem.id)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+                        }
                     }
                 }
                 .ignoresSafeArea(.container, edges: .top)
@@ -94,6 +102,7 @@ public struct MainWindowView: View {
                             .padding(.vertical, 3)
                             .background(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.10))
                             .clipShape(Capsule())
+                            .contentShape(Capsule())
                         }
                         .buttonStyle(.plain)
                     }
@@ -266,6 +275,7 @@ private struct SidebarTabItemButton: View {
                     }
                 }
             )
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
@@ -449,6 +459,7 @@ private struct SidebarServerItemButton: View {
                     }
                 }
             )
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }

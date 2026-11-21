@@ -1009,6 +1009,7 @@ private struct SettingsTabRowButton: View {
                     }
                 }
             )
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 10)

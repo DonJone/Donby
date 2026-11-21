@@ -1,6 +1,6 @@
 # Module Map: Metal EDR Video Renderer (`DonbyMetalRenderer`)
 
-> Last synced: `v1.4.12`. Load this doc for CVDisplayLink presentation, Metal shaders, HDR10/Dolby Vision EDR tone mapping, GPU snapshots, first-frame callbacks, and subtitle overlay rendering.
+> Last synced: `v1.4.22`. Load this doc for CVDisplayLink presentation, Metal shaders, HDR10/Dolby Vision EDR tone mapping, GPU snapshots, first-frame callbacks, and subtitle overlay rendering.
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyMetalRenderer/DKMetalVideoView.swift` (~1666L)
@@ -21,6 +21,7 @@
   - `DKMetalLayerView.subtitleViewportMetrics(videoWidth:videoHeight:)` computes the full-window subtitle canvas (normalized `<=1920px` long edge) and exact letterbox margins, passes them to `dk_player_set_subtitle_viewport`, and draws the subtitle quad at full NDC `scale = (1, 1)` so ASS/SRT/PGS subtitles display freely in black bars.
   - Smoothly interpolates full-viewport `currentSubtitleLiftNDC` when the bottom player control bar is visible so subtitles do not collide with the scrubber.
   - `DKMetalVideoView.subtitleStyleRevision` flags `needsRedrawOnSameFrame = true` in `updateNSView`, bypassing paused DisplayLink throttling so dragging scale/position sliders updates subtitles at 60fps while paused.
+  - `DKMetalLayerView` rotates subtitle uploads across a 3-slot `MTLTexture` ring (`subtitleTextures`, `v1.4.21`) so CPU `replace(region:)` never mutates an in-flight GPU texture on 120Hz ProMotion displays.
 - **Clean Player Detach & First-Frame Signal (`v1.4.0`)**:
   - `clearDisplayedFrame()` clears stale drawable content immediately when player detaches or becomes `nil` (no ghost frame from previous video).
   - `onFirstFrameRendered` callback fires on `MainActor` once the first real video frame is presented on screen, allowing `PlayerView` to dismiss the loading pill with zero black-frame gap.

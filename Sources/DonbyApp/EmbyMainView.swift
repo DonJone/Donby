@@ -209,6 +209,7 @@ public struct EmbyMainView: View {
                             .padding(.vertical, 5)
                             .background(Color.orange.opacity(0.14))
                             .clipShape(Capsule())
+                            .contentShape(Capsule())
                         }
                         .buttonStyle(.plain)
                     } else {
@@ -243,6 +244,7 @@ public struct EmbyMainView: View {
                                 Capsule()
                                     .strokeBorder(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08), lineWidth: 0.5)
                             )
+                            .contentShape(Capsule())
                         }
                         .buttonStyle(.plain)
                         .fixedSize(horizontal: true, vertical: false)
@@ -627,6 +629,9 @@ public struct SectionHeaderView: View {
                         Image(systemName: "chevron.right").font(.system(size: 10, weight: .bold))
                     }
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    .padding(.vertical, 3)
+                    .padding(.horizontal, 4)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }

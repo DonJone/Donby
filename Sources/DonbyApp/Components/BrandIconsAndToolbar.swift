@@ -1205,6 +1205,8 @@ public struct DonbySearchPillField: View {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 12))
                         .foregroundStyle(Color(white: 0.55))
+                        .frame(width: 24, height: 24)
+                        .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
             }

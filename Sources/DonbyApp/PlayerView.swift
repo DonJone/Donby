@@ -63,8 +63,6 @@ public struct PlayerView: View {
     @State private var isOpeningMedia: Bool = true
     @State private var hasRenderedFirstFrame: Bool = false
     @State private var isWaitingForSeekOrBuffer: Bool = false
-    @State private var lastObservedPos: Double = -1.0
-    @State private var lastObservedPosUptime: TimeInterval = 0
     @State private var openingErrorMessage: String? = nil
     @State private var showLogSheet: Bool = false
     @State private var activeDrawer: PlayerDrawerTab? = nil
@@ -183,6 +181,9 @@ public struct PlayerView: View {
                     if activeDrawer != nil {
                         withAnimation(.easeInOut(duration: 0.18)) { activeDrawer = nil }
                     } else {
+                        if !showControls {
+                            syncVisiblePlaybackStateFromBox()
+                        }
                         withAnimation(.easeInOut(duration: 0.18)) {
                             showControls.toggle()
                         }
@@ -190,6 +191,7 @@ public struct PlayerView: View {
                             showControlsAndResetTimer()
                         } else {
                             autoHideBox.autoHideTask?.cancel()
+                            autoHideBox.autoHideTask = nil
                         }
                     }
                 }
@@ -282,7 +284,7 @@ public struct PlayerView: View {
                             .frame(maxWidth: 400)
                         HStack(spacing: 12) {
                             Button("重试播放") {
-                                startNativeKernelPlayback(startSeconds: currentTime)
+                                startNativeKernelPlayback(startSeconds: autoHideBox.liveCurrentTime)
                             }
                             .buttonStyle(.borderedProminent)
                             .tint(appState.accentColor)
@@ -381,7 +383,10 @@ public struct PlayerView: View {
                     Spacer()
                     rightDrawerPanel(tab: drawer)
                         .transition(.move(edge: .trailing).combined(with: .opacity))
-                        .onContinuousHover { _ in autoHideBox.autoHideTask?.cancel() }
+                        .onContinuousHover { _ in
+                            autoHideBox.autoHideTask?.cancel()
+                            autoHideBox.autoHideTask = nil
+                        }
                 }
             }
         }
@@ -471,25 +476,32 @@ public struct PlayerView: View {
             stopNativeKernel()
         }
         .onReceive(progressTimer) { _ in
-            updateClock()
+            let hudVisible = showControls || activeDrawer != nil
+            if hudVisible {
+                updateClock()
+            }
             guard let handle = playerHandle, !isScrubbing else { return }
             let nowUptime = ProcessInfo.processInfo.systemUptime
             let newPos = dk_player_get_position(handle)
             let sinceSeek = nowUptime - lastSeekCommitUptime
             let isSettlingSeek = sinceSeek < 2.5 && abs(newPos - lastSeekCommitTarget) > 8.0
-            if !isSettlingSeek && abs(currentTime - newPos) > 0.05 {
-                currentTime = newPos
+            if !isSettlingSeek {
+                autoHideBox.liveCurrentTime = newPos
+                if hudVisible && abs(currentTime - newPos) > 0.05 {
+                    currentTime = newPos
+                }
             }
+            let livePos = autoHideBox.liveCurrentTime
             if isPlaying && hasRenderedFirstFrame && !didHandlePlaybackEnded && !isOpeningMedia {
-                if lastObservedPos < 0 || abs(newPos - lastObservedPos) > 0.04 {
-                    lastObservedPos = newPos
-                    lastObservedPosUptime = nowUptime
+                if autoHideBox.lastObservedPos < 0 || abs(newPos - autoHideBox.lastObservedPos) > 0.04 {
+                    autoHideBox.lastObservedPos = newPos
+                    autoHideBox.lastObservedPosUptime = nowUptime
                     if isWaitingForSeekOrBuffer {
                         withAnimation(.easeOut(duration: 0.14)) {
                             isWaitingForSeekOrBuffer = false
                         }
                     }
-                } else if (nowUptime - lastObservedPosUptime) >= 0.48 {
+                } else if (nowUptime - autoHideBox.lastObservedPosUptime) >= 0.48 {
                     if !isWaitingForSeekOrBuffer {
                         withAnimation(.easeIn(duration: 0.14)) {
                             isWaitingForSeekOrBuffer = true
@@ -500,7 +512,8 @@ public struct PlayerView: View {
                 isWaitingForSeekOrBuffer = false
             }
             let newBuffered = dk_player_get_buffered_duration(handle)
-            if abs(bufferedAheadSeconds - newBuffered) > 0.25 {
+            autoHideBox.liveBufferedAheadSeconds = newBuffered
+            if hudVisible && abs(bufferedAheadSeconds - newBuffered) > 0.25 {
                 bufferedAheadSeconds = newBuffered
             }
             let dur = dk_player_get_duration(handle)
@@ -535,12 +548,13 @@ public struct PlayerView: View {
             if pState == DK_STATE_ENDED && !didHandlePlaybackEnded {
                 didHandlePlaybackEnded = true
                 isPlaying = false
+                currentTime = livePos
                 finishedItemPendingCleanup = (currentItem.id, currentResource.mediaSource.id)
                 if session.server.type == .uhdNative && !session.server.accessToken.isEmpty {
                     let srv = session.server
                     let itm = currentItem
                     let assetId = currentResource.mediaSource.id
-                    let endPos = currentTime
+                    let endPos = livePos
                     Task {
                         await UHDStreamClient.shared.reportPlayback(server: srv, kind: .finished, item: itm, assetId: assetId, positionSeconds: endPos)
                     }
@@ -549,7 +563,7 @@ public struct PlayerView: View {
                     let itm = currentItem
                     let assetId = currentResource.mediaSource.id
                     let psId = currentResource.playSessionId
-                    let endPos = currentTime
+                    let endPos = livePos
                     Task {
                         await EmbyClient.shared.reportPlaybackStopped(
                             server: srv,
@@ -584,8 +598,8 @@ public struct PlayerView: View {
             // Stall health check & auto-recovery
             let healthEval = healthPolicy.evaluate(
                 now: Date().timeIntervalSinceReferenceDate,
-                position: currentTime,
-                bufferedAhead: bufferedAheadSeconds,
+                position: livePos,
+                bufferedAhead: newBuffered,
                 isPaused: !isPlaying,
                 isOpening: isOpeningMedia,
                 isEnded: didHandlePlaybackEnded,
@@ -596,9 +610,9 @@ public struct PlayerView: View {
             case .none, .progressed:
                 break
             case .recover:
-                DonbyLogger.shared.log("触发播放卡顿自动恢复 at \(String(format: "%.1fs", currentTime))", level: .warning, subsystem: "PlaybackHealth")
+                DonbyLogger.shared.log("触发播放卡顿自动恢复 at \(String(format: "%.1fs", livePos))", level: .warning, subsystem: "PlaybackHealth")
                 appState.showToast("缓冲停滞，正在自动重连当前位置...", icon: "arrow.clockwise")
-                startNativeKernelPlayback(startSeconds: currentTime)
+                startNativeKernelPlayback(startSeconds: livePos)
                 return
             case .fail(let reason):
                 isPlaying = false
@@ -612,8 +626,8 @@ public struct PlayerView: View {
             prefetchNextEpisodeIfNearEnd()
 
             // Update watch history periodically (every 5s) to avoid UI frame drops
-            if abs(currentTime - lastRecordedPosition) >= 5.0 {
-                lastRecordedPosition = currentTime
+            if abs(livePos - lastRecordedPosition) >= 5.0 {
+                lastRecordedPosition = livePos
                 saveCurrentWatchProgress(isFinal: false)
             }
         }
@@ -634,13 +648,13 @@ public struct PlayerView: View {
         }
         .onReceive(embySyncTimer) { _ in
             guard !session.server.host.isEmpty && !session.server.accessToken.isEmpty else { return }
+            let livePos = autoHideBox.liveCurrentTime
             if session.server.type == .uhdNative {
                 let srv = session.server
                 let itm = currentItem
                 let assetId = currentResource.mediaSource.id
-                let pos = currentTime
                 Task {
-                    await UHDStreamClient.shared.reportPlayback(server: srv, kind: .progress, item: itm, assetId: assetId, positionSeconds: pos)
+                    await UHDStreamClient.shared.reportPlayback(server: srv, kind: .progress, item: itm, assetId: assetId, positionSeconds: livePos)
                 }
             } else {
                 Task {
@@ -649,7 +663,7 @@ public struct PlayerView: View {
                         itemId: currentItem.id,
                         mediaSourceId: currentResource.mediaSource.id,
                         playSessionId: currentResource.playSessionId,
-                        positionSeconds: currentTime,
+                        positionSeconds: livePos,
                         isPaused: !isPlaying
                     )
                 }
@@ -698,6 +712,7 @@ public struct PlayerView: View {
                             .fill(Color.black.opacity(0.55))
                             .overlay(Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6))
                     )
+                    .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
                 .help("退出播放 (Esc)")
@@ -727,6 +742,8 @@ public struct PlayerView: View {
                 endPoint: .bottom
             )
         )
+        .contentShape(Rectangle())
+        .onTapGesture {}
     }
 
     private var midRightActionPill: some View {
@@ -858,11 +875,13 @@ public struct PlayerView: View {
             // Main single unified horizontal control bar
             HStack(spacing: 14) {
                 // Left controls: Previous, Rewind 10s, Play/Pause, Forward 10s, Next, Current Time
-                HStack(spacing: 14) {
+                HStack(spacing: 6) {
                     Button { playAdjacentEpisode(offset: -1) } label: {
                         Image(systemName: "backward.end.fill")
                             .font(.system(size: 15, weight: .semibold))
                             .foregroundStyle(session.episodesQueue.count > 1 ? .white : .white.opacity(0.35))
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .disabled(session.episodesQueue.count <= 1)
@@ -872,6 +891,8 @@ public struct PlayerView: View {
                         Image(systemName: "arrow.counterclockwise")
                             .font(.system(size: 16, weight: .bold))
                             .foregroundStyle(.white)
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help("快退 10 秒")
@@ -880,7 +901,8 @@ public struct PlayerView: View {
                         Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                             .font(.system(size: 19, weight: .bold))
                             .foregroundStyle(.white)
-                            .frame(width: 24, height: 24)
+                            .frame(width: 32, height: 28)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help(isPlaying ? "暂停 (空格)" : "播放 (空格)")
@@ -889,6 +911,8 @@ public struct PlayerView: View {
                         Image(systemName: "arrow.clockwise")
                             .font(.system(size: 16, weight: .bold))
                             .foregroundStyle(.white)
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help("快进 10 秒")
@@ -897,6 +921,8 @@ public struct PlayerView: View {
                         Image(systemName: "forward.end.fill")
                             .font(.system(size: 15, weight: .semibold))
                             .foregroundStyle(session.episodesQueue.count > 1 ? .white : .white.opacity(0.35))
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .disabled(session.episodesQueue.count <= 1)
@@ -906,6 +932,7 @@ public struct PlayerView: View {
                         .font(.system(size: 13, weight: .medium, design: .monospaced))
                         .foregroundStyle(.white)
                         .frame(minWidth: 46, alignment: .leading)
+                        .padding(.leading, 4)
                 }
 
                 // Center: sleek timeline scrubber
@@ -920,12 +947,13 @@ public struct PlayerView: View {
                 )
 
                 // Right controls: Duration, Volume Icon, Mini Volume Slider, 5 Circular Buttons
-                HStack(spacing: 12) {
+                HStack(spacing: 10) {
                     Button { showRemainingTime.toggle() } label: {
                         Text(showRemainingTime ? "-\(formatTime(max(0, duration - currentTime)))" : formatTime(duration))
                             .font(.system(size: 13, weight: .medium, design: .monospaced))
                             .foregroundStyle(.white)
-                            .frame(minWidth: 46, alignment: .trailing)
+                            .frame(minWidth: 48, minHeight: 28, alignment: .trailing)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help("切换显示总时长 / 剩余时长")
@@ -939,6 +967,8 @@ public struct PlayerView: View {
                         Image(systemName: isMuted || volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill")
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(.white)
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help(isMuted ? "取消静音" : "静音")
@@ -1011,6 +1041,8 @@ public struct PlayerView: View {
                     ),
                 alignment: .top
             )
+            .contentShape(Rectangle())
+            .onTapGesture {}
         }
     }
 
@@ -1391,181 +1423,322 @@ public struct PlayerView: View {
         return options
     }
 
-    private func rightDrawerPanel(tab: PlayerDrawerTab) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Picker("", selection: Binding(get: { tab }, set: { activeDrawer = $0 })) {
-                    ForEach(PlayerDrawerTab.allCases) { t in Text(t.rawValue).tag(t) }
-                }
-                .pickerStyle(.segmented)
+    private func drawerGlassCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            content()
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.white.opacity(0.055))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.09), lineWidth: 0.65)
+        )
+    }
 
-                Button { withAnimation(.easeInOut(duration: 0.18)) { activeDrawer = nil } } label: {
-                    Image(systemName: "xmark.circle.fill").font(.system(size: 16)).foregroundStyle(.secondary)
+    private func drawerRowBackground(isSelected: Bool) -> some View {
+        let fill: Color = {
+            if !isSelected { return Color.white.opacity(0.045) }
+            return appState.isMonochromeTheme ? Color.white.opacity(0.18) : appState.accentColor.opacity(0.24)
+        }()
+        let stroke: Color = {
+            if !isSelected { return Color.white.opacity(0.06) }
+            return appState.isMonochromeTheme ? Color.white.opacity(0.36) : appState.accentColor.opacity(0.68)
+        }()
+        return RoundedRectangle(cornerRadius: 9, style: .continuous)
+            .fill(fill)
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(stroke, lineWidth: isSelected ? 0.85 : 0.55)
+            )
+    }
+
+    private func drawerSelectedAccentTint() -> Color {
+        appState.isMonochromeTheme ? .white : appState.accentColor
+    }
+
+    private func drawerDelayStepButton(_ label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.90))
+                .frame(minWidth: 36, minHeight: 24)
+                .padding(.horizontal, 6)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(Color.white.opacity(0.10))
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.14), lineWidth: 0.6)
+                )
+                .contentShape(Capsule(style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func drawerSegmentedPill<T: Hashable & Identifiable>(
+        options: [T],
+        selection: T,
+        title: @escaping (T) -> String,
+        onSelect: @escaping (T) -> Void
+    ) -> some View {
+        HStack(spacing: 3) {
+            ForEach(options) { option in
+                let isSelected = (option == selection)
+                let labelText = title(option)
+                let fgColor: Color = isSelected ? .white : Color.white.opacity(0.62)
+                let fillColor: Color = isSelected ? Color.white.opacity(0.18) : .clear
+                let strokeColor: Color = isSelected ? Color.white.opacity(0.18) : .clear
+                Button {
+                    onSelect(option)
+                } label: {
+                    Text(labelText)
+                        .font(.system(size: 11.5, weight: isSelected ? .semibold : .medium))
+                        .foregroundStyle(fgColor)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .background(Capsule(style: .continuous).fill(fillColor))
+                        .overlay(Capsule(style: .continuous).strokeBorder(strokeColor, lineWidth: 0.6))
+                        .contentShape(Capsule(style: .continuous))
                 }
                 .buttonStyle(.plain)
             }
+        }
+        .padding(3)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.white.opacity(0.06))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(Color.white.opacity(0.09), lineWidth: 0.6)
+        )
+    }
 
-            Divider().opacity(0.2)
+    private func rightDrawerPanel(tab: PlayerDrawerTab) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            // Top Liquid Glass Drawer Header
+            HStack(spacing: 8) {
+                drawerSegmentedPill(
+                    options: PlayerDrawerTab.allCases,
+                    selection: tab,
+                    title: { $0.rawValue },
+                    onSelect: { nextTab in
+                        syncVisiblePlaybackStateFromBox()
+                        activeDrawer = nextTab
+                    }
+                )
 
-            ScrollView {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) { activeDrawer = nil }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.82))
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(Color.white.opacity(0.09)))
+                        .overlay(Circle().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.6))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("关闭面板")
+            }
+
+            Rectangle()
+                .fill(Color.white.opacity(0.10))
+                .frame(height: 0.6)
+
+            ScrollView(showsIndicators: false) {
                 switch tab {
                 case .playlist:
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 8) {
                         ForEach(Array(session.episodesQueue.enumerated()), id: \.offset) { _, ep in
                             let isCurrent = ep.id == currentItem.id
                             Button { switchToEpisode(ep) } label: {
                                 HStack(spacing: 10) {
                                     Image(systemName: isCurrent ? "play.circle.fill" : "film")
-                                        .foregroundStyle(isCurrent ? appState.accentColor : .secondary)
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(isCurrent ? drawerSelectedAccentTint() : .white.opacity(0.55))
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(ep.episodeCodeString != nil ? "\(ep.episodeCodeString!) · \(ep.name)" : ep.name)
-                                            .font(.system(size: 12.5, weight: isCurrent ? .bold : .medium))
+                                            .font(.system(size: 12.5, weight: isCurrent ? .semibold : .medium))
                                             .foregroundStyle(.white)
                                             .lineLimit(1)
                                         if let rt = ep.runtimeMinutesString {
-                                            Text(rt).font(.system(size: 11)).foregroundStyle(.white.opacity(0.6))
+                                            Text(rt).font(.system(size: 11)).foregroundStyle(.white.opacity(0.58))
                                         }
                                     }
                                     Spacer()
                                 }
-                                .padding(10)
-                                .background(isCurrent ? appState.accentColor.opacity(0.22) : Color.white.opacity(0.05))
-                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                                .padding(.horizontal, 11)
+                                .padding(.vertical, 9)
+                                .background(drawerRowBackground(isSelected: isCurrent))
+                                .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                             }
                             .buttonStyle(.plain)
                         }
                     }
 
                 case .tracks:
-                    VStack(alignment: .leading, spacing: 14) {
-                        Picker("", selection: $tracksDrawerSection) {
-                            ForEach(TracksDrawerSection.allCases) { sec in
-                                Text(sec.rawValue).tag(sec)
-                            }
-                        }
-                        .pickerStyle(.segmented)
+                    VStack(alignment: .leading, spacing: 12) {
+                        drawerSegmentedPill(
+                            options: TracksDrawerSection.allCases,
+                            selection: tracksDrawerSection,
+                            title: { $0.rawValue },
+                            onSelect: { tracksDrawerSection = $0 }
+                        )
 
                         if tracksDrawerSection == .tracks {
                             let audioOptions = resolvedAudioOptions
                             let subOptions = resolvedSubtitleOptions
 
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("音频轨道").font(.system(size: 11.5, weight: .bold)).foregroundStyle(.secondary)
-                                if audioOptions.isEmpty {
-                                    Text("未检测到可用音轨").font(.system(size: 12)).foregroundStyle(.secondary)
-                                }
-                                ForEach(audioOptions) { option in
-                                    let isSel = (activeAudioAVIndex == option.avStreamIndex)
-                                    Button {
-                                        selectAudioOption(option)
-                                    } label: {
-                                        HStack(spacing: 8) {
-                                            Image(systemName: isSel ? "checkmark.circle.fill" : "circle")
-                                                .font(.system(size: 12))
-                                                .foregroundStyle(isSel ? .white : .secondary)
-                                            Text(option.label)
-                                                .font(.system(size: 12, weight: isSel ? .semibold : .regular))
-                                                .foregroundStyle(.white)
-                                                .lineLimit(1)
-                                            Spacer()
-                                        }
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 7)
-                                        .background(
-                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                .fill(isSel ? appState.accentColor.opacity(0.85) : Color.white.opacity(0.05))
-                                        )
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-
-                            Divider().opacity(0.18)
-
-                            VStack(alignment: .leading, spacing: 6) {
+                            drawerGlassCard {
                                 HStack {
-                                    Text("主字幕").font(.system(size: 11.5, weight: .bold)).foregroundStyle(.secondary)
+                                    Label("音频轨道", systemImage: "waveform")
+                                        .font(.system(size: 11.5, weight: .semibold))
+                                        .foregroundStyle(.white.opacity(0.68))
                                     Spacer()
-                                    Button("加载本地...") {
-                                        promptLocalExternalSubtitleFile(asSecondary: false)
+                                    if !audioOptions.isEmpty {
+                                        Text("\(audioOptions.count)")
+                                            .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                                            .foregroundStyle(.white.opacity(0.45))
                                     }
-                                    .font(.system(size: 11, weight: .medium))
-                                    .buttonStyle(.plain)
-                                    .foregroundStyle(appState.accentColor)
                                 }
 
-                                Button {
-                                    disableSubtitles(showFeedback: true)
-                                } label: {
-                                    let isOff = (activeSubtitleSelection == .off)
-                                    HStack(spacing: 8) {
-                                        Image(systemName: isOff ? "checkmark.circle.fill" : "circle")
-                                            .font(.system(size: 12))
-                                            .foregroundStyle(isOff ? .white : .secondary)
-                                        Text("关闭字幕").font(.system(size: 12, weight: isOff ? .semibold : .regular)).foregroundStyle(.white)
-                                        Spacer()
-                                    }
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 7)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                            .fill(isOff ? appState.accentColor.opacity(0.85) : Color.white.opacity(0.05))
-                                    )
-                                }
-                                .buttonStyle(.plain)
-
-                                ForEach(subOptions) { option in
-                                    let isSel = (activeSubtitleSelection == option.selection)
-                                    Button {
-                                        selectSubtitleOption(option)
-                                    } label: {
-                                        HStack(spacing: 8) {
-                                            Image(systemName: isSel ? "checkmark.circle.fill" : "circle")
-                                                .font(.system(size: 12))
-                                                .foregroundStyle(isSel ? .white : .secondary)
-                                            Text(option.label)
-                                                .font(.system(size: 12, weight: isSel ? .semibold : .regular))
-                                                .foregroundStyle(.white)
-                                                .lineLimit(1)
-                                            Spacer()
-                                            if let badge = option.badge, !badge.isEmpty {
-                                                Text(badge)
-                                                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
-                                                    .foregroundStyle(.white.opacity(0.85))
-                                                    .padding(.horizontal, 6)
-                                                    .padding(.vertical, 2)
-                                                    .background(Color.white.opacity(0.14))
-                                                    .clipShape(Capsule())
+                                if audioOptions.isEmpty {
+                                    Text("未检测到可用音轨")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.white.opacity(0.48))
+                                        .padding(.vertical, 2)
+                                } else {
+                                    VStack(spacing: 6) {
+                                        ForEach(audioOptions) { option in
+                                            let isSel = (activeAudioAVIndex == option.avStreamIndex)
+                                            Button {
+                                                selectAudioOption(option)
+                                            } label: {
+                                                HStack(spacing: 8) {
+                                                    Image(systemName: isSel ? "checkmark.circle.fill" : "circle")
+                                                        .font(.system(size: 12.5, weight: .semibold))
+                                                        .foregroundStyle(isSel ? drawerSelectedAccentTint() : .white.opacity(0.40))
+                                                    Text(option.label)
+                                                        .font(.system(size: 12, weight: isSel ? .semibold : .regular))
+                                                        .foregroundStyle(.white)
+                                                        .lineLimit(1)
+                                                    Spacer()
+                                                }
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 8)
+                                                .background(drawerRowBackground(isSelected: isSel))
+                                                .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                                             }
+                                            .buttonStyle(.plain)
                                         }
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 7)
-                                        .background(
-                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                .fill(isSel ? appState.accentColor.opacity(0.85) : Color.white.opacity(0.05))
-                                        )
                                     }
-                                    .buttonStyle(.plain)
                                 }
                             }
 
-                            Divider().opacity(0.18)
+                            drawerGlassCard {
+                                HStack {
+                                    Label("主字幕", systemImage: "captions.bubble.fill")
+                                        .font(.system(size: 11.5, weight: .semibold))
+                                        .foregroundStyle(.white.opacity(0.68))
+                                    Spacer()
+                                    Button {
+                                        promptLocalExternalSubtitleFile(asSecondary: false)
+                                    } label: {
+                                        Text("加载本地...")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(drawerSelectedAccentTint())
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 3)
+                                            .background(Capsule().fill(Color.white.opacity(0.08)))
+                                            .contentShape(Capsule())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
 
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("双语副字幕").font(.system(size: 11.5, weight: .bold)).foregroundStyle(.secondary)
+                                VStack(spacing: 6) {
+                                    Button {
+                                        disableSubtitles(showFeedback: true)
+                                    } label: {
+                                        let isOff = (activeSubtitleSelection == .off)
+                                        HStack(spacing: 8) {
+                                            Image(systemName: isOff ? "checkmark.circle.fill" : "circle")
+                                                .font(.system(size: 12.5, weight: .semibold))
+                                                .foregroundStyle(isOff ? drawerSelectedAccentTint() : .white.opacity(0.40))
+                                            Text("关闭字幕")
+                                                .font(.system(size: 12, weight: isOff ? .semibold : .regular))
+                                                .foregroundStyle(.white)
+                                            Spacer()
+                                        }
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 8)
+                                        .background(drawerRowBackground(isSelected: isOff))
+                                        .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                    }
+                                    .buttonStyle(.plain)
+
+                                    ForEach(subOptions) { option in
+                                        let isSel = (activeSubtitleSelection == option.selection)
+                                        Button {
+                                            selectSubtitleOption(option)
+                                        } label: {
+                                            HStack(spacing: 8) {
+                                                Image(systemName: isSel ? "checkmark.circle.fill" : "circle")
+                                                    .font(.system(size: 12.5, weight: .semibold))
+                                                    .foregroundStyle(isSel ? drawerSelectedAccentTint() : .white.opacity(0.40))
+                                                Text(option.label)
+                                                    .font(.system(size: 12, weight: isSel ? .semibold : .regular))
+                                                    .foregroundStyle(.white)
+                                                    .lineLimit(1)
+                                                Spacer()
+                                                if let badge = option.badge, !badge.isEmpty {
+                                                    Text(badge)
+                                                        .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                                                        .foregroundStyle(.white.opacity(0.88))
+                                                        .padding(.horizontal, 6)
+                                                        .padding(.vertical, 2)
+                                                        .background(Capsule().fill(Color.white.opacity(0.14)))
+                                                }
+                                            }
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 8)
+                                            .background(drawerRowBackground(isSelected: isSel))
+                                            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                            }
+
+                            drawerGlassCard {
+                                Label("双语副字幕", systemImage: "text.bubble")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(0.68))
+
                                 ZStack {
-                                    HStack {
+                                    HStack(spacing: 8) {
                                         Image(systemName: "captions.bubble")
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(activeSecondarySubtitleSelection == .off ? .white.opacity(0.55) : drawerSelectedAccentTint())
                                         Text(secondarySubtitleStatusTitle(options: subOptions))
                                             .font(.system(size: 12, weight: .medium))
+                                            .foregroundStyle(.white)
                                             .lineLimit(1)
                                         Spacer()
-                                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 10))
+                                        Image(systemName: "chevron.up.chevron.down")
+                                            .font(.system(size: 10, weight: .semibold))
+                                            .foregroundStyle(.white.opacity(0.55))
                                     }
-                                    .foregroundStyle(.white)
-                                    .padding(9)
-                                    .background(Color.white.opacity(0.06))
-                                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                    .padding(.horizontal, 11)
+                                    .padding(.vertical, 9)
+                                    .background(drawerRowBackground(isSelected: activeSecondarySubtitleSelection != .off))
                                     .allowsHitTesting(false)
                                 }
                                 .overlay {
@@ -1578,71 +1751,102 @@ public struct PlayerView: View {
                                         Divider()
                                         Button("加载本地副字幕文件...") { promptLocalExternalSubtitleFile(asSecondary: true) }
                                     } label: {
-                                        Color.white.opacity(0.0001)
+                                        Color.clear
                                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                                             .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                                     }
+                                    .menuStyle(.button)
                                     .buttonStyle(.plain)
-                                    .menuStyle(.borderlessButton)
                                     .menuIndicator(.hidden)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                    .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                                 }
                             }
                         } else {
-                            // Clean, compact "样式与对齐" view (fits without scrolling!)
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text("对齐与延迟").font(.system(size: 11.5, weight: .bold)).foregroundStyle(.secondary)
+                            // 样式与对齐 — Liquid Glass card stack
+                            drawerGlassCard {
+                                Label("智能对齐与延迟", systemImage: "waveform.badge.magnifyingglass")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(0.68))
 
-                                HStack(spacing: 6) {
+                                HStack(spacing: 7) {
+                                    let audioAlignDisabled = (activeSubtitleSelection == .off || isAutoAligningSubtitle || playerHandle == nil)
                                     Button {
                                         runAutoAlignAudioToSubtitle()
                                     } label: {
-                                        HStack(spacing: 4) {
+                                        HStack(spacing: 5) {
                                             if isAutoAligningSubtitle {
                                                 ProgressView().controlSize(.mini)
                                             } else {
-                                                Image(systemName: "waveform.badge.magnifyingglass")
+                                                Image(systemName: "waveform")
+                                                    .font(.system(size: 11, weight: .semibold))
                                             }
                                             Text("字音对齐")
                                         }
-                                        .font(.system(size: 11.5, weight: .medium))
-                                        .foregroundStyle(.white)
+                                        .font(.system(size: 11.5, weight: .semibold))
+                                        .foregroundStyle(.white.opacity(audioAlignDisabled ? 0.42 : 0.95))
                                         .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 7)
-                                        .background(Color.white.opacity(activeSubtitleSelection == .off ? 0.04 : 0.12))
-                                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                        .padding(.vertical, 8)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                                .fill(Color.white.opacity(audioAlignDisabled ? 0.04 : 0.12))
+                                        )
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                                .strokeBorder(Color.white.opacity(audioAlignDisabled ? 0.05 : 0.14), lineWidth: 0.65)
+                                        )
+                                        .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                                     }
                                     .buttonStyle(.plain)
-                                    .disabled(activeSubtitleSelection == .off || isAutoAligningSubtitle || playerHandle == nil)
+                                    .disabled(audioAlignDisabled)
                                     .help("以音轨为基准，通过 Silero VAD 自动校准字幕时间轴")
 
+                                    let dualAlignDisabled = (activeSubtitleSelection == .off || activeSecondarySubtitleSelection == .off || isAutoAligningSubtitle || playerHandle == nil)
                                     Button {
                                         runAutoAlignDualSubtitles()
                                     } label: {
-                                        HStack(spacing: 4) {
+                                        HStack(spacing: 5) {
                                             Image(systemName: "arrow.left.arrow.right")
+                                                .font(.system(size: 10.5, weight: .semibold))
                                             Text("双字对齐")
                                         }
-                                        .font(.system(size: 11.5, weight: .medium))
-                                        .foregroundStyle(.white)
+                                        .font(.system(size: 11.5, weight: .semibold))
+                                        .foregroundStyle(.white.opacity(dualAlignDisabled ? 0.42 : 0.95))
                                         .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 7)
-                                        .background(Color.white.opacity((activeSubtitleSelection == .off || activeSecondarySubtitleSelection == .off) ? 0.04 : 0.12))
-                                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                        .padding(.vertical, 8)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                                .fill(Color.white.opacity(dualAlignDisabled ? 0.04 : 0.12))
+                                        )
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                                .strokeBorder(Color.white.opacity(dualAlignDisabled ? 0.05 : 0.14), lineWidth: 0.65)
+                                        )
+                                        .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                                     }
                                     .buttonStyle(.plain)
-                                    .disabled(activeSubtitleSelection == .off || activeSecondarySubtitleSelection == .off || isAutoAligningSubtitle || playerHandle == nil)
+                                    .disabled(dualAlignDisabled)
                                     .help("对齐主/副字幕偏移及 23.976/25fps 帧率漂移（自动校验音轨基准）")
 
                                     if lastSubtitleAlignUndo != nil {
-                                        Button("撤销") {
+                                        Button {
                                             undoLastSubtitleAlignment()
+                                        } label: {
+                                            Text("撤销")
+                                                .font(.system(size: 11.5, weight: .semibold))
+                                                .foregroundStyle(drawerSelectedAccentTint())
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 8)
+                                                .background(
+                                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                                        .fill(Color.white.opacity(0.08))
+                                                )
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                                        .strokeBorder(Color.white.opacity(0.14), lineWidth: 0.65)
+                                                )
+                                                .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                                         }
-                                        .font(.system(size: 11, weight: .medium))
-                                        .foregroundStyle(appState.accentColor)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 7)
-                                        .background(Color.white.opacity(0.08))
-                                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                                         .buttonStyle(.plain)
                                     }
                                 }
@@ -1651,61 +1855,77 @@ public struct PlayerView: View {
                                     HStack(spacing: 6) {
                                         Text(summary)
                                             .font(.system(size: 10.5))
-                                            .foregroundStyle(.white.opacity(0.70))
+                                            .foregroundStyle(.white.opacity(0.68))
                                             .lineLimit(2)
                                         Spacer()
                                         if abs(secondarySubtitleTimeScale - 1.0) > 5e-4 {
-                                            Button("重置速率") {
+                                            Button {
                                                 resetSecondarySubtitleTimeScale()
+                                            } label: {
+                                                Text("重置速率")
+                                                    .font(.system(size: 10.5, weight: .semibold))
+                                                    .foregroundStyle(drawerSelectedAccentTint())
+                                                    .padding(.horizontal, 6)
+                                                    .padding(.vertical, 3)
+                                                    .contentShape(Capsule())
                                             }
-                                            .font(.system(size: 10, weight: .medium))
                                             .buttonStyle(.plain)
-                                            .foregroundStyle(appState.accentColor)
                                         }
                                     }
                                 }
 
-                                HStack(spacing: 6) {
-                                    Text("主延迟 \(Self.formatSubtitleDelay(appState.subtitleStyle.primaryDelaySeconds))")
+                                HStack(spacing: 5) {
+                                    Text("主延迟")
                                         .font(.system(size: 11.5, weight: .medium))
-                                        .foregroundStyle(.white.opacity(0.9))
+                                        .foregroundStyle(.white.opacity(0.86))
+                                    Text(Self.formatSubtitleDelay(appState.subtitleStyle.primaryDelaySeconds))
+                                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                        .foregroundStyle(.white.opacity(0.65))
                                     Spacer()
-                                    Button("-0.5s") { appState.subtitleStyle.primaryDelaySeconds = max(-120, appState.subtitleStyle.primaryDelaySeconds - 0.5) }.controlSize(.mini)
-                                    Button("0") { appState.subtitleStyle.primaryDelaySeconds = 0 }.controlSize(.mini)
-                                    Button("+0.5s") { appState.subtitleStyle.primaryDelaySeconds = min(120, appState.subtitleStyle.primaryDelaySeconds + 0.5) }.controlSize(.mini)
+                                    drawerDelayStepButton("-0.5s") { appState.subtitleStyle.primaryDelaySeconds = max(-120, appState.subtitleStyle.primaryDelaySeconds - 0.5) }
+                                    drawerDelayStepButton("0") { appState.subtitleStyle.primaryDelaySeconds = 0 }
+                                    drawerDelayStepButton("+0.5s") { appState.subtitleStyle.primaryDelaySeconds = min(120, appState.subtitleStyle.primaryDelaySeconds + 0.5) }
                                 }
 
                                 if activeSecondarySubtitleSelection != .off {
-                                    HStack(spacing: 6) {
-                                        Text("副延迟 \(Self.formatSubtitleDelay(appState.subtitleStyle.secondaryDelaySeconds))")
+                                    HStack(spacing: 5) {
+                                        Text("副延迟")
                                             .font(.system(size: 11.5, weight: .medium))
-                                            .foregroundStyle(.white.opacity(0.8))
+                                            .foregroundStyle(.white.opacity(0.80))
+                                        Text(Self.formatSubtitleDelay(appState.subtitleStyle.secondaryDelaySeconds))
+                                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                            .foregroundStyle(.white.opacity(0.62))
                                         Spacer()
-                                        Button("-0.5s") { appState.subtitleStyle.secondaryDelaySeconds = max(-120, appState.subtitleStyle.secondaryDelaySeconds - 0.5) }.controlSize(.mini)
-                                        Button("0") { appState.subtitleStyle.secondaryDelaySeconds = 0 }.controlSize(.mini)
-                                        Button("+0.5s") { appState.subtitleStyle.secondaryDelaySeconds = min(120, appState.subtitleStyle.secondaryDelaySeconds + 0.5) }.controlSize(.mini)
+                                        drawerDelayStepButton("-0.5s") { appState.subtitleStyle.secondaryDelaySeconds = max(-120, appState.subtitleStyle.secondaryDelaySeconds - 0.5) }
+                                        drawerDelayStepButton("0") { appState.subtitleStyle.secondaryDelaySeconds = 0 }
+                                        drawerDelayStepButton("+0.5s") { appState.subtitleStyle.secondaryDelaySeconds = min(120, appState.subtitleStyle.secondaryDelaySeconds + 0.5) }
                                     }
                                 }
                             }
-                            .padding(10)
-                            .background(Color.white.opacity(0.05))
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-                            VStack(alignment: .leading, spacing: 10) {
+                            drawerGlassCard {
                                 HStack {
-                                    Text("基础样式").font(.system(size: 11.5, weight: .bold)).foregroundStyle(.secondary)
+                                    Label("基础样式", systemImage: "textformat.size")
+                                        .font(.system(size: 11.5, weight: .semibold))
+                                        .foregroundStyle(.white.opacity(0.68))
                                     Spacer()
-                                    Button("恢复默认") {
+                                    Button {
                                         let prevDelay1 = appState.subtitleStyle.primaryDelaySeconds
                                         let prevDelay2 = appState.subtitleStyle.secondaryDelaySeconds
                                         var fresh = SubtitleStyleConfiguration()
                                         fresh.primaryDelaySeconds = prevDelay1
                                         fresh.secondaryDelaySeconds = prevDelay2
                                         appState.subtitleStyle = fresh
+                                    } label: {
+                                        Text("恢复默认")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(drawerSelectedAccentTint())
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 3)
+                                            .background(Capsule().fill(Color.white.opacity(0.08)))
+                                            .contentShape(Capsule())
                                     }
-                                    .font(.system(size: 10.5, weight: .medium))
                                     .buttonStyle(.plain)
-                                    .foregroundStyle(appState.accentColor)
                                 }
 
                                 VStack(alignment: .leading, spacing: 4) {
@@ -1714,10 +1934,17 @@ public struct PlayerView: View {
                                         Spacer()
                                         Text(String(format: "%.2fx", appState.subtitleStyle.scale))
                                             .font(.system(size: 11, design: .monospaced))
-                                            .foregroundStyle(.white.opacity(0.75))
+                                            .foregroundStyle(.white.opacity(0.72))
                                         if abs(appState.subtitleStyle.scale - 1.0) > 0.01 {
-                                            Button("重置") { appState.subtitleStyle.scale = 1.0 }
-                                                .font(.system(size: 10.5)).buttonStyle(.plain).foregroundStyle(appState.accentColor)
+                                            Button { appState.subtitleStyle.scale = 1.0 } label: {
+                                                Text("重置")
+                                                    .font(.system(size: 10.5, weight: .semibold))
+                                                    .foregroundStyle(drawerSelectedAccentTint())
+                                                    .padding(.horizontal, 4)
+                                                    .padding(.vertical, 2)
+                                                    .contentShape(Rectangle())
+                                            }
+                                            .buttonStyle(.plain)
                                         }
                                     }
                                     Slider(
@@ -1728,6 +1955,7 @@ public struct PlayerView: View {
                                             withAnimation(.easeInOut(duration: 0.15)) { isAdjustingSubtitleLayout = editing }
                                         }
                                     )
+                                    .tint(drawerSelectedAccentTint())
                                 }
 
                                 VStack(alignment: .leading, spacing: 4) {
@@ -1736,10 +1964,17 @@ public struct PlayerView: View {
                                         Spacer()
                                         Text("\(Int(appState.subtitleStyle.verticalPositionPercent))%")
                                             .font(.system(size: 11, design: .monospaced))
-                                            .foregroundStyle(.white.opacity(0.75))
+                                            .foregroundStyle(.white.opacity(0.72))
                                         if abs(appState.subtitleStyle.verticalPositionPercent - 92.0) > 0.5 {
-                                            Button("重置") { appState.subtitleStyle.verticalPositionPercent = 92.0 }
-                                                .font(.system(size: 10.5)).buttonStyle(.plain).foregroundStyle(appState.accentColor)
+                                            Button { appState.subtitleStyle.verticalPositionPercent = 92.0 } label: {
+                                                Text("重置")
+                                                    .font(.system(size: 10.5, weight: .semibold))
+                                                    .foregroundStyle(drawerSelectedAccentTint())
+                                                    .padding(.horizontal, 4)
+                                                    .padding(.vertical, 2)
+                                                    .contentShape(Rectangle())
+                                            }
+                                            .buttonStyle(.plain)
                                         }
                                     }
                                     Slider(
@@ -1750,110 +1985,200 @@ public struct PlayerView: View {
                                             withAnimation(.easeInOut(duration: 0.15)) { isAdjustingSubtitleLayout = editing }
                                         }
                                     )
+                                    .tint(drawerSelectedAccentTint())
                                 }
 
-                                Picker("简繁转换", selection: $appState.subtitleStyle.transform) {
-                                    ForEach(SubtitleTextTransform.allCases) { tf in
-                                        Text(tf.shortTitle).tag(tf)
-                                    }
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("简繁转换")
+                                        .font(.system(size: 11.5, weight: .medium))
+                                        .foregroundStyle(.white.opacity(0.86))
+                                    drawerSegmentedPill(
+                                        options: SubtitleTextTransform.allCases,
+                                        selection: appState.subtitleStyle.transform,
+                                        title: { $0.shortTitle },
+                                        onSelect: { appState.subtitleStyle.transform = $0 }
+                                    )
                                 }
-                                .pickerStyle(.segmented)
                             }
-                            .padding(10)
-                            .background(Color.white.opacity(0.05))
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-                            DisclosureGroup("高级外观", isExpanded: $showMoreSubtitleOptions) {
-                                VStack(alignment: .leading, spacing: 10) {
-                                    Toggle("统一苹方与影院双语配对", isOn: $appState.subtitleStyle.unifyPingFangFont)
-                                    Toggle("外语经典橙金增强", isOn: $appState.subtitleStyle.enhanceSecondaryYellow)
+                            drawerGlassCard {
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.18)) {
+                                        showMoreSubtitleOptions.toggle()
+                                    }
+                                } label: {
+                                    HStack {
+                                        Label("高级外观", systemImage: "slider.horizontal.3")
+                                            .font(.system(size: 11.5, weight: .semibold))
+                                            .foregroundStyle(.white.opacity(0.84))
+                                        Spacer()
+                                        Image(systemName: "chevron.right")
+                                            .font(.system(size: 10, weight: .bold))
+                                            .foregroundStyle(.white.opacity(0.55))
+                                            .rotationEffect(.degrees(showMoreSubtitleOptions ? 90 : 0))
+                                    }
+                                    .padding(.vertical, 2)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
 
-                                    VStack(alignment: .leading, spacing: 4) {
+                                if showMoreSubtitleOptions {
+                                    VStack(alignment: .leading, spacing: 10) {
+                                        Toggle("统一苹方与影院双语配对", isOn: $appState.subtitleStyle.unifyPingFangFont)
+                                        Toggle("外语经典橙金增强", isOn: $appState.subtitleStyle.enhanceSecondaryYellow)
+
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            HStack {
+                                                Text(String(format: "外语副行比例 %.2fx", appState.subtitleStyle.secondaryScale))
+                                                    .font(.system(size: 11)).foregroundStyle(.white.opacity(0.82))
+                                                Spacer()
+                                                if abs(appState.subtitleStyle.secondaryScale - 0.60) > 0.01 {
+                                                    Button { appState.subtitleStyle.secondaryScale = 0.60 } label: {
+                                                        Text("重置")
+                                                            .font(.system(size: 10.5, weight: .semibold))
+                                                            .foregroundStyle(drawerSelectedAccentTint())
+                                                            .padding(.horizontal, 4)
+                                                            .padding(.vertical, 2)
+                                                            .contentShape(Rectangle())
+                                                    }
+                                                    .buttonStyle(.plain)
+                                                }
+                                            }
+                                            Slider(
+                                                value: $appState.subtitleStyle.secondaryScale,
+                                                in: 0.45...0.90,
+                                                step: 0.02,
+                                                onEditingChanged: { editing in
+                                                    withAnimation(.easeInOut(duration: 0.15)) { isAdjustingSubtitleLayout = editing }
+                                                }
+                                            )
+                                            .tint(drawerSelectedAccentTint())
+                                        }
+
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(String(format: "双语行间距 %.0f px", appState.subtitleStyle.dualSubtitleGapPx))
+                                                .font(.system(size: 11)).foregroundStyle(.white.opacity(0.82))
+                                            Slider(
+                                                value: $appState.subtitleStyle.dualSubtitleGapPx,
+                                                in: 2...20,
+                                                step: 1,
+                                                onEditingChanged: { editing in
+                                                    withAnimation(.easeInOut(duration: 0.15)) { isAdjustingSubtitleLayout = editing }
+                                                }
+                                            )
+                                            .tint(drawerSelectedAccentTint())
+                                        }
+
+                                        VStack(alignment: .leading, spacing: 6) {
+                                            Text("双语排版")
+                                                .font(.system(size: 11)).foregroundStyle(.white.opacity(0.82))
+                                            HStack(spacing: 3) {
+                                                ForEach([(0, "底部语义配对"), (1, "主底副顶分离")], id: \.0) { mode, label in
+                                                    let isSel = (appState.subtitleStyle.dualLayoutMode == mode)
+                                                    Button {
+                                                        appState.subtitleStyle.dualLayoutMode = mode
+                                                    } label: {
+                                                        Text(label)
+                                                            .font(.system(size: 11, weight: isSel ? .semibold : .medium))
+                                                            .foregroundStyle(isSel ? .white : .white.opacity(0.62))
+                                                            .frame(maxWidth: .infinity)
+                                                            .padding(.vertical, 5.5)
+                                                            .background(Capsule().fill(isSel ? Color.white.opacity(0.18) : Color.clear))
+                                                            .contentShape(Capsule())
+                                                    }
+                                                    .buttonStyle(.plain)
+                                                }
+                                            }
+                                            .padding(3)
+                                            .background(Capsule().fill(Color.white.opacity(0.06)))
+                                        }
+
+                                        if appState.subtitleStyle.dualLayoutMode == 0 {
+                                            Toggle("主字幕在上、副字幕在下", isOn: $appState.subtitleStyle.primaryOnTop)
+                                        }
+
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(String(format: "描边宽度 %.1f", appState.subtitleStyle.borderWidth))
+                                                .font(.system(size: 11)).foregroundStyle(.white.opacity(0.82))
+                                            Slider(value: $appState.subtitleStyle.borderWidth, in: 0...6, step: 0.25)
+                                                .tint(drawerSelectedAccentTint())
+                                        }
+
                                         HStack {
-                                            Text(String(format: "外语副行比例 %.2fx", appState.subtitleStyle.secondaryScale))
-                                                .font(.system(size: 11)).foregroundStyle(.white.opacity(0.8))
+                                            Text("HDR 亮度")
+                                                .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.86))
                                             Spacer()
-                                            if abs(appState.subtitleStyle.secondaryScale - 0.60) > 0.01 {
-                                                Button("重置") { appState.subtitleStyle.secondaryScale = 0.60 }
-                                                    .font(.system(size: 10)).buttonStyle(.plain).foregroundStyle(appState.accentColor)
+                                            ZStack {
+                                                HStack(spacing: 5) {
+                                                    Text(appState.subtitleStyle.hdrPeakNits.title)
+                                                        .font(.system(size: 11, weight: .semibold))
+                                                        .foregroundStyle(.white)
+                                                    Image(systemName: "chevron.up.chevron.down")
+                                                        .font(.system(size: 9, weight: .semibold))
+                                                        .foregroundStyle(.white.opacity(0.6))
+                                                }
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 5)
+                                                .background(Capsule().fill(Color.white.opacity(0.10)))
+                                                .overlay(Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.6))
+                                                .allowsHitTesting(false)
+                                            }
+                                            .overlay {
+                                                Menu {
+                                                    ForEach(SubtitleHDRPeakNits.allCases) { nits in
+                                                        Button {
+                                                            appState.subtitleStyle.hdrPeakNits = nits
+                                                        } label: {
+                                                            if appState.subtitleStyle.hdrPeakNits == nits {
+                                                                Label(nits.title, systemImage: "checkmark")
+                                                            } else {
+                                                                Text(nits.title)
+                                                            }
+                                                        }
+                                                    }
+                                                } label: {
+                                                    Color.clear
+                                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                                        .contentShape(Capsule())
+                                                }
+                                                .menuStyle(.button)
+                                                .buttonStyle(.plain)
+                                                .menuIndicator(.hidden)
+                                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                                .contentShape(Capsule())
                                             }
                                         }
-                                        Slider(
-                                            value: $appState.subtitleStyle.secondaryScale,
-                                            in: 0.45...0.90,
-                                            step: 0.02,
-                                            onEditingChanged: { editing in
-                                                withAnimation(.easeInOut(duration: 0.15)) { isAdjustingSubtitleLayout = editing }
-                                            }
-                                        )
-                                    }
 
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(String(format: "双语行间距 %.0f px", appState.subtitleStyle.dualSubtitleGapPx))
-                                            .font(.system(size: 11)).foregroundStyle(.white.opacity(0.8))
-                                        Slider(
-                                            value: $appState.subtitleStyle.dualSubtitleGapPx,
-                                            in: 2...20,
-                                            step: 1,
-                                            onEditingChanged: { editing in
-                                                withAnimation(.easeInOut(duration: 0.15)) { isAdjustingSubtitleLayout = editing }
-                                            }
-                                        )
+                                        Toggle("完全覆盖内封 ASS 样式", isOn: $appState.subtitleStyle.overrideASSStyle)
+                                        Toggle("仅保留强制字幕 (Forced)", isOn: $appState.subtitleStyle.forcedOnly)
+                                        Toggle("控制栏显示时上移字幕", isOn: $appState.subtitleStyle.antiOcclusionEnabled)
                                     }
-
-                                    Picker("双语排版", selection: $appState.subtitleStyle.dualLayoutMode) {
-                                        Text("底部语义配对").tag(0)
-                                        Text("主底副顶分离").tag(1)
-                                    }
-                                    .pickerStyle(.segmented)
-
-                                    if appState.subtitleStyle.dualLayoutMode == 0 {
-                                        Toggle("主字幕在上、副字幕在下", isOn: $appState.subtitleStyle.primaryOnTop)
-                                    }
-
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(String(format: "描边宽度 %.1f", appState.subtitleStyle.borderWidth))
-                                            .font(.system(size: 11)).foregroundStyle(.white.opacity(0.8))
-                                        Slider(value: $appState.subtitleStyle.borderWidth, in: 0...6, step: 0.25)
-                                    }
-
-                                    Picker("HDR 亮度", selection: $appState.subtitleStyle.hdrPeakNits) {
-                                        ForEach(SubtitleHDRPeakNits.allCases) { nits in
-                                            Text(nits.title).tag(nits)
-                                        }
-                                    }
-                                    .pickerStyle(.menu)
-
-                                    Toggle("完全覆盖内封 ASS 样式", isOn: $appState.subtitleStyle.overrideASSStyle)
-                                    Toggle("仅保留强制字幕 (Forced)", isOn: $appState.subtitleStyle.forcedOnly)
-                                    Toggle("控制栏显示时上移字幕", isOn: $appState.subtitleStyle.antiOcclusionEnabled)
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(.white.opacity(0.88))
+                                    .toggleStyle(.switch)
+                                    .controlSize(.mini)
+                                    .tint(drawerSelectedAccentTint())
+                                    .padding(.top, 4)
                                 }
-                                .font(.system(size: 11.5))
-                                .padding(.top, 8)
                             }
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.85))
-                            .padding(10)
-                            .background(Color.white.opacity(0.04))
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         }
                     }
 
                 case .mediaInfo:
                     VStack(alignment: .leading, spacing: 10) {
-                        osdInfoRow("解码方式", kernelStats.is_hw_accelerated ? "硬件解码" : "软件解码")
-                        osdInfoRow("动态范围", kernelStats.is_dolby_vision ? "Dolby Vision" : (kernelStats.is_hdr ? "HDR10" : "SDR"))
-                        osdInfoRow("当前速率", String(format: "%.1f MB/s", max(0.0, displayDownloadSpeedMBs)))
-                        osdInfoRow("缓冲时长", String(format: "+%.1f 秒", bufferedAheadSeconds))
-                        osdInfoRow("预读缓存", "\(kernelStats.cached_bytes / 1024 / 1024) MB")
-                        osdInfoRow("加载方式", activeTurboHandle != nil ? "多线程并发 (\(appState.effectiveConnectionBudget(for: session.server)) 线程)" : "顺序读取")
-                        osdInfoRow("分辨率", "\(kernelStats.width) × \(kernelStats.height)")
-                        osdInfoRow("帧率", String(format: "%.3f fps", kernelStats.fps))
-                        osdInfoRow("视频编码", Self.cString(from: kernelStats.video_codec))
-                        osdInfoRow("音频编码", Self.cString(from: kernelStats.audio_codec))
-                        osdInfoRow("播放线路", session.server.activeLineName)
-
-                        Divider().opacity(0.2).padding(.vertical, 4)
+                        drawerGlassCard {
+                            osdInfoRow("解码方式", kernelStats.is_hw_accelerated ? "硬件解码" : "软件解码")
+                            osdInfoRow("动态范围", kernelStats.is_dolby_vision ? "Dolby Vision" : (kernelStats.is_hdr ? "HDR10" : "SDR"))
+                            osdInfoRow("当前速率", String(format: "%.1f MB/s", max(0.0, displayDownloadSpeedMBs)))
+                            osdInfoRow("缓冲时长", String(format: "+%.1f 秒", bufferedAheadSeconds))
+                            osdInfoRow("预读缓存", "\(kernelStats.cached_bytes / 1024 / 1024) MB")
+                            osdInfoRow("加载方式", activeTurboHandle != nil ? "多线程并发 (\(appState.effectiveConnectionBudget(for: session.server)) 线程)" : "顺序读取")
+                            osdInfoRow("分辨率", "\(kernelStats.width) × \(kernelStats.height)")
+                            osdInfoRow("帧率", String(format: "%.3f fps", kernelStats.fps))
+                            osdInfoRow("视频编码", Self.cString(from: kernelStats.video_codec))
+                            osdInfoRow("音频编码", Self.cString(from: kernelStats.audio_codec))
+                            osdInfoRow("播放线路", session.server.activeLineName)
+                        }
 
                         Button {
                             exportRedactedDiagnostics()
@@ -1866,9 +2191,9 @@ public struct PlayerView: View {
                             }
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.white)
-                            .padding(10)
-                            .background(Color.white.opacity(0.06))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .padding(11)
+                            .background(drawerRowBackground(isSelected: false))
+                            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                         }
                         .buttonStyle(.plain)
 
@@ -1879,31 +2204,33 @@ public struct PlayerView: View {
                                 Image(systemName: "terminal.fill")
                                 Text("查看运行日志 (快捷键 L)")
                                 Spacer()
-                                Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(.secondary)
+                                Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(.white.opacity(0.55))
                             }
                             .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(appState.accentColor)
-                            .padding(10)
-                            .background(Color.white.opacity(0.06))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .foregroundStyle(drawerSelectedAccentTint())
+                            .padding(11)
+                            .background(drawerRowBackground(isSelected: false))
+                            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                         }
                         .buttonStyle(.plain)
                     }
                 }
             }
         }
-        .padding(18)
-        .frame(width: 312)
+        .padding(16)
+        .frame(width: 324)
         .frame(maxHeight: .infinity)
         .background(
             ZStack {
                 Rectangle().fill(.ultraThinMaterial)
-                Rectangle().fill(Color.black.opacity(0.58))
-                Rectangle().strokeBorder(Color.white.opacity(0.12), lineWidth: 0.6)
+                Rectangle().fill(Color(red: 0.055, green: 0.06, blue: 0.075).opacity(0.76))
+                Rectangle().strokeBorder(Color.white.opacity(0.11), lineWidth: 0.65)
             }
             .opacity(isAdjustingSubtitleLayout ? 0.14 : 1.0)
         )
         .opacity(isAdjustingSubtitleLayout ? 0.42 : 1.0)
+        .contentShape(Rectangle())
+        .onTapGesture {}
     }
 
     private func osdInfoRow(_ key: String, _ val: String) -> some View {
@@ -1915,26 +2242,45 @@ public struct PlayerView: View {
         .padding(.vertical, 3)
     }
 
+    private func syncVisiblePlaybackStateFromBox() {
+        if abs(currentTime - autoHideBox.liveCurrentTime) > 0.05 {
+            currentTime = autoHideBox.liveCurrentTime
+        }
+        if abs(bufferedAheadSeconds - autoHideBox.liveBufferedAheadSeconds) > 0.25 {
+            bufferedAheadSeconds = autoHideBox.liveBufferedAheadSeconds
+        }
+    }
+
     private func showControlsAndResetTimer() {
         // Avoid mutating SwiftUI state or scheduling hide while a macOS NSMenu is open
         if RunLoop.current.currentMode == .eventTracking {
             return
         }
         if !showControls {
+            syncVisiblePlaybackStateFromBox()
             withAnimation(.easeInOut(duration: 0.18)) {
                 showControls = true
             }
         }
-        autoHideBox.autoHideTask?.cancel()
+        let now = ProcessInfo.processInfo.systemUptime
+        autoHideBox.autoHideDeadlineUptime = now + 3.0
+        guard autoHideBox.autoHideTask == nil else { return }
         autoHideBox.autoHideTask = Task {
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            if !Task.isCancelled {
-                await MainActor.run {
-                    if RunLoop.current.currentMode != .eventTracking &&
-                        activeDrawer == nil && !isScrubbing && !isOpeningMedia && openingErrorMessage == nil {
-                        withAnimation(.easeInOut(duration: 0.25)) {
-                            showControls = false
-                        }
+            while !Task.isCancelled {
+                let remaining = autoHideBox.autoHideDeadlineUptime - ProcessInfo.processInfo.systemUptime
+                if remaining > 0.05 {
+                    try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+                    continue
+                }
+                break
+            }
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                autoHideBox.autoHideTask = nil
+                if RunLoop.current.currentMode != .eventTracking &&
+                    activeDrawer == nil && !isScrubbing && !isOpeningMedia && openingErrorMessage == nil {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        showControls = false
                     }
                 }
             }
@@ -1959,8 +2305,10 @@ public struct PlayerView: View {
         isOpeningMedia = true
         hasRenderedFirstFrame = false
         isWaitingForSeekOrBuffer = false
-        lastObservedPos = -1.0
-        lastObservedPosUptime = ProcessInfo.processInfo.systemUptime
+        autoHideBox.lastObservedPos = -1.0
+        autoHideBox.lastObservedPosUptime = ProcessInfo.processInfo.systemUptime
+        autoHideBox.liveCurrentTime = max(0, startSeconds)
+        autoHideBox.liveBufferedAheadSeconds = 0
         openingErrorMessage = nil
         didHandlePlaybackEnded = false
         finishedItemPendingCleanup = nil
@@ -2388,7 +2736,8 @@ public struct PlayerView: View {
     }
 
     private func prefetchNextEpisodeIfNearEnd() {
-        guard duration > 90, currentTime >= max(duration * 0.72, duration - 120) else { return }
+        let livePos = autoHideBox.liveCurrentTime
+        guard duration > 90, livePos >= max(duration * 0.72, duration - 120) else { return }
         guard let idx = session.episodesQueue.firstIndex(where: { $0.id == currentItem.id }),
               session.episodesQueue.indices.contains(idx + 1) else {
             return
@@ -2485,6 +2834,7 @@ public struct PlayerView: View {
         if dk_player_get_state(handle) == DK_STATE_ENDED {
             didHandlePlaybackEnded = false
             finishedItemPendingCleanup = nil
+            autoHideBox.liveCurrentTime = 0
             currentTime = 0
             dk_player_seek(handle, 0, true)
             dk_player_play(handle)
@@ -2503,7 +2853,7 @@ public struct PlayerView: View {
     }
 
     private func seekRelative(_ delta: Double) {
-        let target = max(0, min(duration, currentTime + delta))
+        let target = max(0, min(duration, autoHideBox.liveCurrentTime + delta))
         seekTo(target)
     }
 
@@ -2512,8 +2862,9 @@ public struct PlayerView: View {
         seekGeneration += 1
         lastSeekCommitUptime = ProcessInfo.processInfo.systemUptime
         lastSeekCommitTarget = seconds
-        lastObservedPos = seconds
-        lastObservedPosUptime = lastSeekCommitUptime
+        autoHideBox.lastObservedPos = seconds
+        autoHideBox.lastObservedPosUptime = lastSeekCommitUptime
+        autoHideBox.liveCurrentTime = seconds
         currentTime = seconds
         if let handle = playerHandle {
             dk_player_seek(handle, seconds, accurate)
@@ -2679,7 +3030,8 @@ public struct PlayerView: View {
             return false
         }()
 
-        if let introEnd, currentTime >= 1.5, currentTime < introEnd - 1.5 {
+        let livePos = autoHideBox.liveCurrentTime
+        if let introEnd, livePos >= 1.5, livePos < introEnd - 1.5 {
             if pref.mode == .automatic && !didAutoSkipIntroForCurrentItem && session.startPositionSeconds < introEnd {
                 didAutoSkipIntroForCurrentItem = true
                 seekTo(introEnd)
@@ -2695,7 +3047,7 @@ public struct PlayerView: View {
             return
         }
 
-        if let outroStart, currentTime >= outroStart, currentTime < duration - 2.0, hasNextEp {
+        if let outroStart, livePos >= outroStart, livePos < duration - 2.0, hasNextEp {
             if pref.mode == .automatic && appState.autoNextEpisode && !didAutoSkipOutroForCurrentItem {
                 didAutoSkipOutroForCurrentItem = true
                 if let idx = session.episodesQueue.firstIndex(where: { $0.id == currentItem.id }),
@@ -3461,7 +3813,8 @@ public struct PlayerView: View {
     }
 
     private func saveCurrentWatchProgress(isFinal: Bool = false) {
-        guard duration > 0 || currentTime > 0 else { return }
+        let livePos = autoHideBox.liveCurrentTime
+        guard duration > 0 || livePos > 0 else { return }
 
         let isLocal = currentResource.streamURL.isFileURL ||
                       currentResource.streamURL.scheme == "file" ||
@@ -3515,7 +3868,7 @@ public struct PlayerView: View {
             subtitle: recSubtitle,
             posterKey: isLocal ? "local_frame_\(streamStr)" : nil,
             posterURL: isEmby ? EmbyClient.shared.imageURL(server: session.server, item: currentItem, kind: .primary, maxWidth: 320)?.absoluteString : nil,
-            position: currentTime,
+            position: livePos,
             duration: duration > 0 ? duration : 3600,
             sourceType: resolvedSourceType,
             streamURLString: streamStr,
@@ -3526,7 +3879,7 @@ public struct PlayerView: View {
         DonbyDownloadManager.shared.updateOfflinePlaybackProgress(
             itemId: currentItem.id,
             played: nil,
-            positionSeconds: currentTime,
+            positionSeconds: livePos,
             durationSeconds: duration,
             persistDiskNow: isFinal
         )

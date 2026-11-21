@@ -22,6 +22,8 @@ public struct DetailView: View {
     @State private var selectedEpisodeForInfo: EmbyItem? = nil
     @State private var didUserDisableSubtitle: Bool = false
     @State private var userDidPickEpisodeLocally: Bool = false
+    @State private var cachedOfflineGroup: OfflineLibraryGroup? = nil
+    @State private var cachedUnpinnedAssets: [CachedMediaSummary] = []
 
     private var detailSeriesKey: String {
         AppState.detailSeriesKey(for: item)
@@ -34,7 +36,7 @@ public struct DetailView: View {
     }
 
     private var effectiveDetailServer: EmbyServerConfig? {
-        if let local = offlineGroupForCurrentItem(),
+        if let local = cachedOfflineGroup,
            let sid = local.serverId,
            let matched = appState.servers.first(where: { $0.id == sid }) {
             return matched
@@ -44,6 +46,25 @@ public struct DetailView: View {
             return srv
         }
         return appState.activeServer
+    }
+
+    private func cachedProgressSnapshot(
+        forItemId itemId: String,
+        serverId: UUID? = nil,
+        mediaSourceId: String? = nil
+    ) -> CachedMediaSummary? {
+        guard !cachedUnpinnedAssets.isEmpty else { return nil }
+        if let serverId, let mediaSourceId, !mediaSourceId.isEmpty {
+            let exactKey = DonbyTurboCacheEngine.makeAssetKey(serverId: serverId, itemId: itemId, mediaSourceId: mediaSourceId)
+            if let hit = cachedUnpinnedAssets.first(where: { $0.assetKey == exactKey }) {
+                return hit
+            }
+        }
+        return cachedUnpinnedAssets.first { summary in
+            summary.itemId == itemId &&
+            (serverId == nil || summary.serverId == serverId) &&
+            (mediaSourceId == nil || mediaSourceId?.isEmpty == true || summary.mediaSourceId == mediaSourceId)
+        }
     }
 
     private var selectedMediaSource: MediaSourceInfo? {
@@ -90,6 +111,9 @@ public struct DetailView: View {
         }
         .task(id: initialItem.id) {
             await loadFullDetailData()
+        }
+        .task(id: downloadManager.statusIndex) {
+            await refreshOfflineAndCacheSnapshots()
         }
         .onDisappear {
             DonbyTurboCacheEngine.shared.cancelDetailPreload()
@@ -242,15 +266,15 @@ public struct DetailView: View {
             VStack(alignment: .leading, spacing: 0) {
                 // Top Floating Navigation Bar
                 HStack {
-                    // Floating Left Capsule: [ < | 🏠 ]
-                    HStack(spacing: 8) {
+                    // Floating Left Capsule: [ < | 🏠 ] — full-area clickable halves with zero dead rim
+                    HStack(spacing: 0) {
                         Button {
                             withAnimation(.easeOut(duration: 0.18)) { appState.popDetail() }
                         } label: {
                             Image(systemName: "chevron.left")
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
-                                .frame(width: 26, height: 26)
+                                .frame(width: 40, height: 36)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
@@ -267,27 +291,26 @@ public struct DetailView: View {
                             Image(systemName: "house")
                                 .font(.system(size: 13.5, weight: .medium))
                                 .foregroundStyle(appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
-                                .frame(width: 26, height: 26)
+                                .frame(width: 40, height: 36)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
+                    .clipShape(Capsule(style: .continuous))
                     .donbyLiquidGlassCapsule()
                     .padding(.leading, appState.isSidebarCollapsed ? 68 : 0)
 
                     Spacer()
 
-                    // Floating Right Capsule: [ 🔍 | ⋯ ∨ ]
-                    HStack(spacing: 8) {
+                    // Floating Right Capsule: [ 🔍 | ⋯ ∨ ] — full-area clickable halves with zero dead rim
+                    HStack(spacing: 0) {
                         Button {
                             appState.selectSidebarModule(.search)
                         } label: {
                             Image(systemName: "magnifyingglass")
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
-                                .frame(width: 26, height: 26)
+                                .frame(width: 40, height: 36)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
@@ -332,17 +355,16 @@ public struct DetailView: View {
                                     .font(.system(size: 8, weight: .bold))
                             }
                             .foregroundStyle(appState.isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : .white)
-                            .frame(height: 26)
-                            .padding(.horizontal, 4)
+                            .frame(width: 44, height: 36)
                             .contentShape(Rectangle())
-                            .fixedSize()
                         }
-                        .menuStyle(.borderlessButton)
+                        .menuStyle(.button)
+                        .buttonStyle(.plain)
                         .menuIndicator(.hidden)
-                        .fixedSize()
+                        .frame(width: 44, height: 36)
+                        .contentShape(Rectangle())
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
+                    .clipShape(Capsule(style: .continuous))
                     .donbyLiquidGlassCapsule()
                     .fixedSize()
                 }
@@ -608,7 +630,7 @@ public struct DetailView: View {
         let matchingEntry = downloadManager.entries.first {
             $0.itemId == item.id && (selectedSourceId.isEmpty || $0.mediaSourceId == selectedSourceId)
         }
-        let cachedSummary = (matchingEntry == nil) ? DonbyTurboCacheEngine.shared.cachedProgress(
+        let cachedSummary = (matchingEntry == nil) ? cachedProgressSnapshot(
             forItemId: item.id,
             serverId: effectiveDetailServer?.id,
             mediaSourceId: selectedSourceId.isEmpty ? nil : selectedSourceId
@@ -911,18 +933,25 @@ public struct DetailView: View {
                             .font(.system(size: 11, weight: .bold))
                             .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     }
+                    .padding(.vertical, 4)
+                    .padding(.trailing, 4)
+                    .contentShape(Rectangle())
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
 
                 Spacer()
 
-                HStack(spacing: 14) {
+                HStack(spacing: 10) {
                     Button {
                         scrollEpisodes(direction: -1)
                     } label: {
                         Image(systemName: "arrow.left")
                             .font(.system(size: 12.5, weight: .semibold))
                             .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                            .frame(width: 26, height: 26)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
 
@@ -932,6 +961,8 @@ public struct DetailView: View {
                         Image(systemName: "arrow.right")
                             .font(.system(size: 12.5, weight: .semibold))
                             .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                            .frame(width: 26, height: 26)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
 
@@ -953,7 +984,7 @@ public struct DetailView: View {
                 ScrollViewReader { proxy in
                     ZStack(alignment: .leading) {
                     ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(alignment: .top, spacing: 16) {
+                        LazyHStack(alignment: .top, spacing: 16) {
                             ForEach(episodes) { ep in
                                 let isSelected = (ep.id == (focusedEpisodeId ?? episodes.first?.id))
                                 episodeCardItem(ep, isSelected: isSelected)
@@ -977,6 +1008,7 @@ public struct DetailView: View {
                                 }
                                 .frame(width: 32, height: 32)
                                 .donbyLiquidGlassCapsule()
+                                .contentShape(Circle())
                             }
                             .buttonStyle(.plain)
                             .padding(.leading, 14)
@@ -995,6 +1027,7 @@ public struct DetailView: View {
                                 }
                                 .frame(width: 32, height: 32)
                                 .donbyLiquidGlassCapsule()
+                                .contentShape(Circle())
                             }
                             .buttonStyle(.plain)
                             .padding(.trailing, 14)
@@ -1053,7 +1086,7 @@ public struct DetailView: View {
         let isEpDownloaded = (epDownloadEntry?.status == .completed)
         let isEpDownloading = (epDownloadEntry?.status == .downloading || epDownloadEntry?.status == .queued)
         let isEpWatched = appState.isItemWatchedOfflineOrLocal(ep, localVideoPath: epDownloadEntry?.localVideoFilePath)
-        let epCachedSummary = (!isEpDownloaded && !isEpDownloading) ? DonbyTurboCacheEngine.shared.cachedProgress(
+        let epCachedSummary = (!isEpDownloaded && !isEpDownloading) ? cachedProgressSnapshot(
             forItemId: ep.id,
             serverId: effectiveDetailServer?.id
         ) : nil
@@ -1275,7 +1308,7 @@ public struct DetailView: View {
             SectionHeaderView(title: "演职人员")
                 .padding(.horizontal, 28)
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .top, spacing: 18) {
+                LazyHStack(alignment: .top, spacing: 18) {
                     ForEach(people.prefix(20)) { person in
                         let subtitle = Self.localizedPersonSubtitle(for: person)
                         VStack(spacing: 8) {
@@ -1402,14 +1435,13 @@ public struct DetailView: View {
         }
     }
 
-    private func offlineGroupForCurrentItem() -> OfflineLibraryGroup? {
-        let groups = DonbyOfflineLibraryStorage.scanOfflineLibrary(entries: downloadManager.entries)
-        let targetSeriesId = initialItem.isSeries ? initialItem.id : (initialItem.seriesId ?? initialItem.id)
+    private nonisolated static func matchOfflineGroup(for target: EmbyItem, in groups: [OfflineLibraryGroup]) -> OfflineLibraryGroup? {
+        let targetSeriesId = target.isSeries ? target.id : (target.seriesId ?? target.id)
         return groups.first { g in
-            g.displayItem.id == initialItem.id ||
+            g.displayItem.id == target.id ||
             g.displayItem.id == targetSeriesId ||
-            g.displayItem.name == (initialItem.seriesName ?? initialItem.name) ||
-            g.episodesBySeason.values.contains(where: { eps in eps.contains(where: { $0.id == initialItem.id }) })
+            g.displayItem.name == (target.seriesName ?? target.name) ||
+            g.episodesBySeason.values.contains(where: { eps in eps.contains(where: { $0.id == target.id }) })
         }
     }
 
@@ -1472,8 +1504,24 @@ public struct DetailView: View {
         return merged.sorted { ($0.indexNumber ?? 0) < ($1.indexNumber ?? 0) }
     }
 
+    private func refreshOfflineAndCacheSnapshots() async {
+        let entries = downloadManager.entries
+        let target = initialItem
+        let (group, assets) = await Task.detached(priority: .userInitiated) {
+            let groups = DonbyOfflineLibraryStorage.scanOfflineLibrary(entries: entries)
+            let matched = Self.matchOfflineGroup(for: target, in: groups)
+            let unpinned = DonbyTurboCacheEngine.shared.listUnpinnedCachedAssets()
+            return (matched, unpinned)
+        }.value
+        guard !Task.isCancelled else { return }
+        self.cachedOfflineGroup = group
+        self.cachedUnpinnedAssets = assets
+    }
+
     private func loadFullDetailData() async {
-        let localGroup = offlineGroupForCurrentItem()
+        await refreshOfflineAndCacheSnapshots()
+        guard !Task.isCancelled else { return }
+        let localGroup = cachedOfflineGroup
         // Hydrate from local offline library first so offline items / slow networks show immediately
         if let localGroup {
             self.item = localGroup.displayItem
@@ -1737,7 +1785,7 @@ public struct DetailView: View {
     ) async {
         let sNum = seasonNumber ?? season.indexNumber ?? 1
         selectedSeasonIndex = sNum
-        let localGroup = offlineGroupForCurrentItem()
+        let localGroup = cachedOfflineGroup
         let merged = await fetchMergedEpisodesForSeason(season, seasonNumber: sNum, localGroup: localGroup, preloadedAllEpisodes: preloadedAllEpisodes)
         guard !Task.isCancelled else { return }
         self.episodes = merged

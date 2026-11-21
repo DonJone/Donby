@@ -485,14 +485,15 @@ public struct LiquidGlassCircleMenu<MenuItems: View>: View {
             Menu {
                 menuContent()
             } label: {
-                Color.white.opacity(0.0001)
+                Color.clear
                     .frame(width: size, height: size)
                     .contentShape(Circle())
             }
+            .menuStyle(.button)
             .buttonStyle(.plain)
-            .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .frame(width: size, height: size)
+            .contentShape(Circle())
             .onHover { hoverBox.setHovered($0) }
         }
         .frame(width: size, height: size)
@@ -620,13 +621,15 @@ public struct LiquidGlassSelectorCard<MenuItems: View>: View {
             Menu {
                 menuItems()
             } label: {
-                Color.white.opacity(0.0001)
+                Color.clear
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
             }
+            .menuStyle(.button)
             .buttonStyle(.plain)
-            .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
             .onHover { hoverBox.setHovered($0) }
         }
     }

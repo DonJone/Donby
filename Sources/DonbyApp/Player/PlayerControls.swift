@@ -153,11 +153,16 @@ struct MiniVolumeSlider: View {
     }
 }
 
-/// Non-observable reference box for high-frequency player control timers/timestamps so mouse motion
-/// never triggers SwiftUI body re-evaluations (which would cause open macOS NSMenus to flicker).
+/// Non-observable reference box for high-frequency player control timers/timestamps and hidden-HUD
+/// playback state so mouse motion and 4Hz ticks never trigger unnecessary SwiftUI body re-evaluations.
 final class PlayerAutoHideBox {
     var autoHideTask: Task<Void, Never>? = nil
+    var autoHideDeadlineUptime: TimeInterval = 0
     var lastMouseMoveTimestamp: TimeInterval = 0
+    var liveCurrentTime: Double = 0
+    var liveBufferedAheadSeconds: Double = 0
+    var lastObservedPos: Double = -1.0
+    var lastObservedPosUptime: TimeInterval = 0
 }
 
 private struct PlayerCircleMenuVisual<Content: View>: View {
@@ -196,14 +201,15 @@ struct PlayerCircleMenu<Content: View, MenuItems: View>: View {
             Menu {
                 menuItems()
             } label: {
-                Color.white.opacity(0.0001)
+                Color.clear
                     .frame(width: 28, height: 28)
                     .contentShape(Circle())
             }
+            .menuStyle(.button)
             .buttonStyle(.plain)
-            .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .frame(width: 28, height: 28)
+            .contentShape(Circle())
             .onHover { hoverBox.setHovered($0) }
         }
         .frame(width: 28, height: 28)

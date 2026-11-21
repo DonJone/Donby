@@ -366,6 +366,7 @@ public struct MainCarouselView: View {
             )
             .onHover { hoverBox.isHovering = $0 }
             .onReceive(timer) { _ in
+                guard appState.currentDetailItem == nil && appState.activePlayback == nil else { return }
                 guard !(isScrollPaused?() ?? false) else { return }
                 guard !hoverBox.isHovering && items.count > 1 && Date().timeIntervalSince(lastManualInteraction) > 5.0 else { return }
                 slideDirection = 1

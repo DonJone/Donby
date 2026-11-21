@@ -479,18 +479,11 @@ public struct FilesModuleView: View {
 
     private func subfolderNavigationCard(_ subfolder: LocalMediaFolder) -> some View {
         let posterFile = URL(fileURLWithPath: subfolder.path).appendingPathComponent("poster.jpg")
-        let hasLocalPoster = FileManager.default.fileExists(atPath: posterFile.path)
         return Button {
             folderNavStack.append(subfolder)
         } label: {
             HStack(spacing: 12) {
-                if hasLocalPoster, let img = NSImage(contentsOf: posterFile) {
-                    Image(nsImage: img)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: 40, height: 56)
-                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                } else {
+                LocalFileThumbView(url: posterFile, width: 40, height: 56, cornerRadius: 6) {
                     ZStack {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .fill(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.08))
@@ -522,6 +515,7 @@ public struct FilesModuleView: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.65)
             )
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -540,13 +534,7 @@ public struct FilesModuleView: View {
             }
         } label: {
             HStack(spacing: 12) {
-                if FileManager.default.fileExists(atPath: thumbURL.path), let nsImg = NSImage(contentsOf: thumbURL) {
-                    Image(nsImage: nsImg)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: 68, height: 42)
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                } else {
+                LocalFileThumbView(url: thumbURL, width: 68, height: 42, cornerRadius: 7) {
                     ZStack {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .fill(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08))
@@ -877,9 +865,11 @@ public struct FilesModuleView: View {
                         .frame(width: 28, height: 28)
                         .contentShape(Circle())
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.button)
+                .buttonStyle(.plain)
                 .menuIndicator(.hidden)
                 .frame(width: 28, height: 28)
+                .contentShape(Circle())
             }
             .padding(14)
             .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
@@ -891,6 +881,7 @@ public struct FilesModuleView: View {
                         lineWidth: isDefault ? 1.1 : 0.7
                     )
             )
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -1220,5 +1211,47 @@ public struct FilesModuleView: View {
         if urlStr.lowercased().contains(".mpd") { return "DASH" }
         let ext = (urlStr as NSString).pathExtension.uppercased()
         return ext.isEmpty ? "LIVE" : ext
+    }
+}
+
+private struct LocalFileThumbView<Placeholder: View>: View {
+    let url: URL
+    let width: CGFloat
+    let height: CGFloat
+    let cornerRadius: CGFloat
+    @ViewBuilder let placeholder: () -> Placeholder
+    @State private var image: NSImage? = nil
+
+    private var cacheKey: String { "local_file_thumb|\(url.path)" }
+
+    var body: some View {
+        Group {
+            if let img = image ?? ArtworkImageCache.shared.imageFromMemory(for: cacheKey) {
+                Image(nsImage: img)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: width, height: height)
+                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            } else {
+                placeholder()
+            }
+        }
+        .task(id: url.path) {
+            if let mem = ArtworkImageCache.shared.imageFromMemory(for: cacheKey) {
+                image = mem
+                return
+            }
+            let targetURL = url
+            let key = cacheKey
+            let loaded: NSImage? = await Task.detached(priority: .utility) {
+                guard FileManager.default.fileExists(atPath: targetURL.path),
+                      let img = NSImage(contentsOf: targetURL) else { return nil }
+                ArtworkImageCache.shared.store(img, for: key)
+                return img
+            }.value
+            if !Task.isCancelled, let loaded {
+                image = loaded
+            }
+        }
     }
 }
