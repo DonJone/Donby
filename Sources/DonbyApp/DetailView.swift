@@ -81,35 +81,75 @@ public struct DetailView: View {
     }
 
     public var body: some View {
-        GeometryReader { viewportGeo in
+        let canvasCol = DonbyGlassPalette.canvas(isLight: appState.isLightMode)
+        return GeometryReader { viewportGeo in
             let heroHeight = min(
                 max(440, min(viewportGeo.size.width * 0.42, viewportGeo.size.height * 0.64)),
                 680
             )
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    heroHeaderSection(heroHeight: heroHeight)
+            ZStack(alignment: .top) {
+                canvasCol
+                    .ignoresSafeArea(.container, edges: .top)
 
-                    if item.isSeries || !episodes.isEmpty {
-                        episodesSection
+                // Static color-matched ambient blur backdrop behind the top of ScrollView:
+                // hidden behind the crisp hero at rest, smoothly revealed on pull-down overscroll with zero zoom or jitter.
+                MediaArtworkView(
+                    server: effectiveDetailServer,
+                    item: item,
+                    kind: .backdrop,
+                    maxWidth: 320,
+                    alignment: .top
+                )
+                .frame(width: viewportGeo.size.width, height: 240)
+                .scaleEffect(1.18)
+                .blur(radius: 44)
+                .saturation(1.15)
+                .opacity(appState.isLightMode ? 0.78 : 0.85)
+                .mask(
+                    LinearGradient(
+                        stops: [
+                            .init(color: .white, location: 0.0),
+                            .init(color: .white, location: 0.55),
+                            .init(color: .clear, location: 1.0)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .frame(width: viewportGeo.size.width, height: 240)
+                .clipped()
+                .allowsHitTesting(false)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        heroHeaderSection(heroHeight: heroHeight)
+
+                        VStack(alignment: .leading, spacing: 24) {
+                            if item.isSeries || !episodes.isEmpty {
+                                episodesSection
+                            }
+
+                            if let people = item.people, !people.isEmpty {
+                                castSection(people: people)
+                            }
+
+                            mediaSpecsCard
+                                .padding(.horizontal, 28)
+
+                            if !similarItems.isEmpty {
+                                similarSection
+                            }
+                        }
+                        .padding(.top, 24)
+                        .padding(.bottom, 48)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(canvasCol)
                     }
-
-                    if let people = item.people, !people.isEmpty {
-                        castSection(people: people)
-                    }
-
-                    mediaSpecsCard
-                        .padding(.horizontal, 28)
-
-                    if !similarItems.isEmpty {
-                        similarSection
-                    }
+                    .padding(.top, appState.isWindowFullScreen ? 0 : -28)
                 }
-                .padding(.bottom, 48)
+                .scrollContentBackground(.hidden)
+                .ignoresSafeArea(.container, edges: .top)
             }
-            .coordinateSpace(name: "detailScroll")
-            .ignoresSafeArea(.container, edges: .top)
-            .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
         }
         .ignoresSafeArea(.container, edges: .top)
         .sheet(item: $selectedEpisodeForInfo) { ep in
@@ -244,25 +284,19 @@ public struct DetailView: View {
     private func heroHeaderSection(heroHeight: CGFloat) -> some View {
         let canvasCol = appState.isLightMode ? DonbyGlassPalette.canvasLight : DonbyGlassPalette.canvasBlack
         return ZStack(alignment: .bottomLeading) {
-            // 1. Crisp top-aligned Backdrop Fanart with seamless Apple-TV-style upward stretch across top safe-area & overscroll
-            GeometryReader { bgGeo in
-                let minY = bgGeo.frame(in: .named("detailScroll")).minY
-                let pullDown = max(0, minY)
-
-                MediaArtworkView(
-                    server: effectiveDetailServer,
-                    item: item,
-                    kind: .backdrop,
-                    maxWidth: 3840,
-                    alignment: .top
-                )
-                .frame(width: bgGeo.size.width, height: heroHeight + pullDown)
-                .saturation(1.10)
-                .contrast(1.04)
-                .clipped()
-                .offset(y: -pullDown)
-            }
+            // 1. Crisp top-aligned Backdrop Fanart (fixed heroHeight, zero dynamic zoom/rescaling on scroll)
+            MediaArtworkView(
+                server: effectiveDetailServer,
+                item: item,
+                kind: .backdrop,
+                maxWidth: 3840,
+                alignment: .top
+            )
+            .frame(maxWidth: .infinity)
             .frame(height: heroHeight)
+            .saturation(1.10)
+            .contrast(1.04)
+            .clipped()
 
             // 2. Silky Ambient Gradient Dissolve into Canvas (upper 46% completely clear & vivid)
             LinearGradient(
