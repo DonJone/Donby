@@ -1446,6 +1446,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
     public let controlsOcclusionHeight: CGFloat
     public let subtitleHDRPeakNits: Float
     public let antiOcclusionEnabled: Bool
+    public let subtitleStyleRevision: Int
     public let onFirstFrameRendered: (() -> Void)?
 
     public init(
@@ -1453,12 +1454,14 @@ public struct DKMetalVideoView: NSViewRepresentable {
         controlsOcclusionHeight: CGFloat = 0,
         subtitleHDRPeakNits: Float = 203.0,
         antiOcclusionEnabled: Bool = true,
+        subtitleStyleRevision: Int = 0,
         onFirstFrameRendered: (() -> Void)? = nil
     ) {
         self.playerHandle = playerHandle
         self.controlsOcclusionHeight = controlsOcclusionHeight
         self.subtitleHDRPeakNits = subtitleHDRPeakNits
         self.antiOcclusionEnabled = antiOcclusionEnabled
+        self.subtitleStyleRevision = subtitleStyleRevision
         self.onFirstFrameRendered = onFirstFrameRendered
     }
 
@@ -1468,6 +1471,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
         view.subtitleHDRPeakNits = subtitleHDRPeakNits
         view.antiOcclusionEnabled = antiOcclusionEnabled
         let coordinator = context.coordinator
+        coordinator.lastSubtitleStyleRevision = subtitleStyleRevision
         coordinator.onFirstFrameRendered = onFirstFrameRendered
         view.onDetachFromWindow = { [weak coordinator] in
             coordinator?.stopDisplayLink()
@@ -1481,6 +1485,10 @@ public struct DKMetalVideoView: NSViewRepresentable {
         nsView.subtitleHDRPeakNits = subtitleHDRPeakNits
         nsView.antiOcclusionEnabled = antiOcclusionEnabled
         context.coordinator.onFirstFrameRendered = onFirstFrameRendered
+        if context.coordinator.lastSubtitleStyleRevision != subtitleStyleRevision {
+            context.coordinator.lastSubtitleStyleRevision = subtitleStyleRevision
+            nsView.needsRedrawOnSameFrame = true
+        }
         if context.coordinator.player != playerHandle {
             context.coordinator.updatePlayer(playerHandle)
         }
@@ -1513,6 +1521,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
         }
         private weak var view: DKMetalLayerView?
         private let driver = DisplayLinkDriver()
+        fileprivate var lastSubtitleStyleRevision: Int = 0
         var lastPts: Double = -1.0
         var lastBufferPtr: UnsafeMutableRawPointer?
         var lastSubSerial: UInt64 = UInt64.max

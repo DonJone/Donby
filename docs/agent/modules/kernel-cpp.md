@@ -1,6 +1,6 @@
 # Module Map: Playback Kernel (`DonbyKernelC` & `KernelRust`)
 
-> Last synced: `v1.4.2`. Load this doc for FFmpeg demuxing, VideoToolbox decoding, AudioQueue A/V sync, seek flush, rebuffer cushions, libass/PGS subtitles, and Rust kernel helpers.
+> Last synced: `v1.4.6`. Load this doc for FFmpeg demuxing, VideoToolbox decoding, AudioQueue A/V sync, seek flush, rebuffer cushions, libass/PGS subtitles, and Rust kernel helpers.
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyKernelC/include/donby_kernel.h` (~192L)
@@ -29,8 +29,9 @@
 - **Underrun & Rebuffer**:
   - Continuous silence underrun detection runs **above** `video_queue.empty()` so audio starvation triggers rebuffer cushion even if video frames are still queued.
   - Rebuffer pauses clock cleanly until `dk_required_audio_preroll_samples` is refilled.
-- **Subtitles**:
+- **Subtitles (`v1.4.6`)**:
   - Supports embedded ASS/SRT (via `libass`, dual primary + secondary `ASS_Track`, `CFStringTransform` live Simplified/Traditional conversion before `ass_process_chunk`), external text subtitles, and bitmap PGS (`PgsCue` / `PgsBitmapRect`).
+  - Snapshots original `ASS_Style` entries per track for lossless live scaling/repositioning across ALL bottom dialogue styles (preserving top annotations), defaults to unified `PingFang SC` (stripping inline `\fn` overrides) and rich gold-yellow (`#FFD23F` / `0xFFD23F00`) for secondary/foreign lines, supports real-time bilinear scaling & vertical positioning for PGS bitmaps, and uses `sub_style_dirty` to guarantee immediate paused redraws.
 
 ## 3. Critical Invariants & Pitfalls (DO NOT BREAK)
 1. **CVDisplayLink Thread Purity**: NEVER call `AudioQueuePrime`, `AudioQueueStart`, `dk_try_start_audio_queue_if_ready`, or blocking locks inside `dk_player_acquire_frame`. Fallback `AudioQueue` startup belongs on `dk_audio_decode_worker`.

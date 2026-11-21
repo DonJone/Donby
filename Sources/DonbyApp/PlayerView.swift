@@ -103,6 +103,9 @@ public struct PlayerView: View {
     @State private var finishedItemPendingCleanup: (itemId: String, mediaSourceId: String)? = nil
     @State private var prefetchedNextEpisodeResource: (itemId: String, resource: ResolvedPlaybackResource)? = nil
     @State private var prefetchedNextEpisodeInFlightId: String? = nil
+    @State private var subtitleStyleRevision: Int = 0
+    @State private var isAdjustingSubtitleLayout: Bool = false
+    @State private var showMoreSubtitleOptions: Bool = false
 
     private let progressTimer = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
     private let embySyncTimer = Timer.publish(every: 10.0, on: .main, in: .common).autoconnect()
@@ -135,9 +138,10 @@ public struct PlayerView: View {
             // C++ / Metal Native Engine Video Surface
             DKMetalVideoView(
                 playerHandle: playerHandle,
-                controlsOcclusionHeight: showControls ? bottomControlBarHeight : 0,
+                controlsOcclusionHeight: (showControls && !isAdjustingSubtitleLayout) ? bottomControlBarHeight : 0,
                 subtitleHDRPeakNits: Float(appState.subtitleStyle.hdrPeakNits.rawValue),
                 antiOcclusionEnabled: appState.subtitleStyle.antiOcclusionEnabled,
+                subtitleStyleRevision: subtitleStyleRevision,
                 onFirstFrameRendered: {
                     if !hasRenderedFirstFrame {
                         withAnimation(.easeOut(duration: 0.16)) {
@@ -1488,87 +1492,153 @@ public struct PlayerView: View {
 
                         Divider().opacity(0.2)
 
-                        Text("副字幕 / 双语对照").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
-                        Menu {
-                            Button("关闭副字幕") { disableSecondarySubtitle() }
-                            Divider()
-                            ForEach(subOptions) { opt in
-                                Button(opt.label) { selectSecondarySubtitleOption(opt) }
-                            }
-                            Divider()
-                            Button("加载本地副字幕文件...") { promptLocalExternalSubtitleFile(asSecondary: true) }
-                        } label: {
-                            HStack {
-                                Image(systemName: "captions.bubble")
-                                Text(secondarySubtitleStatusTitle(options: subOptions))
-                                    .font(.system(size: 12, weight: .medium))
-                                    .lineLimit(1)
-                                Spacer()
-                                Image(systemName: "chevron.up.chevron.down").font(.system(size: 10))
-                            }
-                            .foregroundStyle(.white)
-                            .padding(10)
-                            .background(Color.white.opacity(0.06))
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
+                        Text("字幕调节").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
 
-                        Divider().opacity(0.2)
-
-                        Text("字幕外观与同步").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
-
-                        VStack(alignment: .leading, spacing: 10) {
-                            Picker("简繁转换", selection: $appState.subtitleStyle.transform) {
-                                ForEach(SubtitleTextTransform.allCases) { tf in
-                                    Text(tf.shortTitle).tag(tf)
+                        VStack(alignment: .leading, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text("大小").font(.system(size: 11.5, weight: .medium)).foregroundStyle(.white.opacity(0.9))
+                                    Spacer()
+                                    Text(String(format: "%.2fx", appState.subtitleStyle.scale))
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(.white.opacity(0.75))
+                                    if abs(appState.subtitleStyle.scale - 1.0) > 0.01 {
+                                        Button("重置") {
+                                            appState.subtitleStyle.scale = 1.0
+                                        }
+                                        .font(.system(size: 10.5))
+                                        .buttonStyle(.plain)
+                                        .foregroundStyle(appState.accentColor)
+                                    }
                                 }
+                                Slider(
+                                    value: $appState.subtitleStyle.scale,
+                                    in: 0.6...1.8,
+                                    step: 0.05,
+                                    onEditingChanged: { editing in
+                                        withAnimation(.easeInOut(duration: 0.15)) {
+                                            isAdjustingSubtitleLayout = editing
+                                        }
+                                    }
+                                )
                             }
-                            .pickerStyle(.segmented)
 
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(String(format: "缩放 %.2fx · 位置 %d%%", appState.subtitleStyle.scale, Int(appState.subtitleStyle.verticalPositionPercent)))
-                                    .font(.system(size: 11)).foregroundStyle(.white.opacity(0.8))
-                                Slider(value: $appState.subtitleStyle.scale, in: 0.6...1.8, step: 0.05)
-                                Slider(value: $appState.subtitleStyle.verticalPositionPercent, in: 60...100, step: 1)
+                                HStack {
+                                    Text("位置").font(.system(size: 11.5, weight: .medium)).foregroundStyle(.white.opacity(0.9))
+                                    Spacer()
+                                    Text("\(Int(appState.subtitleStyle.verticalPositionPercent))%")
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(.white.opacity(0.75))
+                                    if abs(appState.subtitleStyle.verticalPositionPercent - 92.0) > 0.5 {
+                                        Button("重置") {
+                                            appState.subtitleStyle.verticalPositionPercent = 92.0
+                                        }
+                                        .font(.system(size: 10.5))
+                                        .buttonStyle(.plain)
+                                        .foregroundStyle(appState.accentColor)
+                                    }
+                                }
+                                Slider(
+                                    value: $appState.subtitleStyle.verticalPositionPercent,
+                                    in: 60...100,
+                                    step: 1,
+                                    onEditingChanged: { editing in
+                                        withAnimation(.easeInOut(duration: 0.15)) {
+                                            isAdjustingSubtitleLayout = editing
+                                        }
+                                    }
+                                )
                             }
 
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(String(format: "描边宽度 %.1f", appState.subtitleStyle.borderWidth))
-                                    .font(.system(size: 11)).foregroundStyle(.white.opacity(0.8))
-                                Slider(value: $appState.subtitleStyle.borderWidth, in: 0...6, step: 0.25)
-                            }
-
-                            HStack {
-                                Text("主延迟 \(String(format: "%.1fs", appState.subtitleStyle.primaryDelaySeconds))")
-                                    .font(.system(size: 11))
+                            HStack(spacing: 6) {
+                                Text("延迟 \(String(format: "%+.1fs", appState.subtitleStyle.primaryDelaySeconds))")
+                                    .font(.system(size: 11.5, weight: .medium))
+                                    .foregroundStyle(.white.opacity(0.9))
                                 Spacer()
                                 Button("-0.5s") { appState.subtitleStyle.primaryDelaySeconds = max(-30, appState.subtitleStyle.primaryDelaySeconds - 0.5) }.controlSize(.mini)
                                 Button("0") { appState.subtitleStyle.primaryDelaySeconds = 0 }.controlSize(.mini)
                                 Button("+0.5s") { appState.subtitleStyle.primaryDelaySeconds = min(30, appState.subtitleStyle.primaryDelaySeconds + 0.5) }.controlSize(.mini)
                             }
 
-                            HStack {
-                                Text("副延迟 \(String(format: "%.1fs", appState.subtitleStyle.secondaryDelaySeconds))")
-                                    .font(.system(size: 11))
-                                Spacer()
-                                Button("-0.5s") { appState.subtitleStyle.secondaryDelaySeconds = max(-30, appState.subtitleStyle.secondaryDelaySeconds - 0.5) }.controlSize(.mini)
-                                Button("0") { appState.subtitleStyle.secondaryDelaySeconds = 0 }.controlSize(.mini)
-                                Button("+0.5s") { appState.subtitleStyle.secondaryDelaySeconds = min(30, appState.subtitleStyle.secondaryDelaySeconds + 0.5) }.controlSize(.mini)
-                            }
-
-                            Picker("HDR 亮度", selection: $appState.subtitleStyle.hdrPeakNits) {
-                                ForEach(SubtitleHDRPeakNits.allCases) { nits in
-                                    Text(nits.title).tag(nits)
+                            if activeSecondarySubtitleSelection != .off {
+                                HStack(spacing: 6) {
+                                    Text("副延迟 \(String(format: "%+.1fs", appState.subtitleStyle.secondaryDelaySeconds))")
+                                        .font(.system(size: 11.5, weight: .medium))
+                                        .foregroundStyle(.white.opacity(0.8))
+                                    Spacer()
+                                    Button("-0.5s") { appState.subtitleStyle.secondaryDelaySeconds = max(-30, appState.subtitleStyle.secondaryDelaySeconds - 0.5) }.controlSize(.mini)
+                                    Button("0") { appState.subtitleStyle.secondaryDelaySeconds = 0 }.controlSize(.mini)
+                                    Button("+0.5s") { appState.subtitleStyle.secondaryDelaySeconds = min(30, appState.subtitleStyle.secondaryDelaySeconds + 0.5) }.controlSize(.mini)
                                 }
                             }
-                            .pickerStyle(.menu)
-
-                            Toggle("覆盖内封 ASS 样式", isOn: $appState.subtitleStyle.overrideASSStyle)
-                            Toggle("仅保留强制字幕 (Forced)", isOn: $appState.subtitleStyle.forcedOnly)
-                            Toggle("控制栏显示时上移字幕", isOn: $appState.subtitleStyle.antiOcclusionEnabled)
                         }
-                        .font(.system(size: 11.5))
                         .padding(10)
                         .background(Color.white.opacity(0.05))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                        DisclosureGroup("更多设置", isExpanded: $showMoreSubtitleOptions) {
+                            VStack(alignment: .leading, spacing: 10) {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("双语副字幕").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                                    Menu {
+                                        Button("关闭副字幕") { disableSecondarySubtitle() }
+                                        Divider()
+                                        ForEach(subOptions) { opt in
+                                            Button(opt.label) { selectSecondarySubtitleOption(opt) }
+                                        }
+                                        Divider()
+                                        Button("加载本地副字幕文件...") { promptLocalExternalSubtitleFile(asSecondary: true) }
+                                    } label: {
+                                        HStack {
+                                            Image(systemName: "captions.bubble")
+                                            Text(secondarySubtitleStatusTitle(options: subOptions))
+                                                .font(.system(size: 11.5, weight: .medium))
+                                                .lineLimit(1)
+                                            Spacer()
+                                            Image(systemName: "chevron.up.chevron.down").font(.system(size: 10))
+                                        }
+                                        .foregroundStyle(.white)
+                                        .padding(8)
+                                        .background(Color.white.opacity(0.06))
+                                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                    }
+                                }
+
+                                Toggle("统一使用苹方字体", isOn: $appState.subtitleStyle.unifyPingFangFont)
+                                Toggle("外语字幕经典金黄增强", isOn: $appState.subtitleStyle.enhanceSecondaryYellow)
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(String(format: "描边宽度 %.1f", appState.subtitleStyle.borderWidth))
+                                        .font(.system(size: 11)).foregroundStyle(.white.opacity(0.8))
+                                    Slider(value: $appState.subtitleStyle.borderWidth, in: 0...6, step: 0.25)
+                                }
+
+                                Picker("简繁转换", selection: $appState.subtitleStyle.transform) {
+                                    ForEach(SubtitleTextTransform.allCases) { tf in
+                                        Text(tf.shortTitle).tag(tf)
+                                    }
+                                }
+                                .pickerStyle(.segmented)
+
+                                Picker("HDR 亮度", selection: $appState.subtitleStyle.hdrPeakNits) {
+                                    ForEach(SubtitleHDRPeakNits.allCases) { nits in
+                                        Text(nits.title).tag(nits)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+
+                                Toggle("完全覆盖内封 ASS 样式", isOn: $appState.subtitleStyle.overrideASSStyle)
+                                Toggle("仅保留强制字幕 (Forced)", isOn: $appState.subtitleStyle.forcedOnly)
+                                Toggle("控制栏显示时上移字幕", isOn: $appState.subtitleStyle.antiOcclusionEnabled)
+                            }
+                            .font(.system(size: 11.5))
+                            .padding(.top, 8)
+                        }
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .padding(10)
+                        .background(Color.white.opacity(0.04))
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
 
@@ -1626,7 +1696,7 @@ public struct PlayerView: View {
             }
         }
         .padding(18)
-        .frame(width: 320)
+        .frame(width: 312)
         .frame(maxHeight: .infinity)
         .background(
             ZStack {
@@ -1634,7 +1704,9 @@ public struct PlayerView: View {
                 Rectangle().fill(Color.black.opacity(0.58))
                 Rectangle().strokeBorder(Color.white.opacity(0.12), lineWidth: 0.6)
             }
+            .opacity(isAdjustingSubtitleLayout ? 0.14 : 1.0)
         )
+        .opacity(isAdjustingSubtitleLayout ? 0.42 : 1.0)
     }
 
     private func osdInfoRow(_ key: String, _ val: String) -> some View {
@@ -2245,9 +2317,12 @@ public struct PlayerView: View {
             secondary_delay_sec: s.secondaryDelaySeconds,
             text_transform: Int32(s.transform.rawValue),
             override_ass_style: s.overrideASSStyle,
-            forced_only: s.forcedOnly
+            forced_only: s.forcedOnly,
+            unify_pingfang_font: s.unifyPingFangFont,
+            enhance_secondary_yellow: s.enhanceSecondaryYellow
         )
         dk_player_set_subtitle_style(handle, &cfg)
+        subtitleStyleRevision &+= 1
     }
 
     private static func queryKernelChapters(handle: OpaquePointer) -> [PlaybackChapterItem] {
@@ -2345,7 +2420,7 @@ public struct PlayerView: View {
     }
 
     private func exportRedactedDiagnostics() {
-        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.5"
+        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.6"
         var lines: [String] = []
         lines.append("Donby Diagnostics Report (v\(appVer))")
         lines.append("Time: \(ISO8601DateFormatter().string(from: Date()))")

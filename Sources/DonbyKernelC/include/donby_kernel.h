@@ -64,6 +64,8 @@ typedef struct {
     int32_t text_transform;       // 0 = off, 1 = Hant-Hans (Simplified), 2 = Hans-Hant (Traditional)
     bool    override_ass_style;
     bool    forced_only;
+    bool    unify_pingfang_font;
+    bool    enhance_secondary_yellow;
 } DKSubtitleStyleConfig;
 
 typedef int     (*DKCustomIOReadCallback)(void* opaque, uint8_t* buf, int buf_size);

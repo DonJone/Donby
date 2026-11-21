@@ -295,6 +295,8 @@ public struct SubtitleStyleConfiguration: Codable, Equatable, Sendable {
     public var transform: SubtitleTextTransform
     public var hdrPeakNits: SubtitleHDRPeakNits
     public var antiOcclusionEnabled: Bool
+    public var unifyPingFangFont: Bool
+    public var enhanceSecondaryYellow: Bool
 
     public init(
         scale: Double = 1.0,
@@ -306,7 +308,9 @@ public struct SubtitleStyleConfiguration: Codable, Equatable, Sendable {
         forcedOnly: Bool = false,
         transform: SubtitleTextTransform = .off,
         hdrPeakNits: SubtitleHDRPeakNits = .nits203,
-        antiOcclusionEnabled: Bool = true
+        antiOcclusionEnabled: Bool = true,
+        unifyPingFangFont: Bool = true,
+        enhanceSecondaryYellow: Bool = true
     ) {
         self.scale = scale
         self.borderWidth = borderWidth
@@ -318,6 +322,30 @@ public struct SubtitleStyleConfiguration: Codable, Equatable, Sendable {
         self.transform = transform
         self.hdrPeakNits = hdrPeakNits
         self.antiOcclusionEnabled = antiOcclusionEnabled
+        self.unifyPingFangFont = unifyPingFangFont
+        self.enhanceSecondaryYellow = enhanceSecondaryYellow
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case scale, borderWidth, verticalPositionPercent, primaryDelaySeconds, secondaryDelaySeconds
+        case overrideASSStyle, forcedOnly, transform, hdrPeakNits, antiOcclusionEnabled
+        case unifyPingFangFont, enhanceSecondaryYellow
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.scale = try c.decodeIfPresent(Double.self, forKey: .scale) ?? 1.0
+        self.borderWidth = try c.decodeIfPresent(Double.self, forKey: .borderWidth) ?? 2.8
+        self.verticalPositionPercent = try c.decodeIfPresent(Double.self, forKey: .verticalPositionPercent) ?? 92.0
+        self.primaryDelaySeconds = try c.decodeIfPresent(Double.self, forKey: .primaryDelaySeconds) ?? 0.0
+        self.secondaryDelaySeconds = try c.decodeIfPresent(Double.self, forKey: .secondaryDelaySeconds) ?? 0.0
+        self.overrideASSStyle = try c.decodeIfPresent(Bool.self, forKey: .overrideASSStyle) ?? false
+        self.forcedOnly = try c.decodeIfPresent(Bool.self, forKey: .forcedOnly) ?? false
+        self.transform = try c.decodeIfPresent(SubtitleTextTransform.self, forKey: .transform) ?? .off
+        self.hdrPeakNits = try c.decodeIfPresent(SubtitleHDRPeakNits.self, forKey: .hdrPeakNits) ?? .nits203
+        self.antiOcclusionEnabled = try c.decodeIfPresent(Bool.self, forKey: .antiOcclusionEnabled) ?? true
+        self.unifyPingFangFont = try c.decodeIfPresent(Bool.self, forKey: .unifyPingFangFont) ?? true
+        self.enhanceSecondaryYellow = try c.decodeIfPresent(Bool.self, forKey: .enhanceSecondaryYellow) ?? true
     }
 }
 
