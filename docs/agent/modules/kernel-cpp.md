@@ -1,6 +1,6 @@
 # Module Map: Playback Kernel (`DonbyKernelC` & `KernelRust`)
 
-> Last synced: `v1.4.0` (`f35082e`). Load this doc for FFmpeg demuxing, VideoToolbox decoding, AudioQueue A/V sync, seek flush, rebuffer cushions, libass/PGS subtitles, and Rust kernel helpers.
+> Last synced: `v1.4.2`. Load this doc for FFmpeg demuxing, VideoToolbox decoding, AudioQueue A/V sync, seek flush, rebuffer cushions, libass/PGS subtitles, and Rust kernel helpers.
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyKernelC/include/donby_kernel.h` (~192L)
@@ -36,5 +36,6 @@
 1. **CVDisplayLink Thread Purity**: NEVER call `AudioQueuePrime`, `AudioQueueStart`, `dk_try_start_audio_queue_if_ready`, or blocking locks inside `dk_player_acquire_frame`. Fallback `AudioQueue` startup belongs on `dk_audio_decode_worker`.
 2. **`audio_queue_starting` Serialization**: Every `AudioQueueStop` / `AudioQueueReset` path (seek, close, audio track switch, underrun rebuffer) MUST synchronize with `audio_queue_starting` so `AudioQueueStart` cannot race with teardown or pause.
 3. **Audio EOF Clock Handoff**: When audio reaches EOF before video (common in MKV remuxes), master clock must seamlessly switch to monotonic fallback instead of freezing the final seconds.
-4. **URL Redaction**: Keep `Opening URL` log redacted (strip host/query/token).
-5. **Rebuild Requirement**: Any edit to `dk_engine.cpp` or `donby_kernel.h` requires `cmake --build /Users/don/git/Donby/build_kernel` BEFORE `swift build`.
+4. **PGS/DVD Subtitle Probe Bypass (`v1.4.2`)**: Before `avformat_find_stream_info`, temporarily set `AVDISCARD_ALL` on subtitle streams and seed `1920x1080` on `0x0` `AV_CODEC_ID_HDMV_PGS_SUBTITLE` / `AV_CODEC_ID_DVD_SUBTITLE` streams, then immediately restore original `discard` and `0x0` dimensions after `avformat_find_stream_info` so FFmpeg never stalls reading 1-2 MiB waiting for a dialogue packet while keeping PGS/DVD decoding intact.
+5. **URL Redaction**: Keep `Opening URL` log redacted (strip host/query/token).
+6. **Rebuild Requirement**: Any edit to `dk_engine.cpp` or `donby_kernel.h` requires `cmake --build /Users/don/git/Donby/build_kernel` (or `./build_kernel.sh`) BEFORE `swift build`.

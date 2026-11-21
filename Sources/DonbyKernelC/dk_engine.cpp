@@ -2724,8 +2724,8 @@ int dk_player_open_with_tracks(
     const bool has_start_seek = (start_sec > 0.5);
     const bool is_mpeg_ts = (normalized_url.find(".ts") != std::string::npos ||
                              normalized_url.find(".m2ts") != std::string::npos);
-    const char* probe_bytes = is_mpeg_ts ? "4194304" : (has_start_seek ? "1048576" : "2097152");
-    const char* analyze_us = is_mpeg_ts ? "2000000" : (has_start_seek ? "800000" : "1200000");
+    const char* probe_bytes = is_mpeg_ts ? "4194304" : "1048576";
+    const char* analyze_us = is_mpeg_ts ? "2000000" : (has_start_seek ? "500000" : "600000");
 
     if (is_local_file || use_custom_io) {
         av_dict_set(&opts, "probesize", probe_bytes, 0);
@@ -2816,16 +2816,31 @@ int dk_player_open_with_tracks(
         return -1;
     }
 
-    // Bound FPS probing and discard font attachments/data streams before find_stream_info
-    // so MKV font attachments never force exhausting the full analyzeduration window.
+    // Bound FPS probing and avoid exhausting probesize/analyzeduration on attachments, data streams,
+    // or bitmap PGS/DVD subtitles whose MKV headers report 0x0 size until the first dialogue packet.
     player->format_ctx->fps_probe_size = 4;
-    player->format_ctx->max_probe_packets = 600;
+    player->format_ctx->max_probe_packets = 200;
+    struct SavedSubProbeState {
+        AVDiscard discard = AVDISCARD_DEFAULT;
+        bool seeded_dims = false;
+    };
+    std::vector<SavedSubProbeState> saved_sub_states(player->format_ctx->nb_streams);
     for (unsigned int i = 0; i < player->format_ctx->nb_streams; i++) {
         AVStream* st = player->format_ctx->streams[i];
-        if (st && st->codecpar &&
-            (st->codecpar->codec_type == AVMEDIA_TYPE_ATTACHMENT ||
-             st->codecpar->codec_type == AVMEDIA_TYPE_DATA)) {
+        if (!st || !st->codecpar) continue;
+        if (st->codecpar->codec_type == AVMEDIA_TYPE_ATTACHMENT ||
+            st->codecpar->codec_type == AVMEDIA_TYPE_DATA) {
             st->discard = AVDISCARD_ALL;
+        } else if (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) {
+            saved_sub_states[i].discard = st->discard;
+            st->discard = AVDISCARD_ALL;
+            if ((st->codecpar->codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE ||
+                 st->codecpar->codec_id == AV_CODEC_ID_DVD_SUBTITLE) &&
+                (st->codecpar->width == 0 || st->codecpar->height == 0)) {
+                st->codecpar->width = 1920;
+                st->codecpar->height = 1080;
+                saved_sub_states[i].seeded_dims = true;
+            }
         }
     }
 
@@ -2844,6 +2859,18 @@ int dk_player_open_with_tracks(
         }
         player->state.store(DK_STATE_ERROR);
         return -1;
+    }
+
+    // Restore subtitle stream discard & original dimensions so PGS/DVD decoders read true canvas size from packets.
+    for (unsigned int i = 0; i < player->format_ctx->nb_streams && i < saved_sub_states.size(); i++) {
+        AVStream* st = player->format_ctx->streams[i];
+        if (st && st->codecpar && st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) {
+            st->discard = saved_sub_states[i].discard;
+            if (saved_sub_states[i].seeded_dims) {
+                st->codecpar->width = 0;
+                st->codecpar->height = 0;
+            }
+        }
     }
 
     auto after_find_stream = std::chrono::steady_clock::now();
