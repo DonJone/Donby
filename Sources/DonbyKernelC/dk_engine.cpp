@@ -5560,8 +5560,10 @@ static inline void dk_hash_str(uint64_t& h, const std::string& s) {
 /// Returns: 1 = rendered with Pair-A engine (has active subtitle), 0 = empty at this PTS, -1 = fallback to standard libass/PGS pipeline
 static int dk_try_render_paired_bilingual_locked(
     DKPlayer* player,
+    double video_pts,
     double pri_pts,
     double sec_pts,
+    double sec_scale,
     int32_t canvas_w,
     int32_t canvas_h,
     bool canvas_resized,
@@ -5572,8 +5574,21 @@ static int dk_try_render_paired_bilingual_locked(
     if (player->has_bitmap_subs || player->secondary_has_bitmap_subs) return -1;
     if (!player->ass_track && !player->secondary_ass_track) return -1;
 
+    const long long now_ms = static_cast<long long>(std::llround(std::max(0.0, video_pts) * 1000.0));
     const long long pri_ms = static_cast<long long>(std::max(0.0, pri_pts) * 1000.0);
     const long long sec_ms = static_cast<long long>(std::max(0.0, sec_pts) * 1000.0);
+    const long long pri_delay_ms = static_cast<long long>(std::llround(player->sub_style.primary_delay_sec * 1000.0));
+    const long long sec_delay_ms = static_cast<long long>(std::llround(player->sub_style.secondary_delay_sec * 1000.0));
+
+    auto event_display_span = [&](const ASS_Event& ev, bool is_secondary, long long& out_s, long long& out_e) {
+        if (is_secondary) {
+            out_s = static_cast<long long>(std::llround(static_cast<double>(ev.Start) * sec_scale)) + sec_delay_ms;
+            out_e = static_cast<long long>(std::llround(static_cast<double>(ev.Start + ev.Duration) * sec_scale)) + sec_delay_ms;
+        } else {
+            out_s = ev.Start + pri_delay_ms;
+            out_e = (ev.Start + ev.Duration) + pri_delay_ms;
+        }
+    };
 
     // Resolve Dual-Track Anchor:
     // - dual_anchor_mode == 1 -> primary track is anchor (e.g. Native Chinese media)
@@ -5616,30 +5631,30 @@ static int dk_try_render_paired_bilingual_locked(
         return true;
     };
 
-    if (player->ass_track && player->secondary_ass_track) {
-        // Dual-Track Anchor-Synchronized Collection with +/-260ms Anti-Flicker Snap:
-        // Eliminates the annoying 100-250ms staggered flash where one language pops in/out just before the other.
-        constexpr long long kSnapMs = 260;
+    const bool dual_tracks_loaded = (player->ass_track != nullptr && player->secondary_ass_track != nullptr);
+    if (dual_tracks_loaded) {
+        // Dual-Track Anchor-Synchronized Collection in UNIFIED VIDEO DISPLAY TIME (pts_ms) with +/-450ms Anti-Flicker Snap:
+        // Translating both tracks into display time ensures delay/scale differences never break edge snapping or cause blink-off/on.
+        constexpr long long kSnapMs = 450;
         const ASS_Track* anchor_tr = anchor_is_secondary ? player->secondary_ass_track : player->ass_track;
         const ASS_Track* other_tr  = anchor_is_secondary ? player->ass_track : player->secondary_ass_track;
-        const long long anchor_ms  = anchor_is_secondary ? sec_ms : pri_ms;
-        const long long other_ms   = anchor_is_secondary ? pri_ms : sec_ms;
+        const bool other_is_sec    = !anchor_is_secondary;
 
         bool has_anchor_active = false;
         long long anchor_win_s = LLONG_MAX;
-        long long anchor_win_e = 0;
+        long long anchor_win_e = LLONG_MIN;
 
         if (anchor_tr && anchor_tr->events && anchor_tr->n_events > 0) {
             for (int i = 0; i < anchor_tr->n_events; i++) {
                 const ASS_Event& ev = anchor_tr->events[i];
                 if (ev.Duration <= 0) continue;
-                const long long es = ev.Start;
-                const long long ee = ev.Start + ev.Duration;
-                if (anchor_ms < es || anchor_ms >= ee) continue;
+                long long ds = 0, de = 0;
+                event_display_span(ev, anchor_is_secondary, ds, de);
+                if (now_ms < ds || now_ms >= de) continue;
                 if (!append_event_lines(anchor_tr, ev, anchor_is_secondary)) return -1;
                 has_anchor_active = true;
-                anchor_win_s = std::min(anchor_win_s, es);
-                anchor_win_e = std::max(anchor_win_e, ee);
+                anchor_win_s = std::min(anchor_win_s, ds);
+                anchor_win_e = std::max(anchor_win_e, de);
             }
         }
 
@@ -5648,37 +5663,39 @@ static int dk_try_render_paired_bilingual_locked(
             for (int i = 0; i < other_tr->n_events; i++) {
                 const ASS_Event& ev = other_tr->events[i];
                 if (ev.Duration <= 0) continue;
-                const long long es = ev.Start;
-                const long long ee = ev.Start + ev.Duration;
+                long long ds = 0, de = 0;
+                event_display_span(ev, other_is_sec, ds, de);
+                const long long ev_dur = std::max<long long>(1, de - ds);
                 bool include = false;
 
                 if (has_anchor_active) {
-                    const long long ov = std::min(ee, anchor_win_e) - std::max(es, anchor_win_s);
-                    const long long min_ov = std::min<long long>(300, std::max<long long>(1, std::min<long long>(ev.Duration, anchor_dur) * 4 / 10));
+                    const long long ov = std::min(de, anchor_win_e) - std::max(ds, anchor_win_s);
+                    const long long min_ov = std::min<long long>(280, std::max<long long>(1, std::min<long long>(ev_dur, anchor_dur) * 35 / 100));
                     if (ov >= min_ov) {
-                        const long long eff_s = (std::llabs(es - anchor_win_s) <= kSnapMs) ? anchor_win_s : es;
-                        const long long eff_e = (std::llabs(ee - anchor_win_e) <= kSnapMs) ? anchor_win_e : ee;
-                        include = (other_ms >= eff_s && other_ms < eff_e);
+                        const long long eff_s = (std::llabs(ds - anchor_win_s) <= kSnapMs) ? anchor_win_s : ds;
+                        const long long eff_e = (std::llabs(de - anchor_win_e) <= kSnapMs) ? anchor_win_e : de;
+                        include = (now_ms >= eff_s && now_ms < eff_e);
                     } else {
-                        include = (other_ms >= es && other_ms < ee);
+                        include = (now_ms >= ds && now_ms < de);
                     }
-                } else if (other_ms >= es && other_ms < ee) {
-                    // Anchor is silent right now: suppress brief <=260ms leading/trailing overhang tied to a nearby anchor cue
+                } else if (now_ms >= ds && now_ms < de) {
+                    // Anchor is silent right now: suppress brief <=450ms leading/trailing overhang tied to a nearby anchor cue
                     bool suppressed_edge = false;
                     if (anchor_tr && anchor_tr->events && anchor_tr->n_events > 0) {
                         for (int j = 0; j < anchor_tr->n_events; j++) {
                             const ASS_Event& aev = anchor_tr->events[j];
                             if (aev.Duration <= 0) continue;
-                            const long long as = aev.Start;
-                            const long long ae = aev.Start + aev.Duration;
-                            const long long ov = std::min(ee, ae) - std::max(es, as);
-                            const long long min_ov = std::min<long long>(300, std::max<long long>(1, std::min<long long>(ev.Duration, aev.Duration) * 4 / 10));
+                            long long as = 0, ae = 0;
+                            event_display_span(aev, anchor_is_secondary, as, ae);
+                            const long long adur = std::max<long long>(1, ae - as);
+                            const long long ov = std::min(de, ae) - std::max(ds, as);
+                            const long long min_ov = std::min<long long>(280, std::max<long long>(1, std::min<long long>(ev_dur, adur) * 35 / 100));
                             if (ov < min_ov) continue;
-                            if (other_ms < as && (as - other_ms) <= kSnapMs && std::llabs(es - as) <= kSnapMs) {
+                            if (now_ms < as && (as - now_ms) <= kSnapMs && std::llabs(ds - as) <= kSnapMs) {
                                 suppressed_edge = true;
                                 break;
                             }
-                            if (other_ms >= ae && (other_ms - ae) <= kSnapMs && std::llabs(ee - ae) <= kSnapMs) {
+                            if (now_ms >= ae && (now_ms - ae) <= kSnapMs && std::llabs(de - ae) <= kSnapMs) {
                                 suppressed_edge = true;
                                 break;
                             }
@@ -5688,17 +5705,17 @@ static int dk_try_render_paired_bilingual_locked(
                 }
 
                 if (include) {
-                    if (!append_event_lines(other_tr, ev, !anchor_is_secondary)) return -1;
+                    if (!append_event_lines(other_tr, ev, other_is_sec)) return -1;
                 }
             }
         }
     } else {
-        auto collect_single = [&](const ASS_Track* tr, long long now_ms, bool is_secondary) -> bool {
+        auto collect_single = [&](const ASS_Track* tr, long long track_now_ms, bool is_secondary) -> bool {
             if (!tr || !tr->events || tr->n_events <= 0) return true;
             for (int i = 0; i < tr->n_events; i++) {
                 const ASS_Event& ev = tr->events[i];
                 if (ev.Duration <= 0) continue;
-                if (now_ms < ev.Start || now_ms >= ev.Start + ev.Duration) continue;
+                if (track_now_ms < ev.Start || track_now_ms >= ev.Start + ev.Duration) continue;
                 if (!append_event_lines(tr, ev, is_secondary)) return false;
             }
             return true;
@@ -5707,7 +5724,7 @@ static int dk_try_render_paired_bilingual_locked(
         if (!collect_single(player->secondary_ass_track, sec_ms, true)) return -1;
     }
 
-    if (pri_tagged.empty() && sec_lines.empty()) {
+    auto clear_if_active = [&]() {
         if (player->sub_last_non_empty) {
             clear_subtitle_canvas(canvas_w, canvas_h);
             player->sub_last_non_empty = false;
@@ -5715,11 +5732,17 @@ static int dk_try_render_paired_bilingual_locked(
             player->paired_layout_hash = 0;
             player->sub_serial++;
         }
+    };
+    if (pri_tagged.empty() && sec_lines.empty()) {
+        clear_if_active();
         return 0;
     }
 
     auto turns = dk_build_paired_turns(pri_tagged, sec_lines, anchor_is_secondary);
-    if (turns.empty()) return 0;
+    if (turns.empty()) {
+        clear_if_active();
+        return 0;
+    }
 
     // Compute fast deterministic fingerprint for zero-cost frame deduplication
     uint64_t h = 14695981039346656037ULL;
@@ -5880,7 +5903,14 @@ static int dk_try_render_paired_bilingual_locked(
         }
     } else {
         // Pair-A Semantic Stacked Mode (CN+EN / CN+EN) — centered, constant size, zero overlap!
-        int cur_y = compute_bottom_block_top(total_bottom_h, r_turns.size() <= 1);
+        // In 16:9 dual-track mode (bar_h < 90*vh_ratio), reserve the secondary line rail below a lone primary line
+        // so the primary subtitle stays on a rock-solid horizontal rail instead of jumping up/down 40px when secondary pops in/out.
+        int effective_bottom_h = total_bottom_h;
+        if (dual_tracks_loaded && primary_on_top && bar_h < static_cast<int>(std::lround(90.0 * vh_ratio)) &&
+            r_turns.size() == 1 && !r_turns[0].pri.empty() && r_turns[0].sec.empty()) {
+            effective_bottom_h += pair_gap + std::max(12, static_cast<int>(std::lround(en_size * 0.92)));
+        }
+        int cur_y = compute_bottom_block_top(effective_bottom_h, r_turns.size() <= 1);
         for (size_t ti = 0; ti < r_turns.size(); ti++) {
             const auto& rt = r_turns[ti];
             if (rt.totalH <= 0) continue;
@@ -5981,7 +6011,7 @@ static bool dk_update_subtitle_rgba_locked(
 
     // Fast path: Donby Cinema Pair-A Semantic Bilingual Engine for regular text SRT/VTT/ASS & dual-track text
     const int paired_rc = dk_try_render_paired_bilingual_locked(
-        player, pri_pts, sec_pts, canvas_w, canvas_h, canvas_resized, clear_subtitle_canvas
+        player, pts, pri_pts, sec_pts, sec_scale, canvas_w, canvas_h, canvas_resized, clear_subtitle_canvas
     );
     if (paired_rc == 1) {
         *out_rgba = player->sub_rgba_buf.data();

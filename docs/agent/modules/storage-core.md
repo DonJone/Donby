@@ -1,6 +1,6 @@
 # Module Map: Core Models, Policies & Storage (`DonbyCore`)
 
-> Last synced: `v1.4.18`. Load this doc for shared data models, `DONBY_HOME` storage path isolation, unified `DonbyAppInfo.version`, AES-256-GCM local credential vault, async file logger, subtitle encoding/transform/auto-alignment policies (Silero VAD + audio-first dual-subtitle aligner), diagnostics redaction, playback health state machine, update manifest parsing, and `DonbyCoreTests`.
+> Last synced: `v1.4.19`. Load this doc for shared data models, `DONBY_HOME` storage path isolation, unified `DonbyAppInfo.version`, AES-256-GCM local credential vault, async file logger, subtitle encoding/transform/auto-alignment policies (Silero VAD + audio-first dual-subtitle aligner), diagnostics redaction, playback health state machine, update manifest parsing, and `DonbyCoreTests`.
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyCore/DonbyStoragePaths.swift` (~52L)

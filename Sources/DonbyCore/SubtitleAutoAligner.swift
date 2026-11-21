@@ -503,6 +503,12 @@ public enum SubtitleAutoAligner {
                 targetSec = secRes.suggestedPrimaryDelaySeconds
                 targetScale = 1.0
                 secNote = String(format: "secVAD(%+.2f,r=%.2f)", targetSec, secRes.peakCorrelation)
+            } else {
+                // Even if secondary cues couldn't be matched independently yet, carry secondary by the same primary delta
+                // so both subtitles ALWAYS move together in lockstep when clicking "字音对齐".
+                let priDelta = targetPri - currentPrimaryDelay
+                targetSec = roundCenti(currentSecondaryDelay + priDelta)
+                secNote = String(format: "carryDelta(%+.2f)", priDelta)
             }
 
             let priMoved = abs(targetPri - currentPrimaryDelay) > 0.14
@@ -512,9 +518,9 @@ public enum SubtitleAutoAligner {
             if already {
                 msg = String(format: "双字幕均已与音轨对齐 (主 %+.2fs / 副 %+.2fs)", targetPri, targetSec)
             } else if drifted {
-                msg = String(format: "字音已对齐: 主 %+.2fs · 副 %+.2fs (速率 %.4fx)", targetPri, targetSec, targetScale)
+                msg = String(format: "字音已对齐(主副同步): 主 %+.2fs · 副 %+.2fs (速率 %.4fx)", targetPri, targetSec, targetScale)
             } else {
-                msg = String(format: "字音已对齐: 主 %+.2fs · 副 %+.2fs", targetPri, targetSec)
+                msg = String(format: "字音已对齐(主副同步): 主 %+.2fs · 副 %+.2fs", targetPri, targetSec)
             }
             let diag = String(
                 format: "mode=audio-dual(priAnchor) win=[%.1f..%.1f] pri=%.2f->%.2f(r=%.3f,z=%.2f,h=%.2f/%.2f) sec=%.2f->%.2f via=%@",
@@ -1162,76 +1168,84 @@ public enum SubtitleAutoAligner {
                 ? sec
                 : sec.map { SubtitleCueInterval(startSeconds: $0.startSeconds * scale, endSeconds: $0.endSeconds * scale) }
 
-            guard let coarse = coarseAndFineEnvelopeShift(
+            let candidateShifts = coarseAndFineEnvelopeShiftCandidates(
                 primary: pri,
                 secondary: scaledSec,
                 maxShiftSeconds: maxShiftSeconds
-            ) else {
-                return nil
-            }
-
-            var deltas: [Double] = []
-            deltas.reserveCapacity(scaledSec.count)
-            var j = 0
-            for idx in 0..<scaledSec.count {
-                let sc = scaledSec[idx]
-                let predStart = sc.startSeconds + coarse.shift
-                let predMid = sc.midpoint + coarse.shift
-                while j + 1 < pri.count && pri[j + 1].startSeconds < predStart - 1.6 {
-                    j += 1
-                }
-                var bestDist = Double.greatestFiniteMagnitude
-                var bestPriIdx = -1
-                var scan = j
-                while scan < pri.count && pri[scan].startSeconds <= predStart + 1.6 {
-                    let pc = pri[scan]
-                    let durRatio = max(pc.duration, 0.05) / max(sc.duration, 0.05)
-                    if durRatio >= 0.22 && durRatio <= 4.5 {
-                        let dStart = abs(pc.startSeconds - predStart)
-                        let dMid = abs(pc.midpoint - predMid)
-                        let dist = 0.7 * dStart + 0.3 * dMid
-                        if dist < bestDist {
-                            bestDist = dist
-                            bestPriIdx = scan
-                        }
-                    }
-                    scan += 1
-                }
-                if bestPriIdx >= 0 && bestDist <= 1.6 {
-                    let pc = pri[bestPriIdx]
-                    let res = 0.7 * (pc.startSeconds - predStart) + 0.3 * (pc.midpoint - predMid)
-                    deltas.append(res)
-                }
-            }
-
-            guard deltas.count >= 4 else { return nil }
-            let medDelta = median(of: deltas)
-            let refinedOffset = coarse.shift + medDelta
-
-            var absRes: [Double] = []
-            absRes.reserveCapacity(deltas.count)
-            var inliers = 0
-            for d in deltas {
-                let err = abs(d - medDelta)
-                if err <= 0.65 {
-                    inliers += 1
-                    absRes.append(err)
-                }
-            }
-            guard inliers >= 4 else { return nil }
-            let mad = median(of: absRes)
-            let denom = Double(min(pri.count, sec.count))
-            let ratio = min(1.0, Double(inliers) / max(1.0, denom))
-            let quality = ratio * 0.55 + max(0.0, 1.0 - mad / 0.55) * 0.30 + min(1.0, max(0.0, coarse.corr)) * 0.15
-            return ScaleEval(
-                scale: scale,
-                offset: refinedOffset,
-                mad: mad,
-                inliers: inliers,
-                inlierRatio: ratio,
-                corr: coarse.corr,
-                score: quality
             )
+            guard !candidateShifts.isEmpty else { return nil }
+
+            var bestForScale: ScaleEval? = nil
+            for candShift in candidateShifts {
+                var deltas: [Double] = []
+                deltas.reserveCapacity(scaledSec.count)
+                var j = 0
+                for idx in 0..<scaledSec.count {
+                    let sc = scaledSec[idx]
+                    let predStart = sc.startSeconds + candShift.shift
+                    let predMid = sc.midpoint + candShift.shift
+                    while j + 1 < pri.count && pri[j + 1].startSeconds < predStart - 1.6 {
+                        j += 1
+                    }
+                    var bestDist = Double.greatestFiniteMagnitude
+                    var bestPriIdx = -1
+                    var scan = j
+                    while scan < pri.count && pri[scan].startSeconds <= predStart + 1.6 {
+                        let pc = pri[scan]
+                        let durRatio = max(pc.duration, 0.05) / max(sc.duration, 0.05)
+                        if durRatio >= 0.22 && durRatio <= 4.5 {
+                            let dStart = abs(pc.startSeconds - predStart)
+                            let dMid = abs(pc.midpoint - predMid)
+                            let dist = 0.7 * dStart + 0.3 * dMid
+                            if dist < bestDist {
+                                bestDist = dist
+                                bestPriIdx = scan
+                            }
+                        }
+                        scan += 1
+                    }
+                    if bestPriIdx >= 0 && bestDist <= 1.6 {
+                        let pc = pri[bestPriIdx]
+                        let res = 0.7 * (pc.startSeconds - predStart) + 0.3 * (pc.midpoint - predMid)
+                        deltas.append(res)
+                    }
+                }
+
+                guard deltas.count >= 4 else { continue }
+                let medDelta = median(of: deltas)
+                let refinedOffset = candShift.shift + medDelta
+
+                var absRes: [Double] = []
+                absRes.reserveCapacity(deltas.count)
+                var inliers = 0
+                for d in deltas {
+                    let err = abs(d - medDelta)
+                    if err <= 0.65 {
+                        inliers += 1
+                        absRes.append(err)
+                    }
+                }
+                guard inliers >= 4 else { continue }
+                let mad = median(of: absRes)
+                let denom = Double(min(pri.count, sec.count))
+                let ratio = min(1.0, Double(inliers) / max(1.0, denom))
+                // Small near-zero tie-breaker prevents sparse far-away edge flukes from beating a dense near-zero match
+                let shiftPenalty = 0.02 * min(1.0, abs(refinedOffset) / 60.0)
+                let quality = ratio * 0.58 + max(0.0, 1.0 - mad / 0.55) * 0.27 + min(1.0, max(0.0, candShift.corr)) * 0.15 - shiftPenalty
+                let eval = ScaleEval(
+                    scale: scale,
+                    offset: refinedOffset,
+                    mad: mad,
+                    inliers: inliers,
+                    inlierRatio: ratio,
+                    corr: candShift.corr,
+                    score: quality
+                )
+                if bestForScale == nil || eval.score > bestForScale!.score {
+                    bestForScale = eval
+                }
+            }
+            return bestForScale
         }
 
         let unityEval = evaluateCandidate(scale: 1.0)
@@ -1264,10 +1278,10 @@ public enum SubtitleAutoAligner {
             return .lowConfidence(reason: "主副字幕时间轴重叠度过低，无法可靠对齐")
         }
 
-        let isValid = (chosen.inliers >= 4 && chosen.inlierRatio >= 0.22 && chosen.mad <= 0.45) ||
-                      (chosen.inliers >= 12 && chosen.mad <= 0.38)
+        let isValid = (chosen.inliers >= 5 && chosen.inlierRatio >= 0.30 && chosen.mad <= 0.45) ||
+                      (chosen.inliers >= 16 && chosen.inlierRatio >= 0.25 && chosen.mad <= 0.35)
         guard isValid else {
-            return .lowConfidence(reason: "主副字幕匹配条数不足 (\(chosen.inliers) 条)，无法可靠对齐")
+            return .lowConfidence(reason: "主副字幕匹配比例过低 (\(chosen.inliers) 条 / \(Int((chosen.inlierRatio * 100).rounded()))%)，请播放更多对白后重试")
         }
 
         let roundedOffset = roundCenti(chosen.offset)
@@ -1335,20 +1349,32 @@ public enum SubtitleAutoAligner {
         return merged
     }
 
-    private static func coarseAndFineEnvelopeShift(
+    /// Overlap-clipped 2-stage coarse (`0.25s`) -> fine (`0.04s`) envelope cross-correlation returning top distinct candidate shifts
+    /// (plus `0.0s` baseline), preventing empty-void edge inflation on freshly demuxed embedded subtitle windows.
+    private static func coarseAndFineEnvelopeShiftCandidates(
         primary: [SubtitleCueInterval],
         secondary: [SubtitleCueInterval],
         maxShiftSeconds: Double
-    ) -> (shift: Double, corr: Double)? {
+    ) -> [(shift: Double, corr: Double)] {
         guard let priFirst = primary.first, let priLast = primary.last,
               let secFirst = secondary.first, let secLast = secondary.last else {
-            return nil
+            return []
         }
 
-        let spanStart = max(0.0, min(priFirst.startSeconds, secFirst.startSeconds))
-        let spanEnd = max(priLast.endSeconds, secLast.endSeconds)
+        let priSpan = max(0.0, priLast.endSeconds - priFirst.startSeconds)
+        let secSpan = max(0.0, secLast.endSeconds - secFirst.startSeconds)
+        let minTrackSpan = min(priSpan, secSpan)
+        guard minTrackSpan >= 2.0 else { return [] }
+
+        // Never search lags larger than ~45% of the buffered embedded subtitle span (prevents ±70s void jumps on 80s clips)
+        let effectiveMaxShift = (minTrackSpan < 260.0)
+            ? min(maxShiftSeconds, max(12.0, minTrackSpan * 0.45))
+            : maxShiftSeconds
+
+        let spanStart = max(0.0, priFirst.startSeconds)
+        let spanEnd = priLast.endSeconds
         let totalSpan = spanEnd - spanStart
-        guard totalSpan >= 2.0 else { return nil }
+        guard totalSpan >= 2.0 else { return [] }
 
         var windows: [(Double, Double)] = []
         if totalSpan <= 1500.0 {
@@ -1361,18 +1387,18 @@ public enum SubtitleAutoAligner {
             windows.append((spanEnd - winLen, spanEnd))
         }
 
-        func correlate(dt: Double, lagMinSec: Double, lagMaxSec: Double) -> (shift: Double, corr: Double)? {
+        func correlateTopPeaks(dt: Double, lagMinSec: Double, lagMaxSec: Double, maxPeaks: Int, minSepSec: Double) -> [(shift: Double, corr: Double)] {
             let kMin = Int(floor(lagMinSec / dt))
             let kMax = Int(ceil(lagMaxSec / dt))
             let lagCount = kMax - kMin + 1
-            guard lagCount >= 1 else { return nil }
+            guard lagCount >= 1 else { return [] }
 
-            var totalNum = [Double](repeating: 0, count: lagCount)
-            var totalDenP = 0.0
-            var totalDenS = [Double](repeating: 0, count: lagCount)
+            var scoreSum = [Double](repeating: 0, count: lagCount)
+            var weightSum = [Double](repeating: 0, count: lagCount)
 
             for (wStart, wEnd) in windows {
-                let n = max(16, Int(ceil((wEnd - wStart) / dt)))
+                let wDur = wEnd - wStart
+                let n = max(16, Int(ceil(wDur / dt)))
                 var pVec = [Float](repeating: 0, count: n)
                 for cue in primary where cue.endSeconds >= wStart && cue.startSeconds <= wEnd {
                     let i0 = max(0, Int(floor((cue.startSeconds - wStart) / dt)))
@@ -1382,14 +1408,14 @@ public enum SubtitleAutoAligner {
                         pVec[i0] = 1.5
                     }
                 }
-                var meanP: Float = 0
-                vDSP_meanv(pVec, 1, &meanP, vDSP_Length(n))
-                var negMeanP = -meanP
-                vDSP_vsadd(pVec, 1, &negMeanP, &pVec, 1, vDSP_Length(n))
-                var normPSq: Float = 0
-                vDSP_dotpr(pVec, 1, pVec, 1, &normPSq, vDSP_Length(n))
-                if normPSq < 1e-4 { continue }
-                totalDenP += Double(normPSq)
+
+                var prefP = [Double](repeating: 0, count: n + 1)
+                var prefP2 = [Double](repeating: 0, count: n + 1)
+                for i in 0..<n {
+                    let v = Double(pVec[i])
+                    prefP[i + 1] = prefP[i] + v
+                    prefP2[i + 1] = prefP2[i] + v * v
+                }
 
                 let sOrigin = wStart - Double(kMax) * dt
                 let sLen = n + (kMax - kMin) + 2
@@ -1411,50 +1437,97 @@ public enum SubtitleAutoAligner {
                     prefS[i + 1] = prefS[i] + v
                     prefS2[i + 1] = prefS2[i] + v * v
                 }
-                let invN = 1.0 / Double(n)
+
+                let minOvSamples = max(12, Int(ceil(0.50 * Double(n))))
 
                 sVec.withUnsafeBufferPointer { sPtr in
                     pVec.withUnsafeBufferPointer { pPtr in
                         guard let sBase = sPtr.baseAddress, let pBase = pPtr.baseAddress else { return }
                         for li in 0..<lagCount {
                             let k = kMin + li
-                            let sIdx = kMax - k
-                            let sumS = prefS[sIdx + n] - prefS[sIdx]
-                            let sumS2 = prefS2[sIdx + n] - prefS2[sIdx]
-                            let varS = max(0.0, sumS2 - (sumS * sumS) * invN)
-                            if varS < 1e-4 { continue }
+                            let lagSec = Double(k) * dt
+                            // Clip strictly to the valid overlap where secondary actually has demuxed cues
+                            let ovStart = max(wStart, secFirst.startSeconds + lagSec - 2.0)
+                            let ovEnd = min(wEnd, secLast.endSeconds + lagSec + 2.0)
+                            let i0 = max(0, Int(ceil((ovStart - wStart) / dt)))
+                            let i1 = min(n, Int(floor((ovEnd - wStart) / dt)))
+                            let ovN = i1 - i0
+                            guard ovN >= minOvSamples else { continue }
+
+                            let sIdx = (kMax - k) + i0
+                            let invOv = 1.0 / Double(ovN)
+                            let sumP = prefP[i1] - prefP[i0]
+                            let sumP2 = prefP2[i1] - prefP2[i0]
+                            let varP = sumP2 - sumP * sumP * invOv
+                            guard varP > 1e-4 else { continue }
+
+                            let sumS = prefS[sIdx + ovN] - prefS[sIdx]
+                            let sumS2 = prefS2[sIdx + ovN] - prefS2[sIdx]
+                            let varS = sumS2 - sumS * sumS * invOv
+                            guard varS > 1e-4 else { continue }
+
                             var dot: Float = 0
-                            vDSP_dotpr(pBase, 1, sBase.advanced(by: sIdx), 1, &dot, vDSP_Length(n))
-                            totalNum[li] += Double(dot)
-                            totalDenS[li] += varS
+                            vDSP_dotpr(pBase.advanced(by: i0), 1, sBase.advanced(by: sIdx), 1, &dot, vDSP_Length(ovN))
+                            let r = (Double(dot) - sumP * sumS * invOv) / sqrt(varP * varS)
+                            let ovFrac = Double(ovN) / Double(n)
+                            // Weight by overlap fraction so sparse partial overlaps never outrank dense full overlaps
+                            let w = ovFrac * Double(ovN)
+                            scoreSum[li] += (r * sqrt(ovFrac)) * w
+                            weightSum[li] += w
                         }
                     }
                 }
             }
 
-            guard totalDenP > 1e-4 else { return nil }
-            var bestLi = -1
-            var bestR = -1.0
-            for li in 0..<lagCount {
-                let den = sqrt(totalDenP * totalDenS[li])
-                guard den > 1e-4 else { continue }
-                let r = totalNum[li] / den
-                if r > bestR {
-                    bestR = r
-                    bestLi = li
+            var scored: [(li: Int, score: Double)] = []
+            scored.reserveCapacity(lagCount)
+            for li in 0..<lagCount where weightSum[li] > 0 {
+                scored.append((li, scoreSum[li] / weightSum[li]))
+            }
+            scored.sort { $0.score > $1.score }
+
+            let sepBins = max(1, Int(ceil(minSepSec / dt)))
+            var peaks: [(shift: Double, corr: Double)] = []
+            var pickedLi: [Int] = []
+            for item in scored {
+                if pickedLi.allSatisfy({ abs($0 - item.li) >= sepBins }) {
+                    pickedLi.append(item.li)
+                    peaks.append((Double(kMin + item.li) * dt, item.score))
+                    if peaks.count >= maxPeaks { break }
                 }
             }
-            guard bestLi >= 0 else { return nil }
-            return (Double(kMin + bestLi) * dt, bestR)
+            return peaks
         }
 
-        guard let coarse = correlate(dt: 0.25, lagMinSec: -maxShiftSeconds, lagMaxSec: maxShiftSeconds) else {
-            return nil
+        var coarseSeeds = correlateTopPeaks(
+            dt: 0.25,
+            lagMinSec: -effectiveMaxShift,
+            lagMaxSec: effectiveMaxShift,
+            maxPeaks: 4,
+            minSepSec: 2.0
+        )
+        // Always include near-zero baseline candidate so closely aligned tracks are guaranteed evaluation
+        if coarseSeeds.allSatisfy({ abs($0.shift) > 1.5 }) {
+            coarseSeeds.append((0.0, 0.0))
         }
-        if let fine = correlate(dt: 0.04, lagMinSec: coarse.shift - 1.5, lagMaxSec: coarse.shift + 1.5) {
-            return fine
+
+        var refined: [(shift: Double, corr: Double)] = []
+        for seed in coarseSeeds {
+            if let fine = correlateTopPeaks(
+                dt: 0.04,
+                lagMinSec: seed.shift - 1.5,
+                lagMaxSec: seed.shift + 1.5,
+                maxPeaks: 1,
+                minSepSec: 0.5
+            ).first {
+                if refined.allSatisfy({ abs($0.shift - fine.shift) > 0.35 }) {
+                    refined.append(fine)
+                }
+            } else if refined.allSatisfy({ abs($0.shift - seed.shift) > 0.35 }) {
+                refined.append(seed)
+            }
         }
-        return coarse
+        return refined
     }
 
     private static func median(of values: [Double]) -> Double {

@@ -7,7 +7,7 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "1.4.18")
+        #expect(DonbyAppInfo.fallbackVersion == "1.4.19")
     }
 
     @Test func subtitleDecoderUTF8BOMAndGB18030() {
@@ -500,6 +500,69 @@ struct DonbyCoreTests {
             #expect(res.alreadyAligned == true)
         } else {
             Issue.record("Expected already-synced embedded subtitle to remain aligned, got \(alreadySynced)")
+        }
+    }
+
+    @Test func dualAlignNeverJumpsToEdgeVoidOnShortEmbeddedClipAndAudioFirstMovesBoth() {
+        // Reproduces real-world embedded MKV post-seek session (~75s buffered cues starting at 996s, true offset +0.39s, ±240ms jitter)
+        var pri: [SubtitleCueInterval] = []
+        var sec: [SubtitleCueInterval] = []
+        var cursor = 996.5
+        let gaps: [Double] = [1.4, 2.9, 0.8, 4.1, 1.9, 3.3, 1.1, 2.5]
+        let durs: [Double] = [1.8, 2.4, 1.5, 2.9, 2.1, 1.6]
+        for i in 0..<20 {
+            let d = durs[i % durs.count]
+            pri.append(SubtitleCueInterval(startSeconds: cursor, endSeconds: cursor + d))
+            let jitter = Double((i % 5) - 2) * 0.11
+            // t_pri = t_sec + 0.39 => t_sec = t_pri - 0.39
+            sec.append(SubtitleCueInterval(startSeconds: cursor - 0.39 + jitter, endSeconds: cursor + d - 0.39 + jitter))
+            cursor += d + gaps[i % gaps.count]
+        }
+
+        // Must land directly near +0.39s on click #1 — NEVER jump to -50s/-70s edge void!
+        let res = SubtitleAutoAligner.alignDualSubtitles(
+            primaryCues: pri,
+            secondaryCues: sec,
+            currentPrimaryDelay: 0.0,
+            maxShiftSeconds: 120.0
+        )
+        if case .aligned(let aligned) = res {
+            #expect(abs(aligned.rawOffsetSeconds - 0.39) <= 0.15)
+            #expect(abs(aligned.suggestedSecondaryDelaySeconds - 0.39) <= 0.15)
+        } else {
+            Issue.record("Expected +0.39s alignment on short embedded clip, got \(res)")
+        }
+
+        // Audio-first alignment ("字音对齐") must ALWAYS move BOTH primary and secondary together even if secondary has <5 cues!
+        let dt = SileroVAD.frameDurationSeconds
+        let audioStart = 120.0
+        let frameCount = Int(35.0 / dt)
+        let speech: [(Double, Double)] = [
+            (122.0, 124.2), (125.8, 127.6), (130.4, 133.1),
+            (135.2, 137.0), (140.5, 143.2), (146.1, 148.9), (150.5, 152.7)
+        ]
+        var vad = [Float](repeating: 0.02, count: frameCount)
+        for (s, e) in speech {
+            let i0 = max(0, Int((s - audioStart) / dt))
+            let i1 = min(frameCount - 1, Int((e - audioStart) / dt))
+            for idx in i0...i1 { vad[idx] = 0.93 }
+        }
+        let shiftedPri = speech.map { SubtitleCueInterval(startSeconds: $0.0 - 2.20, endSeconds: $0.1 - 2.20) }
+        // Only 2 secondary cues (too few for dual match) -> fallback must carry secondary by the same +2.20s delta!
+        let sparseSec = Array(shiftedPri.prefix(2))
+        let outcome = SubtitleAutoAligner.alignAudioFirst(
+            vadProbabilities: vad,
+            audioStartPTS: audioStart,
+            primaryCues: shiftedPri,
+            secondaryCues: sparseSec,
+            currentPrimaryDelay: 0.0,
+            currentSecondaryDelay: 0.50
+        )
+        if case .applied(let plan) = outcome {
+            #expect(abs(plan.primaryDelaySeconds - 2.20) <= 0.10)
+            #expect(abs(plan.secondaryDelaySeconds - 2.70) <= 0.10)
+        } else {
+            Issue.record("Expected audioFirst to carry secondary delta, got \(outcome)")
         }
     }
 }
