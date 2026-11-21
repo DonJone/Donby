@@ -434,11 +434,18 @@ public final class AppState: ObservableObject {
               let decoded = try? jsonDecoder.decode([EmbyServerConfig].self, from: data) else {
             return
         }
-        self.servers = decoded.filter { !$0.isDemoServer }
+        let filtered = decoded.filter { !$0.isDemoServer }
+        let (hydrated, needsMigration) = ServerCredentialStore.shared.hydrate(filtered)
+        self.servers = hydrated
+        if needsMigration {
+            saveServersToDisk()
+            DonbyLogger.shared.log("已完成旧版明文服务器凭证向 macOS 钥匙串的自动迁移", level: .info, subsystem: "Keychain")
+        }
     }
 
     private func saveServersToDisk() {
-        if let data = try? jsonEncoder.encode(servers) {
+        let sanitized = ServerCredentialStore.shared.persistSecretsAndSanitizeForDefaults(servers)
+        if let data = try? jsonEncoder.encode(sanitized) {
             UserDefaults.standard.set(data, forKey: serversStorageKey)
         }
     }

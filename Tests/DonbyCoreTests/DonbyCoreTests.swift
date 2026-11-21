@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import Testing
 @testable import DonbyCore
 
@@ -6,7 +7,7 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "1.4.12")
+        #expect(DonbyAppInfo.fallbackVersion == "1.4.13")
     }
 
     @Test func subtitleDecoderUTF8BOMAndGB18030() {
@@ -119,5 +120,95 @@ struct DonbyCoreTests {
         } else {
             Issue.record("Expected .fail after exhausted recovery, got \(failEval)")
         }
+    }
+
+    @Test func serverCredentialStoreMigrationHydrationAndSafetyGuards() {
+        final class MockVaultBackend: ServerCredentialVaultBackend {
+            var storedData: Data? = nil
+            var readError: OSStatus? = nil
+            var writeError: OSStatus? = nil
+            var writeCount = 0
+            var deleteCount = 0
+
+            func readVaultData() -> VaultReadResult {
+                if let err = readError { return .failure(err) }
+                return storedData.map(VaultReadResult.found) ?? .notFound
+            }
+
+            func writeVaultData(_ data: Data) -> OSStatus {
+                writeCount += 1
+                if let err = writeError { return err }
+                storedData = data
+                return errSecSuccess
+            }
+
+            func deleteVaultData() -> OSStatus {
+                deleteCount += 1
+                if let err = writeError { return err }
+                storedData = nil
+                return errSecSuccess
+            }
+        }
+
+        let backend = MockVaultBackend()
+        let store = ServerCredentialStore(backend: backend)
+        let serverId = UUID()
+        let legacyServer = EmbyServerConfig(
+            id: serverId,
+            name: "Home",
+            host: "emby.local",
+            username: "alice",
+            password: "p@ssword",
+            accessToken: "tok_abc"
+        )
+
+        // 1. Legacy plaintext triggers migration and strips UserDefaults copy
+        let (hydratedLegacy, needsMigration) = store.hydrate([legacyServer])
+        #expect(needsMigration == true)
+        #expect(hydratedLegacy[0].password == "p@ssword")
+        #expect(hydratedLegacy[0].accessToken == "tok_abc")
+
+        let sanitized = store.persistSecretsAndSanitizeForDefaults(hydratedLegacy)
+        #expect(backend.writeCount == 1)
+        #expect(sanitized[0].password.isEmpty)
+        #expect(sanitized[0].accessToken.isEmpty)
+
+        // 2. Metadata-only save skips redundant Keychain write
+        var metaUpdated = hydratedLegacy
+        metaUpdated[0].movieCount = 42
+        _ = store.persistSecretsAndSanitizeForDefaults(metaUpdated)
+        #expect(backend.writeCount == 1)
+
+        // 3. Reloading stripped UserDefaults copy hydrates secrets back from vault
+        let store2 = ServerCredentialStore(backend: backend)
+        let (reloaded, needsMigration2) = store2.hydrate(sanitized)
+        #expect(needsMigration2 == false)
+        #expect(reloaded[0].password == "p@ssword")
+        #expect(reloaded[0].accessToken == "tok_abc")
+
+        // 4. Write failure keeps UserDefaults fallback unstripped (zero data loss)
+        backend.writeError = errSecAuthFailed
+        var changedPass = reloaded
+        changedPass[0].password = "new_secret"
+        let fallbackCopy = store2.persistSecretsAndSanitizeForDefaults(changedPass)
+        #expect(fallbackCopy[0].password == "new_secret")
+        backend.writeError = nil
+
+        // 5. Read-blocked launch never wipes Keychain during unrelated metadata save
+        backend.readError = errSecAuthFailed
+        let blockedStore = ServerCredentialStore(backend: backend)
+        let (blockedLoad, _) = blockedStore.hydrate(sanitized)
+        #expect(blockedLoad[0].password.isEmpty)
+        _ = blockedStore.persistSecretsAndSanitizeForDefaults(blockedLoad)
+        #expect(backend.deleteCount == 0)
+        #expect(backend.storedData != nil)
+
+        // 6. Deleting all servers clears vault cleanly
+        backend.readError = nil
+        let cleanStore = ServerCredentialStore(backend: backend)
+        _ = cleanStore.hydrate(sanitized)
+        _ = cleanStore.persistSecretsAndSanitizeForDefaults([])
+        #expect(backend.deleteCount == 1)
+        #expect(backend.storedData == nil)
     }
 }

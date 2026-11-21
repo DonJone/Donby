@@ -20,7 +20,10 @@ let package = Package(
     targets: [
         .target(
             name: "DonbyCore",
-            path: "Sources/DonbyCore"
+            path: "Sources/DonbyCore",
+            linkerSettings: [
+                .linkedFramework("Security")
+            ]
         ),
         .target(
             name: "DonbyNetwork",

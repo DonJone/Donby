@@ -14,6 +14,10 @@ public enum DonbyStoragePaths {
         return URL(fileURLWithPath: customHome, isDirectory: true)
     }
 
+    public static var isIsolatedHome: Bool {
+        homeOverrideURL != nil
+    }
+
     public static var cachesDirectoryURL: URL {
         if let override = homeOverrideURL {
             return override.appendingPathComponent("Library/Caches", isDirectory: true)

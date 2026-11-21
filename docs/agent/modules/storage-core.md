@@ -1,10 +1,12 @@
 # Module Map: Core Models, Policies & Storage (`DonbyCore`)
 
-> Last synced: `v1.4.12`. Load this doc for shared data models, `DONBY_HOME` storage path isolation, unified `DonbyAppInfo.version`, async file logger, subtitle encoding/transform policies, diagnostics redaction, playback health state machine, update manifest parsing, and `DonbyCoreTests`.
+> Last synced: `v1.4.13`. Load this doc for shared data models, `DONBY_HOME` storage path isolation, unified `DonbyAppInfo.version`, Keychain credential vault, async file logger, subtitle encoding/transform policies, diagnostics redaction, playback health state machine, update manifest parsing, and `DonbyCoreTests`.
 
 ## 1. File Inventory & Core Symbols
-- `Sources/DonbyCore/DonbyStoragePaths.swift` (~48L)
-  - `DonbyStoragePaths`: Centralized path resolver supporting `DONBY_HOME` environment override (`cachesDirectoryURL`, `applicationSupportDirectoryURL`, `libraryDirectoryURL`, `moviesDirectoryURL`).
+- `Sources/DonbyCore/DonbyStoragePaths.swift` (~52L)
+  - `DonbyStoragePaths`: Centralized path resolver supporting `DONBY_HOME` environment override (`isIsolatedHome`, `cachesDirectoryURL`, `applicationSupportDirectoryURL`, `libraryDirectoryURL`, `moviesDirectoryURL`).
+- `Sources/DonbyCore/ServerCredentialStore.swift` (~240L)
+  - `ServerCredentialStore`, `ServerCredentialSecret`, `KeychainVaultBackend`, `IsolatedFileVaultBackend` — stores all server `password` and `accessToken` values in a **single** strictly scoped macOS Login Keychain entry (`service = com.don.Donby.credentials`, `account = server-credentials.v1`) using atomic `SecItemUpdate` -> `SecItemAdd`, automatic one-time migration from legacy plaintext `UserDefaults`, no-op write skipping when only metadata changes, and data-loss guards when Keychain access is denied/locked. Automatically routes to an isolated `0600` file when `DonbyStoragePaths.isIsolatedHome` is true so tests never touch the host Keychain.
 - `Sources/DonbyCore/DonbyLogger.swift` (~177L)
   - `DonbyLogger`, `DonbyLogLevel`, `DonbyLogEntry` — in-memory ring + serial background `ioQueue` file logging (non-blocking log writes and lock-free file export). Note: `DonbyLogger` itself does NOT redact strings; callers logging URLs/tokens MUST pass them through `PlaybackDiagnosticsRedactor.redact(_:)`.
 - `Sources/DonbyCore/SubtitleAndPlaybackPolicies.swift` (~951L)
@@ -29,3 +31,4 @@
 1. **`DONBY_HOME` Isolation**: Every cache/storage path in `DonbyNetwork` and `DonbyApp` MUST route through `DonbyStoragePaths` (never hardcode `FileManager.default.urls(for: .cachesDirectory, ...)` directly), so automated tests with `DONBY_HOME=$(mktemp -d)` remain 100% isolated from user data.
 2. **ASS Tag Preservation**: Any changes to `SubtitleTextTransform` must preserve `{...}` ASS formatting tags intact.
 3. **Diagnostic Redaction**: Never weaken `PlaybackDiagnosticsRedactor` secret-stripping regexes, and always redact stream URLs/tokens before calling `DonbyLogger.shared.log(...)`.
+4. **Keychain Atomic Update & Isolation**: Never use `SecItemDelete` before `SecItemAdd` or omit `kSecAttrService` on Keychain queries; never overwrite the Keychain vault if startup read failed (`vaultReadBlocked == true`); always isolate via `IsolatedFileVaultBackend` when `DonbyStoragePaths.isIsolatedHome == true`.
