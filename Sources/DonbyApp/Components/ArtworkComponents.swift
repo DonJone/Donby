@@ -879,6 +879,7 @@ public struct MediaArtworkView: View {
     public let item: EmbyItem
     public var kind: EmbyImageKind = .primary
     public var maxWidth: Int = 600
+    public var alignment: Alignment = .center
 
     @State private var loadedImage: CGImage? = nil
 
@@ -886,12 +887,14 @@ public struct MediaArtworkView: View {
         server: EmbyServerConfig?,
         item: EmbyItem,
         kind: EmbyImageKind = .primary,
-        maxWidth: Int = 600
+        maxWidth: Int = 600,
+        alignment: Alignment = .center
     ) {
         self.server = server
         self.item = item
         self.kind = kind
         self.maxWidth = maxWidth
+        self.alignment = alignment
     }
 
     nonisolated public static func resolvedTargetPixelSize(kind: EmbyImageKind, maxWidth: Int) -> Int {
@@ -1117,7 +1120,7 @@ public struct MediaArtworkView: View {
                 Image(decorative: img, scale: 2.0)
                     .resizable()
                     .scaledToFill()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment)
                     .clipped()
             } else {
                 ZStack {

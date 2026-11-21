@@ -876,57 +876,50 @@ public struct PlayerView: View {
             HStack(spacing: 14) {
                 // Left controls: Previous, Rewind 10s, Play/Pause, Forward 10s, Next, Current Time
                 HStack(spacing: 6) {
-                    Button { playAdjacentEpisode(offset: -1) } label: {
-                        Image(systemName: "backward.end.fill")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(session.episodesQueue.count > 1 ? .white : .white.opacity(0.35))
-                            .frame(width: 28, height: 28)
-                            .contentShape(Rectangle())
+                    PlayerConsoleIconButton(
+                        systemImage: "backward.end.fill",
+                        fontSize: 13.5,
+                        isDisabled: session.episodesQueue.count <= 1,
+                        tooltip: "上一集"
+                    ) {
+                        playAdjacentEpisode(offset: -1)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(session.episodesQueue.count <= 1)
-                    .help("上一集")
 
-                    Button { seekRelative(-10) } label: {
-                        Image(systemName: "arrow.counterclockwise")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 28, height: 28)
-                            .contentShape(Rectangle())
+                    PlayerConsoleIconButton(
+                        systemImage: "gobackward.10",
+                        fontSize: 14.5,
+                        tooltip: "快退 10 秒"
+                    ) {
+                        seekRelative(-10)
                     }
-                    .buttonStyle(.plain)
-                    .help("快退 10 秒")
 
-                    Button { togglePlayPause() } label: {
-                        Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 19, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 32, height: 28)
-                            .contentShape(Rectangle())
+                    PlayerConsoleIconButton(
+                        systemImage: isPlaying ? "pause.fill" : "play.fill",
+                        fontSize: 15,
+                        fontWeight: .bold,
+                        size: 34,
+                        prominent: true,
+                        tooltip: isPlaying ? "暂停 (空格)" : "播放 (空格)"
+                    ) {
+                        togglePlayPause()
                     }
-                    .buttonStyle(.plain)
-                    .help(isPlaying ? "暂停 (空格)" : "播放 (空格)")
 
-                    Button { seekRelative(10) } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 28, height: 28)
-                            .contentShape(Rectangle())
+                    PlayerConsoleIconButton(
+                        systemImage: "goforward.10",
+                        fontSize: 14.5,
+                        tooltip: "快进 10 秒"
+                    ) {
+                        seekRelative(10)
                     }
-                    .buttonStyle(.plain)
-                    .help("快进 10 秒")
 
-                    Button { playAdjacentEpisode(offset: 1) } label: {
-                        Image(systemName: "forward.end.fill")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(session.episodesQueue.count > 1 ? .white : .white.opacity(0.35))
-                            .frame(width: 28, height: 28)
-                            .contentShape(Rectangle())
+                    PlayerConsoleIconButton(
+                        systemImage: "forward.end.fill",
+                        fontSize: 13.5,
+                        isDisabled: session.episodesQueue.count <= 1,
+                        tooltip: "下一集"
+                    ) {
+                        playAdjacentEpisode(offset: 1)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(session.episodesQueue.count <= 1)
-                    .help("下一集")
 
                     Text(formatTime(isScrubbing ? scrubTime : currentTime))
                         .font(.system(size: 13, weight: .medium, design: .monospaced))
@@ -946,8 +939,8 @@ public struct PlayerView: View {
                     onCommitSeek: { target in seekTo(target) }
                 )
 
-                // Right controls: Duration, Volume Icon, Mini Volume Slider, 5 Circular Buttons
-                HStack(spacing: 10) {
+                // Right controls: Duration, Volume Icon, Mini Volume Slider, 5 Unified Circular Glass Buttons
+                HStack(spacing: 8) {
                     Button { showRemainingTime.toggle() } label: {
                         Text(showRemainingTime ? "-\(formatTime(max(0, duration - currentTime)))" : formatTime(duration))
                             .font(.system(size: 13, weight: .medium, design: .monospaced))
@@ -958,63 +951,60 @@ public struct PlayerView: View {
                     .buttonStyle(.plain)
                     .help("切换显示总时长 / 剩余时长")
 
-                    Button {
+                    PlayerConsoleIconButton(
+                        systemImage: isMuted || volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill",
+                        fontSize: 13.5,
+                        tooltip: isMuted ? "取消静音" : "静音"
+                    ) {
                         isMuted.toggle()
                         if let handle = playerHandle {
                             dk_player_set_volume(handle, volume, isMuted)
                         }
-                    } label: {
-                        Image(systemName: isMuted || volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 28, height: 28)
-                            .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
-                    .help(isMuted ? "取消静音" : "静音")
 
                     MiniVolumeSlider(volume: $volume, isMuted: $isMuted) { v in
                         if let handle = playerHandle {
                             dk_player_set_volume(handle, v, isMuted)
                         }
                     }
+                    .padding(.trailing, 4)
 
-                    // 1. Audio tracks circular button
+                    // 1. Audio tracks circular glass button
                     PlayerCircleMenu(tooltip: "音频轨道") {
                         Image(systemName: "waveform")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(.system(size: 13, weight: .semibold))
                     } menuItems: {
                         audioMenuContent
                     }
 
-                    // 2. Subtitle circular button
+                    // 2. Subtitle circular glass button
                     PlayerCircleMenu(tooltip: "字幕选择") {
-                        Image(systemName: "line.3.horizontal")
-                            .font(.system(size: 11, weight: .bold))
+                        Image(systemName: "captions.bubble")
+                            .font(.system(size: 12.5, weight: .semibold))
                     } menuItems: {
                         subtitleMenuContent
                     }
 
-                    // 3. ( D ) Decoder & display info circular button
+                    // 3. ( D ) Decoder & display info circular glass button
                     PlayerCircleMenu(tooltip: "解码与显示信息") {
                         Text("D")
-                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .font(.system(size: 12.5, weight: .bold, design: .rounded))
                     } menuItems: {
                         decoderMenuContent
                     }
 
-                    // 4. Playback speed gauge circular button
+                    // 4. Playback speed circular glass button (open-arc speedometer, zero double-ring)
                     PlayerCircleMenu(tooltip: "播放速度") {
-                        Image(systemName: "gauge.with.needle")
-                            .font(.system(size: 12, weight: .semibold))
+                        Image(systemName: "speedometer")
+                            .font(.system(size: 13, weight: .semibold))
                     } menuItems: {
                         speedMenuContent
                     }
 
-                    // 5. More options circular button
+                    // 5. More options circular glass button
                     PlayerCircleMenu(tooltip: "更多选项") {
                         Image(systemName: "ellipsis")
-                            .font(.system(size: 12, weight: .bold))
+                            .font(.system(size: 13, weight: .bold))
                     } menuItems: {
                         moreMenuContent
                     }
@@ -2222,15 +2212,22 @@ public struct PlayerView: View {
         .frame(maxHeight: .infinity)
         .background(
             ZStack {
-                Rectangle().fill(.ultraThinMaterial)
-                Rectangle().fill(Color(red: 0.055, green: 0.06, blue: 0.075).opacity(0.76))
-                Rectangle().strokeBorder(Color.white.opacity(0.11), lineWidth: 0.65)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color(red: 0.055, green: 0.06, blue: 0.075).opacity(0.76))
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.14), lineWidth: 0.7)
             }
             .opacity(isAdjustingSubtitleLayout ? 0.14 : 1.0)
         )
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .shadow(color: Color.black.opacity(isAdjustingSubtitleLayout ? 0.0 : 0.42), radius: 22, x: -4, y: 8)
         .opacity(isAdjustingSubtitleLayout ? 0.42 : 1.0)
-        .contentShape(Rectangle())
+        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .onTapGesture {}
+        .padding(.vertical, 14)
+        .padding(.trailing, 14)
     }
 
     private func osdInfoRow(_ key: String, _ val: String) -> some View {

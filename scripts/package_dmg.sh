@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DEFAULT_VERSION="$(sed -n 's/^APP_VERSION="\${DONBY_VERSION:-\(.*\)}"$/\1/p' build_app.sh | head -n 1)"
-VERSION="${DONBY_VERSION:-${DEFAULT_VERSION:-1.4.22}}"
+VERSION="${DONBY_VERSION:-${DEFAULT_VERSION:-1.4.23}}"
 ARCH="$(uname -m)"
 APP_NAME="Donby"
 DIST_DIR="dist"

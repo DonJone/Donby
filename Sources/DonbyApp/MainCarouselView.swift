@@ -153,6 +153,7 @@ private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
 public struct MainCarouselView: View {
     @EnvironmentObject private var appState: AppState
     public let items: [EmbyItem]
+    public var height: CGFloat = 365
     public var isScrollPaused: (() -> Bool)? = nil
     public let onPlay: (EmbyItem) -> Void
     public let onSelectDetail: (EmbyItem) -> Void
@@ -170,11 +171,13 @@ public struct MainCarouselView: View {
 
     public init(
         items: [EmbyItem],
+        height: CGFloat = 365,
         isScrollPaused: (() -> Bool)? = nil,
         onPlay: @escaping (EmbyItem) -> Void,
         onSelectDetail: @escaping (EmbyItem) -> Void
     ) {
         self.items = items
+        self.height = height
         self.isScrollPaused = isScrollPaused
         self.onPlay = onPlay
         self.onSelectDetail = onSelectDetail
@@ -211,11 +214,12 @@ public struct MainCarouselView: View {
                     server: appState.activeServer,
                     item: item,
                     kind: .backdrop,
-                    maxWidth: 1600
+                    maxWidth: 2200,
+                    alignment: .top
                 )
                 .id(item.id)
                 .frame(maxWidth: .infinity)
-                .frame(height: 365)
+                .frame(height: height)
                 .clipped()
                 .transition(
                     .asymmetric(
@@ -315,7 +319,7 @@ public struct MainCarouselView: View {
                 .padding(.bottom, 24)
                 .padding(.trailing, 160) // reserve room for indicators
             }
-            .frame(height: 365)
+            .frame(height: height)
             .background(
                 TrackpadHorizontalSwipeDetector(
                    isEnabled: true,

@@ -165,6 +165,49 @@ final class PlayerAutoHideBox {
     var lastObservedPosUptime: TimeInterval = 0
 }
 
+struct PlayerConsoleIconButton: View {
+    let systemImage: String
+    var fontSize: CGFloat = 14
+    var fontWeight: Font.Weight = .semibold
+    var size: CGFloat = 30
+    var prominent: Bool = false
+    var isDisabled: Bool = false
+    var tooltip: String = ""
+    let action: () -> Void
+    @State private var isHovered: Bool = false
+
+    var body: some View {
+        Button(action: action) {
+            let fillOpacity: Double = {
+                if isDisabled { return prominent ? 0.06 : 0.0 }
+                if prominent { return isHovered ? 0.24 : 0.14 }
+                return isHovered ? 0.16 : 0.0
+            }()
+            let strokeOpacity: Double = {
+                if isDisabled { return 0.0 }
+                if prominent { return isHovered ? 0.34 : 0.20 }
+                return isHovered ? 0.18 : 0.0
+            }()
+            ZStack {
+                Circle()
+                    .fill(Color.white.opacity(fillOpacity))
+                Circle()
+                    .strokeBorder(Color.white.opacity(strokeOpacity), lineWidth: 0.75)
+                Image(systemName: systemImage)
+                    .font(.system(size: fontSize, weight: fontWeight))
+                    .foregroundStyle(isDisabled ? .white.opacity(0.32) : .white)
+            }
+            .frame(width: size, height: size)
+            .contentShape(Circle())
+            .animation(.easeOut(duration: 0.14), value: isHovered)
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .onHover { isHovered = $0 }
+        .help(tooltip)
+    }
+}
+
 private struct PlayerCircleMenuVisual<Content: View>: View {
     @ViewBuilder let content: () -> Content
     let hoverBox: DonbyMenuHoverBox
@@ -173,13 +216,15 @@ private struct PlayerCircleMenuVisual<Content: View>: View {
     var body: some View {
         ZStack {
             Circle()
-                .strokeBorder(Color.white.opacity(isHovered ? 0.95 : 0.65), lineWidth: 1.25)
-                .background(Circle().fill(isHovered ? Color.white.opacity(0.18) : Color.clear))
+                .fill(Color.white.opacity(isHovered ? 0.22 : 0.10))
+            Circle()
+                .strokeBorder(Color.white.opacity(isHovered ? 0.34 : 0.16), lineWidth: 0.75)
             content()
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.white)
         }
-        .frame(width: 28, height: 28)
+        .frame(width: 30, height: 30)
+        .animation(.easeOut(duration: 0.14), value: isHovered)
         .onAppear {
             hoverBox.onHoverChange = { isHovered = $0 }
             isHovered = hoverBox.isHovered
@@ -202,17 +247,17 @@ struct PlayerCircleMenu<Content: View, MenuItems: View>: View {
                 menuItems()
             } label: {
                 Color.clear
-                    .frame(width: 28, height: 28)
+                    .frame(width: 30, height: 30)
                     .contentShape(Circle())
             }
             .menuStyle(.button)
             .buttonStyle(.plain)
             .menuIndicator(.hidden)
-            .frame(width: 28, height: 28)
+            .frame(width: 30, height: 30)
             .contentShape(Circle())
             .onHover { hoverBox.setHovered($0) }
         }
-        .frame(width: 28, height: 28)
+        .frame(width: 30, height: 30)
         .help(tooltip)
     }
 }

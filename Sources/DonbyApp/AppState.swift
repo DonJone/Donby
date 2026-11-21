@@ -19,6 +19,11 @@ public final class AppState: ObservableObject {
     @Published public var activePlayback: ActivePlaybackSession? = nil
     @Published public var preferredSettingsTabRaw: String = "基础设置"
     @Published public var isSidebarCollapsed: Bool = false
+    @Published public var isWindowFullScreen: Bool = false
+
+    public var collapsedSidebarLeadingPadding: CGFloat {
+        isWindowFullScreen ? 0 : 58
+    }
 
     @Published public var showAddServerSheet: Bool = false
     @Published public var editingServer: EmbyServerConfig? = nil

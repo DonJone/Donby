@@ -32,7 +32,7 @@ public struct RecordsView: View {
                         DonbyToolbarCircleView(systemName: "sidebar.left")
                     }
                     .buttonStyle(.plain)
-                    .padding(.leading, 54)
+                    .padding(.leading, appState.isWindowFullScreen ? 0 : 54)
                 }
 
                 VStack(alignment: .leading, spacing: 2) {

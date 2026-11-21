@@ -475,6 +475,12 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
         private var lastShelves: [HomeShelfSection] = []
         private var lastAppearance: DonbyCardAppearance?
         private var currentWidth: CGFloat = 960
+        private var currentCarouselHeight: CGFloat = 365
+
+        private static func resolvedCarouselHeight(forWidth width: CGFloat) -> CGFloat {
+            let bannerWidth = max(200, width - 48)
+            return min(max(365, (bannerWidth * 0.36).rounded()), 540)
+        }
 
         private var observers: [NSObjectProtocol] = []
         private var hoverGate: ScrollHoverGate?
@@ -590,9 +596,12 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
                 return
             }
 
+            let carouselHeight = Self.resolvedCarouselHeight(forWidth: max(400, scrollView?.contentView.bounds.width ?? currentWidth))
+            currentCarouselHeight = carouselHeight
             let carouselRoot = AnyView(
                 MainCarouselView(
                     items: items,
+                    height: carouselHeight,
                     isScrollPaused: { [weak pauseState = carouselPauseState] in pauseState?.isScrolling ?? false },
                     onPlay: { [weak self] item in self?.onPlayItem(item) },
                     onSelectDetail: { [weak self] item in self?.onSelectItem(item) }
@@ -657,8 +666,12 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
 
             var cursorY: CGFloat = 12
             if let carousel = carouselHostingView {
-                carousel.frame = NSRect(x: 24, y: cursorY, width: max(200, resolvedWidth - 48), height: 365)
-                cursorY += 365
+                let targetCarouselHeight = Self.resolvedCarouselHeight(forWidth: resolvedWidth)
+                if abs(targetCarouselHeight - currentCarouselHeight) > 1.0, let appearance = lastAppearance {
+                    updateCarousel(items: lastCarouselItems, visible: lastShowCarousel, appearance: appearance)
+                }
+                carousel.frame = NSRect(x: 24, y: cursorY, width: max(200, resolvedWidth - 48), height: targetCarouselHeight)
+                cursorY += targetCarouselHeight
                 if !orderedShelfViews.isEmpty {
                     cursorY += 22
                 }

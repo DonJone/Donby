@@ -38,7 +38,7 @@ public struct ServerListView: View {
                         DonbyToolbarCircleView(systemName: "sidebar.left")
                     }
                     .buttonStyle(.plain)
-                    .padding(.leading, 54)
+                    .padding(.leading, appState.isWindowFullScreen ? 0 : 54)
                 }
 
                 Text("服务器")

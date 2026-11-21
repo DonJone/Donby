@@ -44,7 +44,7 @@ public struct SettingsView: View {
                         DonbyToolbarCircleView(systemName: "sidebar.left")
                     }
                     .buttonStyle(.plain)
-                    .padding(.leading, 64)
+                    .padding(.leading, appState.isWindowFullScreen ? 16 : 64)
                     .padding(.top, 14)
                 }
 

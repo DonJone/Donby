@@ -22,7 +22,7 @@ public struct MainWindowView: View {
                 HStack(spacing: 0) {
                     if !appState.isSidebarCollapsed {
                         appSidebarView
-                            .frame(width: 206)
+                            .frame(width: appState.isWindowFullScreen ? 228 : 206)
                             .background(
                                 ZStack {
                                     DonbyVisualEffectView(material: .sidebar, blendingMode: .behindWindow)
@@ -141,6 +141,23 @@ public struct MainWindowView: View {
                 appState.cancelPendingPlaybackStart()
             }
         }
+        .onAppear {
+            if let win = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first {
+                appState.isWindowFullScreen = win.styleMask.contains(.fullScreen)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willEnterFullScreenNotification)) { _ in
+            appState.isWindowFullScreen = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in
+            appState.isWindowFullScreen = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willExitFullScreenNotification)) { _ in
+            appState.isWindowFullScreen = false
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
+            appState.isWindowFullScreen = false
+        }
         .sheet(isPresented: $appState.showAddServerSheet) {
             ServerConfigSheet(existingServer: appState.editingServer)
                 .environmentObject(appState)
@@ -174,7 +191,14 @@ public struct MainWindowView: View {
 
     private var appSidebarView: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
+            HStack(spacing: 8) {
+                if appState.isWindowFullScreen {
+                    Text("Donby")
+                        .font(.system(size: 14.5, weight: .bold, design: .rounded))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode).opacity(0.88))
+                        .padding(.leading, 16)
+                        .padding(.top, 4)
+                }
                 Spacer()
                 Button {
                     withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
@@ -184,10 +208,10 @@ public struct MainWindowView: View {
                     DonbyToolbarCircleView(systemName: "sidebar.left")
                 }
                 .buttonStyle(.plain)
-                .padding(.trailing, 10)
-                .padding(.top, 8)
+                .padding(.trailing, 12)
+                .padding(.top, appState.isWindowFullScreen ? 4 : 8)
             }
-            .frame(height: 52)
+            .frame(height: appState.isWindowFullScreen ? 46 : 52)
 
             let visibleServers = appState.servers.filter { !appState.hideEncryptedServers || !$0.isEncrypted }
 

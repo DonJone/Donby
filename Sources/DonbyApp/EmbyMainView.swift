@@ -180,7 +180,7 @@ public struct EmbyMainView: View {
                     DonbyToolbarCircleView(systemName: "sidebar.left")
                 }
                 .buttonStyle(.plain)
-                .padding(.leading, 58)
+                .padding(.leading, appState.collapsedSidebarLeadingPadding)
             }
 
             if let server = appState.activeServer {
@@ -694,7 +694,7 @@ public struct MLibListView: View {
                         .font(.system(size: 13.5, weight: .semibold))
                         .foregroundStyle(iconColor)
                 }
-                .padding(.leading, appState.isSidebarCollapsed ? 58 : 0)
+                .padding(.leading, appState.isSidebarCollapsed ? appState.collapsedSidebarLeadingPadding : 0)
 
                 Text(library.name)
                     .font(.system(size: 16, weight: .bold))

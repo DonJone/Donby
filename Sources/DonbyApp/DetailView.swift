@@ -81,28 +81,37 @@ public struct DetailView: View {
     }
 
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                heroHeaderSection
+        GeometryReader { viewportGeo in
+            let heroHeight = min(
+                max(440, min(viewportGeo.size.width * 0.42, viewportGeo.size.height * 0.64)),
+                680
+            )
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    heroHeaderSection(heroHeight: heroHeight)
 
-                if item.isSeries || !episodes.isEmpty {
-                    episodesSection
+                    if item.isSeries || !episodes.isEmpty {
+                        episodesSection
+                    }
+
+                    if let people = item.people, !people.isEmpty {
+                        castSection(people: people)
+                    }
+
+                    mediaSpecsCard
+                        .padding(.horizontal, 28)
+
+                    if !similarItems.isEmpty {
+                        similarSection
+                    }
                 }
-
-                if let people = item.people, !people.isEmpty {
-                    castSection(people: people)
-                }
-
-                mediaSpecsCard
-                    .padding(.horizontal, 28)
-
-                if !similarItems.isEmpty {
-                    similarSection
-                }
+                .padding(.bottom, 48)
             }
-            .padding(.bottom, 48)
+            .coordinateSpace(name: "detailScroll")
+            .ignoresSafeArea(.container, edges: .top)
+            .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
         }
-        .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+        .ignoresSafeArea(.container, edges: .top)
         .sheet(item: $selectedEpisodeForInfo) { ep in
             EpisodeInfoSheet(episode: ep, isLightMode: appState.isLightMode)
         }
@@ -232,20 +241,47 @@ public struct DetailView: View {
         }
     }
 
-    private var heroHeaderSection: some View {
-        let heroHeight: CGFloat = 440
+    private func heroHeaderSection(heroHeight: CGFloat) -> some View {
         let canvasCol = appState.isLightMode ? DonbyGlassPalette.canvasLight : DonbyGlassPalette.canvasBlack
         return ZStack(alignment: .bottomLeading) {
-            // 1. Clear High-Resolution Backdrop Fanart (Cinematic bleed, vivid contrast)
+            // 1. Clear High-Resolution Backdrop Fanart with stretchy pull-down blur & scroll parallax
             GeometryReader { bgGeo in
-                MediaArtworkView(server: effectiveDetailServer, item: item, kind: .backdrop, maxWidth: 3840)
-                    .frame(width: bgGeo.size.width, height: bgGeo.size.height)
+                let minY = bgGeo.frame(in: .named("detailScroll")).minY
+                let pullDown = max(0, minY)
+                let scrollUp = max(0, -minY)
+                let stretchHeight = heroHeight + pullDown
+                let blurRadius = pullDown > 1
+                    ? min(18.0, pullDown * 0.14)
+                    : min(10.0, max(0, scrollUp - 50.0) * 0.03)
+                let zoomScale = pullDown > 1
+                    ? (1.0 + min(0.08, pullDown / 900.0))
+                    : 1.0
+                let offsetY = pullDown > 0 ? -pullDown : (scrollUp * 0.22)
+
+                ZStack {
+                    MediaArtworkView(
+                        server: effectiveDetailServer,
+                        item: item,
+                        kind: .backdrop,
+                        maxWidth: 3840,
+                        alignment: .top
+                    )
+                    .frame(width: bgGeo.size.width, height: stretchHeight)
+                    .scaleEffect(zoomScale, anchor: .top)
                     .saturation(1.10)
                     .contrast(1.04)
-                    .clipped()
+                    .blur(radius: blurRadius)
+
+                    if pullDown > 2 {
+                        canvasCol
+                            .opacity(min(0.24, Double(pullDown) / 420.0))
+                    }
+                }
+                .frame(width: bgGeo.size.width, height: stretchHeight)
+                .clipped()
+                .offset(y: offsetY)
             }
             .frame(height: heroHeight)
-            .clipped()
 
             // 2. Silky Ambient Gradient Dissolve into Canvas (upper 46% completely clear & vivid)
             LinearGradient(
@@ -261,6 +297,7 @@ public struct DetailView: View {
                 endPoint: .bottom
             )
             .frame(height: heroHeight)
+            .allowsHitTesting(false)
 
             // 3. Floating Navigation Capsules & Hero Metadata Content
             VStack(alignment: .leading, spacing: 0) {
@@ -298,7 +335,7 @@ public struct DetailView: View {
                     }
                     .clipShape(Capsule(style: .continuous))
                     .donbyLiquidGlassCapsule()
-                    .padding(.leading, appState.isSidebarCollapsed ? 68 : 0)
+                    .padding(.leading, appState.isSidebarCollapsed ? (appState.isWindowFullScreen ? 0 : 68) : 0)
 
                     Spacer()
 
@@ -369,7 +406,7 @@ public struct DetailView: View {
                     .fixedSize()
                 }
                 .padding(.horizontal, 28)
-                .padding(.top, 18)
+                .padding(.top, appState.isWindowFullScreen ? 18 : 26)
 
                 Spacer()
 
