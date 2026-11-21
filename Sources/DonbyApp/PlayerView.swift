@@ -139,7 +139,7 @@ public struct PlayerView: View {
             // C++ / Metal Native Engine Video Surface
             DKMetalVideoView(
                 playerHandle: playerHandle,
-                controlsOcclusionHeight: (showControls && !isAdjustingSubtitleLayout) ? bottomControlBarHeight : 0,
+                controlsOcclusionHeight: (isPlaying && showControls && !isAdjustingSubtitleLayout && activeDrawer == nil) ? bottomControlBarHeight : 0,
                 subtitleHDRPeakNits: Float(appState.subtitleStyle.hdrPeakNits.rawValue),
                 antiOcclusionEnabled: appState.subtitleStyle.antiOcclusionEnabled,
                 subtitleStyleRevision: subtitleStyleRevision,
@@ -1521,7 +1521,21 @@ public struct PlayerView: View {
 
                         Divider().opacity(0.2)
 
-                        Text("字幕调节").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
+                        HStack {
+                            Text("字幕调节").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
+                            Spacer()
+                            Button("恢复影院默认") {
+                                let prevDelay1 = appState.subtitleStyle.primaryDelaySeconds
+                                let prevDelay2 = appState.subtitleStyle.secondaryDelaySeconds
+                                var fresh = SubtitleStyleConfiguration()
+                                fresh.primaryDelaySeconds = prevDelay1
+                                fresh.secondaryDelaySeconds = prevDelay2
+                                appState.subtitleStyle = fresh
+                            }
+                            .font(.system(size: 10.5, weight: .medium))
+                            .buttonStyle(.plain)
+                            .foregroundStyle(appState.accentColor)
+                        }
 
                         VStack(alignment: .leading, spacing: 12) {
                             VStack(alignment: .leading, spacing: 4) {
@@ -2497,7 +2511,7 @@ public struct PlayerView: View {
     }
 
     private func exportRedactedDiagnostics() {
-        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.9"
+        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.10"
         var lines: [String] = []
         lines.append("Donby Diagnostics Report (v\(appVer))")
         lines.append("Time: \(ISO8601DateFormatter().string(from: Date()))")

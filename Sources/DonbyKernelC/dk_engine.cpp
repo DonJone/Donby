@@ -4842,46 +4842,174 @@ static bool dk_try_split_inline_two_speakers(const std::string& line, std::strin
     return !out_a.empty() && !out_b.empty();
 }
 
+static std::string dk_strip_ass_braces(const std::string& line) {
+    std::string out;
+    out.reserve(line.size());
+    for (size_t i = 0; i < line.size(); i++) {
+        if (line[i] == '{') {
+            size_t close = line.find('}', i + 1);
+            if (close != std::string::npos) {
+                i = close;
+                continue;
+            }
+        }
+        out.push_back(line[i]);
+    }
+    return out;
+}
+
+static bool dk_is_bracket_or_music_line(const std::string& line) {
+    std::string t = dk_trim_sub_ws(dk_strip_ass_braces(line));
+    if (t.empty()) return false;
+    if (t[0] == '[' || t[0] == '(') return true;
+    // UTF-8: ♪ (E2 99 AA), ♫ (E2 99 AB), （ (EF BC 88), 【 (E3 80 90)
+    if (t.rfind("\xE2\x99\xAA", 0) == 0 || t.rfind("\xE2\x99\xAB", 0) == 0 ||
+        t.rfind("\xEF\xBC\x88", 0) == 0 || t.rfind("\xE3\x80\x90", 0) == 0) {
+        return true;
+    }
+    return false;
+}
+
+static size_t dk_utf8_visible_len(const std::string& line) {
+    std::string plain = dk_strip_ass_braces(line);
+    size_t count = 0;
+    for (unsigned char c : plain) {
+        if ((c & 0xC0) != 0x80) count++;
+    }
+    return count;
+}
+
+static std::string dk_join_two_lines(const std::string& a, const std::string& b, bool is_latin) {
+    if (a.empty()) return b;
+    if (b.empty()) return a;
+    if (is_latin) {
+        return a + " " + b;
+    }
+    // For Chinese/CJK: avoid extra space right after CJK punctuation, otherwise keep a clean single space
+    auto ends_with = [&](const char* suf) {
+        size_t n = std::strlen(suf);
+        return a.size() >= n && a.compare(a.size() - n, n, suf) == 0;
+    };
+    if (ends_with("\xEF\xBC\x8C") || ends_with("\xE3\x80\x82") || ends_with("\xEF\xBC\x81") ||
+        ends_with("\xEF\xBC\x9F") || ends_with("\xE3\x80\x81") || ends_with("\xEF\xBC\x9B") ||
+        ends_with("\xEF\xBC\x9A") || ends_with("\xE2\x80\xA6") || ends_with("\xE2\x80\x94") ||
+        a.back() == ' ') {
+        return a + b;
+    }
+    return a + " " + b;
+}
+
+static std::vector<std::string> dk_group_by_speaker_dash(const std::vector<std::string>& lines, bool is_latin) {
+    if (lines.size() <= 1) return lines;
+    bool has_dash_after_first = false;
+    for (size_t i = 1; i < lines.size(); i++) {
+        if (dk_looks_like_speaker_dash(lines[i])) {
+            has_dash_after_first = true;
+            break;
+        }
+    }
+    if (!has_dash_after_first) return lines;
+    std::vector<std::string> grouped;
+    for (const auto& l : lines) {
+        if (grouped.empty() || dk_looks_like_speaker_dash(l) || dk_is_bracket_or_music_line(l)) {
+            grouped.push_back(l);
+        } else {
+            grouped.back() = dk_join_two_lines(grouped.back(), l, is_latin);
+        }
+    }
+    return grouped;
+}
+
+/// Unwraps unnecessary streaming SRT/ASS hard line breaks within a single speaker turn
+/// so short/medium sentences stay on one crisp line (matching cinema Pair-A) and only
+/// wrap via libass WrapStyle:0 when they genuinely exceed the viewport width.
+static std::vector<std::string> dk_reflow_non_dialogue_lines(const std::vector<std::string>& lines, bool is_latin) {
+    if (lines.size() <= 1) return lines;
+    // Never collapse distinct speaker turns or sound-effect/music lines
+    for (size_t i = 0; i < lines.size(); i++) {
+        if (i > 0 && dk_looks_like_speaker_dash(lines[i])) return lines;
+        if (dk_is_bracket_or_music_line(lines[i])) return lines;
+    }
+    std::string merged = lines[0];
+    for (size_t i = 1; i < lines.size(); i++) {
+        merged = dk_join_two_lines(merged, lines[i], is_latin);
+    }
+    return {std::move(merged)};
+}
+
+static bool dk_has_multi_speaker_dashes(const std::vector<std::string>& lines) {
+    if (lines.size() < 2) return false;
+    for (size_t i = 1; i < lines.size(); i++) {
+        if (dk_looks_like_speaker_dash(lines[i])) return true;
+    }
+    return false;
+}
+
 static std::vector<DKSemanticTurn> dk_build_paired_turns(
     const std::vector<std::pair<std::string, bool>>& pri_track_tagged,
     const std::vector<std::string>& sec_track_lines
 ) {
     std::vector<DKSemanticTurn> turns;
 
+    auto pair_or_reflow_two_lists = [&](std::vector<std::string> cns, std::vector<std::string> ens) {
+        cns = dk_group_by_speaker_dash(cns, false);
+        ens = dk_group_by_speaker_dash(ens, true);
+
+        // Smart repair: if one track has 2 speaker-dash lines and the other packed both speakers onto 1 line
+        if (cns.size() == 2 && ens.size() == 1 && dk_looks_like_speaker_dash(cns[0]) && dk_looks_like_speaker_dash(cns[1])) {
+            std::string a, b;
+            if (dk_try_split_inline_two_speakers(ens[0], a, b)) ens = {a, b};
+        } else if (ens.size() == 2 && cns.size() == 1 && dk_looks_like_speaker_dash(ens[0]) && dk_looks_like_speaker_dash(ens[1])) {
+            std::string a, b;
+            if (dk_try_split_inline_two_speakers(cns[0], a, b)) cns = {a, b};
+        }
+
+        if (cns.empty()) {
+            turns.push_back({{}, dk_reflow_non_dialogue_lines(ens, true)});
+            return;
+        }
+        if (ens.empty()) {
+            turns.push_back({dk_reflow_non_dialogue_lines(cns, false), {}});
+            return;
+        }
+
+        const bool is_two_speaker = dk_has_multi_speaker_dashes(cns) || dk_has_multi_speaker_dashes(ens);
+        if (cns.size() == ens.size() && cns.size() >= 2) {
+            if (is_two_speaker) {
+                // True 2-speaker dialogue -> ALWAYS interleave CN1+EN1 / CN2+EN2
+                for (size_t i = 0; i < cns.size(); i++) {
+                    turns.push_back({{cns[i]}, {ens[i]}});
+                }
+                return;
+            }
+            // Non-dialogue 2+ lines in both tracks: if the combined sentence easily fits on 1 line each,
+            // unwrap unnecessary streaming hard-wraps into a single clean 1+1 cinema Pair-A turn;
+            // otherwise interleave CN1+EN1 / CN2+EN2 so long 2-clause cues never split into CN-CN / EN-EN!
+            size_t total_cn = 0, total_en = 0;
+            bool any_bracket = false;
+            for (const auto& s : cns) { total_cn += dk_utf8_visible_len(s); any_bracket |= dk_is_bracket_or_music_line(s); }
+            for (const auto& s : ens) { total_en += dk_utf8_visible_len(s); any_bracket |= dk_is_bracket_or_music_line(s); }
+            if (!any_bracket && total_cn <= 26 && total_en <= 88) {
+                turns.push_back({dk_reflow_non_dialogue_lines(cns, false), dk_reflow_non_dialogue_lines(ens, true)});
+            } else {
+                for (size_t i = 0; i < cns.size(); i++) {
+                    turns.push_back({{cns[i]}, {ens[i]}});
+                }
+            }
+            return;
+        }
+
+        // Mismatched line counts (e.g. 1 CN line + 2 hard-wrapped EN lines like Netflix/AppleTV SRTs):
+        // unwrap non-dialogue continuations cleanly so English does NOT split into awkward short lines!
+        turns.push_back({dk_reflow_non_dialogue_lines(cns, false), dk_reflow_non_dialogue_lines(ens, true)});
+    };
+
     // Mode 1: Dual tracks both active (Primary track + Secondary track)
     if (!sec_track_lines.empty()) {
         std::vector<std::string> pri_lines;
         pri_lines.reserve(pri_track_tagged.size());
         for (const auto& kv : pri_track_tagged) pri_lines.push_back(kv.first);
-
-        std::vector<std::string> sec_lines = sec_track_lines;
-        // Smart repair: if one track has 2 speaker-dash lines and the other packed both speakers onto 1 line
-        if (pri_lines.size() == 2 && sec_lines.size() == 1 &&
-            dk_looks_like_speaker_dash(pri_lines[0]) && dk_looks_like_speaker_dash(pri_lines[1])) {
-            std::string a, b;
-            if (dk_try_split_inline_two_speakers(sec_lines[0], a, b)) {
-                sec_lines = {a, b};
-            }
-        } else if (sec_lines.size() == 2 && pri_lines.size() == 1 &&
-                   dk_looks_like_speaker_dash(sec_lines[0]) && dk_looks_like_speaker_dash(sec_lines[1])) {
-            std::string a, b;
-            if (dk_try_split_inline_two_speakers(pri_lines[0], a, b)) {
-                pri_lines = {a, b};
-            }
-        }
-
-        if (pri_lines.empty()) {
-            turns.push_back({{}, sec_lines});
-            return turns;
-        }
-        if (pri_lines.size() == sec_lines.size() && pri_lines.size() >= 2) {
-            // Semantic 1-to-1 line pairing (CN1+EN1 / CN2+EN2) — eliminates split CN-CN / EN-EN blocks!
-            for (size_t i = 0; i < pri_lines.size(); i++) {
-                turns.push_back({{pri_lines[i]}, {sec_lines[i]}});
-            }
-            return turns;
-        }
-        turns.push_back({std::move(pri_lines), std::move(sec_lines)});
+        pair_or_reflow_two_lists(std::move(pri_lines), sec_track_lines);
         return turns;
     }
 
@@ -4893,10 +5021,16 @@ static std::vector<DKSemanticTurn> dk_build_paired_turns(
         if (kv.second) any_sec = true; else any_pri = true;
     }
     if (!any_pri || !any_sec) {
-        // Pure monolingual subtitle -> render all lines cleanly as Primary white
-        DKSemanticTurn t;
-        for (const auto& kv : pri_track_tagged) t.priLines.push_back(kv.first);
-        turns.push_back(std::move(t));
+        // Pure monolingual subtitle -> unwrap unnecessary hard breaks unless multi-speaker
+        std::vector<std::string> mono;
+        mono.reserve(pri_track_tagged.size());
+        for (const auto& kv : pri_track_tagged) mono.push_back(kv.first);
+        const bool looks_latin = (!mono.empty() && dk_is_mostly_latin_line(mono[0]));
+        mono = dk_group_by_speaker_dash(mono, looks_latin);
+        if (!dk_has_multi_speaker_dashes(mono)) {
+            mono = dk_reflow_non_dialogue_lines(mono, looks_latin);
+        }
+        turns.push_back({std::move(mono), {}});
         return turns;
     }
 
@@ -4925,27 +5059,13 @@ static std::vector<DKSemanticTurn> dk_build_paired_turns(
         return turns;
     }
 
-    // Block-separated bilingual lines in one track (e.g. CN1, CN2, EN1, EN2) -> split & semantically pair!
+    // Block-separated bilingual lines in one track (e.g. CN1, CN2, EN1, EN2) -> split & semantically pair or reflow!
     std::vector<std::string> cns, ens;
     for (const auto& kv : pri_track_tagged) {
         if (kv.second) ens.push_back(kv.first);
         else cns.push_back(kv.first);
     }
-    if (cns.size() == 2 && ens.size() == 1 && dk_looks_like_speaker_dash(cns[0]) && dk_looks_like_speaker_dash(cns[1])) {
-        std::string a, b;
-        if (dk_try_split_inline_two_speakers(ens[0], a, b)) ens = {a, b};
-    } else if (ens.size() == 2 && cns.size() == 1 && dk_looks_like_speaker_dash(ens[0]) && dk_looks_like_speaker_dash(ens[1])) {
-        std::string a, b;
-        if (dk_try_split_inline_two_speakers(cns[0], a, b)) cns = {a, b};
-    }
-
-    if (cns.size() == ens.size() && cns.size() >= 2) {
-        for (size_t i = 0; i < cns.size(); i++) {
-            turns.push_back({{cns[i]}, {ens[i]}});
-        }
-    } else {
-        turns.push_back({std::move(cns), std::move(ens)});
-    }
+    pair_or_reflow_two_lists(std::move(cns), std::move(ens));
     return turns;
 }
 
@@ -5262,16 +5382,18 @@ static int dk_try_render_paired_bilingual_locked(
         //   and expands smoothly upward into the lower movie frame!
         if (bar_h >= static_cast<int>(std::lround(90.0 * vh_ratio)) && pos_pct >= 88.0f) {
             const float t_bar = std::clamp((pos_pct - 88.0f) / 12.0f, 0.0f, 1.0f); // 88%->0.0, 92%->0.33, 100%->1.0
-            if (is_single_turn && block_h <= bar_h - static_cast<int>(std::lround(36.0 * vh_ratio))) {
-                const int min_top = video_bottom_y + static_cast<int>(std::lround(12.0 * vh_ratio));
-                const int max_top = canvas_h - block_h - static_cast<int>(std::lround(10.0 * vh_ratio));
-                // Map 92% right to the golden 0.45 vertical center of the bottom black bar!
-                const float mapped = (t_bar <= 0.333f) ? (0.45f * (t_bar / 0.333f)) : (0.45f + 0.55f * ((t_bar - 0.333f) / 0.667f));
-                return std::clamp(min_top + static_cast<int>(std::lround((max_top - min_top) * mapped)), 8, std::max(8, canvas_h - block_h - 6));
+            if (is_single_turn && block_h <= bar_h - static_cast<int>(std::lround(38.0 * vh_ratio))) {
+                // Keep classy breathing room both below movie edge and above screen bezel (even at 100%)
+                const int min_top = video_bottom_y + static_cast<int>(std::lround(14.0 * vh_ratio));
+                const int max_top = canvas_h - block_h - static_cast<int>(std::lround(26.0 * vh_ratio));
+                const int safe_max = std::max(min_top, max_top);
+                // Map default 92% right to the golden 0.42 optical center of the bottom black bar (matches v5 sample!)
+                const float mapped = (t_bar <= 0.333f) ? (0.42f * (t_bar / 0.333f)) : (0.42f + 0.58f * ((t_bar - 0.333f) / 0.667f));
+                return std::clamp(min_top + static_cast<int>(std::lround((safe_max - min_top) * mapped)), 8, std::max(8, canvas_h - block_h - 14));
             } else {
-                const int min_margin = static_cast<int>(std::lround(10.0 * vh_ratio));
-                const int anchor_margin = std::max(min_margin, static_cast<int>(std::lround(default_bottom_margin * (1.0f - t_bar * 0.65f))));
-                return std::clamp((canvas_h - anchor_margin) - block_h, 8, std::max(8, canvas_h - block_h - 6));
+                const int min_margin = static_cast<int>(std::lround(20.0 * vh_ratio));
+                const int anchor_margin = std::max(min_margin, static_cast<int>(std::lround(34.0 * vh_ratio - t_bar * 14.0 * vh_ratio)));
+                return std::clamp((canvas_h - anchor_margin) - block_h, 8, std::max(8, canvas_h - block_h - 14));
             }
         }
         // Standard full-viewport vertical anchor (16:9 no-letterbox OR user manually raised slider < 88%)

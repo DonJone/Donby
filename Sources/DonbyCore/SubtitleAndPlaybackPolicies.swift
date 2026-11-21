@@ -285,6 +285,9 @@ public enum SubtitleHDRPeakNits: Int, CaseIterable, Codable, Identifiable, Senda
 }
 
 public struct SubtitleStyleConfiguration: Codable, Equatable, Sendable {
+    public static let currentSchemaVersion: Int = 2
+
+    public var schemaVersion: Int
     public var scale: Double
     public var borderWidth: Double
     public var verticalPositionPercent: Double
@@ -303,6 +306,7 @@ public struct SubtitleStyleConfiguration: Codable, Equatable, Sendable {
     public var dualLayoutMode: Int
 
     public init(
+        schemaVersion: Int = SubtitleStyleConfiguration.currentSchemaVersion,
         scale: Double = 1.0,
         borderWidth: Double = 2.2,
         verticalPositionPercent: Double = 92.0,
@@ -312,7 +316,7 @@ public struct SubtitleStyleConfiguration: Codable, Equatable, Sendable {
         forcedOnly: Bool = false,
         transform: SubtitleTextTransform = .off,
         hdrPeakNits: SubtitleHDRPeakNits = .nits203,
-        antiOcclusionEnabled: Bool = true,
+        antiOcclusionEnabled: Bool = false,
         unifyPingFangFont: Bool = true,
         enhanceSecondaryYellow: Bool = true,
         secondaryScale: Double = 0.60,
@@ -320,6 +324,7 @@ public struct SubtitleStyleConfiguration: Codable, Equatable, Sendable {
         primaryOnTop: Bool = true,
         dualLayoutMode: Int = 0
     ) {
+        self.schemaVersion = schemaVersion
         self.scale = scale
         self.borderWidth = borderWidth
         self.verticalPositionPercent = verticalPositionPercent
@@ -339,6 +344,7 @@ public struct SubtitleStyleConfiguration: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case schemaVersion
         case scale, borderWidth, verticalPositionPercent, primaryDelaySeconds, secondaryDelaySeconds
         case overrideASSStyle, forcedOnly, transform, hdrPeakNits, antiOcclusionEnabled
         case unifyPingFangFont, enhanceSecondaryYellow
@@ -347,22 +353,41 @@ public struct SubtitleStyleConfiguration: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.scale = try c.decodeIfPresent(Double.self, forKey: .scale) ?? 1.0
-        self.borderWidth = try c.decodeIfPresent(Double.self, forKey: .borderWidth) ?? 2.2
-        self.verticalPositionPercent = try c.decodeIfPresent(Double.self, forKey: .verticalPositionPercent) ?? 92.0
+        let decodedSchema = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        self.schemaVersion = Self.currentSchemaVersion
         self.primaryDelaySeconds = try c.decodeIfPresent(Double.self, forKey: .primaryDelaySeconds) ?? 0.0
         self.secondaryDelaySeconds = try c.decodeIfPresent(Double.self, forKey: .secondaryDelaySeconds) ?? 0.0
-        self.overrideASSStyle = try c.decodeIfPresent(Bool.self, forKey: .overrideASSStyle) ?? false
         self.forcedOnly = try c.decodeIfPresent(Bool.self, forKey: .forcedOnly) ?? false
         self.transform = try c.decodeIfPresent(SubtitleTextTransform.self, forKey: .transform) ?? .off
         self.hdrPeakNits = try c.decodeIfPresent(SubtitleHDRPeakNits.self, forKey: .hdrPeakNits) ?? .nits203
-        self.antiOcclusionEnabled = try c.decodeIfPresent(Bool.self, forKey: .antiOcclusionEnabled) ?? true
-        self.unifyPingFangFont = try c.decodeIfPresent(Bool.self, forKey: .unifyPingFangFont) ?? true
-        self.enhanceSecondaryYellow = try c.decodeIfPresent(Bool.self, forKey: .enhanceSecondaryYellow) ?? true
-        self.secondaryScale = try c.decodeIfPresent(Double.self, forKey: .secondaryScale) ?? 0.60
-        self.dualSubtitleGapPx = try c.decodeIfPresent(Double.self, forKey: .dualSubtitleGapPx) ?? 7.0
-        self.primaryOnTop = try c.decodeIfPresent(Bool.self, forKey: .primaryOnTop) ?? true
-        self.dualLayoutMode = try c.decodeIfPresent(Int.self, forKey: .dualLayoutMode) ?? 0
+
+        if decodedSchema < Self.currentSchemaVersion {
+            // One-time migration from legacy pre-Pair-A v1 settings (which often had pos=100, border=3.5, antiOcclusion=true)
+            // into the calibrated Pair-A cinema defaults so subtitles sit centered in black bars and stay rock-steady on pause.
+            self.scale = 1.0
+            self.borderWidth = 2.2
+            self.verticalPositionPercent = 92.0
+            self.overrideASSStyle = false
+            self.antiOcclusionEnabled = false
+            self.unifyPingFangFont = true
+            self.enhanceSecondaryYellow = true
+            self.secondaryScale = 0.60
+            self.dualSubtitleGapPx = 7.0
+            self.primaryOnTop = true
+            self.dualLayoutMode = 0
+        } else {
+            self.scale = try c.decodeIfPresent(Double.self, forKey: .scale) ?? 1.0
+            self.borderWidth = try c.decodeIfPresent(Double.self, forKey: .borderWidth) ?? 2.2
+            self.verticalPositionPercent = try c.decodeIfPresent(Double.self, forKey: .verticalPositionPercent) ?? 92.0
+            self.overrideASSStyle = try c.decodeIfPresent(Bool.self, forKey: .overrideASSStyle) ?? false
+            self.antiOcclusionEnabled = try c.decodeIfPresent(Bool.self, forKey: .antiOcclusionEnabled) ?? false
+            self.unifyPingFangFont = try c.decodeIfPresent(Bool.self, forKey: .unifyPingFangFont) ?? true
+            self.enhanceSecondaryYellow = try c.decodeIfPresent(Bool.self, forKey: .enhanceSecondaryYellow) ?? true
+            self.secondaryScale = try c.decodeIfPresent(Double.self, forKey: .secondaryScale) ?? 0.60
+            self.dualSubtitleGapPx = try c.decodeIfPresent(Double.self, forKey: .dualSubtitleGapPx) ?? 7.0
+            self.primaryOnTop = try c.decodeIfPresent(Bool.self, forKey: .primaryOnTop) ?? true
+            self.dualLayoutMode = try c.decodeIfPresent(Int.self, forKey: .dualLayoutMode) ?? 0
+        }
     }
 }
 

@@ -295,7 +295,7 @@ public final class DKMetalLayerView: NSView {
     private var currentSubtitleLiftNDC: Float = 0.0
     private var _subtitleHDRPeakNits: Float = 203.0
     private var _controlsOcclusionHeightPoints: CGFloat = 0.0
-    private var _antiOcclusionEnabled: Bool = true
+    private var _antiOcclusionEnabled: Bool = false
     private var cachedViewPointSize: CGSize = .zero
 
     public var subtitleHDRPeakNits: Float {
@@ -345,8 +345,12 @@ public final class DKMetalLayerView: NSView {
         defer { sizeLock.unlock() }
         let targetNDC: Float
         let viewH = Float(max(1.0, cachedViewPointSize.height))
-        if !_antiOcclusionEnabled || _controlsOcclusionHeightPoints <= 0.5 || subtitleCanvasH <= 0 || subtitleBoundsY1 <= subtitleBoundsY0 {
+        if !_antiOcclusionEnabled || _controlsOcclusionHeightPoints <= 0.5 {
             targetNDC = 0.0
+        } else if subtitleCanvasH <= 0 || subtitleBoundsY1 <= subtitleBoundsY0 {
+            // Keep existing lift offset across brief inter-cue silence so newly appearing subtitles
+            // NEVER play a bottom-to-top slide-up entrance animation.
+            return false
         } else {
             let subBottomRatio = Float(subtitleBoundsY1) / Float(subtitleCanvasH)
             let subTopRatio = Float(subtitleBoundsY0) / Float(subtitleCanvasH)
@@ -361,13 +365,8 @@ public final class DKMetalLayerView: NSView {
                 targetNDC = 0.0
             }
         }
-        let diff = targetNDC - currentSubtitleLiftNDC
-        if abs(diff) > 0.0005 {
-            let alpha = min(1.0, max(0.08, dt * 16.0))
-            currentSubtitleLiftNDC += diff * alpha
-            _needsRedrawOnSameFrame = true
-            return true
-        } else if currentSubtitleLiftNDC != targetNDC {
+        // Traditional instant cinema placement: snap directly to target position with zero bottom-up slide animation.
+        if abs(targetNDC - currentSubtitleLiftNDC) > 0.0001 {
             currentSubtitleLiftNDC = targetNDC
             _needsRedrawOnSameFrame = true
             return true
@@ -1503,7 +1502,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
         playerHandle: OpaquePointer?,
         controlsOcclusionHeight: CGFloat = 0,
         subtitleHDRPeakNits: Float = 203.0,
-        antiOcclusionEnabled: Bool = true,
+        antiOcclusionEnabled: Bool = false,
         subtitleStyleRevision: Int = 0,
         onFirstFrameRendered: (() -> Void)? = nil
     ) {
