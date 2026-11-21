@@ -1067,7 +1067,7 @@ final class NativePosterCollectionItem: NSCollectionViewItem, HoverableCollectio
             cardContainerLayer.borderWidth = 1.5
             cardContainerLayer.borderColor = borderCG
             hoverDimLayer.isHidden = false
-            playLayer.isHidden = false
+            playLayer.isHidden = true
         } else {
             cardContainerLayer.borderWidth = 0.65
             cardContainerLayer.borderColor = NativeCardLayerCache.defaultPosterBorderCGColor
@@ -1083,11 +1083,7 @@ final class NativePosterCollectionItem: NSCollectionViewItem, HoverableCollectio
 
     func handleClick(at pointInItemView: NSPoint) {
         guard let currentItem else { return }
-        if isHovered && !playLayer.isHidden && playLayer.frame.contains(pointInItemView) {
-            actionDelegate?.cardDidPlay(currentItem)
-        } else {
-            actionDelegate?.cardDidSelect(currentItem)
-        }
+        actionDelegate?.cardDidSelect(currentItem)
     }
 
     func configure(
@@ -1507,7 +1503,7 @@ final class NativeLandscapeCollectionItem: NSCollectionViewItem, HoverableCollec
             cardContainerLayer.borderWidth = 1.5
             cardContainerLayer.borderColor = borderCG
             hoverDimLayer.isHidden = false
-            playLayer.isHidden = false
+            playLayer.isHidden = true
         } else {
             cardContainerLayer.borderWidth = 0.65
             cardContainerLayer.borderColor = NativeCardLayerCache.defaultPosterBorderCGColor
@@ -1523,14 +1519,7 @@ final class NativeLandscapeCollectionItem: NSCollectionViewItem, HoverableCollec
 
     func handleClick(at pointInItemView: NSPoint) {
         guard let currentItem else { return }
-        let infoHitRect = CGRect(x: Self.itemSize.width - 30, y: Self.thumbHeight + 2, width: 30, height: 38)
-        if infoHitRect.contains(pointInItemView) {
-            actionDelegate?.cardDidSelect(currentItem)
-        } else if cardContainerLayer.frame.contains(pointInItemView) {
-            actionDelegate?.cardDidPlay(currentItem)
-        } else {
-            actionDelegate?.cardDidSelect(currentItem)
-        }
+        actionDelegate?.cardDidSelect(currentItem)
     }
 
     func configure(item: EmbyItem, appearance: DonbyCardAppearance, allowAsyncLoad: Bool = true) {

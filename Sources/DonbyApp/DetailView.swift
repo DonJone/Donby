@@ -94,9 +94,23 @@ public struct DetailView: View {
         .onDisappear {
             DonbyTurboCacheEngine.shared.cancelDetailPreload()
         }
-        .task(id: "\(item.id)|\(heroTargetEpisode?.id ?? "")|\(selectedSourceId)|\(isLoadingDetails)|\(appState.detailPreloadEnabled)|\(appState.detailPreloadSeconds)") {
+        .task(id: "\(item.id)|\(heroTargetEpisode?.id ?? "")|\(selectedSourceId)|\(Int(effectivePlayButtonStartSeconds))|\(isLoadingDetails)|\(appState.detailPreloadEnabled)|\(appState.detailPreloadSeconds)") {
             await runDetailPrewarmAndPreload()
         }
+    }
+
+    private var effectivePlayButtonStartSeconds: Double {
+        let target = heroResolvedPlayTarget
+        if target.resumePositionSeconds > 0.5 {
+            return target.resumePositionSeconds
+        }
+        if target.isEpisode, let serverId = effectiveDetailServer?.id ?? appState.activeServer?.id {
+            let pref = appState.effectiveSkipPreference(serverId: serverId, item: target)
+            if pref.introEnabled && pref.mode == .automatic && pref.introSeconds > 0 {
+                return Double(pref.introSeconds)
+            }
+        }
+        return 0.0
     }
 
     private func runDetailPrewarmAndPreload() async {
@@ -167,7 +181,7 @@ public struct DetailView: View {
         let originURL = res.originStreamURL ?? res.streamURL
         let cachedRedirectURL: URL? = (res.originStreamURL != nil && res.originStreamURL != res.streamURL) ? res.streamURL : nil
         let durationSec = Double(target.runTimeTicks ?? res.mediaSource.runTimeTicks ?? 0) / 10_000_000.0
-        let resumeSec = target.resumePositionSeconds
+        let playStartSec = effectivePlayButtonStartSeconds
         let redirectHandler: (@Sendable (URL) -> Void)? = enable302
             ? Self.makeRedirectStoreHandler(key: redirectKey)
             : nil
@@ -179,7 +193,7 @@ public struct DetailView: View {
             headers: res.headers,
             knownTotalSize: res.mediaSource.size,
             durationSeconds: durationSec,
-            resumePositionSeconds: resumeSec,
+            resumePositionSeconds: playStartSec,
             preloadSeconds: appState.detailPreloadSeconds,
             maxMemoryBytes: max(64, appState.turboMemoryCacheMB) * 1024 * 1024,
             onResolvedRedirectURL: redirectHandler

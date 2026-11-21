@@ -2345,7 +2345,7 @@ public struct PlayerView: View {
     }
 
     private func exportRedactedDiagnostics() {
-        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.3"
+        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.4"
         var lines: [String] = []
         lines.append("Donby Diagnostics Report (v\(appVer))")
         lines.append("Time: \(ISO8601DateFormatter().string(from: Date()))")

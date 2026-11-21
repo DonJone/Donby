@@ -502,7 +502,7 @@ public struct SettingsView: View {
                 }
 
                 Toggle("进入详情页自动预加载", isOn: $appState.detailPreloadEnabled)
-                Text("打开影片详情页时在后台预读片头或续播点附近码流至缓存，点击播放更快起播（开启后将消耗对应流量）")
+                Text("打开详情页时按当前播放按钮的起播位置（续播进度或自动跳过片头落点）在后台预读码流，点击播放更快起播（开启后将消耗对应流量）")
                     .font(.system(size: 11.5))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
 

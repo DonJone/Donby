@@ -3179,7 +3179,7 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
             }
             guard !Task.isCancelled else { return }
 
-            // 3. Preload target duration window (starting at resume offset or 0s)
+            // 3. Preload target duration window anchored at the exact Play-button start position
             let bytesPerSec: Double = (totalSize > 0 && durationSeconds > 10)
                 ? (Double(totalSize) / durationSeconds)
                 : 2_500_000.0
@@ -3189,16 +3189,22 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
             let targetChunkCount = max(8, Int((clampedBytes + chunkSize - 1) / chunkSize))
 
             var playheadChunk = 0
-            if resumePositionSeconds > 5.0, totalSize > 0, durationSeconds > 10 {
+            var preloadChunks = targetChunkCount
+            if resumePositionSeconds > 0.5, totalSize > 0, durationSeconds > 10 {
                 let frac = max(0.0, min(0.98, resumePositionSeconds / durationSeconds))
                 let estByte = Int64(frac * Double(totalSize))
-                playheadChunk = max(0, Int(estByte / chunkSize) - 2)
+                let estChunk = Int(estByte / chunkSize)
+                if estChunk > 4 {
+                    // Back up 4 chunks (2 MiB) to absorb VBR drift and keyframe alignment
+                    playheadChunk = estChunk - 4
+                    preloadChunks = targetChunkCount + 4
+                }
             }
 
-            let ok = await storeAlignedRange(startChunk: playheadChunk, chunkCount: targetChunkCount)
+            let ok = await storeAlignedRange(startChunk: playheadChunk, chunkCount: preloadChunks)
             if ok && !Task.isCancelled {
                 DonbyLogger.shared.log(
-                    "详情页预加载完成: \(clampedSeconds)s (\(targetChunkCount) 分片 / 约 \(clampedBytes / (1024 * 1024)) MB, 起点分片 #\(playheadChunk))",
+                    "详情页预加载完成: 起点 \(String(format: "%.0fs", resumePositionSeconds)), 预读 \(clampedSeconds)s (\(preloadChunks) 分片 / 约 \(clampedBytes / (1024 * 1024)) MB, 起点分片 #\(playheadChunk))",
                     level: .info,
                     subsystem: "Turbo"
                 )

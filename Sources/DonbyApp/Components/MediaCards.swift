@@ -233,10 +233,10 @@ public struct PosterCardView: View, Equatable {
                     cornerRadius: 10,
                     borderDefaultColor: Color.white.opacity(0.06),
                     accentColor: appearance.accentColor,
-                    showPlayButton: onPlay != nil,
+                    showPlayButton: false,
                     playCircleSize: 40,
                     playIconSize: 15,
-                    onPlay: onPlay
+                    onPlay: nil
                 )
             }
             .frame(width: targetWidth, height: targetHeight)
@@ -352,14 +352,14 @@ public struct LandscapeCardView: View, Equatable {
                     cornerRadius: 10,
                     borderDefaultColor: Color.white.opacity(0.06),
                     accentColor: appearance.accentColor,
-                    showPlayButton: true,
+                    showPlayButton: false,
                     playCircleSize: 36,
                     playIconSize: 13,
-                    onPlay: onPlay
+                    onPlay: nil
                 )
             }
             .frame(width: width, height: height)
-            .onTapGesture { onPlay() }
+            .onTapGesture { onDetail() }
 
             HStack(alignment: .center, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
