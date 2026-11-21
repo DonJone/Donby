@@ -133,8 +133,15 @@ public struct ServerListView: View {
                         Toggle("显示搜索框", isOn: $appState.displaySearchBox)
                         Toggle("卡片光晕质感", isOn: $appState.displayAeroGlass)
                     }
-                    .toggleStyle(.checkbox)
+                    .toggleStyle(
+                        DonbyCheckboxToggleStyle(
+                            isLightMode: appState.isLightMode,
+                            accentColor: appState.accentColor,
+                            accentTextColor: appState.accentTextColor
+                        )
+                    )
                     .font(.system(size: 12.5))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     .padding(14)
                     .frame(width: 195)
                 }
@@ -282,11 +289,11 @@ public struct ServerCardView: View {
 
                             if isUnconfigured {
                                 Text("待配置")
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(.orange)
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
-                                    .background(Color.orange.opacity(0.14))
+                                    .background(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.08))
                                     .clipShape(Capsule())
                             } else if appState.displayConnectionStatus {
                                 Circle()
@@ -393,7 +400,8 @@ public struct ServerContextMenuItems: View {
     public var body: some View {
         Button { appState.openServer(server) } label: { Label("打开媒体库", systemImage: "play.tv") }
         Button { appState.linePickerServer = server } label: {
-            Label(server.type == .uhdNative ? "线路与测速" : "切换线路", systemImage: server.type == .uhdNative ? "speedometer" : "bolt.horizontal.icloud")
+            let uhdActive = appState.isUsingUHDExtension(for: server)
+            Label(uhdActive ? "线路与测速" : "切换线路", systemImage: uhdActive ? "speedometer" : "bolt.horizontal.icloud")
         }
         #if canImport(DonbyUHDModule)
         if uhdModule.isActive(for: server) {
@@ -507,7 +515,7 @@ public struct ServerLinePickSheet: View {
 
                 #if canImport(DonbyUHDModule)
                 if isUHDExtensionActive && activeTab == .account {
-                    UHDAccountDashboardContent(server: server, onDismiss: { dismiss() })
+                    UHDAccountDashboardContent(server: server, showRouteSwitchAction: false, onDismiss: { dismiss() })
                 } else {
                     linesBody(server: server)
                 }
@@ -539,28 +547,18 @@ public struct ServerLinePickSheet: View {
         }
         #endif
 
-        let fastestLineId: UUID? = server.backupLines
-            .filter { ($0.lastSpeedMbps ?? 0) > 0 }
-            .max { ($0.lastSpeedMbps ?? 0) < ($1.lastSpeedMbps ?? 0) }?.id
-
-        let rowCount = (server.type == .uhdNative && !server.backupLines.isEmpty) ? server.backupLines.count : (1 + server.backupLines.count)
-        let listHeight = min(max(CGFloat(rowCount) * 64, 128), 280)
+        let rowCount = (isUHDExtensionActive && !server.backupLines.isEmpty) ? server.backupLines.count : (1 + server.backupLines.count)
+        let listHeight = min(max(CGFloat(rowCount) * 60, 124), 260)
 
         ScrollView {
             VStack(spacing: 8) {
-                if server.type != .uhdNative || server.backupLines.isEmpty {
+                if !isUHDExtensionActive || server.backupLines.isEmpty {
                     ServerLineOptionRow(
                         title: "默认主线路",
-                        url: server.mainLineURL,
-                        latencyMs: server.mainLineLatencyMs,
+                        url: ServerLineInfo(name: "默认主线路", url: server.mainLineURL).cleanDisplayHost,
                         lastSpeedMbps: nil,
-                        exitBadge: nil,
-                        isAutoSynced: false,
                         isSelected: server.selectedLineId == nil,
-                        isFastest: false,
                         isTesting: false,
-                        isProbing: false,
-                        onProbeExit: nil,
                         onRunSpeedTest: nil
                     ) {
                         appState.switchLineImmediate(to: nil, for: server.id)
@@ -569,50 +567,25 @@ public struct ServerLinePickSheet: View {
                 }
 
                 ForEach(server.backupLines) { line in
-                    let exitStr: String? = {
-                        #if canImport(DonbyUHDModule)
-                        return UHDDisplayNormalizer.formatExitBadge(location: line.lastExitLocation, isp: line.lastExitISP)
-                        #else
-                        var parts: [String] = []
-                        if let loc = line.lastExitLocation, !loc.isEmpty { parts.append(loc) }
-                        if let isp = line.lastExitISP, !isp.isEmpty { parts.append(isp) }
-                        return parts.isEmpty ? nil : parts.joined(separator: " · ")
-                        #endif
-                    }()
-
                     #if canImport(DonbyUHDModule)
-                    let canProbe = isUHDExtensionActive && (line.domainId?.isEmpty == false)
+                    let canSpeedTest = isUHDExtensionActive && (line.domainId?.isEmpty == false)
                     let isTestingLine = speedModel.isSpeedTesting && speedModel.testingDomainId == line.domainId
-                    let isProbingLine = speedModel.probingDomainId == line.domainId
-                    let probeAction: (() -> Void)? = canProbe ? {
-                        if let did = line.domainId {
-                            Task { await speedModel.probeLineExit(server: server, domainId: did, appState: appState) }
-                        }
-                    } : nil
-                    let speedAction: (() -> Void)? = canProbe ? {
+                    let speedAction: (() -> Void)? = canSpeedTest ? {
                         if let did = line.domainId, !speedModel.isSpeedTesting {
                             speedModel.launchSingle(server: server, domainId: did, appState: appState)
                         }
                     } : nil
                     #else
                     let isTestingLine = false
-                    let isProbingLine = false
-                    let probeAction: (() -> Void)? = nil
                     let speedAction: (() -> Void)? = nil
                     #endif
 
                     ServerLineOptionRow(
                         title: line.cleanDisplayName,
                         url: line.cleanDisplayHost,
-                        latencyMs: line.latencyMs,
                         lastSpeedMbps: line.lastSpeedMbps,
-                        exitBadge: exitStr,
-                        isAutoSynced: false,
                         isSelected: server.selectedLineId == line.id,
-                        isFastest: fastestLineId == line.id && server.backupLines.count > 1,
                         isTesting: isTestingLine,
-                        isProbing: isProbingLine,
-                        onProbeExit: probeAction,
                         onRunSpeedTest: speedAction
                     ) {
                         appState.switchLineImmediate(to: line.id, for: server.id)
@@ -662,23 +635,6 @@ public struct ServerLinePickSheet: View {
 
             Spacer()
 
-            if let fastestLineId, server.selectedLineId != fastestLineId {
-                Button {
-                    appState.switchLineImmediate(to: fastestLineId, for: server.id)
-                    dismiss()
-                } label: {
-                    Text("切换最快")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.green)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7.5)
-                        .background(Color.green.opacity(0.11))
-                        .clipShape(Capsule())
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-            }
-
             Button {
                 #if canImport(DonbyUHDModule)
                 speedModel.cancel()
@@ -708,15 +664,9 @@ private struct ServerLineOptionRow: View {
     @EnvironmentObject private var appState: AppState
     let title: String
     let url: String
-    let latencyMs: Int?
     let lastSpeedMbps: Double?
-    let exitBadge: String?
-    let isAutoSynced: Bool
     let isSelected: Bool
-    let isFastest: Bool
     let isTesting: Bool
-    let isProbing: Bool
-    let onProbeExit: (() -> Void)?
     let onRunSpeedTest: (() -> Void)?
     let action: () -> Void
 
@@ -767,82 +717,28 @@ private struct ServerLineOptionRow: View {
                     selectionIndicator
 
                     VStack(alignment: .leading, spacing: 2.5) {
-                        HStack(spacing: 6) {
-                            Text(title)
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                                .lineLimit(1)
-                            if isFastest {
-                                Text("最快")
-                                    .font(.system(size: 9.5, weight: .bold))
-                                    .foregroundStyle(.green)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 1.5)
-                                    .background(Color.green.opacity(0.13))
-                                    .clipShape(Capsule())
-                            } else if isAutoSynced {
-                                Text("云端")
-                                    .font(.system(size: 9.5, weight: .medium))
-                                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 1.5)
-                                    .background(appState.isLightMode ? Color.black.opacity(0.04) : Color.white.opacity(0.08))
-                                    .clipShape(Capsule())
-                            }
-                        }
+                        Text(title)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                            .lineLimit(1)
 
-                        HStack(spacing: 6) {
-                            Text(url)
-                                .font(.system(size: 10.5, design: .monospaced))
-                                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                                .lineLimit(1)
-                            if let exitBadge {
-                                Text("· \(exitBadge)")
-                                    .font(.system(size: 10.5))
-                                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                                    .lineLimit(1)
-                            }
-                        }
+                        Text(url)
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                            .lineLimit(1)
                     }
 
                     Spacer(minLength: 6)
 
-                    VStack(alignment: .trailing, spacing: 2) {
-                        if let spd = lastSpeedMbps, spd > 0 {
-                            Text(String(format: "%.1f Mbps", spd))
-                                .font(.system(size: 11.5, weight: .bold, design: .monospaced))
-                                .foregroundStyle(spd >= 100 ? .green : (spd >= 40 ? appState.accentColor : .orange))
-                        }
-                        if let latencyMs {
-                            Text("\(latencyMs) ms")
-                                .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(latencyMs < 150 ? .green : (latencyMs < 350 ? .orange : .red))
-                        }
+                    if let spd = lastSpeedMbps, spd > 0 {
+                        Text(String(format: "%.1f Mbps", spd))
+                            .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     }
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-
-            if let onProbeExit {
-                Button(action: onProbeExit) {
-                    Group {
-                        if isProbing {
-                            ProgressView().controlSize(.mini)
-                        } else {
-                            Image(systemName: "antenna.radiowaves.left.and.right")
-                                .font(.system(size: 11.5, weight: .medium))
-                        }
-                    }
-                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                    .frame(width: 26, height: 26)
-                    .background(appState.isLightMode ? Color.black.opacity(0.04) : Color.white.opacity(0.07))
-                    .clipShape(Circle())
-                    .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .help("探测出口")
-            }
 
             if let onRunSpeedTest {
                 Button(action: onRunSpeedTest) {
@@ -851,17 +747,17 @@ private struct ServerLineOptionRow: View {
                             ProgressView().controlSize(.mini)
                         } else {
                             Image(systemName: "speedometer")
-                                .font(.system(size: 11.5, weight: .semibold))
+                                .font(.system(size: 11.5, weight: .medium))
                         }
                     }
-                    .foregroundStyle(appState.accentColor)
+                    .foregroundStyle(isHovered ? DonbyGlassPalette.primaryText(isLight: appState.isLightMode) : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     .frame(width: 26, height: 26)
-                    .background(appState.accentColor.opacity(0.12))
+                    .background(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.08))
                     .clipShape(Circle())
                     .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
-                .help("线路测速")
+                .help("测速")
             }
         }
         .padding(.horizontal, 13)
@@ -1132,8 +1028,14 @@ public struct ServerConfigSheet: View {
             // Keep Signed In & Advanced Options
             HStack(spacing: 12) {
                 Toggle("保持登录", isOn: $draft.keepSignedIn)
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
+                    .toggleStyle(
+                        DonbySwitchToggleStyle(
+                            isLightMode: appState.isLightMode,
+                            accentColor: appState.accentColor,
+                            accentTextColor: appState.accentTextColor,
+                            compact: true
+                        )
+                    )
                     .font(.system(size: 12.5, weight: .medium))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
@@ -1160,26 +1062,26 @@ public struct ServerConfigSheet: View {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 10) {
                         TextField("显示名称", text: $draft.name)
-                            .textFieldStyle(.roundedBorder)
                             .font(.system(size: 12.5))
+                            .donbyFlatTextField(isLight: appState.isLightMode, cornerRadius: 8, horizontalPadding: 10, verticalPadding: 6.5)
                         TextField("备注", text: $draft.note)
-                            .textFieldStyle(.roundedBorder)
                             .font(.system(size: 12.5))
+                            .donbyFlatTextField(isLight: appState.isLightMode, cornerRadius: 8, horizontalPadding: 10, verticalPadding: 6.5)
                     }
 
                     if draft.type == .uhdNative {
                         VStack(alignment: .leading, spacing: 4) {
                             TextField("自定义接入地址（留空自动优选节点）", text: $uhdCustomEndpoint)
-                                .textFieldStyle(.roundedBorder)
                                 .font(.system(size: 12, design: .monospaced))
+                                .donbyFlatTextField(isLight: appState.isLightMode, cornerRadius: 8, horizontalPadding: 10, verticalPadding: 6.5)
                             Text("默认优先连接中国优化节点，无优化套餐自动回退标准节点")
                                 .font(.system(size: 10.5))
                                 .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                         }
                     } else {
                         TextField("API Key / 访问令牌（可选）", text: $draft.accessToken)
-                            .textFieldStyle(.roundedBorder)
                             .font(.system(size: 12, design: .monospaced))
+                            .donbyFlatTextField(isLight: appState.isLightMode, cornerRadius: 8, horizontalPadding: 10, verticalPadding: 6.5)
 
                         VStack(alignment: .leading, spacing: 6) {
                             Text("备用线路")
@@ -1193,21 +1095,35 @@ public struct ServerConfigSheet: View {
                                     Button {
                                         draft.backupLines.removeAll { $0.id == line.id }
                                     } label: {
-                                        Image(systemName: "minus.circle.fill").foregroundStyle(.red.opacity(0.8))
+                                        Image(systemName: "minus.circle.fill").foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                                     }
                                     .buttonStyle(.plain)
                                 }
                             }
                             HStack(spacing: 6) {
-                                TextField("线路名称", text: $newLineName).textFieldStyle(.roundedBorder).frame(width: 110)
-                                TextField("https://...", text: $newLineURL).textFieldStyle(.roundedBorder)
-                                Button("新增") {
+                                TextField("线路名称", text: $newLineName)
+                                    .font(.system(size: 12))
+                                    .donbyFlatTextField(isLight: appState.isLightMode, cornerRadius: 8, horizontalPadding: 9, verticalPadding: 6)
+                                    .frame(width: 110)
+                                TextField("https://...", text: $newLineURL)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .donbyFlatTextField(isLight: appState.isLightMode, cornerRadius: 8, horizontalPadding: 9, verticalPadding: 6)
+                                Button {
                                     let clean = newLineURL.trimmingCharacters(in: .whitespacesAndNewlines)
                                     guard !clean.isEmpty else { return }
                                     let name = newLineName.trimmingCharacters(in: .whitespacesAndNewlines)
                                     draft.backupLines.append(ServerLineInfo(name: name.isEmpty ? "备用线路 \(draft.backupLines.count + 1)" : name, url: clean, isAutoSynced: false))
                                     newLineName = ""; newLineURL = ""
+                                } label: {
+                                    Text("新增")
+                                        .font(.system(size: 11.5, weight: .medium))
+                                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                                        .padding(.horizontal, 11)
+                                        .padding(.vertical, 6)
+                                        .donbyLiquidGlassCapsule()
+                                        .contentShape(Capsule())
                                 }
+                                .buttonStyle(.plain)
                                 .disabled(newLineURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             }
                         }
@@ -1336,6 +1252,7 @@ public struct ServerConfigSheet: View {
             VStack(alignment: .leading, spacing: 6) {
                 TextField("8 位数字登录码", text: $uhdLoginCode)
                     .textFieldStyle(.plain)
+                    .focusEffectDisabled()
                     .font(.system(size: 15.5, weight: .semibold, design: .monospaced))
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
@@ -1356,6 +1273,7 @@ public struct ServerConfigSheet: View {
             VStack(alignment: .leading, spacing: 6) {
                 TextField("粘贴 API Key 或 Stream Token", text: $draft.accessToken)
                     .textFieldStyle(.plain)
+                    .focusEffectDisabled()
                     .font(.system(size: 12.5, design: .monospaced))
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
@@ -1393,6 +1311,7 @@ public struct ServerConfigSheet: View {
 
             TextField("服务器地址", text: $draft.host)
                 .textFieldStyle(.plain)
+                .focusEffectDisabled()
                 .font(.system(size: 13))
                 .padding(.horizontal, 11)
                 .padding(.vertical, 8)
@@ -1416,6 +1335,7 @@ public struct ServerConfigSheet: View {
 
             TextField("端口", text: $portText)
                 .textFieldStyle(.plain)
+                .focusEffectDisabled()
                 .font(.system(size: 12.5, design: .monospaced))
                 .multilineTextAlignment(.center)
                 .frame(width: 64)
@@ -1479,6 +1399,7 @@ public struct ServerConfigSheet: View {
         VStack(spacing: 10) {
             TextField("用户名", text: $draft.username)
                 .textFieldStyle(.plain)
+                .focusEffectDisabled()
                 .font(.system(size: 13))
                 .padding(.horizontal, 11)
                 .padding(.vertical, 8.5)
@@ -1495,6 +1416,7 @@ public struct ServerConfigSheet: View {
                     }
                 }
                 .textFieldStyle(.plain)
+                .focusEffectDisabled()
                 .font(.system(size: 13))
 
                 Button {

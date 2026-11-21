@@ -270,19 +270,26 @@ public struct IPTVModuleView: View {
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 TextField("如：CCTV 4K 超高清", text: $newChannelName)
-                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 13))
+                    .donbyFlatTextField(isLight: appState.isLightMode)
             }
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("频道分组")
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                Picker("", selection: $newChannelGroup) {
-                    ForEach(["4K UHD", "影视频道", "新闻资讯", "自定义"], id: \.self) { grp in
-                        Text(grp).tag(grp)
-                    }
-                }
-                .pickerStyle(.segmented)
+                DonbySegmentedControl(
+                    options: ["4K UHD", "影视频道", "新闻资讯", "自定义"],
+                    selection: $newChannelGroup,
+                    isLightMode: appState.isLightMode,
+                    accentColor: appState.accentColor,
+                    accentTextColor: appState.accentTextColor,
+                    fontSize: 12,
+                    horizontalPadding: 10,
+                    verticalPadding: 5,
+                    expandsEqually: true,
+                    title: { $0 }
+                )
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -290,15 +297,27 @@ public struct IPTVModuleView: View {
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 TextField("https://example.com/live/master.m3u8", text: $newChannelURL)
-                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 13, design: .monospaced))
+                    .donbyFlatTextField(isLight: appState.isLightMode)
             }
 
-            HStack {
+            HStack(spacing: 10) {
                 Spacer()
-                Button("取消") { showAddChannelSheet = false }
-                    .keyboardShortcut(.cancelAction)
+                Button {
+                    showAddChannelSheet = false
+                } label: {
+                    Text("取消")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 7)
+                        .donbyLiquidGlassCapsule()
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
 
-                Button("保存频道") {
+                Button {
                     let name = newChannelName.trimmingCharacters(in: .whitespacesAndNewlines)
                     let url = newChannelURL.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !name.isEmpty && !url.isEmpty else {
@@ -307,8 +326,17 @@ public struct IPTVModuleView: View {
                     }
                     appState.addIPTVChannel(name: name, group: newChannelGroup, urlString: url)
                     showAddChannelSheet = false
+                } label: {
+                    Text("保存频道")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(appState.accentTextColor)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 7)
+                        .background(appState.accentColor)
+                        .clipShape(Capsule())
+                        .contentShape(Capsule())
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
                 .keyboardShortcut(.defaultAction)
             }
             .padding(.top, 8)
@@ -375,12 +403,23 @@ public struct IPTVModuleView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
             }
 
-            HStack {
+            HStack(spacing: 10) {
                 Spacer()
-                Button("取消") { showImportM3USheet = false }
-                    .keyboardShortcut(.cancelAction)
+                Button {
+                    showImportM3USheet = false
+                } label: {
+                    Text("取消")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 7)
+                        .donbyLiquidGlassCapsule()
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
 
-                Button("解析并导入") {
+                Button {
                     let content = m3uTextInput.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !content.isEmpty else {
                         appState.showToast("请输入 M3U 文本", icon: "exclamationmark.triangle", isError: true)
@@ -388,8 +427,17 @@ public struct IPTVModuleView: View {
                     }
                     appState.importM3UContent(content)
                     showImportM3USheet = false
+                } label: {
+                    Text("解析并导入")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(appState.accentTextColor)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 7)
+                        .background(appState.accentColor)
+                        .clipShape(Capsule())
+                        .contentShape(Capsule())
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
                 .keyboardShortcut(.defaultAction)
             }
             .padding(.top, 4)

@@ -72,10 +72,7 @@ public final class UHDSpeedTestSessionModel: ObservableObject {
     @Published public var isSpeedTesting: Bool = false
     @Published public var isBatchTesting: Bool = false
     @Published public var testingDomainId: String? = nil
-    @Published public var probingDomainId: String? = nil
     @Published public var liveProgress: UHDSpeedTestProgress? = nil
-    @Published public var liveNetworkInfo: UHDSpeedTestNetworkInfo? = nil
-    @Published public var liveResolvedHost: String = ""
     @Published public var lastResult: UHDSpeedTestResult? = nil
     @Published public var speedTestError: String? = nil
 
@@ -85,22 +82,6 @@ public final class UHDSpeedTestSessionModel: ObservableObject {
 
     public func cancel() {
         speedTestTask?.cancel()
-    }
-
-    public func probeLineExit(server: EmbyServerConfig, domainId: String, appState: AppState) async {
-        guard probingDomainId == nil else { return }
-        probingDomainId = domainId
-        speedTestError = nil
-        defer { probingDomainId = nil }
-        do {
-            let (resolvedURL, info, ms) = try await UHDStreamClient.shared.probeLineExitNetworkInfo(server: server, domainId: domainId)
-            UHDModuleManager.shared.updateLineExitInfo(serverId: server.id, domainId: domainId, info: info, latencyMs: ms, appState: appState)
-            liveNetworkInfo = info
-            liveResolvedHost = resolvedURL.host ?? resolvedURL.absoluteString
-            appState.showToast("出口：\(info.compactSummary) (\(ms) ms)", icon: "antenna.radiowaves.left.and.right")
-        } catch {
-            speedTestError = "探测失败: \(error.localizedDescription)"
-        }
     }
 
     public func launchSingle(server: EmbyServerConfig, domainId: String, appState: AppState) {
@@ -132,8 +113,6 @@ public final class UHDSpeedTestSessionModel: ObservableObject {
     private func executeSingle(server: EmbyServerConfig, domainId: String, sizeMiB: Int, appState: AppState) async {
         speedTestError = nil
         liveProgress = nil
-        liveNetworkInfo = nil
-        liveResolvedHost = ""
         testingDomainId = domainId
         isSpeedTesting = true
         defer {
@@ -145,12 +124,7 @@ public final class UHDSpeedTestSessionModel: ObservableObject {
                 server: server,
                 domainId: domainId,
                 sizeMiB: sizeMiB,
-                onNetworkInfo: { resolvedURL, info in
-                    Task { @MainActor in
-                        self.liveResolvedHost = resolvedURL.host ?? resolvedURL.absoluteString
-                        self.liveNetworkInfo = info
-                    }
-                },
+                onNetworkInfo: nil,
                 onProgress: { prog in
                     Task { @MainActor in
                         self.liveProgress = prog
@@ -267,12 +241,11 @@ public struct UHDSpeedTestConsoleView: View {
                         model.cancel()
                     } label: {
                         Text("取消")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(.red)
-                            .padding(.horizontal, 10)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                            .padding(.horizontal, 11)
                             .padding(.vertical, 5)
-                            .background(Color.red.opacity(0.10))
-                            .clipShape(Capsule())
+                            .donbyLiquidGlassCapsule()
                             .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
@@ -319,8 +292,16 @@ public struct UHDSpeedTestConsoleView: View {
                             isLightMode: appState.isLightMode
                         )
                     }
-                    ProgressView(value: prog.fraction)
-                        .tint(appState.accentColor)
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.10))
+                            Capsule()
+                                .fill(appState.accentColor)
+                                .frame(width: max(4, geo.size.width * CGFloat(prog.fraction)))
+                        }
+                    }
+                    .frame(height: 4)
                     HStack(spacing: 10) {
                         Text(String(format: "实时 %.1f · 均值 %.1f · 峰值 %.1f Mbps", prog.currentMbps, prog.averageMbps, prog.peakMbps))
                             .font(.system(size: 11, weight: .medium, design: .monospaced))
@@ -329,12 +310,6 @@ public struct UHDSpeedTestConsoleView: View {
                         Text("\(UHDTrafficSummary.formatBytes(prog.downloadedBytes)) / \(model.selectedSizeMiB) MiB")
                             .font(.system(size: 10.5, design: .monospaced))
                             .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                    }
-                    if let net = model.liveNetworkInfo {
-                        Text("\(model.liveResolvedHost) · \(net.compactSummary)")
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                            .lineLimit(1)
                     }
                 }
             } else if model.isSpeedTesting {
@@ -349,33 +324,23 @@ public struct UHDSpeedTestConsoleView: View {
                     if res.samplesMbps.count >= 2 {
                         UHDSpeedSparklineChart(
                             samplesMbps: Array(res.samplesMbps.suffix(48)),
-                            accentColor: .green,
+                            accentColor: appState.accentColor,
                             isLightMode: appState.isLightMode
                         )
                     }
                     HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                         Text(String(format: "均值 %.1f Mbps · 峰值 %.1f Mbps · %.1fs", res.averageMbps, res.peakMbps, Double(res.elapsedMs) / 1000.0))
                             .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
                             .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                         Spacer()
-                        if !res.networkInfo.country.isEmpty {
-                            Text(res.networkInfo.isChinaMainlandExit ? "CN" : res.networkInfo.country)
-                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.08))
-                                .clipShape(Capsule())
-                        }
                     }
                 }
             } else if let err = model.speedTestError {
                 Text(err)
                     .font(.system(size: 11.5))
-                    .foregroundStyle(.red)
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             } else {
-                Text("测速计入流量配额；探测出口不消耗流量")
+                Text("测速将消耗对应流量配额")
                     .font(.system(size: 11))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }
@@ -419,12 +384,20 @@ public struct UHDProxyRulesPopoverButton: View {
                     Text("分流规则参考")
                         .font(.system(size: 12.5, weight: .bold))
                     Spacer()
-                    Button("复制") {
+                    Button {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(UHDProxyRoutingRules.standardRulesText, forType: .string)
                         appState.showToast("已复制分流规则", icon: "doc.on.doc.fill")
+                    } label: {
+                        Text("复制")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .donbyLiquidGlassCapsule()
+                            .contentShape(Capsule())
                     }
-                    .controlSize(.small)
+                    .buttonStyle(.plain)
                 }
                 Text(UHDProxyRoutingRules.standardRulesText)
                     .font(.system(size: 11, design: .monospaced))

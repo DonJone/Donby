@@ -168,8 +168,10 @@ public final class UHDDanmuClient: Sendable {
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue("Donby/\(DonbyAppInfo.version) (macOS)", forHTTPHeaderField: "User-Agent")
         let data = try await performData(request: req)
-        let dto = try JSONDecoder().decode(DanmuCommentsResponseDTO.self, from: data)
-        return Self.parseComments(dto.comments ?? [])
+        return try await Task.detached(priority: .utility) {
+            let dto = try JSONDecoder().decode(DanmuCommentsResponseDTO.self, from: data)
+            return Self.parseComments(dto.comments ?? [])
+        }.value
     }
 
     /// Convenience helper: auto-matches a movie or episode and loads its danmu comments.
@@ -221,8 +223,8 @@ public final class UHDDanmuClient: Sendable {
     }
 
     private static func parseComments(_ raw: [DanmuRawCommentDTO]) -> [UHDDanmuComment] {
-        var result: [UHDDanmuComment] = []
-        result.reserveCapacity(raw.count)
+        var parsed: [UHDDanmuComment] = []
+        parsed.reserveCapacity(min(raw.count, 12_000))
         for (idx, item) in raw.enumerated() {
             guard let text = item.m?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !text.isEmpty,
@@ -232,9 +234,31 @@ public final class UHDDanmuClient: Sendable {
             let mode = parts.count > 1 ? (Int(parts[1]) ?? 1) : 1
             let color = parts.count > 2 ? (UInt32(parts[2]) ?? 0xFFFFFF) : 0xFFFFFF
             let cid = item.cid.map(String.init) ?? "\(idx)-\(Int(time * 100))"
-            result.append(UHDDanmuComment(id: cid, timeSeconds: time, mode: mode, colorRGB: color, text: text))
+            parsed.append(UHDDanmuComment(id: cid, timeSeconds: time, mode: mode, colorRGB: color, text: text))
         }
-        result.sort { $0.timeSeconds < $1.timeSeconds }
-        return result
+        parsed.sort { $0.timeSeconds < $1.timeSeconds }
+
+        // Density-balance hot drama episodes (10k-50k+ comments) off-main-thread:
+        // deduplicate identical spam within 3s and cap each 0.5s bucket to 6 comments so
+        // playback stays silky-smooth with zero Main-Thread stalls or overlapping spam walls.
+        guard parsed.count > 2_000 else { return parsed }
+        var balanced: [UHDDanmuComment] = []
+        balanced.reserveCapacity(min(parsed.count, 8_000))
+        var bucketCounts: [Int: Int] = [:]
+        var lastSeenTextTime: [String: Double] = [:]
+        let maxPerHalfSecond = 6
+
+        for c in parsed {
+            let bucket = Int(c.timeSeconds * 2.0)
+            let currentCount = bucketCounts[bucket] ?? 0
+            if currentCount >= maxPerHalfSecond { continue }
+            if let prevTime = lastSeenTextTime[c.text], (c.timeSeconds - prevTime) < 3.0 {
+                continue
+            }
+            bucketCounts[bucket] = currentCount + 1
+            lastSeenTextTime[c.text] = c.timeSeconds
+            balanced.append(c)
+        }
+        return balanced
     }
 }

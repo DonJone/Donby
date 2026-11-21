@@ -103,6 +103,13 @@ public struct SettingsView: View {
                     }
                     .padding(32)
                     .frame(maxWidth: 680, alignment: .leading)
+                    .toggleStyle(
+                        DonbyCheckboxToggleStyle(
+                            isLightMode: appState.isLightMode,
+                            accentColor: appState.accentColor,
+                            accentTextColor: appState.accentTextColor
+                        )
+                    )
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
@@ -386,13 +393,17 @@ public struct SettingsView: View {
                         .font(.system(size: 13))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
-                    Picker("", selection: $appState.subtitleStyle.transform) {
-                        ForEach(SubtitleTextTransform.allCases) { item in
-                            Text(item.title).tag(item)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 220)
+                    DonbySegmentedControl(
+                        options: SubtitleTextTransform.allCases,
+                        selection: $appState.subtitleStyle.transform,
+                        isLightMode: appState.isLightMode,
+                        accentColor: appState.accentColor,
+                        accentTextColor: appState.accentTextColor,
+                        fontSize: 11.5,
+                        horizontalPadding: 11,
+                        verticalPadding: 5,
+                        title: { $0.title }
+                    )
                 }
 
                 HStack {
@@ -409,16 +420,30 @@ public struct SettingsView: View {
                     .frame(width: 170)
                 }
 
-                HStack {
+                HStack(spacing: 12) {
                     Text(String(format: "字幕缩放 %.2fx", appState.subtitleStyle.scale))
                         .font(.system(size: 13))
-                    Slider(value: $appState.subtitleStyle.scale, in: 0.6...1.8, step: 0.05)
+                        .frame(width: 118, alignment: .leading)
+                    DonbySlider(
+                        value: $appState.subtitleStyle.scale,
+                        in: 0.6...1.8,
+                        step: 0.05,
+                        isLightMode: appState.isLightMode,
+                        accentColor: appState.accentColor
+                    )
                 }
 
-                HStack {
+                HStack(spacing: 12) {
                     Text("垂直位置 \(Int(appState.subtitleStyle.verticalPositionPercent))%")
                         .font(.system(size: 13))
-                    Slider(value: $appState.subtitleStyle.verticalPositionPercent, in: 60...100, step: 1)
+                        .frame(width: 118, alignment: .leading)
+                    DonbySlider(
+                        value: $appState.subtitleStyle.verticalPositionPercent,
+                        in: 60...100,
+                        step: 1,
+                        isLightMode: appState.isLightMode,
+                        accentColor: appState.accentColor
+                    )
                 }
 
                 Toggle("覆盖 ASS 默认样式", isOn: $appState.subtitleStyle.overrideASSStyle)
@@ -935,11 +960,19 @@ public struct SettingsView: View {
                 Text(canSelfReplace ? "v\(release.version) 更新已准备就绪" : "v\(release.version) 已下载，请拖入「应用程序」替换")
                     .font(.system(size: 12, weight: .medium))
                 Spacer()
-                Button(canSelfReplace ? "安装并重启" : "在访达中查看") {
+                Button {
                     updater.installReadyUpdate(release: release, packageURL: packageURL)
+                } label: {
+                    Text(canSelfReplace ? "安装并重启" : "在访达中查看")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(appState.accentTextColor)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(appState.accentColor)
+                        .clipShape(Capsule())
+                        .contentShape(Capsule())
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+                .buttonStyle(.plain)
             }
         case .installing:
             HStack(spacing: 8) {

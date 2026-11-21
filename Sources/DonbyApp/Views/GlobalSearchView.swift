@@ -85,6 +85,7 @@ public struct GlobalSearchView: View {
 
                     TextField("搜索电影、电视剧、演员、本地视频或 IPTV 频道...", text: $appState.globalSearchQuery)
                         .textFieldStyle(.plain)
+                        .focusEffectDisabled()
                         .font(.system(size: 15))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                         .onSubmit {
@@ -206,14 +207,22 @@ public struct GlobalSearchView: View {
                                             .font(.system(size: 13, weight: .medium))
                                             .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                                         Spacer()
-                                        Button("播放") {
+                                        Button {
                                             appState.recordSearchHistory(appState.globalSearchQuery)
                                             if let url = URL(string: file.urlString) {
                                                 appState.playDirectURL(url: url, title: file.name)
                                             }
+                                        } label: {
+                                            Text("播放")
+                                                .font(.system(size: 11.5, weight: .semibold))
+                                                .foregroundStyle(appState.accentTextColor)
+                                                .padding(.horizontal, 12)
+                                                .padding(.vertical, 5)
+                                                .background(appState.accentColor)
+                                                .clipShape(Capsule())
+                                                .contentShape(Capsule())
                                         }
-                                        .buttonStyle(.borderedProminent)
-                                        .controlSize(.small)
+                                        .buttonStyle(.plain)
                                     }
                                     .padding(12)
                                     .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
@@ -243,14 +252,22 @@ public struct GlobalSearchView: View {
                                             .font(.system(size: 11))
                                             .foregroundStyle(.secondary)
                                         Spacer()
-                                        Button("播放") {
+                                        Button {
                                             appState.recordSearchHistory(appState.globalSearchQuery)
                                             if let url = URL(string: ch.urlString) {
                                                 appState.playDirectURL(url: url, title: ch.name)
                                             }
+                                        } label: {
+                                            Text("播放")
+                                                .font(.system(size: 11.5, weight: .semibold))
+                                                .foregroundStyle(appState.accentTextColor)
+                                                .padding(.horizontal, 12)
+                                                .padding(.vertical, 5)
+                                                .background(appState.accentColor)
+                                                .clipShape(Capsule())
+                                                .contentShape(Capsule())
                                         }
-                                        .buttonStyle(.borderedProminent)
-                                        .controlSize(.small)
+                                        .buttonStyle(.plain)
                                     }
                                     .padding(12)
                                     .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))

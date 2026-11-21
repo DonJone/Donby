@@ -121,6 +121,7 @@ public struct MainWindowView: View {
 
             if let toast = appState.toastMessage {
                 ToastBannerView(toast: toast)
+                    .environment(\.colorScheme, appState.activePlayback != nil ? .dark : (appState.isLightMode ? .light : .dark))
                     .padding(.bottom, 26)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                     .zIndex(100)
@@ -165,11 +166,13 @@ public struct MainWindowView: View {
             ServerConfigSheet(existingServer: req.existingServer, preferredType: req.preferredType)
                 .environmentObject(appState)
                 .preferredColorScheme(appState.colorScheme)
+                .tint(appState.accentColor)
         }
         .sheet(item: $appState.linePickerServer) { server in
             ServerLinePickSheet(serverId: server.id)
                 .environmentObject(appState)
                 .preferredColorScheme(appState.colorScheme)
+                .tint(appState.accentColor)
         }
         #if canImport(DonbyUHDModule)
         .donbyUHDModuleSheets()
@@ -178,6 +181,7 @@ public struct MainWindowView: View {
             LogViewerSheet()
                 .environmentObject(appState)
                 .preferredColorScheme(appState.colorScheme)
+                .tint(appState.accentColor)
         }
         .sheet(isPresented: $updater.showUpdatePromptSheet) {
             AppUpdatePromptSheet(
@@ -192,6 +196,7 @@ public struct MainWindowView: View {
                 }
             )
             .preferredColorScheme(appState.colorScheme)
+            .tint(appState.accentColor)
         }
     }
 

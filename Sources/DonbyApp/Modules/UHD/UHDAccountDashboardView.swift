@@ -61,6 +61,7 @@ public struct UHDAccountDashboardContent: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject private var uhd = UHDModuleManager.shared
     public let server: EmbyServerConfig
+    public var showRouteSwitchAction: Bool = true
     public var onDismiss: (() -> Void)? = nil
 
     @State private var isRefreshing: Bool = false
@@ -77,8 +78,9 @@ public struct UHDAccountDashboardContent: View {
         uhd.accountSnapshots[server.id]
     }
 
-    public init(server: EmbyServerConfig, onDismiss: (() -> Void)? = nil) {
+    public init(server: EmbyServerConfig, showRouteSwitchAction: Bool = true, onDismiss: (() -> Void)? = nil) {
         self.server = server
+        self.showRouteSwitchAction = showRouteSwitchAction
         self.onDismiss = onDismiss
     }
 
@@ -103,11 +105,7 @@ public struct UHDAccountDashboardContent: View {
         let sub = snapshot?.subscription
         let isUnlimited = traffic?.displayUnlimitedTraffic ?? sub?.displayUnlimitedTraffic ?? false
         let fraction = traffic?.usageFraction ?? 0
-        let barColor: Color = {
-            if fraction >= 0.95 { return .red }
-            if fraction >= 0.80 { return .orange }
-            return appState.accentColor
-        }()
+        let barColor = appState.accentColor
 
         return dashboardCard {
             HStack(alignment: .center) {
@@ -157,7 +155,7 @@ public struct UHDAccountDashboardContent: View {
                     if !isUnlimited && traffic.limitBytes > 0 {
                         Text(String(format: "%.1f%%", fraction * 100))
                             .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(barColor)
+                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     }
                 }
 
@@ -206,18 +204,16 @@ public struct UHDAccountDashboardContent: View {
 
     private var subscriptionPlanCard: some View {
         let sub = snapshot?.subscription
+        let planLabel: String = {
+            let base = UHDDisplayNormalizer.formatPlanName(sub?.plan?.name) ?? "订阅信息"
+            return sub?.isTrial == true ? "\(base) · 试用" : base
+        }()
         return dashboardCard {
             HStack(spacing: 8) {
-                Text(UHDDisplayNormalizer.formatPlanName(sub?.plan?.name) ?? "订阅信息")
+                Text(planLabel)
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
-                if sub?.isTrial == true {
-                    pillBadge("试用", tint: .orange)
-                }
-                if sub?.autoRenew == true {
-                    pillBadge("自动续订", tint: .green)
-                }
                 Spacer()
                 if let expStr = sub?.formattedExpiresDate {
                     let daysText = sub?.remainingDays.map { d -> String in
@@ -227,7 +223,7 @@ public struct UHDAccountDashboardContent: View {
                     } ?? ""
                     Text("\(expStr) · \(daysText)")
                         .font(.system(size: 11.5, weight: .medium, design: .monospaced))
-                        .foregroundStyle((sub?.isExpired == true || sub?.isExpiringSoon == true) ? .orange : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
             }
 
@@ -295,13 +291,21 @@ public struct UHDAccountDashboardContent: View {
 
                     HStack(spacing: 8) {
                         TextField("搜索成员", text: $teamSearchQuery)
-                            .textFieldStyle(.roundedBorder)
                             .font(.system(size: 12))
+                            .donbyFlatTextField(isLight: appState.isLightMode, cornerRadius: 8, horizontalPadding: 10, verticalPadding: 6)
                             .onSubmit { Task { await loadTeamData(reset: true) } }
-                        Button("筛选") {
+                        Button {
                             Task { await loadTeamData(reset: true) }
+                        } label: {
+                            Text("筛选")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .donbyLiquidGlassCapsule()
+                                .contentShape(Capsule())
                         }
-                        .controlSize(.small)
+                        .buttonStyle(.plain)
                     }
 
                     if !teamMembers.isEmpty {
@@ -322,14 +326,22 @@ public struct UHDAccountDashboardContent: View {
                                             .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                                     }
                                     Spacer()
-                                    Button("清零") {
+                                    Button {
                                         Task {
                                             try? await UHDStreamClient.shared.setTeamMemberTrafficUsage(server: server, memberId: member.id, usedBytes: 0)
                                             await loadTeamData(reset: true)
                                             appState.showToast("已重置 \(member.username) 流量", icon: "checkmark.circle.fill")
                                         }
+                                    } label: {
+                                        Text("清零")
+                                            .font(.system(size: 11, weight: .medium))
+                                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 4)
+                                            .donbyLiquidGlassCapsule()
+                                            .contentShape(Capsule())
                                     }
-                                    .controlSize(.small)
+                                    .buttonStyle(.plain)
                                 }
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 7)
@@ -340,10 +352,18 @@ public struct UHDAccountDashboardContent: View {
                     }
 
                     if let cursor = teamNextCursor, !cursor.isEmpty {
-                        Button("加载更多") {
+                        Button {
                             Task { await loadTeamData(reset: false) }
+                        } label: {
+                            Text("加载更多")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 5)
+                                .donbyLiquidGlassCapsule()
+                                .contentShape(Capsule())
                         }
-                        .controlSize(.small)
+                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -352,22 +372,24 @@ public struct UHDAccountDashboardContent: View {
 
     private var sessionActionBar: some View {
         HStack(spacing: 10) {
-            Button {
-                onDismiss?()
-                appState.linePickerServer = server
-            } label: {
-                HStack(spacing: 6) {
-                    RouteSwitchVectorIcon(size: 12, color: DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    Text("线路与测速")
+            if showRouteSwitchAction {
+                Button {
+                    onDismiss?()
+                    appState.linePickerServer = server
+                } label: {
+                    HStack(spacing: 6) {
+                        RouteSwitchVectorIcon(size: 12, color: DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        Text("线路与测速")
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 7)
+                    .donbyLiquidGlassCapsule()
+                    .contentShape(Capsule())
                 }
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                .padding(.horizontal, 13)
-                .padding(.vertical, 7)
-                .donbyLiquidGlassCapsule()
-                .contentShape(Capsule())
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
 
             Spacer()
 
@@ -384,13 +406,11 @@ public struct UHDAccountDashboardContent: View {
                     if isLoggingOut { ProgressView().controlSize(.mini) }
                     Text("退出登录")
                 }
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.red)
-                .padding(.horizontal, 13)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                .padding(.horizontal, 14)
                 .padding(.vertical, 7)
-                .background(Color.red.opacity(0.09))
-                .clipShape(Capsule())
-                .overlay(Capsule().strokeBorder(Color.red.opacity(0.20), lineWidth: 0.6))
+                .donbyLiquidGlassCapsule()
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
@@ -427,16 +447,6 @@ public struct UHDAccountDashboardContent: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(appState.isLightMode ? Color.black.opacity(0.03) : Color.white.opacity(0.05))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-    }
-
-    private func pillBadge(_ text: String, tint: Color) -> some View {
-        Text(text)
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(tint)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(tint.opacity(0.12))
-            .clipShape(Capsule())
     }
 
     private func refreshAccount() async {

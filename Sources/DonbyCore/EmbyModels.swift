@@ -172,9 +172,22 @@ public struct ServerLineInfo: Codable, Identifiable, Hashable, Sendable {
         return trimmed
     }
 
-    /// Strips any verbose backend marketing description appended after `" · "` so UI labels stay concise.
+    /// Normalizes verbose backend line names into concise Donby UI labels.
+    /// Known Anycast CDN hosts map directly to their CDN tier without geographic copy.
     public var cleanDisplayName: String {
+        let host = cleanDisplayHost.lowercased()
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+
+        if host == "smart.uhdnow.com" || (host.contains("uhd") && (lower.contains("中国") || lower.contains("大陆") || lower == "cn cdn")) {
+            return "CN CDN"
+        }
+        if host == "v1.uhdnow.com" || (host.contains("uhd") && (lower.contains("cloudflare pro") || lower == "cf cdn pro")) {
+            return "CF CDN Pro"
+        }
+        if host == "v1.uhdgo.com" || (host.contains("uhd") && (lower.contains("备用") || lower == "cf cdn")) {
+            return "CF CDN"
+        }
         if let range = trimmed.range(of: " · ") {
             let head = String(trimmed[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
             if !head.isEmpty { return head }

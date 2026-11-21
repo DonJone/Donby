@@ -318,11 +318,9 @@ public final class UHDModuleManager: ObservableObject {
         if let lIdx = appState.servers[sIdx].backupLines.firstIndex(where: { $0.domainId == domainId }) {
             appState.servers[sIdx].backupLines[lIdx].lastSpeedMbps = result.averageMbps
             appState.servers[sIdx].backupLines[lIdx].lastPeakMbps = result.peakMbps
-            appState.servers[sIdx].backupLines[lIdx].lastExitLocation = result.networkInfo.displayLocation
-            appState.servers[sIdx].backupLines[lIdx].lastExitISP = result.networkInfo.isp
-            if let latencyMs {
-                appState.servers[sIdx].backupLines[lIdx].latencyMs = latencyMs
-            }
+            appState.servers[sIdx].backupLines[lIdx].lastExitLocation = nil
+            appState.servers[sIdx].backupLines[lIdx].lastExitISP = nil
+            appState.servers[sIdx].backupLines[lIdx].latencyMs = nil
             appState.servers[sIdx].backupLines[lIdx].lastCheckedAt = Date()
         }
     }
@@ -356,14 +354,45 @@ public final class UHDModuleManager: ObservableObject {
             return
         }
 
-        do {
-            async let collectionsTask = UHDStreamClient.shared.fetchCollections(server: server)
-            async let statesTask = UHDStreamClient.shared.fetchPlaybackStates(server: server, limit: 16)
-            async let favTask = UHDStreamClient.shared.fetchFavorites(server: server, limit: 24)
-            async let hotTask = UHDStreamClient.shared.fetchHot(server: server, limit: 20)
-            async let animeHotTask = UHDStreamClient.shared.fetchAnimeHot(server: server, limit: 20)
+        var workingServer = server
 
-            let views = try await collectionsTask
+        do {
+            let views: [EmbyItem]
+            do {
+                views = try await UHDStreamClient.shared.fetchCollections(server: workingServer)
+            } catch {
+                // If user temporarily disabled the extension (which re-authed as standard Emby) and later re-enabled it,
+                // transparently re-acquire a UHD Stream session using saved credentials.
+                if !workingServer.username.isEmpty, !workingServer.password.isEmpty {
+                    let outcome = try await UHDStreamClient.shared.loginWithAutoFallback(
+                        customBaseURL: nil,
+                        username: workingServer.username,
+                        password: workingServer.password
+                    )
+                    workingServer.host = outcome.host
+                    workingServer.port = outcome.port
+                    workingServer.isHttps = outcome.isHttps
+                    workingServer.accessToken = outcome.auth.token
+                    workingServer.tokenExpiresAt = outcome.auth.expiresAt
+                    if let idx = appState.servers.firstIndex(where: { $0.id == workingServer.id }) {
+                        appState.servers[idx].host = workingServer.host
+                        appState.servers[idx].port = workingServer.port
+                        appState.servers[idx].isHttps = workingServer.isHttps
+                        appState.servers[idx].accessToken = workingServer.accessToken
+                        appState.servers[idx].tokenExpiresAt = workingServer.tokenExpiresAt
+                    }
+                    views = try await UHDStreamClient.shared.fetchCollections(server: workingServer)
+                } else {
+                    throw error
+                }
+            }
+
+            let resolvedServer = workingServer
+            async let statesTask = UHDStreamClient.shared.fetchPlaybackStates(server: resolvedServer, limit: 16)
+            async let favTask = UHDStreamClient.shared.fetchFavorites(server: resolvedServer, limit: 24)
+            async let hotTask = UHDStreamClient.shared.fetchHot(server: resolvedServer, limit: 20)
+            async let animeHotTask = UHDStreamClient.shared.fetchAnimeHot(server: resolvedServer, limit: 20)
+
             guard isCurrentGeneration() else { return }
             if appState.libraryViews != views { appState.libraryViews = views }
 
@@ -381,9 +410,10 @@ public final class UHDModuleManager: ObservableObject {
 
             let homePrewarmTargets = Array((states.resume + states.nextUp).filter { !$0.isSeries }.prefix(3))
             if !homePrewarmTargets.isEmpty {
+                let targetSrv = workingServer
                 Task.detached(priority: .utility) {
                     for target in homePrewarmTargets {
-                        _ = try? await UHDStreamClient.shared.fetchAssetMediaSources(server: server, item: target)
+                        _ = try? await UHDStreamClient.shared.fetchAssetMediaSources(server: targetSrv, item: target)
                     }
                 }
             }
@@ -394,10 +424,11 @@ public final class UHDModuleManager: ObservableObject {
             let hideWatched = appState.hideWatchedInLatest
 
             await withTaskGroup(of: (String, [EmbyItem]).self) { group in
+                let targetSrv = workingServer
                 for view in views {
                     group.addTask {
                         let fetched = (try? await UHDStreamClient.shared.fetchCollectionItems(
-                            server: server,
+                            server: targetSrv,
                             collectionId: view.id,
                             mediaType: nil,
                             sortBy: "asset_updated_at",

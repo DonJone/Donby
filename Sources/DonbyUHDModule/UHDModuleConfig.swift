@@ -98,7 +98,7 @@ public enum UHDModuleEndpoints {
         let lowerName = line.name.lowercased()
         let chineseOptimizedKeywords = [
             "中国", "优化", "直连", "大陆", "国内", "回国", "专线",
-            "smart", "china", "direct", "cn2", "iepl", "iplc", "bgp"
+            "cn cdn", "smart", "china", "direct", "cn2", "iepl", "iplc", "bgp"
         ]
         return chineseOptimizedKeywords.contains { lowerName.contains($0) }
     }

@@ -386,6 +386,27 @@ public enum UHDDisplayNormalizer {
         "cbn": "中国广电"
     ]
 
+    /// Maps UHD Anycast CDN playback routes to concise CDN tier labels without fake fixed geography.
+    public static func formatCDNLineName(rawName: String, description: String? = nil, url: String) -> String {
+        let host = ServerLineInfo.normalizeBaseURL(url)
+            .replacingOccurrences(of: "https://", with: "")
+            .replacingOccurrences(of: "http://", with: "")
+            .lowercased()
+        let combined = "\(rawName) \(description ?? "")".lowercased()
+
+        if host == "smart.uhdnow.com" || combined.contains("中国") || combined.contains("大陆") || combined.contains("cn cdn") {
+            return "CN CDN"
+        }
+        if host == "v1.uhdnow.com" || combined.contains("cloudflare pro") || combined.contains("cf cdn pro") {
+            return "CF CDN Pro"
+        }
+        if host == "v1.uhdgo.com" || combined.contains("备用") || combined.contains("国际") || combined.contains("cf cdn") {
+            return "CF CDN"
+        }
+        let cleaned = ServerLineInfo(name: rawName, url: url).cleanDisplayName
+        return cleaned.isEmpty ? host : cleaned
+    }
+
     /// Normalizes awkward mixed-language plan names from upstream API into restrained Donby Chinese UI copy.
     public static func formatPlanName(_ raw: String?) -> String? {
         guard let raw else { return nil }

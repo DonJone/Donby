@@ -123,6 +123,7 @@ public final class AppState: ObservableObject {
     @AppStorage("donby.showCarousel") public var showCarousel: Bool = true
     @AppStorage("donby.showMyMedia") public var showMyMedia: Bool = true
     @AppStorage("donby.showContinueWatching") public var showContinueWatching: Bool = true
+    @AppStorage("donby.showFavorites") public var showFavorites: Bool = true
     @AppStorage("donby.showNextUp") public var showNextUp: Bool = true
     @AppStorage("donby.hideWatchedInLatest") public var hideWatchedInLatest: Bool = false
     @AppStorage("donby.showResolutionBadge") public var showResolutionBadge: Bool = true
@@ -1244,11 +1245,8 @@ public final class AppState: ObservableObject {
         let hasUsername = !server.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         var usedChinaOptimizedLine = false
 
-        if server.type == .uhdNative {
+        if isUsingUHDExtension(for: server) {
             #if canImport(DonbyUHDModule)
-            guard UHDModuleManager.shared.isEnabled else {
-                throw EmbyClientError.httpStatus(400, "UHDNow 扩展模块未启用")
-            }
             let result = try await UHDModuleManager.shared.authenticateAndConfigureServer(
                 draft: server,
                 uhdLoginCode: uhdLoginCode,
@@ -1258,8 +1256,6 @@ public final class AppState: ObservableObject {
             )
             server = result.server
             usedChinaOptimizedLine = result.usedChinaOptimizedLine
-            #else
-            throw EmbyClientError.httpStatus(400, "当前构建未包含 UHDNow 扩展模块")
             #endif
         } else {
             if hasUsername && hasPassword {
@@ -1324,8 +1320,8 @@ public final class AppState: ObservableObject {
         detailFocusedEpisodeMemory.removeAll()
 
         let syncedCount = server.autoSyncedLineCount
-        if server.type == .uhdNative && usedChinaOptimizedLine {
-            showToast("已登录 \(server.name) · 中国优化线路", icon: "checkmark.circle.fill")
+        if isUsingUHDExtension(for: server) && usedChinaOptimizedLine {
+            showToast("已登录 \(server.name) · CN CDN", icon: "checkmark.circle.fill")
         } else if syncedCount > 0 {
             showToast("已登录 \(server.name) · \(syncedCount) 条线路", icon: "checkmark.circle.fill")
         } else {
@@ -1333,6 +1329,34 @@ public final class AppState: ObservableObject {
         }
 
         await loadActiveServerHome(syncDomains: false)
+    }
+
+    public func isUsingUHDExtension(for server: EmbyServerConfig) -> Bool {
+        #if canImport(DonbyUHDModule)
+        return UHDModuleManager.shared.isActive(for: server)
+        #else
+        return false
+        #endif
+    }
+
+    /// Seamlessly transitions active server views between UHD extension mode and standard Emby mode
+    /// whenever the user toggles the optional UHDNow module in Settings.
+    public func reloadAfterModuleToggle() {
+        homeErrorMessage = nil
+        selectedLibrary = nil
+        detailStack.removeAll()
+        if let srv = activeServer {
+            ServerHomeCacheStore.shared.clear(for: srv.id)
+            libraryViews = []
+            resumeItems = []
+            nextUpItems = []
+            favoriteItems = []
+            latestByLibrary = [:]
+            carouselItems = []
+            Task {
+                await loadActiveServerHome(syncDomains: true)
+            }
+        }
     }
 
     public func syncExtDomains(for serverId: UUID, showFeedback: Bool = false) async {
@@ -1349,7 +1373,7 @@ public final class AppState: ObservableObject {
             isSyncingDomains = activeSyncDomainsCount > 0
         }
 
-        if server.type == .uhdNative {
+        if isUsingUHDExtension(for: server) {
             #if canImport(DonbyUHDModule)
             await UHDModuleManager.shared.syncPlaybackDomains(for: serverId, appState: self, showFeedback: showFeedback)
             #endif
@@ -1485,24 +1509,100 @@ public final class AppState: ObservableObject {
             Task { await EmbyClient.shared.prewarmConnection(server: server) }
         }
 
-        if server.type == .uhdNative {
+        if isUsingUHDExtension(for: server) {
             #if canImport(DonbyUHDModule)
             await UHDModuleManager.shared.loadHomeContent(
                 for: server,
                 appState: self,
                 isCurrentGeneration: { [weak self] in self?.homeLoadGeneration == currentGen }
             )
-            #else
-            self.homeErrorMessage = "当前构建未包含 UHDNow 扩展模块"
-            self.isLoadingHome = false
             #endif
             return
         }
 
+        // Standard Emby mode (also seamless fallback when optional UHD extension is disabled):
+        // If current token/userId is invalid for standard Emby API (e.g. switched from UHD JWT session),
+        // transparently re-authenticate over standard Emby using saved credentials.
+        var activeEmbyServer = server
+        func authenticateEmbyFallback(_ target: EmbyServerConfig) async -> EmbyServerConfig? {
+            guard !target.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !target.password.isEmpty else { return nil }
+            var candidateURLs: [String] = [target.activeBaseURL, target.mainLineURL]
+            for line in target.backupLines {
+                candidateURLs.append(line.url)
+            }
+            if target.host.lowercased().contains("uhdnow.com") {
+                candidateURLs.append("https://v1.uhdnow.com")
+            }
+            var seen = Set<String>()
+            let uniqueCandidates = candidateURLs.filter { !$0.isEmpty && seen.insert($0).inserted }
+            for baseURL in uniqueCandidates {
+                if let auth = try? await EmbyClient.shared.authenticate(
+                    baseURL: baseURL,
+                    username: target.username,
+                    password: target.password
+                ), let token = auth.accessToken, !token.isEmpty {
+                    var updated = target
+                    updated.accessToken = token
+                    if let uid = auth.user?.id, !uid.isEmpty { updated.userId = uid }
+                    if let sId = auth.serverId ?? auth.user?.serverId, !sId.isEmpty { updated.serverId = sId }
+                    if let matchedLine = updated.backupLines.first(where: { $0.url == baseURL }) {
+                        updated.selectedLineId = matchedLine.id
+                    } else if baseURL != updated.activeBaseURL, let parsed = URL(string: baseURL), let h = parsed.host {
+                        updated.host = h
+                        updated.isHttps = (parsed.scheme?.lowercased() != "http")
+                        updated.port = parsed.port ?? (updated.isHttps ? 443 : 80)
+                        updated.selectedLineId = nil
+                    }
+                    if let idx = self.servers.firstIndex(where: { $0.id == target.id }) {
+                        self.servers[idx].accessToken = updated.accessToken
+                        if !updated.userId.isEmpty { self.servers[idx].userId = updated.userId }
+                        if !updated.serverId.isEmpty { self.servers[idx].serverId = updated.serverId }
+                        self.servers[idx].selectedLineId = updated.selectedLineId
+                        self.servers[idx].host = updated.host
+                        self.servers[idx].port = updated.port
+                        self.servers[idx].isHttps = updated.isHttps
+                    }
+                    return updated
+                }
+            }
+            return nil
+        }
+
+        if activeEmbyServer.accessToken.isEmpty || activeEmbyServer.userId.isEmpty {
+            if let authed = await authenticateEmbyFallback(activeEmbyServer) {
+                activeEmbyServer = authed
+            }
+        }
+
+        let embyServerForHome: EmbyServerConfig
+        let initialViews: [EmbyItem]
+        do {
+            initialViews = try await EmbyClient.shared.fetchViews(server: activeEmbyServer)
+            embyServerForHome = activeEmbyServer
+        } catch {
+            if let authed = await authenticateEmbyFallback(activeEmbyServer) {
+                do {
+                    initialViews = try await EmbyClient.shared.fetchViews(server: authed)
+                    embyServerForHome = authed
+                } catch {
+                    guard currentGen == homeLoadGeneration else { return }
+                    self.homeErrorMessage = error.localizedDescription
+                    self.isLoadingHome = false
+                    return
+                }
+            } else {
+                guard currentGen == homeLoadGeneration else { return }
+                self.homeErrorMessage = error.localizedDescription
+                self.isLoadingHome = false
+                return
+            }
+        }
+
         // Update library item counts in background so large servers (400k+ episodes) never block homepage UI
         Task {
-            if let counts = try? await EmbyClient.shared.fetchCounts(server: server),
-               let idx = self.servers.firstIndex(where: { $0.id == server.id }) {
+            if let counts = try? await EmbyClient.shared.fetchCounts(server: embyServerForHome),
+               let idx = self.servers.firstIndex(where: { $0.id == embyServerForHome.id }) {
                 let newMovies = counts.movieCount ?? self.servers[idx].movieCount
                 let newEpisodes = counts.episodeCount ?? counts.seriesCount ?? self.servers[idx].episodeCount
                 if self.servers[idx].movieCount != newMovies || self.servers[idx].episodeCount != newEpisodes {
@@ -1513,11 +1613,10 @@ public final class AppState: ObservableObject {
         }
 
         do {
-            async let viewsTask = EmbyClient.shared.fetchViews(server: server)
-            async let resumeTask = EmbyClient.shared.fetchResumeItems(server: server, limit: 16)
-            async let favTask = EmbyClient.shared.fetchItems(server: server, isFavorite: true, limit: 24)
+            async let resumeTask = EmbyClient.shared.fetchResumeItems(server: embyServerForHome, limit: 16)
+            async let favTask = EmbyClient.shared.fetchItems(server: embyServerForHome, isFavorite: true, limit: 24)
 
-            let views = try await viewsTask
+            let views = initialViews
             guard currentGen == homeLoadGeneration else { return }
             if self.libraryViews != views {
                 self.libraryViews = views
@@ -1537,7 +1636,7 @@ public final class AppState: ObservableObject {
             if !embyPrewarmTargets.isEmpty {
                 Task.detached(priority: .utility) {
                     for target in embyPrewarmTargets {
-                        await EmbyClient.shared.prewarmPlaybackInfo(server: server, itemId: target.id)
+                        await EmbyClient.shared.prewarmPlaybackInfo(server: embyServerForHome, itemId: target.id)
                     }
                 }
             }
@@ -1550,7 +1649,7 @@ public final class AppState: ObservableObject {
                 for view in views {
                     group.addTask { [hideWatchedInLatest] in
                         let items = (try? await EmbyClient.shared.fetchLatestItems(
-                            server: server,
+                            server: embyServerForHome,
                             parentId: view.id,
                             limit: 16,
                             hidePlayed: hideWatchedInLatest
@@ -1756,7 +1855,7 @@ public final class AppState: ObservableObject {
                         resolvedQueue = allOfflineEps
                         targetItem = allOfflineEps.first(where: { !isItemWatchedOfflineOrLocal($0) }) ?? allOfflineEps[0]
                     }
-                } else if server.type == .uhdNative {
+                } else if isUsingUHDExtension(for: server) {
                     #if canImport(DonbyUHDModule)
                     let uhdRes = try await UHDModuleManager.shared.resolveSeriesStartEpisode(server: server, seriesItem: item)
                     eps = uhdRes.episodes
@@ -2175,7 +2274,7 @@ public final class AppState: ObservableObject {
 
     public func refreshServerCapabilities(for server: EmbyServerConfig) async {
         guard !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        if server.type == .uhdNative {
+        if isUsingUHDExtension(for: server) {
             #if canImport(DonbyUHDModule)
             await UHDModuleManager.shared.refreshAccountSnapshot(for: server, appState: self)
             #endif
@@ -2419,7 +2518,7 @@ public final class AppState: ObservableObject {
             return
         }
 
-        let isUHD = server.type == .uhdNative
+        let isUHD = isUsingUHDExtension(for: server)
         let itemPoster = EmbyClient.shared.imageURL(server: server, item: targetItem, kind: .primary, maxWidth: 800)
             ?? (isUHD ? nil : EmbyClient.shared.imageURL(server: server, itemId: targetItem.id, kind: .primary, maxWidth: 800))
             ?? summary.posterURLString.flatMap { URL(string: $0) }
@@ -2572,6 +2671,14 @@ public final class ServerHomeCacheStore {
             if let data = try? JSONEncoder().encode(snapshot) {
                 try? data.write(to: file, options: .atomic)
             }
+        }
+    }
+
+    public func clear(for serverId: UUID) {
+        inMemorySnapshots.removeValue(forKey: serverId)
+        DispatchQueue.global(qos: .utility).async { [cacheDirectoryURL] in
+            let file = cacheDirectoryURL.appendingPathComponent("home_\(serverId.uuidString).json")
+            try? FileManager.default.removeItem(at: file)
         }
     }
 }

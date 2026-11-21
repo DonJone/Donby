@@ -1192,6 +1192,7 @@ public struct DonbySearchPillField: View {
 
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
+                .focusEffectDisabled()
                 .font(.system(size: 13))
                 .foregroundStyle(colorScheme == .light ? Color(red: 0.10, green: 0.10, blue: 0.12) : .white)
                 .onSubmit {

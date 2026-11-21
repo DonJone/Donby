@@ -491,23 +491,35 @@ public struct ToastBannerView: View {
     )
 
     public var body: some View {
-        HStack(spacing: 9) {
+        let isLight = (colorScheme == .light)
+        HStack(spacing: 8) {
             Image(systemName: toast.icon)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(toast.isError ? Self.classicRed : Color(red: 0.22, green: 0.86, blue: 0.36))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(
+                    toast.isError
+                        ? Self.classicRed
+                        : (isLight ? Color(red: 0.14, green: 0.14, blue: 0.16) : Color.white.opacity(0.88))
+                )
 
             Text(toast.text)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(colorScheme == .light ? Color(red: 0.10, green: 0.10, blue: 0.12) : .white)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(isLight ? Color(red: 0.10, green: 0.10, blue: 0.12) : .white)
+                .lineLimit(2)
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 10)
-        .background(DonbyLiquidGlassCapsuleSurface(tint: nil, isHovered: false))
-        .clipShape(Capsule())
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9.5)
+        .background(
+            Capsule(style: .continuous)
+                .fill(isLight ? Color.white.opacity(0.96) : Color(red: 0.10, green: 0.105, blue: 0.12).opacity(0.92))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(isLight ? Color.black.opacity(0.10) : Color.white.opacity(0.16), lineWidth: 0.75)
+        )
         .shadow(
-            color: colorScheme == .light ? Color.black.opacity(0.12) : Color.black.opacity(0.42),
-            radius: colorScheme == .light ? 10 : 14,
-            y: colorScheme == .light ? 4 : 6
+            color: isLight ? Color.black.opacity(0.12) : Color.black.opacity(0.45),
+            radius: isLight ? 10 : 14,
+            y: isLight ? 4 : 6
         )
     }
 }

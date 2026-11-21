@@ -113,7 +113,7 @@ public struct PlayerView: View {
     @State private var secondarySubtitleTimeScale: Double = 1.0
     @State private var isSecondaryAlignedToPrimary: Bool = false
     #if canImport(DonbyUHDModule)
-    @State private var uhdDanmuComments: [UHDDanmuComment] = []
+    @State private var uhdDanmuTrack: UHDDanmuTrack? = nil
     @State private var uhdDanmuMatchedTitle: String = ""
     @State private var isLoadingUHDDanmu: Bool = false
     @State private var showUHDDanmuPickerSheet: Bool = false
@@ -213,7 +213,7 @@ public struct PlayerView: View {
             #if canImport(DonbyUHDModule)
             if UHDModuleManager.shared.isActive(for: session.server) {
                 UHDDanmuLiveOverlay(
-                    comments: uhdDanmuComments,
+                    track: uhdDanmuTrack,
                     isEnabled: appState.enableDanmaku,
                     isPlaying: isPlaying && hasRenderedFirstFrame && !isWaitingForSeekOrBuffer,
                     playbackRate: Double(playbackSpeed),
@@ -221,6 +221,8 @@ public struct PlayerView: View {
                         (autoHideBox.liveCurrentTime, autoHideBox.lastObservedPosUptime > 0 ? autoHideBox.lastObservedPosUptime : ProcessInfo.processInfo.systemUptime)
                     }
                 )
+                .allowsHitTesting(false)
+                .ignoresSafeArea()
             }
             #endif
 
@@ -310,27 +312,62 @@ public struct PlayerView: View {
                             .foregroundStyle(.white.opacity(0.7))
                             .multilineTextAlignment(.center)
                             .frame(maxWidth: 400)
-                        HStack(spacing: 12) {
-                            Button("重试播放") {
+                        HStack(spacing: 10) {
+                            Button {
                                 startNativeKernelPlayback(startSeconds: autoHideBox.liveCurrentTime)
+                            } label: {
+                                Text("重试播放")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundStyle(.black)
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 7)
+                                    .background(Color.white)
+                                    .clipShape(Capsule())
+                                    .contentShape(Capsule())
                             }
-                            .buttonStyle(.borderedProminent)
-                            .tint(appState.accentColor)
+                            .buttonStyle(.plain)
 
-                            Button("切换线路") {
+                            Button {
                                 appState.linePickerServer = session.server
+                            } label: {
+                                Text("切换线路")
+                                    .font(.system(size: 12.5, weight: .medium))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 7)
+                                    .background(Color.white.opacity(0.14))
+                                    .clipShape(Capsule())
+                                    .contentShape(Capsule())
                             }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(.plain)
 
-                            Button("查看运行日志") {
+                            Button {
                                 showLogSheet = true
+                            } label: {
+                                Text("查看运行日志")
+                                    .font(.system(size: 12.5, weight: .medium))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 7)
+                                    .background(Color.white.opacity(0.14))
+                                    .clipShape(Capsule())
+                                    .contentShape(Capsule())
                             }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(.plain)
 
-                            Button("退出播放") {
+                            Button {
                                 exitPlayer()
+                            } label: {
+                                Text("退出播放")
+                                    .font(.system(size: 12.5, weight: .medium))
+                                    .foregroundStyle(.white.opacity(0.85))
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 7)
+                                    .background(Color.white.opacity(0.10))
+                                    .clipShape(Capsule())
+                                    .contentShape(Capsule())
                             }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(.plain)
                         }
                     }
                     .padding(32)
@@ -421,6 +458,8 @@ public struct PlayerView: View {
         .sheet(isPresented: $showLogSheet) {
             LogViewerSheet()
                 .environmentObject(appState)
+                .preferredColorScheme(appState.colorScheme)
+                .tint(appState.accentColor)
         }
         .focusable()
         .focusEffectDisabled()
@@ -519,7 +558,7 @@ public struct PlayerView: View {
                 initialKeyword: currentItem.isEpisode ? (currentItem.seriesName ?? currentItem.name) : currentItem.name,
                 onSelectEpisode: { label, _, comments in
                     uhdDanmuMatchedTitle = label
-                    uhdDanmuComments = comments
+                    uhdDanmuTrack = UHDDanmuTrack(title: label, comments: comments)
                     appState.enableDanmaku = true
                     appState.showToast("已加载 \(comments.count) 条弹幕 · \(label)", icon: "text.bubble.fill")
                 }
@@ -829,16 +868,20 @@ public struct PlayerView: View {
                         HStack(spacing: 4) {
                             Image(systemName: appState.enableDanmaku ? "text.bubble.fill" : "text.bubble")
                                 .font(.system(size: 11.5, weight: .semibold))
-                            Text(appState.enableDanmaku && !uhdDanmuComments.isEmpty ? "弹幕 \(uhdDanmuComments.count)" : "弹幕")
+                            Text(appState.enableDanmaku && !(uhdDanmuTrack?.comments.isEmpty ?? true) ? "弹幕 \(uhdDanmuTrack?.comments.count ?? 0)" : "弹幕")
                                 .font(.system(size: 11.5, weight: .semibold))
                         }
-                        .foregroundStyle(appState.enableDanmaku ? .white : .white.opacity(0.58))
-                        .padding(.horizontal, 9)
+                        .foregroundStyle(appState.enableDanmaku ? .white : .white.opacity(0.60))
+                        .padding(.horizontal, 10)
                         .padding(.vertical, 5)
                         .background(
                             Capsule()
-                                .fill(appState.enableDanmaku ? appState.accentColor.opacity(0.42) : Color.black.opacity(0.50))
-                                .overlay(Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6))
+                                .fill(
+                                    appState.enableDanmaku
+                                        ? (appState.isMonochromeTheme ? Color.white.opacity(0.22) : appState.accentColor.opacity(0.45))
+                                        : Color.black.opacity(0.50)
+                                )
+                                .overlay(Capsule().strokeBorder(Color.white.opacity(appState.enableDanmaku ? 0.28 : 0.16), lineWidth: 0.6))
                         )
                         .contentShape(Capsule())
                     }
@@ -2084,15 +2127,16 @@ public struct PlayerView: View {
                                             .buttonStyle(.plain)
                                         }
                                     }
-                                    Slider(
+                                    DonbySlider(
                                         value: $appState.subtitleStyle.scale,
                                         in: 0.6...1.8,
                                         step: 0.05,
+                                        isLightMode: false,
+                                        accentColor: drawerSelectedAccentTint(),
                                         onEditingChanged: { editing in
                                             withAnimation(.easeInOut(duration: 0.15)) { isAdjustingSubtitleLayout = editing }
                                         }
                                     )
-                                    .tint(drawerSelectedAccentTint())
                                 }
 
                                 VStack(alignment: .leading, spacing: 4) {
@@ -2114,15 +2158,16 @@ public struct PlayerView: View {
                                             .buttonStyle(.plain)
                                         }
                                     }
-                                    Slider(
+                                    DonbySlider(
                                         value: $appState.subtitleStyle.verticalPositionPercent,
                                         in: 60...100,
                                         step: 1,
+                                        isLightMode: false,
+                                        accentColor: drawerSelectedAccentTint(),
                                         onEditingChanged: { editing in
                                             withAnimation(.easeInOut(duration: 0.15)) { isAdjustingSubtitleLayout = editing }
                                         }
                                     )
-                                    .tint(drawerSelectedAccentTint())
                                 }
 
                                 VStack(alignment: .leading, spacing: 6) {
@@ -2181,29 +2226,31 @@ public struct PlayerView: View {
                                                     .buttonStyle(.plain)
                                                 }
                                             }
-                                            Slider(
+                                            DonbySlider(
                                                 value: $appState.subtitleStyle.secondaryScale,
                                                 in: 0.45...0.90,
                                                 step: 0.02,
+                                                isLightMode: false,
+                                                accentColor: drawerSelectedAccentTint(),
                                                 onEditingChanged: { editing in
                                                     withAnimation(.easeInOut(duration: 0.15)) { isAdjustingSubtitleLayout = editing }
                                                 }
                                             )
-                                            .tint(drawerSelectedAccentTint())
                                         }
 
                                         VStack(alignment: .leading, spacing: 4) {
                                             Text(String(format: "双语行间距 %.0f px", appState.subtitleStyle.dualSubtitleGapPx))
                                                 .font(.system(size: 11)).foregroundStyle(.white.opacity(0.82))
-                                            Slider(
+                                            DonbySlider(
                                                 value: $appState.subtitleStyle.dualSubtitleGapPx,
                                                 in: 2...20,
                                                 step: 1,
+                                                isLightMode: false,
+                                                accentColor: drawerSelectedAccentTint(),
                                                 onEditingChanged: { editing in
                                                     withAnimation(.easeInOut(duration: 0.15)) { isAdjustingSubtitleLayout = editing }
                                                 }
                                             )
-                                            .tint(drawerSelectedAccentTint())
                                         }
 
                                         VStack(alignment: .leading, spacing: 6) {
@@ -2237,8 +2284,13 @@ public struct PlayerView: View {
                                         VStack(alignment: .leading, spacing: 4) {
                                             Text(String(format: "描边宽度 %.1f", appState.subtitleStyle.borderWidth))
                                                 .font(.system(size: 11)).foregroundStyle(.white.opacity(0.82))
-                                            Slider(value: $appState.subtitleStyle.borderWidth, in: 0...6, step: 0.25)
-                                                .tint(drawerSelectedAccentTint())
+                                            DonbySlider(
+                                                value: $appState.subtitleStyle.borderWidth,
+                                                in: 0...6,
+                                                step: 0.25,
+                                                isLightMode: false,
+                                                accentColor: drawerSelectedAccentTint()
+                                            )
                                         }
 
                                         HStack {
@@ -2292,9 +2344,14 @@ public struct PlayerView: View {
                                     }
                                     .font(.system(size: 11.5))
                                     .foregroundStyle(.white.opacity(0.88))
-                                    .toggleStyle(.switch)
-                                    .controlSize(.mini)
-                                    .tint(drawerSelectedAccentTint())
+                                    .toggleStyle(
+                                        DonbySwitchToggleStyle(
+                                            isLightMode: false,
+                                            accentColor: drawerSelectedAccentTint(),
+                                            accentTextColor: appState.isMonochromeTheme ? .black : .white,
+                                            compact: true
+                                        )
+                                    )
                                     .padding(.top, 4)
                                 }
                             }
@@ -4020,10 +4077,10 @@ public struct PlayerView: View {
                             Text("创建同看房间")
                         }
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(appState.isMonochromeTheme ? .black : .white)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
-                        .background(RoundedRectangle(cornerRadius: 9).fill(appState.accentColor.opacity(0.75)))
+                        .background(RoundedRectangle(cornerRadius: 9).fill(drawerSelectedAccentTint()))
                         .contentShape(RoundedRectangle(cornerRadius: 9))
                     }
                     .buttonStyle(.plain)
@@ -4039,11 +4096,17 @@ public struct PlayerView: View {
                         Spacer()
                         Toggle("", isOn: $appState.enableDanmaku)
                             .labelsHidden()
-                            .toggleStyle(.switch)
-                            .controlSize(.small)
+                            .toggleStyle(
+                                DonbySwitchToggleStyle(
+                                    isLightMode: false,
+                                    accentColor: drawerSelectedAccentTint(),
+                                    accentTextColor: appState.isMonochromeTheme ? .black : .white,
+                                    compact: true
+                                )
+                            )
                     }
                     if !uhdDanmuMatchedTitle.isEmpty {
-                        Text("\(uhdDanmuMatchedTitle)（\(uhdDanmuComments.count) 条）")
+                        Text("\(uhdDanmuMatchedTitle)（\(uhdDanmuTrack?.comments.count ?? 0) 条）")
                             .font(.system(size: 11))
                             .foregroundStyle(.white.opacity(0.68))
                             .lineLimit(2)
@@ -4180,7 +4243,7 @@ public struct PlayerView: View {
         ) {
             guard !Task.isCancelled else { return }
             uhdDanmuMatchedTitle = loaded.matchedTitle
-            uhdDanmuComments = loaded.comments
+            uhdDanmuTrack = UHDDanmuTrack(title: loaded.matchedTitle, comments: loaded.comments)
         }
     }
     #endif

@@ -47,13 +47,17 @@ public struct RecordsView: View {
 
                 Spacer()
 
-                Picker("", selection: $filterMode) {
-                    ForEach(["全部", "Emby", "本地与直链"], id: \.self) { opt in
-                        Text(opt).tag(opt)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 200)
+                DonbySegmentedControl(
+                    options: ["全部", "Emby", "本地与直链"],
+                    selection: $filterMode,
+                    isLightMode: appState.isLightMode,
+                    accentColor: appState.accentColor,
+                    accentTextColor: appState.accentTextColor,
+                    fontSize: 12,
+                    horizontalPadding: 11,
+                    verticalPadding: 5,
+                    title: { $0 }
+                )
 
                 Button {
                     showClearAlert = true

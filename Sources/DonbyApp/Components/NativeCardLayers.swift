@@ -1059,7 +1059,7 @@ final class NativePosterCollectionItem: NSCollectionViewItem, HoverableCollectio
         guard isHovered != hovered else { return }
         isHovered = hovered
         let borderCG = currentAppearance.map { NativeCardLayerCache.srgbColorInfo(for: $0.accentColor).hoverBorderCG }
-            ?? NSColor.controlAccentColor.withAlphaComponent(0.88).cgColor
+            ?? NSColor.white.withAlphaComponent(0.35).cgColor
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -1495,7 +1495,7 @@ final class NativeLandscapeCollectionItem: NSCollectionViewItem, HoverableCollec
         guard isHovered != hovered else { return }
         isHovered = hovered
         let borderCG = currentAppearance.map { NativeCardLayerCache.srgbColorInfo(for: $0.accentColor).hoverBorderCG }
-            ?? NSColor.controlAccentColor.withAlphaComponent(0.88).cgColor
+            ?? NSColor.white.withAlphaComponent(0.35).cgColor
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)

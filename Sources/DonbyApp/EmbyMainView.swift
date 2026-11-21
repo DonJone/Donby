@@ -13,8 +13,6 @@ public struct EmbyMainView: View {
     #endif
     @State private var isSearchingInline: Bool = false
     @State private var showViewOptionsPopover: Bool = false
-    @State private var showSearchHistoryPopover: Bool = false
-    @State private var isLinePillHovered: Bool = false
 
     public init() {}
 
@@ -157,6 +155,14 @@ public struct EmbyMainView: View {
                 items: appState.resumeItems
             ))
         }
+        if appState.showFavorites && !appState.favoriteItems.isEmpty {
+            result.append(HomeShelfSection(
+                id: "my_favorites",
+                title: "我的收藏",
+                kind: .poster,
+                items: appState.favoriteItems
+            ))
+        }
         #if canImport(DonbyUHDModule)
         if uhdModule.isActive(for: appState.activeServer) {
             if !uhdModule.hotItems.isEmpty {
@@ -220,60 +226,27 @@ public struct EmbyMainView: View {
                         Button {
                             appState.presentServerEditor(for: server)
                         } label: {
-                            HStack(spacing: 5) {
-                                Circle()
-                                    .fill(Color.orange)
-                                    .frame(width: 5.5, height: 5.5)
-                                Text("点击登录")
-                                    .font(.system(size: 11.5, weight: .semibold))
-                                    .foregroundStyle(.orange)
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(Color.orange.opacity(0.14))
-                            .clipShape(Capsule())
-                            .contentShape(Capsule())
+                            Text("点击登录")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                                .padding(.horizontal, 11)
+                                .padding(.vertical, 5)
+                                .donbyLiquidGlassCapsule()
+                                .contentShape(Capsule())
                         }
                         .buttonStyle(.plain)
                     } else {
-                        Button {
-                            appState.linePickerServer = server
-                        } label: {
-                            HStack(spacing: 6) {
-                                RouteSwitchVectorIcon(
-                                    size: 12,
-                                    color: appState.isMonochromeTheme
-                                        ? (isLinePillHovered ? DonbyGlassPalette.primaryText(isLight: appState.isLightMode) : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                                        : appState.accentColor
-                                )
-
-                                Text(server.activeLineName)
-                                    .font(.system(size: 12.5, weight: .medium))
-                                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 8.5, weight: .semibold))
-                                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .frame(maxWidth: 168)
-                            .background(
-                                Capsule()
-                                    .fill(appState.isLightMode ? Color.white : Color(white: 0.16))
-                                    .shadow(color: Color.black.opacity(appState.isLightMode ? 0.05 : 0.22), radius: isLinePillHovered ? 4 : 2, y: 1)
-                            )
-                            .overlay(
-                                Capsule()
-                                    .strokeBorder(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.08), lineWidth: 0.5)
-                            )
-                            .contentShape(Capsule())
+                        ToolbarVectorButton(
+                            tooltip: appState.isUsingUHDExtension(for: server)
+                                ? "线路与测速 · \(server.activeLineName) (⌘L)"
+                                : "切换线路 · \(server.activeLineName) (⌘L)",
+                            action: { appState.linePickerServer = server }
+                        ) { hovered in
+                            let iconColor = appState.isLightMode
+                                ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28))
+                                : (hovered ? .white : Color(white: 0.88))
+                            RouteSwitchVectorIcon(size: 14.5, color: iconColor)
                         }
-                        .buttonStyle(.plain)
-                        .onHover { isLinePillHovered = $0 }
-                        .help("切换服务器线路 (⌘L)")
                     }
                 }
             }
@@ -282,17 +255,8 @@ public struct EmbyMainView: View {
 
             if let server = appState.activeServer {
                 #if canImport(DonbyUHDModule)
-                UHDEmbyToolbarMenuButton(server: server)
+                UHDEmbyToolbarButtons(server: server)
                 #endif
-                if server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    ToolbarVectorButton(
-                        tooltip: "切换线路 (⌘L)",
-                        action: { appState.linePickerServer = server }
-                    ) { hovered in
-                        let iconColor = appState.isLightMode ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28)) : (hovered ? .white : Color(white: 0.88))
-                        RouteSwitchVectorIcon(size: 15, color: iconColor)
-                    }
-                }
 
                 ToolbarVectorButton(
                     tooltip: "刷新媒体库并同步云端线路 (⌘R)",
@@ -328,6 +292,7 @@ public struct EmbyMainView: View {
                         Toggle("显示轮播大图", isOn: $appState.showCarousel)
                         Toggle("显示我的媒体", isOn: $appState.showMyMedia)
                         Toggle("显示继续观看", isOn: $appState.showContinueWatching)
+                        Toggle("显示我的收藏", isOn: $appState.showFavorites)
                         Toggle("隐藏已观看项目", isOn: $appState.hideWatchedInLatest)
                         Divider()
                         Button {
@@ -345,90 +310,29 @@ public struct EmbyMainView: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    .toggleStyle(.checkbox)
+                    .toggleStyle(
+                        DonbyCheckboxToggleStyle(
+                            isLightMode: appState.isLightMode,
+                            accentColor: appState.accentColor,
+                            accentTextColor: appState.accentTextColor
+                        )
+                    )
                     .font(.system(size: 12.5))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     .padding(14)
                     .frame(width: 210)
                 }
             }
 
-            if !appState.searchHistory.isEmpty {
-                ToolbarVectorButton(
-                    tooltip: "搜索历史",
-                    isActive: showSearchHistoryPopover,
-                    action: { showSearchHistoryPopover.toggle() }
-                ) { hovered in
-                    let iconColor = appState.isLightMode ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28)) : (hovered ? .white : Color(white: 0.88))
-                    Image(systemName: "clock.arrow.circlepath")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(iconColor)
-                }
-                .popover(isPresented: $showSearchHistoryPopover, arrowEdge: .bottom) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("搜索历史")
-                                .font(.system(size: 11.5, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Button("清空") {
-                                appState.clearSearchHistory()
-                                showSearchHistoryPopover = false
-                            }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
-                        }
-                        Divider()
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 4) {
-                                ForEach(appState.searchHistory, id: \.self) { term in
-                                    HStack(spacing: 6) {
-                                        Button {
-                                            appState.embyInlineSearchQuery = term
-                                            appState.recordSearchHistory(term)
-                                            showSearchHistoryPopover = false
-                                        } label: {
-                                            HStack(spacing: 6) {
-                                                Image(systemName: "magnifyingglass")
-                                                    .font(.system(size: 11))
-                                                    .foregroundStyle(.secondary)
-                                                Text(term)
-                                                    .font(.system(size: 12.5))
-                                                    .lineLimit(1)
-                                                Spacer()
-                                            }
-                                            .contentShape(Rectangle())
-                                        }
-                                        .buttonStyle(.plain)
-
-                                        Button {
-                                            appState.removeSearchHistoryItem(term)
-                                        } label: {
-                                            Image(systemName: "xmark")
-                                                .font(.system(size: 10, weight: .semibold))
-                                                .foregroundStyle(.secondary)
-                                        }
-                                        .buttonStyle(.plain)
-                                    }
-                                    .padding(.vertical, 3)
-                                }
-                            }
-                        }
-                        .frame(maxHeight: 220)
-                    }
-                    .padding(12)
-                    .frame(width: 220)
-                }
+            ToolbarVectorButton(
+                tooltip: "搜索媒体",
+                action: { appState.selectSidebarModule(.search) }
+            ) { hovered in
+                let iconColor = appState.isLightMode ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28)) : (hovered ? .white : Color(white: 0.88))
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(iconColor)
             }
-
-            DonbySearchPillField(
-                placeholder: "搜索媒体",
-                text: $appState.embyInlineSearchQuery,
-                width: 175,
-                onSubmit: {
-                    appState.recordSearchHistory(appState.embyInlineSearchQuery)
-                }
-            )
         }
         .padding(.horizontal, 24)
         .frame(height: 54)
@@ -519,26 +423,31 @@ public struct EmbyMainView: View {
 
     private func errorBanner(message: String) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 13.5, weight: .semibold))
+                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             Text("连接异常：\(message)")
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(Color(white: 0.92))
+                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                 .lineLimit(2)
             Spacer()
             Button {
                 Task { await appState.loadActiveServerHome(syncDomains: true) }
             } label: {
                 HStack(spacing: 5) {
-                    RefreshVectorIcon(size: 12, color: .white, isSpinning: appState.isLoadingHome)
+                    RefreshVectorIcon(
+                        size: 12,
+                        color: DonbyGlassPalette.primaryText(isLight: appState.isLightMode),
+                        isSpinning: appState.isLoadingHome
+                    )
                     Text("重试")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .background(Color.white.opacity(0.14))
-                .clipShape(Capsule())
+                .donbyLiquidGlassCapsule()
+                .contentShape(Capsule())
             }
             .buttonStyle(.plain)
 
@@ -576,16 +485,17 @@ public struct EmbyMainView: View {
                     .padding(.vertical, 6)
                     .background(appState.accentColor)
                     .clipShape(Capsule())
+                    .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
             }
         }
         .padding(14)
-        .background(Color.orange.opacity(0.14))
+        .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.orange.opacity(0.28), lineWidth: 0.8)
+                .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.75)
         )
     }
 
@@ -611,7 +521,7 @@ public struct EmbyMainView: View {
                     .font(.system(size: 20, weight: .bold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
-                Text(server.type == .uhdNative ? "登录后自动接入优选节点并同步媒体库" : "配置服务器地址与账号后即可浏览媒体库")
+                Text(appState.isUsingUHDExtension(for: server) ? "登录后自动接入优选节点并同步媒体库" : "配置服务器地址与账号后即可浏览媒体库")
                     .font(.system(size: 13))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     .multilineTextAlignment(.center)
@@ -804,8 +714,15 @@ public struct MLibListView: View {
                             .labelsHidden()
                         }
                     }
-                    .toggleStyle(.checkbox)
+                    .toggleStyle(
+                        DonbyCheckboxToggleStyle(
+                            isLightMode: appState.isLightMode,
+                            accentColor: appState.accentColor,
+                            accentTextColor: appState.accentTextColor
+                        )
+                    )
                     .font(.system(size: 12.5))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     .padding(14)
                     .frame(width: 215)
                 }
@@ -901,6 +818,39 @@ public struct MLibListView: View {
                     self.totalCount = found.count
                     self.nextCursor = nil
                     self.hasMoreItems = false
+                    return
+                }
+                if filterFavoritesOnly {
+                    let libType: String? = {
+                        let lower = library.name.lowercased()
+                        if lower.contains("电影") || lower.contains("movie") { return "movie" }
+                        if lower.contains("剧") || lower.contains("动漫") || lower.contains("综艺") || lower.contains("tv") || lower.contains("series") { return "tv" }
+                        return nil
+                    }()
+                    let favPage = try await UHDStreamClient.shared.fetchFavorites(
+                        server: server,
+                        type: libType,
+                        limit: 50,
+                        cursor: reset ? nil : nextCursor
+                    )
+                    guard !Task.isCancelled, currentGen == loadGeneration else { return }
+                    var fetched = favPage.items
+                    if filterUnwatchedOnly { fetched = fetched.filter { $0.userData?.played != true } }
+                    if !selectedGenreFilter.isEmpty {
+                        fetched = fetched.filter { $0.genres?.contains(selectedGenreFilter) == true }
+                    }
+                    if reset {
+                        self.items = fetched
+                        self.seenIds = Set(fetched.map(\.id))
+                    } else {
+                        var added: [EmbyItem] = []
+                        for it in fetched where seenIds.insert(it.id).inserted { added.append(it) }
+                        self.items.append(contentsOf: added)
+                    }
+                    self.itemsRevision &+= 1
+                    self.nextCursor = favPage.nextCursor
+                    self.hasMoreItems = favPage.nextCursor != nil
+                    self.totalCount = max(self.items.count, favPage.total)
                     return
                 }
                 let uhdSortBy: String = switch sortField {

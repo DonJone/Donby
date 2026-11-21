@@ -237,6 +237,7 @@ public struct FilesModuleView: View {
 
                 TextField("检索已下载影视海报库、本地文件夹或最近播放流...", text: $searchQuery)
                     .textFieldStyle(.plain)
+                    .focusEffectDisabled()
                     .font(.system(size: 14.5))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
@@ -1103,7 +1104,8 @@ public struct FilesModuleView: View {
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 TextField("选填自定义标题", text: $directNameInput)
-                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 13))
+                    .donbyFlatTextField(isLight: appState.isLightMode)
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -1111,17 +1113,27 @@ public struct FilesModuleView: View {
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 TextField("https://example.com/video.m3u8", text: $directURLInput)
-                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 13, design: .monospaced))
+                    .donbyFlatTextField(isLight: appState.isLightMode)
             }
 
-            HStack {
+            HStack(spacing: 10) {
                 Spacer()
-                Button("取消") {
+                Button {
                     showDirectURLSheet = false
+                } label: {
+                    Text("取消")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 7)
+                        .donbyLiquidGlassCapsule()
+                        .contentShape(Capsule())
                 }
+                .buttonStyle(.plain)
                 .keyboardShortcut(.cancelAction)
 
-                Button("立即播放") {
+                Button {
                     let raw = directURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard let url = URL(string: raw), !raw.isEmpty else {
                         appState.showToast("请输入有效网络 URL", icon: "exclamationmark.triangle", isError: true)
@@ -1132,8 +1144,17 @@ public struct FilesModuleView: View {
                         : directNameInput
                     showDirectURLSheet = false
                     appState.playDirectURL(url: url, title: title)
+                } label: {
+                    Text("立即播放")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(appState.accentTextColor)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 7)
+                        .background(appState.accentColor)
+                        .clipShape(Capsule())
+                        .contentShape(Capsule())
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
                 .keyboardShortcut(.defaultAction)
             }
             .padding(.top, 8)

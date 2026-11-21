@@ -51,16 +51,24 @@ public struct UHDWatchPartyJoinSheet: View {
 
             HStack(spacing: 8) {
                 TextField("8 位邀请码或链接", text: $rawInvite)
-                    .textFieldStyle(.roundedBorder)
                     .font(.system(size: 13.5, weight: .medium, design: .monospaced))
+                    .donbyFlatTextField(isLight: appState.isLightMode)
                     .onSubmit { Task { await joinNow() } }
 
-                Button("粘贴") {
+                Button {
                     if let str = NSPasteboard.general.string(forType: .string) {
                         rawInvite = str.trimmingCharacters(in: .whitespacesAndNewlines)
                     }
+                } label: {
+                    Text("粘贴")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 8)
+                        .donbyLiquidGlassCapsule()
+                        .contentShape(Capsule())
                 }
-                .controlSize(.regular)
+                .buttonStyle(.plain)
             }
 
             HStack {
@@ -176,8 +184,38 @@ public struct UHDWatchPartyCreateSheet: View {
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                 Spacer()
-                Stepper("\(maxMembers) 人", value: $maxMembers, in: 2...10)
-                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                HStack(spacing: 10) {
+                    Button {
+                        if maxMembers > 2 { maxMembers -= 1 }
+                    } label: {
+                        Image(systemName: "minus")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                            .frame(width: 24, height: 24)
+                            .donbyLiquidGlassCapsule()
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(maxMembers <= 2)
+
+                    Text("\(maxMembers) 人")
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        .frame(minWidth: 42)
+
+                    Button {
+                        if maxMembers < 10 { maxMembers += 1 }
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                            .frame(width: 24, height: 24)
+                            .donbyLiquidGlassCapsule()
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(maxMembers >= 10)
+                }
             }
             .padding(12)
             .frame(maxWidth: .infinity)
@@ -254,130 +292,397 @@ public struct UHDWatchPartyCreateSheet: View {
     }
 }
 
-// MARK: - Danmu Overlay & Picker
+// MARK: - Zero-Stutter Native CALayer Danmu Overlay & Picker
 
-public struct UHDDanmuCanvasOverlay: View {
+/// Immutable reference container so holding thousands of danmu comments on PlayerView
+/// never triggers O(N) SwiftUI Equatable array diffing on HUD updates.
+public final class UHDDanmuTrack: @unchecked Sendable {
+    private static var nextRevision: UInt64 = 1
+
+    public let revision: UInt64
+    public let title: String
     public let comments: [UHDDanmuComment]
-    public let currentTime: Double
-    public let isEnabled: Bool
-    public let opacity: Double
 
-    public init(comments: [UHDDanmuComment], currentTime: Double, isEnabled: Bool, opacity: Double = 0.86) {
+    public init(title: String, comments: [UHDDanmuComment]) {
+        self.revision = Self.nextRevision
+        Self.nextRevision &+= 1
+        self.title = title
         self.comments = comments
-        self.currentTime = currentTime
-        self.isEnabled = isEnabled
-        self.opacity = opacity
-    }
-
-    public var body: some View {
-        if isEnabled && !comments.isEmpty {
-            Canvas { ctx, size in
-                let scrollDuration = 9.0
-                let staticDuration = 4.2
-                let windowStart = currentTime - scrollDuration
-                let windowEnd = currentTime + 0.1
-
-                var lo = 0
-                var hi = comments.count
-                while lo < hi {
-                    let mid = (lo + hi) >> 1
-                    if comments[mid].timeSeconds < windowStart {
-                        lo = mid + 1
-                    } else {
-                        hi = mid
-                    }
-                }
-
-                let laneHeight: CGFloat = 28
-                let maxLanes = max(4, min(10, Int((size.height * 0.48) / laneHeight)))
-                let topPadding: CGFloat = 44
-                var drawn = 0
-
-                for i in lo..<comments.count {
-                    let c = comments[i]
-                    if c.timeSeconds > windowEnd { break }
-                    let age = currentTime - c.timeSeconds
-                    guard age >= 0 else { continue }
-
-                    let isTopOrBottom = (c.mode == 4 || c.mode == 5)
-                    let life = isTopOrBottom ? staticDuration : scrollDuration
-                    guard age <= life else { continue }
-                    if drawn >= 45 { break }
-                    drawn += 1
-
-                    let r = Double((c.colorRGB >> 16) & 0xFF) / 255.0
-                    let g = Double((c.colorRGB >> 8) & 0xFF) / 255.0
-                    let b = Double(c.colorRGB & 0xFF) / 255.0
-                    let textColor = Color(red: r, green: g, blue: b).opacity(opacity)
-
-                    let resolved = ctx.resolve(
-                        Text(c.text)
-                            .font(.system(size: 19, weight: .semibold))
-                            .foregroundColor(textColor)
-                    )
-                    let shadowResolved = ctx.resolve(
-                        Text(c.text)
-                            .font(.system(size: 19, weight: .semibold))
-                            .foregroundColor(Color.black.opacity(opacity * 0.72))
-                    )
-                    let textSize = resolved.measure(in: size)
-                    let lane = abs(c.id.hashValue) % maxLanes
-
-                    let x: CGFloat
-                    let y: CGFloat
-                    if isTopOrBottom {
-                        x = (size.width - textSize.width) * 0.5
-                        y = c.mode == 4
-                            ? max(topPadding, size.height - 110 - CGFloat(lane % 4) * laneHeight)
-                            : topPadding + CGFloat(lane % 4) * laneHeight
-                    } else {
-                        let progress = CGFloat(age / scrollDuration)
-                        x = size.width - progress * (size.width + textSize.width + 24)
-                        y = topPadding + CGFloat(lane) * laneHeight
-                    }
-
-                    ctx.draw(shadowResolved, at: CGPoint(x: x + 1.2, y: y + 1.2), anchor: .topLeading)
-                    ctx.draw(resolved, at: CGPoint(x: x, y: y), anchor: .topLeading)
-                }
-            }
-            .allowsHitTesting(false)
-            .ignoresSafeArea()
-        }
     }
 }
 
-public struct UHDDanmuLiveOverlay: View {
-    public let comments: [UHDDanmuComment]
+public struct UHDDanmuLiveOverlay: NSViewRepresentable {
+    public let track: UHDDanmuTrack?
     public let isEnabled: Bool
     public let isPlaying: Bool
     public let playbackRate: Double
+    public let opacity: Double
     public let timeProvider: () -> (baseTime: Double, baseUptime: TimeInterval)
 
     public init(
-        comments: [UHDDanmuComment],
+        track: UHDDanmuTrack?,
         isEnabled: Bool,
         isPlaying: Bool,
         playbackRate: Double,
+        opacity: Double = 0.88,
         timeProvider: @escaping () -> (baseTime: Double, baseUptime: TimeInterval)
     ) {
-        self.comments = comments
+        self.track = track
         self.isEnabled = isEnabled
         self.isPlaying = isPlaying
         self.playbackRate = playbackRate
+        self.opacity = opacity
         self.timeProvider = timeProvider
     }
 
-    public var body: some View {
-        if isEnabled && !comments.isEmpty {
-            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !isPlaying)) { _ in
-                let sample = timeProvider()
-                let dt = isPlaying ? max(0, min(1.5, ProcessInfo.processInfo.systemUptime - sample.baseUptime)) : 0
-                let smoothTime = sample.baseTime + dt * max(0.25, playbackRate)
-                UHDDanmuCanvasOverlay(comments: comments, currentTime: smoothTime, isEnabled: true)
-            }
-            .allowsHitTesting(false)
-            .ignoresSafeArea()
+    public func makeNSView(context: Context) -> DanmuSpriteHostView {
+        let view = DanmuSpriteHostView()
+        view.configure(
+            track: track,
+            isEnabled: isEnabled,
+            isPlaying: isPlaying,
+            playbackRate: playbackRate,
+            opacity: opacity,
+            timeProvider: timeProvider
+        )
+        return view
+    }
+
+    public func updateNSView(_ nsView: DanmuSpriteHostView, context: Context) {
+        nsView.configure(
+            track: track,
+            isEnabled: isEnabled,
+            isPlaying: isPlaying,
+            playbackRate: playbackRate,
+            opacity: opacity,
+            timeProvider: timeProvider
+        )
+    }
+
+    public static func dismantleNSView(_ nsView: DanmuSpriteHostView, coordinator: ()) {
+        nsView.shutdown()
+    }
+}
+
+/// Pure CoreAnimation sprite-pooled Danmu renderer:
+/// - Rasterizes each newly-entered comment ONCE into a Retina CGImage (zero per-frame CoreText layout).
+/// - Uses lane collision avoidance so high-volume shows never overlap or stutter.
+/// - Animates purely by updating `CALayer.position.x` inside disabled implicit transactions (<0.1ms/frame).
+public final class DanmuSpriteHostView: NSView {
+    private struct ActiveSprite {
+        let layer: CALayer
+        let lane: Int
+        let isStatic: Bool
+        let isBottom: Bool
+        let startTime: Double
+        let duration: Double
+        let width: CGFloat
+        let height: CGFloat
+    }
+
+    private var track: UHDDanmuTrack?
+    private var trackRevision: UInt64 = 0
+    private var isDanmuEnabled: Bool = false
+    private var isPlaying: Bool = false
+    private var playbackRate: Double = 1.0
+    private var danmuOpacity: Double = 0.88
+    private var timeProvider: (() -> (baseTime: Double, baseUptime: TimeInterval))?
+
+    private var timer: Timer?
+    private var nextIndex: Int = 0
+    private var lastObservedTime: Double = -1
+    private var activeSprites: [ActiveSprite] = []
+    private var maxConcurrentSprites: Int = 36
+
+    private static let danmuFont = NSFont.systemFont(ofSize: 19, weight: .semibold)
+    private static let laneHeight: CGFloat = 30
+    private static let topMargin: CGFloat = 46
+    private static let scrollDuration: Double = 9.0
+    private static let staticDuration: Double = 4.2
+
+    public override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    public override var isFlipped: Bool { true }
+
+    public override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    public func configure(
+        track: UHDDanmuTrack?,
+        isEnabled: Bool,
+        isPlaying: Bool,
+        playbackRate: Double,
+        opacity: Double,
+        timeProvider: @escaping () -> (baseTime: Double, baseUptime: TimeInterval)
+    ) {
+        let newRev = track?.revision ?? 0
+        let trackChanged = (newRev != trackRevision)
+        self.track = track
+        self.trackRevision = newRev
+        self.isDanmuEnabled = isEnabled
+        self.isPlaying = isPlaying
+        self.playbackRate = max(0.25, playbackRate)
+        self.danmuOpacity = opacity
+        self.timeProvider = timeProvider
+
+        if !isEnabled || track == nil || (track?.comments.isEmpty ?? true) {
+            stopTimer()
+            clearAllSprites()
+            isHidden = true
+            return
         }
+
+        isHidden = false
+        if trackChanged {
+            clearAllSprites()
+            lastObservedTime = -1
+        }
+
+        if isPlaying {
+            startTimerIfNeeded()
+        } else {
+            stopTimer()
+        }
+    }
+
+    public func shutdown() {
+        stopTimer()
+        clearAllSprites()
+    }
+
+    private func startTimerIfNeeded() {
+        guard timer == nil else { return }
+        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func clearAllSprites() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for s in activeSprites {
+            s.layer.removeFromSuperlayer()
+        }
+        CATransaction.commit()
+        activeSprites.removeAll(keepingCapacity: true)
+    }
+
+    private func currentPlaybackTime() -> Double {
+        guard let provider = timeProvider else { return 0 }
+        let sample = provider()
+        let dt = isPlaying ? max(0, min(1.5, ProcessInfo.processInfo.systemUptime - sample.baseUptime)) : 0
+        return sample.baseTime + dt * playbackRate
+    }
+
+    private func lowerBound(comments: [UHDDanmuComment], time: Double) -> Int {
+        var lo = 0
+        var hi = comments.count
+        while lo < hi {
+            let mid = (lo + hi) >> 1
+            if comments[mid].timeSeconds < time {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        return lo
+    }
+
+    private func tick() {
+        guard isDanmuEnabled, let comments = track?.comments, !comments.isEmpty else {
+            stopTimer()
+            return
+        }
+        let width = bounds.width
+        let height = bounds.height
+        guard width > 40, height > 40, let hostLayer = layer else { return }
+
+        let now = currentPlaybackTime()
+
+        // Detect seek or initial positioning -> O(log N) jump
+        if lastObservedTime < 0 || now < lastObservedTime - 0.15 || (now - lastObservedTime) > 1.5 {
+            clearAllSprites()
+            nextIndex = lowerBound(comments: comments, time: max(0, now - 0.25))
+        }
+        lastObservedTime = now
+
+        let maxScrollLanes = max(4, min(10, Int((height * 0.48) / Self.laneHeight)))
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+
+        // 1. Advance active sprites and prune expired ones
+        var writeIdx = 0
+        for i in 0..<activeSprites.count {
+            let sprite = activeSprites[i]
+            let age = now - sprite.startTime
+            if age < 0 || age > sprite.duration {
+                sprite.layer.removeFromSuperlayer()
+                continue
+            }
+            if !sprite.isStatic {
+                let progress = CGFloat(age / sprite.duration)
+                let x = width - progress * (width + sprite.width + 28)
+                sprite.layer.position = CGPoint(
+                    x: x + sprite.width * 0.5,
+                    y: Self.topMargin + CGFloat(sprite.lane) * Self.laneHeight + sprite.height * 0.5
+                )
+            } else {
+                let y: CGFloat = sprite.isBottom
+                    ? max(Self.topMargin, height - 116 - CGFloat(sprite.lane) * Self.laneHeight)
+                    : Self.topMargin + CGFloat(sprite.lane) * Self.laneHeight
+                sprite.layer.position = CGPoint(x: width * 0.5, y: y + sprite.height * 0.5)
+            }
+            activeSprites[writeIdx] = sprite
+            writeIdx += 1
+        }
+        if writeIdx < activeSprites.count {
+            activeSprites.removeSubrange(writeIdx..<activeSprites.count)
+        }
+
+        // 2. Spawn newly arrived comments with lane collision avoidance
+        var spawnedThisFrame = 0
+        let maxSpawnPerFrame = 4
+
+        while nextIndex < comments.count && comments[nextIndex].timeSeconds <= now + 0.05 {
+            let c = comments[nextIndex]
+            nextIndex += 1
+
+            let age = now - c.timeSeconds
+            let isStatic = (c.mode == 4 || c.mode == 5)
+            let life = isStatic ? Self.staticDuration : Self.scrollDuration
+            guard age >= -0.05 && age <= min(0.8, life * 0.5) else { continue }
+            guard activeSprites.count < maxConcurrentSprites, spawnedThisFrame < maxSpawnPerFrame else { continue }
+
+            let chosenLane: Int?
+            if isStatic {
+                let isBottom = (c.mode == 4)
+                var occupied = Set<Int>()
+                for s in activeSprites where s.isStatic && s.isBottom == isBottom {
+                    occupied.insert(s.lane)
+                }
+                chosenLane = (0..<4).first(where: { !occupied.contains($0) })
+            } else {
+                // Find a scrolling lane whose trailing sprite has cleanly entered the viewport with spacing
+                var laneRightmostEdge = [CGFloat](repeating: -.greatestFiniteMagnitude, count: maxScrollLanes)
+                for s in activeSprites where !s.isStatic && s.lane < maxScrollLanes {
+                    let sAge = now - s.startTime
+                    let sProg = CGFloat(max(0, sAge) / s.duration)
+                    let leftX = width - sProg * (width + s.width + 28)
+                    let rightEdge = leftX + s.width
+                    if rightEdge > laneRightmostEdge[s.lane] {
+                        laneRightmostEdge[s.lane] = rightEdge
+                    }
+                }
+                chosenLane = (0..<maxScrollLanes).first(where: { laneRightmostEdge[$0] < width - 26 })
+            }
+
+            guard let lane = chosenLane else { continue }
+            guard let (img, imgSize) = rasterizeComment(c) else { continue }
+
+            let spriteLayer = CALayer()
+            spriteLayer.contents = img
+            spriteLayer.contentsScale = window?.backingScaleFactor ?? 2.0
+            spriteLayer.bounds = CGRect(origin: .zero, size: imgSize)
+            spriteLayer.opacity = Float(danmuOpacity)
+
+            let progress = CGFloat(max(0, age) / life)
+            if isStatic {
+                let isBottom = (c.mode == 4)
+                let y: CGFloat = isBottom
+                    ? max(Self.topMargin, height - 116 - CGFloat(lane) * Self.laneHeight)
+                    : Self.topMargin + CGFloat(lane) * Self.laneHeight
+                spriteLayer.position = CGPoint(x: width * 0.5, y: y + imgSize.height * 0.5)
+            } else {
+                let x = width - progress * (width + imgSize.width + 28)
+                spriteLayer.position = CGPoint(
+                    x: x + imgSize.width * 0.5,
+                    y: Self.topMargin + CGFloat(lane) * Self.laneHeight + imgSize.height * 0.5
+                )
+            }
+
+            hostLayer.addSublayer(spriteLayer)
+            activeSprites.append(
+                ActiveSprite(
+                    layer: spriteLayer,
+                    lane: lane,
+                    isStatic: isStatic,
+                    isBottom: c.mode == 4,
+                    startTime: c.timeSeconds,
+                    duration: life,
+                    width: imgSize.width,
+                    height: imgSize.height
+                )
+            )
+            spawnedThisFrame += 1
+        }
+
+        CATransaction.commit()
+    }
+
+    private func rasterizeComment(_ c: UHDDanmuComment) -> (CGImage, CGSize)? {
+        let r = CGFloat((c.colorRGB >> 16) & 0xFF) / 255.0
+        let g = CGFloat((c.colorRGB >> 8) & 0xFF) / 255.0
+        let b = CGFloat(c.colorRGB & 0xFF) / 255.0
+        let fgColor = NSColor(srgbRed: r, green: g, blue: b, alpha: 1.0)
+
+        let shadow = NSShadow()
+        shadow.shadowOffset = NSSize(width: 1.0, height: -1.0)
+        shadow.shadowBlurRadius = 2.0
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.85)
+
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: Self.danmuFont,
+            .foregroundColor: fgColor,
+            .shadow: shadow
+        ]
+        let attrStr = NSAttributedString(string: c.text, attributes: attrs)
+        let measured = attrStr.size()
+        let padX: CGFloat = 4
+        let padY: CGFloat = 3
+        let ptSize = CGSize(width: ceil(measured.width) + padX * 2, height: ceil(measured.height) + padY * 2)
+        guard ptSize.width > 1, ptSize.height > 1 else { return nil }
+
+        let scale = window?.backingScaleFactor ?? 2.0
+        let pxW = max(1, Int(ceil(ptSize.width * scale)))
+        let pxH = max(1, Int(ceil(ptSize.height * scale)))
+
+        guard let ctx = CGContext(
+            data: nil,
+            width: pxW,
+            height: pxH,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return nil }
+
+        ctx.scaleBy(x: scale, y: scale)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+        attrStr.draw(at: NSPoint(x: padX, y: padY))
+        NSGraphicsContext.restoreGraphicsState()
+
+        guard let cgImg = ctx.makeImage() else { return nil }
+        return (cgImg, ptSize)
     }
 }
 
@@ -413,17 +718,37 @@ public struct UHDDanmuPickerSheet: View {
                     .font(.system(size: 16, weight: .bold))
                     .foregroundStyle(.white)
                 Spacer()
-                Button("关闭") { dismiss() }
-                    .buttonStyle(.bordered)
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11.5, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.82))
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(Color.white.opacity(0.10)))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
             }
 
             HStack(spacing: 8) {
                 TextField("搜索名称", text: $keyword)
-                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white)
+                    .donbyFlatTextField(isLight: false)
                     .onSubmit { Task { await runSearch() } }
-                Button("搜索") { Task { await runSearch() } }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(keyword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSearching)
+                Button {
+                    Task { await runSearch() }
+                } label: {
+                    Text("搜索")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(Color.white)
+                        .clipShape(Capsule())
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(keyword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSearching)
             }
 
             if let errorMessage {

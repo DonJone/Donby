@@ -118,7 +118,7 @@ public struct UHDAnimeCalendarSheet: View {
                                     .foregroundStyle(.white)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2.5)
-                                    .background(entry.schedule.estimated ? Color.black.opacity(0.66) : appState.accentColor.opacity(0.90))
+                                    .background(Color.black.opacity(0.72))
                                     .clipShape(Capsule())
                                     .padding(6)
                                     .allowsHitTesting(false)
@@ -409,29 +409,16 @@ public struct UHDPersonDetailSheet: View {
                         .font(.system(size: 18, weight: .bold))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
-                    HStack(spacing: 8) {
-                        if let tmdb = detail?.tmdbId, !tmdb.isEmpty {
-                            Text("TMDB \(tmdb)")
-                                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2)
-                                .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
-                                .clipShape(Capsule())
-                        }
-                        if let imdb = detail?.imdbId, !imdb.isEmpty {
-                            Text("IMDb \(imdb)")
-                                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2)
-                                .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
-                                .clipShape(Capsule())
-                        }
-                        Text("\(works.count)\(nextCursor != nil ? "+" : "") 部作品")
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                    }
+                    let personMeta: String = {
+                        var parts: [String] = []
+                        if let tmdb = detail?.tmdbId, !tmdb.isEmpty { parts.append("TMDB \(tmdb)") }
+                        if let imdb = detail?.imdbId, !imdb.isEmpty { parts.append("IMDb \(imdb)") }
+                        parts.append("\(works.count)\(nextCursor != nil ? "+" : "") 部作品")
+                        return parts.joined(separator: " · ")
+                    }()
+                    Text(personMeta)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
 
                 Spacer()

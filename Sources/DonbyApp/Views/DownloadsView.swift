@@ -229,20 +229,46 @@ public struct DownloadsView: View {
                         .labelsHidden()
 
                         Toggle("升序排列", isOn: $sortAscending)
-                            .toggleStyle(.checkbox)
+                            .toggleStyle(
+                                DonbyCheckboxToggleStyle(
+                                    isLightMode: appState.isLightMode,
+                                    accentColor: appState.accentColor,
+                                    accentTextColor: appState.accentTextColor
+                                )
+                            )
 
                         Divider()
 
                         Text("媒体类型")
                             .font(.system(size: 11.5, weight: .semibold))
                             .foregroundStyle(.secondary)
-                        Picker("类型", selection: $mediaFilter) {
+                        VStack(alignment: .leading, spacing: 6) {
                             ForEach(OfflineLibraryFilter.allCases) { f in
-                                Text(f.rawValue).tag(f)
+                                let isSel = (mediaFilter == f)
+                                Button {
+                                    mediaFilter = f
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        ZStack {
+                                            Circle()
+                                                .strokeBorder(isSel ? appState.accentColor : DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 1.3)
+                                                .frame(width: 14, height: 14)
+                                            if isSel {
+                                                Circle()
+                                                    .fill(appState.accentColor)
+                                                    .frame(width: 7, height: 7)
+                                            }
+                                        }
+                                        Text(f.rawValue)
+                                            .font(.system(size: 12.5, weight: isSel ? .semibold : .regular))
+                                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                                        Spacer()
+                                    }
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
                             }
                         }
-                        .pickerStyle(.radioGroup)
-                        .labelsHidden()
                     } else {
                         Text("任务状态筛选")
                             .font(.system(size: 11.5, weight: .semibold))

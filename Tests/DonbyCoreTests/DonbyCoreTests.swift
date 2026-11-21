@@ -8,7 +8,7 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "1.4.35")
+        #expect(DonbyAppInfo.fallbackVersion == "1.4.36")
     }
 
     @Test func heroTopEdgeSynthesizerPreservesExactColorContrastAndSuppressesOutlierSpike() {
@@ -792,16 +792,30 @@ struct DonbyCoreTests {
     }
 
     @Test func uhdDisplayNormalizerStripsVerboseLineDescriptionsAndNormalizesExitCopy() {
-        let noisyLine = ServerLineInfo(
+        let cnLine = ServerLineInfo(
             name: "中国大陆优化 · 智能调配的中国大陆三网优化 CDN",
             url: "https://smart.uhdnow.com/"
         )
-        #expect(noisyLine.cleanDisplayName == "中国大陆优化")
-        #expect(noisyLine.cleanDisplayHost == "smart.uhdnow.com")
+        #expect(cnLine.cleanDisplayName == "CN CDN")
+        #expect(cnLine.cleanDisplayHost == "smart.uhdnow.com")
 
-        let cleanLine = ServerLineInfo(name: "国际方向-备用", url: "https://v1.uhdgo.com")
-        #expect(cleanLine.cleanDisplayName == "国际方向-备用")
-        #expect(cleanLine.cleanDisplayHost == "v1.uhdgo.com")
+        let cfProLine = ServerLineInfo(
+            name: "国际方向 · CloudFlare Pro CDN 提供的优质海外线路",
+            url: "https://v1.uhdnow.com"
+        )
+        #expect(cfProLine.cleanDisplayName == "CF CDN Pro")
+        #expect(cfProLine.cleanDisplayHost == "v1.uhdnow.com")
+
+        let cfBackupLine = ServerLineInfo(name: "国际方向-备用", url: "https://v1.uhdgo.com")
+        #expect(cfBackupLine.cleanDisplayName == "CF CDN")
+        #expect(cfBackupLine.cleanDisplayHost == "v1.uhdgo.com")
+
+        let genericLine = ServerLineInfo(name: "香港节点 · 极速专线", url: "https://emby.example.com")
+        #expect(genericLine.cleanDisplayName == "香港节点")
+
+        #expect(UHDDisplayNormalizer.formatCDNLineName(rawName: "国际方向", description: "CloudFlare Pro CDN", url: "https://v1.uhdnow.com") == "CF CDN Pro")
+        #expect(UHDDisplayNormalizer.formatCDNLineName(rawName: "国际方向-备用", description: "国际主线路不稳定时可使用", url: "https://v1.uhdgo.com") == "CF CDN")
+        #expect(UHDDisplayNormalizer.formatCDNLineName(rawName: "中国大陆优化", description: "三网优化 CDN", url: "https://smart.uhdnow.com") == "CN CDN")
 
         #expect(UHDDisplayNormalizer.formatPlanName("China 优化版") == "中国优化版")
         #expect(UHDDisplayNormalizer.formatExitBadge(location: "陕西省", isp: "cmcc") == "陕西 · 中国移动")

@@ -1486,20 +1486,24 @@ public final class UHDStreamClient: Sendable {
 
         return sorted.map { dom in
             let prev = existingByDomainId[dom.id]
-            let displayName = dom.name.trimmingCharacters(in: .whitespacesAndNewlines)
             let baseURL = (dom.domain?.isEmpty == false) ? dom.domain! : (prev?.url ?? server.mainLineURL)
+            let displayName = UHDDisplayNormalizer.formatCDNLineName(
+                rawName: dom.name,
+                description: dom.description,
+                url: baseURL
+            )
             return ServerLineInfo(
                 id: prev?.id ?? UUID(),
-                name: displayName.isEmpty ? baseURL : displayName,
+                name: displayName,
                 url: baseURL,
                 domainId: dom.id,
                 isAutoSynced: true,
-                latencyMs: prev?.latencyMs,
+                latencyMs: nil,
                 lastCheckedAt: prev?.lastCheckedAt,
                 lastSpeedMbps: prev?.lastSpeedMbps,
                 lastPeakMbps: prev?.lastPeakMbps,
-                lastExitLocation: prev?.lastExitLocation,
-                lastExitISP: prev?.lastExitISP
+                lastExitLocation: nil,
+                lastExitISP: nil
             )
         }
     }
