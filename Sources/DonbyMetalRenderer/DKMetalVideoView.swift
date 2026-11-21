@@ -882,10 +882,12 @@ public final class DKMetalLayerView: NSView {
         float headroom = max(u.edr_headroom, 1.0f);
         float paperWhite;
         if (u.transfer_fn != 0 && headroom > 1.01f) {
-            float requestedGain = clamp(targetNits / 203.0f, 0.90f, 2.50f);
-            paperWhite = min(requestedGain, headroom * 0.96f);
+            // Calibrated HDR subtitle luminance: maps user peak nit selection cleanly without clipping or glare
+            float requestedGain = clamp(targetNits / 203.0f, 0.72f, 2.20f);
+            paperWhite = min(requestedGain, headroom * 0.92f);
         } else {
-            paperWhite = 0.88f;
+            // SDR / EDR-disabled display: crisp reference white without dulling PGS/ASS glyphs
+            paperWhite = 0.94f;
         }
         float3 lin = srgb_to_linear(srgb) * paperWhite;
         float3 p3 = gamut_map_to_linear_p3(lin, 0);

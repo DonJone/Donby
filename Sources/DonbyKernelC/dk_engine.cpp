@@ -259,14 +259,20 @@ struct DKPlayer {
     std::deque<PgsCue> pgs_cues;
     uint64_t pgs_generation{0};
     uint64_t rendered_pgs_gen{0};
+    bool secondary_has_bitmap_subs{false};
+    std::deque<PgsCue> secondary_pgs_cues;
+    uint64_t secondary_pgs_generation{0};
+    uint64_t rendered_secondary_pgs_gen{0};
     std::vector<uint8_t> sub_rgba_buf;
+    std::vector<uint8_t> sub_layer_pri_buf;
+    std::vector<uint8_t> sub_layer_sec_buf;
     uint64_t sub_serial{0};
     uint64_t sub_read_order{0};
     bool sub_last_non_empty{false};
     bool sub_style_dirty{false};
     int sub_dirty_y0{0};
     int sub_dirty_y1{0};
-    DKSubtitleStyleConfig sub_style{1.0f, 2.8f, 92.0f, 0.0, 0.0, 0, false, false, true, true};
+    DKSubtitleStyleConfig sub_style{1.0f, 2.8f, 92.0f, 0.0, 0.0, 0, false, false, true, true, 0.80f, 10.0f, true, 0};
     struct OriginalAssStyle {
         std::string font_name;
         double font_size{56.0};
@@ -1855,13 +1861,19 @@ static void dk_apply_style_to_ass_track_locked(DKPlayer* player, ASS_Track* trac
 
         // 3. Base size & compact MarginV (overall user scale & vertical placement into letterbox are driven natively by
         //    ass_set_font_scale + ass_set_line_position + ass_set_use_margins so even inline \fs tags scale cleanly!)
+        const double sec_rel_scale = std::clamp(
+            static_cast<double>(player->sub_style.secondary_scale > 0.2f ? player->sub_style.secondary_scale : 0.80f),
+            0.50,
+            1.40
+        );
+        const double role_rel = is_secondary ? sec_rel_scale : 1.0;
         if (override_all || is_default) {
             double base_fs = (is_default && orig.font_size > 10.0 && !override_all && track->n_styles > 1)
                 ? orig.font_size
                 : (56.0 * res_ratio);
-            st.FontSize = base_fs * (is_secondary ? 0.80 : 1.0);
+            st.FontSize = base_fs * role_rel;
             st.Outline = static_cast<double>(border) * (is_secondary ? 0.88 : 1.0) * res_ratio;
-            st.MarginV = is_secondary ? (compact_margin_v + static_cast<int>(std::lround(52.0 * res_ratio))) : compact_margin_v;
+            st.MarginV = compact_margin_v;
             if (override_all) {
                 st.ScaleX = 1.0;
                 st.ScaleY = 1.0;
@@ -1874,7 +1886,7 @@ static void dk_apply_style_to_ass_track_locked(DKPlayer* player, ASS_Track* trac
                 st.BorderStyle = orig.border_style;
             }
         } else if (is_bottom_style) {
-            st.FontSize = (orig.font_size > 4.0) ? (orig.font_size * (is_secondary ? 0.80 : 1.0)) : (48.0 * res_ratio);
+            st.FontSize = (orig.font_size > 4.0) ? (orig.font_size * role_rel) : (48.0 * res_ratio * role_rel);
             st.Outline = std::max(orig.outline, static_cast<double>(border) * 0.85 * res_ratio);
             // Cap overly large MarginV on bottom dialogue styles so they can descend into the black letterbox bar
             st.MarginV = std::min(orig.margin_v, compact_margin_v + static_cast<int>(std::lround(24.0 * res_ratio)));
@@ -1975,6 +1987,11 @@ static void dk_open_subtitle_decoder_for_slot_locked(DKPlayer* player, int strea
         player->pgs_generation++;
         player->rendered_pgs_gen = 0;
         player->has_bitmap_subs = false;
+    } else {
+        player->secondary_pgs_cues.clear();
+        player->secondary_pgs_generation++;
+        player->rendered_secondary_pgs_gen = 0;
+        player->secondary_has_bitmap_subs = false;
     }
     player->sub_rgba_buf.clear();
     player->sub_last_non_empty = false;
@@ -2106,20 +2123,23 @@ static void dk_decode_subtitle_packet_for_slot_locked(DKPlayer* player, AVPacket
         ? (sub.end_display_time - sub.start_display_time)
         : pkt_dur_ms;
 
-    if (sub.format == 0 && !is_secondary) {
-        player->has_bitmap_subs = true;
+    if (sub.format == 0) {
+        bool& slot_has_bitmap = is_secondary ? player->secondary_has_bitmap_subs : player->has_bitmap_subs;
+        auto& slot_cues = is_secondary ? player->secondary_pgs_cues : player->pgs_cues;
+        uint64_t& slot_gen = is_secondary ? player->secondary_pgs_generation : player->pgs_generation;
+        slot_has_bitmap = true;
         double cue_start = static_cast<double>(start_ms) / 1000.0;
         double cue_end = (sub.end_display_time > sub.start_display_time && sub.end_display_time < 3600000)
             ? (static_cast<double>(base_ms + sub.end_display_time) / 1000.0)
             : (cue_start + 12.0);
 
-        if (!player->pgs_cues.empty() && player->pgs_cues.back().end_sec > cue_start) {
-            player->pgs_cues.back().end_sec = cue_start;
+        if (!slot_cues.empty() && slot_cues.back().end_sec > cue_start) {
+            slot_cues.back().end_sec = cue_start;
         }
 
         if (sub.num_rects > 0) {
             PgsCue cue;
-            cue.id = ++player->pgs_generation;
+            cue.id = ++slot_gen;
             cue.start_sec = cue_start;
             cue.end_sec = cue_end;
             cue.canvas_w = (codec_ctx->width > 0) ? codec_ctx->width : player->sub_storage_w;
@@ -2150,8 +2170,10 @@ static void dk_decode_subtitle_packet_for_slot_locked(DKPlayer* player, AVPacket
                     if (luma > cue_peak_luma) cue_peak_luma = luma;
                 }
             }
-            const float pgs_luma_gain = (cue_peak_luma >= 80.0f)
-                ? std::clamp(245.0f / cue_peak_luma, 0.96f, 2.40f)
+            // HDR-safe highlight normalization: lifts dim Blu-ray PGS glyph cores gently toward reference white (230)
+            // while keeping dark outlines (luma <= 32) strictly pure black without gray-lifting.
+            const float pgs_luma_gain = (cue_peak_luma >= 80.0f && cue_peak_luma < 205.0f)
+                ? std::clamp(230.0f / cue_peak_luma, 1.0f, 1.65f)
                 : 1.0f;
 
             for (unsigned r = 0; r < sub.num_rects; r++) {
@@ -2171,9 +2193,14 @@ static void dk_decode_subtitle_packet_for_slot_locked(DKPlayer* player, AVPacket
                     for (int col = 0; col < rect->w; col++) {
                         uint32_t argb = pal[idx_row[col]];
                         uint8_t a = (argb >> 24) & 0xFF;
-                        int cr = std::min(255, static_cast<int>(std::lround(((argb >> 16) & 0xFF) * pgs_luma_gain)));
-                        int cg = std::min(255, static_cast<int>(std::lround(((argb >> 8) & 0xFF) * pgs_luma_gain)));
-                        int cb = std::min(255, static_cast<int>(std::lround((argb & 0xFF) * pgs_luma_gain)));
+                        float r0 = static_cast<float>((argb >> 16) & 0xFF);
+                        float g0 = static_cast<float>((argb >> 8) & 0xFF);
+                        float b0 = static_cast<float>(argb & 0xFF);
+                        float luma = 0.2126f * r0 + 0.7152f * g0 + 0.0722f * b0;
+                        float w_gain = (luma <= 32.0f) ? 1.0f : (1.0f + (pgs_luma_gain - 1.0f) * std::clamp((luma - 32.0f) / 64.0f, 0.0f, 1.0f));
+                        int cr = std::min(255, static_cast<int>(std::lround(r0 * w_gain)));
+                        int cg = std::min(255, static_cast<int>(std::lround(g0 * w_gain)));
+                        int cb = std::min(255, static_cast<int>(std::lround(b0 * w_gain)));
                         out_row[col * 4 + 0] = static_cast<uint8_t>((cr * a + 127) / 255);
                         out_row[col * 4 + 1] = static_cast<uint8_t>((cg * a + 127) / 255);
                         out_row[col * 4 + 2] = static_cast<uint8_t>((cb * a + 127) / 255);
@@ -2183,10 +2210,10 @@ static void dk_decode_subtitle_packet_for_slot_locked(DKPlayer* player, AVPacket
                 cue.rects.push_back(std::move(dst_r));
             }
             if (!cue.rects.empty()) {
-                if (player->pgs_cues.size() >= 64) {
-                    player->pgs_cues.pop_front();
+                if (slot_cues.size() >= 64) {
+                    slot_cues.pop_front();
                 }
-                player->pgs_cues.push_back(std::move(cue));
+                slot_cues.push_back(std::move(cue));
             }
         }
     } else if (track) {
@@ -2270,6 +2297,8 @@ static void dk_replay_sub_pkt_history(DKPlayer* player, int target_stream_idx, b
         }
         player->sub_last_non_empty = false;
         player->rendered_pgs_gen = 0;
+        player->rendered_secondary_pgs_gen = 0;
+        player->sub_style_dirty = true;
         player->sub_serial++;
     }
     for (AVPacket* cp : clones) {
@@ -2412,6 +2441,8 @@ static void dk_demux_worker(DKPlayer* player) {
                     if (player->secondary_sub_codec_ctx) avcodec_flush_buffers(player->secondary_sub_codec_ctx);
                     if (player->secondary_ass_track) ass_flush_events(player->secondary_ass_track);
                     player->secondary_ass_events.clear();
+                    player->secondary_pgs_cues.clear();
+                    player->secondary_pgs_generation++;
                 }
                 if (!player->sub_rgba_buf.empty() && player->ass_canvas_w > 0 && player->ass_canvas_h > 0) {
                     int y0 = std::clamp(player->sub_dirty_y0, 0, player->ass_canvas_h);
@@ -2426,6 +2457,7 @@ static void dk_demux_worker(DKPlayer* player) {
                     }
                 }
                 player->rendered_pgs_gen = 0;
+                player->rendered_secondary_pgs_gen = 0;
                 player->sub_last_non_empty = false;
                 player->sub_dirty_y0 = 0;
                 player->sub_dirty_y1 = 0;
@@ -3445,6 +3477,9 @@ void dk_player_close(DKPlayer* player) {
         player->primary_ext_raw.clear();
         player->secondary_ext_raw.clear();
         player->pgs_cues.clear();
+        player->secondary_pgs_cues.clear();
+        player->has_bitmap_subs = false;
+        player->secondary_has_bitmap_subs = false;
     }
 
     if (player->video_codec_ctx) { avcodec_free_context(&player->video_codec_ctx); }
@@ -3952,8 +3987,12 @@ void dk_player_load_secondary_external_subtitle(DKPlayer* player, const char* co
     }
     player->secondary_ass_events.clear();
     player->secondary_codec_private.clear();
+    player->secondary_pgs_cues.clear();
+    player->secondary_has_bitmap_subs = false;
+    player->rendered_secondary_pgs_gen = 0;
     player->sub_rgba_buf.clear();
     player->sub_last_non_empty = false;
+    player->sub_style_dirty = true;
     player->sub_dirty_y0 = 0;
     player->sub_dirty_y1 = 0;
     player->sub_serial++;
@@ -4002,6 +4041,7 @@ void dk_player_set_subtitle_style(DKPlayer* player, const DKSubtitleStyleConfig*
     player->sub_last_non_empty = false;
     player->sub_style_dirty = true;
     player->rendered_pgs_gen = 0;
+    player->rendered_secondary_pgs_gen = 0;
     player->sub_serial++;
 }
 
@@ -4054,6 +4094,7 @@ void dk_player_set_subtitle_viewport(
     }
     player->sub_style_dirty = true;
     player->rendered_pgs_gen = 0;
+    player->rendered_secondary_pgs_gen = 0;
     player->sub_serial++;
 }
 
@@ -4318,6 +4359,310 @@ static void dk_composite_ass_images_to_rgba(
     }
 }
 
+struct DKRenderedSubLayer {
+    bool active{false};
+    int y0{0};
+    int y1{0};
+    std::vector<uint8_t>* buf{nullptr};
+};
+
+static inline void dk_apply_pgs_pixel_overrides(
+    uint8_t& sr,
+    uint8_t& sg,
+    uint8_t& sb,
+    uint8_t& sa,
+    bool is_secondary,
+    bool enhance_yellow,
+    float border_width
+) {
+    if (sa == 0) return;
+    // Unpremultiply to inspect true RGB chroma & luminance
+    const float inv_a = 255.0f / static_cast<float>(sa);
+    float r = std::min(255.0f, static_cast<float>(sr) * inv_a);
+    float g = std::min(255.0f, static_cast<float>(sg) * inv_a);
+    float b = std::min(255.0f, static_cast<float>(sb) * inv_a);
+    const float luma = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+
+    if (enhance_yellow && sa >= 36) {
+        const uint8_t ur = static_cast<uint8_t>(std::lround(r));
+        const uint8_t ug = static_cast<uint8_t>(std::lround(g));
+        const uint8_t ub = static_cast<uint8_t>(std::lround(b));
+        if (dk_is_pale_yellow_rgb(ur, ug, ub)) {
+            // Enrich washed-out cream/pale-yellow PGS glyphs to classic cinema gold-yellow (#FFD23F) preserving luminance
+            const float lum_scale = std::clamp(luma / 215.0f, 0.35f, 1.05f);
+            r = std::min(255.0f, 255.0f * lum_scale);
+            g = std::min(255.0f, 210.0f * lum_scale);
+            b = std::min(255.0f, 63.0f * lum_scale);
+        } else if (is_secondary && luma >= 120.0f) {
+            // Tint secondary PGS glyph cores to classic gold-yellow while keeping dark outlines pure black
+            const float tint_w = std::clamp((luma - 120.0f) / 80.0f, 0.0f, 1.0f);
+            const float lum_scale = std::clamp(luma / 225.0f, 0.45f, 1.04f);
+            const float tr = std::min(255.0f, 255.0f * lum_scale);
+            const float tg = std::min(255.0f, 210.0f * lum_scale);
+            const float tb = std::min(255.0f, 63.0f * lum_scale);
+            r = r + (tr - r) * tint_w;
+            g = g + (tg - g) * tint_w;
+            b = b + (tb - b) * tint_w;
+        }
+    }
+
+    // Subtle dark-outline contrast boost when user increases border_width above default
+    if (border_width > 3.0f && luma < 48.0f && sa > 24 && sa < 245) {
+        const float boost = 1.0f + std::clamp((border_width - 3.0f) * 0.12f, 0.0f, 0.35f);
+        sa = static_cast<uint8_t>(std::min(255L, std::lround(static_cast<float>(sa) * boost)));
+    }
+
+    const float af = static_cast<float>(sa) / 255.0f;
+    sr = static_cast<uint8_t>(std::clamp(std::lround(r * af), 0L, 255L));
+    sg = static_cast<uint8_t>(std::clamp(std::lround(g * af), 0L, 255L));
+    sb = static_cast<uint8_t>(std::clamp(std::lround(b * af), 0L, 255L));
+}
+
+static void dk_render_pgs_cue_to_layer_locked(
+    const DKPlayer* player,
+    const PgsCue& cue,
+    bool is_secondary,
+    int dst_w,
+    int dst_h,
+    std::vector<uint8_t>& layer_buf,
+    DKRenderedSubLayer& out_layer
+) {
+    out_layer.active = false;
+    out_layer.y0 = dst_h;
+    out_layer.y1 = 0;
+    out_layer.buf = &layer_buf;
+    if (dst_w <= 0 || dst_h <= 0 || cue.rects.empty()) return;
+
+    const size_t needed = static_cast<size_t>(dst_w) * static_cast<size_t>(dst_h) * 4;
+    if (layer_buf.size() != needed) {
+        layer_buf.assign(needed, 0);
+    } else {
+        std::memset(layer_buf.data(), 0, needed);
+    }
+
+    const int cue_w = std::max(1, cue.canvas_w);
+    const int cue_h = std::max(1, cue.canvas_h);
+    const int vid_area_w = std::max(1, dst_w - player->sub_margin_l - player->sub_margin_r);
+    const float base_fit_scale = std::min(
+        static_cast<float>(vid_area_w) / static_cast<float>(cue_w),
+        static_cast<float>(dst_h) / static_cast<float>(cue_h)
+    );
+    const float user_scale = std::clamp(player->sub_style.scale > 0.1f ? player->sub_style.scale : 1.0f, 0.5f, 2.5f);
+    const float sec_rel = std::clamp(player->sub_style.secondary_scale > 0.2f ? player->sub_style.secondary_scale : 0.80f, 0.5f, 1.4f);
+    const float total_scale = base_fit_scale * user_scale * (is_secondary ? sec_rel : 1.0f);
+    const float pos_pct = std::clamp(player->sub_style.vertical_pos_percent > 10.0f ? player->sub_style.vertical_pos_percent : 92.0f, 50.0f, 100.0f);
+    const bool enhance_yellow = player->sub_style.enhance_secondary_yellow;
+    const float border_w = player->sub_style.border_width;
+
+    int union_x0 = cue_w, union_y0 = cue_h, union_x1 = 0, union_y1 = 0;
+    for (const auto& r : cue.rects) {
+        union_x0 = std::min(union_x0, r.x);
+        union_y0 = std::min(union_y0, r.y);
+        union_x1 = std::max(union_x1, r.x + r.w);
+        union_y1 = std::max(union_y1, r.y + r.h);
+    }
+    const float union_cx_src = 0.5f * static_cast<float>(union_x0 + union_x1);
+    const float union_cx_dst = static_cast<float>(player->sub_margin_l) +
+                               (union_cx_src / static_cast<float>(cue_w)) * static_cast<float>(vid_area_w);
+    const float union_h_src = std::max(1.0f, static_cast<float>(union_y1 - union_y0));
+    const float scaled_union_h = union_h_src * total_scale;
+    // Direct full-viewport placement so PGS subtitles descend freely into bottom black letterbox bars!
+    const float target_bottom = std::clamp(
+        (pos_pct * 0.01f) * static_cast<float>(dst_h) - 6.0f,
+        scaled_union_h + 8.0f,
+        static_cast<float>(dst_h - 4)
+    );
+
+    int new_y0 = dst_h;
+    int new_y1 = 0;
+    for (const auto& r : cue.rects) {
+        if (r.w <= 0 || r.h <= 0 || r.rgba.empty()) continue;
+        const int sw = std::max(1, static_cast<int>(std::lround(static_cast<float>(r.w) * total_scale)));
+        const int sh = std::max(1, static_cast<int>(std::lround(static_cast<float>(r.h) * total_scale)));
+        const float rel_x = (static_cast<float>(r.x) - union_cx_src) * total_scale;
+        const float rel_bottom = static_cast<float>(union_y1 - (r.y + r.h)) * total_scale;
+        int base_x = static_cast<int>(std::lround(union_cx_dst + rel_x));
+        int base_y = static_cast<int>(std::lround(target_bottom - rel_bottom - static_cast<float>(sh)));
+        base_x = std::clamp(base_x, 0, std::max(0, dst_w - sw));
+        base_y = std::clamp(base_y, 4, std::max(4, dst_h - sh - 4));
+
+        for (int y = 0; y < sh; y++) {
+            const int dy = base_y + y;
+            if (dy < 0 || dy >= dst_h) continue;
+            const float fy = (static_cast<float>(y) + 0.5f) / total_scale - 0.5f;
+            const int sy0 = std::clamp(static_cast<int>(std::floor(fy)), 0, r.h - 1);
+            const int sy1 = std::clamp(sy0 + 1, 0, r.h - 1);
+            const float wy = std::clamp(fy - static_cast<float>(sy0), 0.0f, 1.0f);
+            for (int x = 0; x < sw; x++) {
+                const int dx = base_x + x;
+                if (dx < 0 || dx >= dst_w) continue;
+                const float fx = (static_cast<float>(x) + 0.5f) / total_scale - 0.5f;
+                const int sx0 = std::clamp(static_cast<int>(std::floor(fx)), 0, r.w - 1);
+                const int sx1 = std::clamp(sx0 + 1, 0, r.w - 1);
+                const float wx = std::clamp(fx - static_cast<float>(sx0), 0.0f, 1.0f);
+
+                const uint8_t* p00 = &r.rgba[(static_cast<size_t>(sy0) * r.w + sx0) * 4];
+                const uint8_t* p10 = &r.rgba[(static_cast<size_t>(sy0) * r.w + sx1) * 4];
+                const uint8_t* p01 = &r.rgba[(static_cast<size_t>(sy1) * r.w + sx0) * 4];
+                const uint8_t* p11 = &r.rgba[(static_cast<size_t>(sy1) * r.w + sx1) * 4];
+                const float w00 = (1.0f - wx) * (1.0f - wy);
+                const float w10 = wx * (1.0f - wy);
+                const float w01 = (1.0f - wx) * wy;
+                const float w11 = wx * wy;
+                uint8_t sr = static_cast<uint8_t>(std::clamp(std::lround(p00[0]*w00 + p10[0]*w10 + p01[0]*w01 + p11[0]*w11), 0L, 255L));
+                uint8_t sg = static_cast<uint8_t>(std::clamp(std::lround(p00[1]*w00 + p10[1]*w10 + p01[1]*w01 + p11[1]*w11), 0L, 255L));
+                uint8_t sb = static_cast<uint8_t>(std::clamp(std::lround(p00[2]*w00 + p10[2]*w10 + p01[2]*w01 + p11[2]*w11), 0L, 255L));
+                uint8_t sa = static_cast<uint8_t>(std::clamp(std::lround(p00[3]*w00 + p10[3]*w10 + p01[3]*w01 + p11[3]*w11), 0L, 255L));
+                if (sa == 0) continue;
+
+                dk_apply_pgs_pixel_overrides(sr, sg, sb, sa, is_secondary, enhance_yellow, border_w);
+                new_y0 = std::min(new_y0, dy);
+                new_y1 = std::max(new_y1, dy + 1);
+
+                uint8_t* dp = &layer_buf[(static_cast<size_t>(dy) * dst_w + dx) * 4];
+                const uint8_t inv_a = 255 - sa;
+                dp[0] = static_cast<uint8_t>(std::min(255, static_cast<int>(sr) + (dp[0] * inv_a + 127) / 255));
+                dp[1] = static_cast<uint8_t>(std::min(255, static_cast<int>(sg) + (dp[1] * inv_a + 127) / 255));
+                dp[2] = static_cast<uint8_t>(std::min(255, static_cast<int>(sb) + (dp[2] * inv_a + 127) / 255));
+                dp[3] = static_cast<uint8_t>(std::min(255, static_cast<int>(sa) + (dp[3] * inv_a + 127) / 255));
+            }
+        }
+    }
+    if (new_y1 > new_y0) {
+        out_layer.active = true;
+        out_layer.y0 = new_y0;
+        out_layer.y1 = new_y1;
+    }
+}
+
+static void dk_render_ass_images_to_layer_locked(
+    ASS_Image* img,
+    int dst_w,
+    int dst_h,
+    std::vector<uint8_t>& layer_buf,
+    DKRenderedSubLayer& out_layer
+) {
+    out_layer.active = false;
+    out_layer.y0 = dst_h;
+    out_layer.y1 = 0;
+    out_layer.buf = &layer_buf;
+    if (!img || dst_w <= 0 || dst_h <= 0) return;
+
+    const size_t needed = static_cast<size_t>(dst_w) * static_cast<size_t>(dst_h) * 4;
+    if (layer_buf.size() != needed) {
+        layer_buf.assign(needed, 0);
+    } else {
+        std::memset(layer_buf.data(), 0, needed);
+    }
+    int y0 = dst_h;
+    int y1 = 0;
+    dk_composite_ass_images_to_rgba(img, layer_buf.data(), dst_w, dst_h, 0, y0, y1);
+    if (y1 > y0) {
+        out_layer.active = true;
+        out_layer.y0 = y0;
+        out_layer.y1 = y1;
+    }
+}
+
+static void dk_blit_sub_layer_shifted(
+    const DKRenderedSubLayer& layer,
+    uint8_t* dst_rgba,
+    int dst_w,
+    int dst_h,
+    int y_shift,
+    int& out_y0,
+    int& out_y1
+) {
+    if (!layer.active || !layer.buf || !dst_rgba || layer.y1 <= layer.y0) return;
+    const uint8_t* src = layer.buf->data();
+    for (int sy = layer.y0; sy < layer.y1; sy++) {
+        const int dy = sy + y_shift;
+        if (dy < 0 || dy >= dst_h) continue;
+        out_y0 = std::min(out_y0, dy);
+        out_y1 = std::max(out_y1, dy + 1);
+        const uint8_t* srow = src + static_cast<size_t>(sy) * dst_w * 4;
+        uint8_t* drow = dst_rgba + static_cast<size_t>(dy) * dst_w * 4;
+        for (int x = 0; x < dst_w; x++) {
+            const uint8_t sa = srow[x * 4 + 3];
+            if (sa == 0) continue;
+            const uint8_t inv_a = 255 - sa;
+            drow[x * 4 + 0] = static_cast<uint8_t>(std::min(255, static_cast<int>(srow[x * 4 + 0]) + (drow[x * 4 + 0] * inv_a + 127) / 255));
+            drow[x * 4 + 1] = static_cast<uint8_t>(std::min(255, static_cast<int>(srow[x * 4 + 1]) + (drow[x * 4 + 1] * inv_a + 127) / 255));
+            drow[x * 4 + 2] = static_cast<uint8_t>(std::min(255, static_cast<int>(srow[x * 4 + 2]) + (drow[x * 4 + 2] * inv_a + 127) / 255));
+            drow[x * 4 + 3] = static_cast<uint8_t>(std::min(255, static_cast<int>(sa) + (drow[x * 4 + 3] * inv_a + 127) / 255));
+        }
+    }
+}
+
+/// Unified Dual-Subtitle Compositor: handles all combinations (ASS+ASS, PGS+ASS, ASS+PGS, PGS+PGS),
+/// stacked order (primary_on_top: classic CN-top / EN-bottom), gap spacing, and split top/bottom mode.
+static void dk_composite_dual_layers_locked(
+    const DKPlayer* player,
+    const DKRenderedSubLayer& pri,
+    const DKRenderedSubLayer& sec,
+    uint8_t* dst_rgba,
+    int dst_w,
+    int dst_h,
+    int& out_y0,
+    int& out_y1
+) {
+    out_y0 = dst_h;
+    out_y1 = 0;
+    if (!pri.active && !sec.active) return;
+
+    const int gap = std::clamp(static_cast<int>(std::lround(player->sub_style.dual_gap_px >= 0.0f ? player->sub_style.dual_gap_px : 10.0f)), 0, 80);
+    const bool primary_on_top = player->sub_style.primary_on_top;
+    const int layout_mode = player->sub_style.dual_layout_mode;
+
+    if (pri.active && !sec.active) {
+        dk_blit_sub_layer_shifted(pri, dst_rgba, dst_w, dst_h, 0, out_y0, out_y1);
+        return;
+    }
+    if (!pri.active && sec.active) {
+        int sec_shift = 0;
+        if (layout_mode == 1) {
+            const int top_pad = std::max(14, player->sub_margin_t / 4 + 14);
+            sec_shift = top_pad - sec.y0;
+        }
+        dk_blit_sub_layer_shifted(sec, dst_rgba, dst_w, dst_h, sec_shift, out_y0, out_y1);
+        return;
+    }
+
+    // Both primary and secondary are active simultaneously
+    if (layout_mode == 1) {
+        // Split mode: primary anchored at user bottom/letterbox position, secondary cleanly pinned near top
+        dk_blit_sub_layer_shifted(pri, dst_rgba, dst_w, dst_h, 0, out_y0, out_y1);
+        const int top_pad = std::max(14, player->sub_margin_t / 4 + 14);
+        const int sec_shift = top_pad - sec.y0;
+        dk_blit_sub_layer_shifted(sec, dst_rgba, dst_w, dst_h, sec_shift, out_y0, out_y1);
+        return;
+    }
+
+    // Stacked mode (layout_mode == 0): anchor the lower layer at the bottom anchor and stack the upper layer above with exact gap
+    const int anchor_bottom = std::max(pri.y1, sec.y1);
+    if (primary_on_top) {
+        // Classic bilingual layout: Primary (e.g. Chinese) on top, Secondary (e.g. English gold-yellow) on bottom
+        const int sec_shift = anchor_bottom - sec.y1;
+        const int sec_placed_y0 = sec.y0 + sec_shift;
+        int pri_shift = (sec_placed_y0 - gap) - pri.y1;
+        if (pri.y0 + pri_shift < 6) {
+            pri_shift = 6 - pri.y0;
+        }
+        dk_blit_sub_layer_shifted(sec, dst_rgba, dst_w, dst_h, sec_shift, out_y0, out_y1);
+        dk_blit_sub_layer_shifted(pri, dst_rgba, dst_w, dst_h, pri_shift, out_y0, out_y1);
+    } else {
+        // Secondary on top, Primary on bottom
+        const int pri_shift = anchor_bottom - pri.y1;
+        const int pri_placed_y0 = pri.y0 + pri_shift;
+        int sec_shift = (pri_placed_y0 - gap) - sec.y1;
+        if (sec.y0 + sec_shift < 6) {
+            sec_shift = 6 - sec.y0;
+        }
+        dk_blit_sub_layer_shifted(pri, dst_rgba, dst_w, dst_h, pri_shift, out_y0, out_y1);
+        dk_blit_sub_layer_shifted(sec, dst_rgba, dst_w, dst_h, sec_shift, out_y0, out_y1);
+    }
+}
+
 static bool dk_update_subtitle_rgba_locked(
     DKPlayer* player,
     double pts,
@@ -4360,238 +4705,109 @@ static bool dk_update_subtitle_rgba_locked(
     const double pri_pts = pts - player->sub_style.primary_delay_sec;
     const double sec_pts = pts - player->sub_style.secondary_delay_sec;
 
-    if (player->has_bitmap_subs) {
-        while (!player->pgs_cues.empty() && player->pgs_cues.front().end_sec < pri_pts - 2.0) {
-            player->pgs_cues.pop_front();
-        }
-        const PgsCue* active_cue = nullptr;
-        for (const auto& cue : player->pgs_cues) {
-            if (pri_pts >= cue.start_sec && pri_pts < cue.end_sec && !cue.rects.empty()) {
-                active_cue = &cue;
-                break;
-            }
-        }
-        if (!active_cue && !player->secondary_ass_track) {
-            if (player->sub_last_non_empty) {
-                if (player->ass_canvas_w > 0 && player->ass_canvas_h > 0) {
-                    clear_subtitle_canvas(player->ass_canvas_w, player->ass_canvas_h);
-                }
-                player->sub_last_non_empty = false;
-                player->sub_serial++;
-            }
-            *out_serial = player->sub_serial;
-            return false;
-        }
-        if (active_cue) {
-            int cue_w = std::max(1, active_cue->canvas_w);
-            int cue_h = std::max(1, active_cue->canvas_h);
-            int dst_w = (canvas_w > 0) ? canvas_w : cue_w;
-            int dst_h = (canvas_h > 0) ? canvas_h : cue_h;
-            int vid_area_w = std::max(1, dst_w - player->sub_margin_l - player->sub_margin_r);
-            int vid_area_h = std::max(1, dst_h - player->sub_margin_t - player->sub_margin_b);
-            float base_fit_scale = static_cast<float>(vid_area_w) / static_cast<float>(cue_w);
-            int crop_top = (cue_h > static_cast<int>(std::lround(static_cast<float>(vid_area_h) / base_fit_scale)) + 20)
-                ? ((cue_h - static_cast<int>(std::lround(static_cast<float>(vid_area_h) / base_fit_scale))) / 2)
-                : 0;
-
-            if (player->rendered_pgs_gen != active_cue->id || player->sub_style_dirty || player->ass_canvas_w != dst_w || player->ass_canvas_h != dst_h) {
-                player->ass_canvas_w = dst_w;
-                player->ass_canvas_h = dst_h;
-                clear_subtitle_canvas(dst_w, dst_h);
-                int new_y0 = dst_h;
-                int new_y1 = 0;
-
-                // Apply real-time user scale & full-viewport vertical position (including black letterbox bars!) to PGS bitmap subtitles
-                const float user_scale = std::clamp(player->sub_style.scale > 0.1f ? player->sub_style.scale : 1.0f, 0.5f, 2.5f);
-                const float total_scale = base_fit_scale * user_scale;
-                const float pos_pct = std::clamp(player->sub_style.vertical_pos_percent > 10.0f ? player->sub_style.vertical_pos_percent : 92.0f, 50.0f, 100.0f);
-                int union_x0 = cue_w, union_y0 = cue_h, union_x1 = 0, union_y1 = 0;
-                for (const auto& r : active_cue->rects) {
-                    int my = r.y - crop_top;
-                    union_x0 = std::min(union_x0, r.x);
-                    union_y0 = std::min(union_y0, my);
-                    union_x1 = std::max(union_x1, r.x + r.w);
-                    union_y1 = std::max(union_y1, my + r.h);
-                }
-                const float union_cx_src = 0.5f * static_cast<float>(union_x0 + union_x1);
-                const float union_cx_dst = static_cast<float>(player->sub_margin_l) + union_cx_src * base_fit_scale;
-                const float union_h_src = std::max(1.0f, static_cast<float>(union_y1 - union_y0));
-                const float scaled_union_h = union_h_src * total_scale;
-                const float target_bottom = std::clamp(
-                    (pos_pct * 0.01f) * static_cast<float>(dst_h) - 6.0f,
-                    scaled_union_h + 8.0f,
-                    static_cast<float>(dst_h - 4)
-                );
-
-                for (const auto& r : active_cue->rects) {
-                    if (r.w <= 0 || r.h <= 0 || r.rgba.empty()) continue;
-                    int mapped_y = r.y - crop_top;
-                    int sw = std::max(1, static_cast<int>(std::lround(static_cast<float>(r.w) * total_scale)));
-                    int sh = std::max(1, static_cast<int>(std::lround(static_cast<float>(r.h) * total_scale)));
-                    float rel_x = (static_cast<float>(r.x) - union_cx_src) * total_scale;
-                    float rel_bottom = static_cast<float>(union_y1 - (mapped_y + r.h)) * total_scale;
-                    int base_x = static_cast<int>(std::lround(union_cx_dst + rel_x));
-                    int base_y = static_cast<int>(std::lround(target_bottom - rel_bottom - static_cast<float>(sh)));
-                    base_x = std::clamp(base_x, 0, std::max(0, dst_w - sw));
-                    base_y = std::clamp(base_y, 4, std::max(4, dst_h - sh - 4));
-
-                    for (int y = 0; y < sh; y++) {
-                        int dy = base_y + y;
-                        if (dy < 0 || dy >= dst_h) continue;
-                        new_y0 = std::min(new_y0, dy);
-                        new_y1 = std::max(new_y1, dy + 1);
-                        float fy = (static_cast<float>(y) + 0.5f) / total_scale - 0.5f;
-                        int sy0 = std::clamp(static_cast<int>(std::floor(fy)), 0, r.h - 1);
-                        int sy1 = std::clamp(sy0 + 1, 0, r.h - 1);
-                        float wy = std::clamp(fy - static_cast<float>(sy0), 0.0f, 1.0f);
-                        for (int x = 0; x < sw; x++) {
-                            int dx = base_x + x;
-                            if (dx < 0 || dx >= dst_w) continue;
-                            float fx = (static_cast<float>(x) + 0.5f) / total_scale - 0.5f;
-                            int sx0 = std::clamp(static_cast<int>(std::floor(fx)), 0, r.w - 1);
-                            int sx1 = std::clamp(sx0 + 1, 0, r.w - 1);
-                            float wx = std::clamp(fx - static_cast<float>(sx0), 0.0f, 1.0f);
-
-                            const uint8_t* p00 = &r.rgba[(static_cast<size_t>(sy0) * r.w + sx0) * 4];
-                            const uint8_t* p10 = &r.rgba[(static_cast<size_t>(sy0) * r.w + sx1) * 4];
-                            const uint8_t* p01 = &r.rgba[(static_cast<size_t>(sy1) * r.w + sx0) * 4];
-                            const uint8_t* p11 = &r.rgba[(static_cast<size_t>(sy1) * r.w + sx1) * 4];
-                            float w00 = (1.0f - wx) * (1.0f - wy);
-                            float w10 = wx * (1.0f - wy);
-                            float w01 = (1.0f - wx) * wy;
-                            float w11 = wx * wy;
-                            uint8_t sr = static_cast<uint8_t>(std::clamp(std::lround(p00[0]*w00 + p10[0]*w10 + p01[0]*w01 + p11[0]*w11), 0L, 255L));
-                            uint8_t sg = static_cast<uint8_t>(std::clamp(std::lround(p00[1]*w00 + p10[1]*w10 + p01[1]*w01 + p11[1]*w11), 0L, 255L));
-                            uint8_t sb = static_cast<uint8_t>(std::clamp(std::lround(p00[2]*w00 + p10[2]*w10 + p01[2]*w01 + p11[2]*w11), 0L, 255L));
-                            uint8_t sa = static_cast<uint8_t>(std::clamp(std::lround(p00[3]*w00 + p10[3]*w10 + p01[3]*w01 + p11[3]*w11), 0L, 255L));
-                            if (sa == 0) continue;
-
-                            uint8_t* dp = &player->sub_rgba_buf[(static_cast<size_t>(dy) * dst_w + dx) * 4];
-                            uint8_t inv_a = 255 - sa;
-                            dp[0] = static_cast<uint8_t>(std::min(255, static_cast<int>(sr) + (dp[0] * inv_a + 127) / 255));
-                            dp[1] = static_cast<uint8_t>(std::min(255, static_cast<int>(sg) + (dp[1] * inv_a + 127) / 255));
-                            dp[2] = static_cast<uint8_t>(std::min(255, static_cast<int>(sb) + (dp[2] * inv_a + 127) / 255));
-                            dp[3] = static_cast<uint8_t>(std::min(255, static_cast<int>(sa) + (dp[3] * inv_a + 127) / 255));
-                        }
-                    }
-                }
-                player->sub_style_dirty = false;
-                if (player->secondary_ass_track && player->ass_renderer) {
-                    ass_set_frame_size(player->ass_renderer, dst_w, dst_h);
-                    ass_set_storage_size(player->ass_renderer, dst_w, dst_h);
-                    int sec_change = 0;
-                    ASS_Image* sec_img = ass_render_frame(
-                        player->ass_renderer,
-                        player->secondary_ass_track,
-                        static_cast<long long>(std::max(0.0, sec_pts) * 1000.0),
-                        &sec_change
-                    );
-                    if (sec_img) {
-                        int sec_y1 = 0;
-                        for (ASS_Image* c = sec_img; c != nullptr; c = c->next) {
-                            if (c->w > 0 && c->h > 0) sec_y1 = std::max(sec_y1, c->dst_y + c->h);
-                        }
-                        int y_off = (new_y1 > new_y0 && sec_y1 > new_y0 - 6) ? ((new_y0 - 8) - sec_y1) : 0;
-                        dk_composite_ass_images_to_rgba(sec_img, player->sub_rgba_buf.data(), dst_w, dst_h, y_off, new_y0, new_y1);
-                    }
-                }
-                if (new_y1 > new_y0) {
-                    player->sub_dirty_y0 = new_y0;
-                    player->sub_dirty_y1 = new_y1;
-                }
-                player->rendered_pgs_gen = active_cue->id;
-                player->sub_last_non_empty = true;
-                player->sub_serial++;
-            }
-            *out_rgba = player->sub_rgba_buf.data();
-            *out_w = dst_w;
-            *out_h = dst_h;
-            *out_serial = player->sub_serial;
-            return true;
-        }
-    }
-
-    if (!player->ass_renderer || (!player->ass_track && !player->secondary_ass_track)) {
-        if (player->sub_last_non_empty) {
-            if (player->ass_canvas_w > 0 && player->ass_canvas_h > 0) {
-                clear_subtitle_canvas(player->ass_canvas_w, player->ass_canvas_h);
-            }
-            player->sub_last_non_empty = false;
-            player->sub_serial++;
-            *out_serial = player->sub_serial;
-        }
-        return false;
-    }
-    if (player->ass_canvas_w != canvas_w || player->ass_canvas_h != canvas_h) {
+    const bool canvas_resized = (player->ass_canvas_w != canvas_w || player->ass_canvas_h != canvas_h);
+    if (canvas_resized) {
         player->ass_canvas_w = canvas_w;
         player->ass_canvas_h = canvas_h;
         player->sub_dirty_y0 = 0;
         player->sub_dirty_y1 = 0;
-        dk_sync_ass_renderer_params_locked(player, player->ass_renderer);
-        if (player->secondary_ass_renderer) {
-            dk_sync_ass_renderer_params_locked(player, player->secondary_ass_renderer);
+    }
+    if (canvas_resized || player->sub_style_dirty) {
+        if (player->ass_renderer) {
+            dk_sync_ass_renderer_params_locked(player, player->ass_renderer);
         }
-    } else if (player->sub_style_dirty) {
-        dk_sync_ass_renderer_params_locked(player, player->ass_renderer);
         if (player->secondary_ass_renderer) {
             dk_sync_ass_renderer_params_locked(player, player->secondary_ass_renderer);
         }
     }
 
-    long long pri_ms = static_cast<long long>(std::max(0.0, pri_pts) * 1000.0);
-    long long sec_ms = static_cast<long long>(std::max(0.0, sec_pts) * 1000.0);
+    // Resolve active primary PGS cue (if primary slot is bitmap)
+    const PgsCue* pri_pgs_cue = nullptr;
+    if (player->has_bitmap_subs) {
+        while (!player->pgs_cues.empty() && player->pgs_cues.front().end_sec < pri_pts - 2.0) {
+            player->pgs_cues.pop_front();
+        }
+        for (const auto& cue : player->pgs_cues) {
+            if (pri_pts >= cue.start_sec && pri_pts < cue.end_sec && !cue.rects.empty()) {
+                pri_pgs_cue = &cue;
+                break;
+            }
+        }
+    }
 
+    // Resolve active secondary PGS cue (if secondary slot is bitmap)
+    const PgsCue* sec_pgs_cue = nullptr;
+    if (player->secondary_has_bitmap_subs) {
+        while (!player->secondary_pgs_cues.empty() && player->secondary_pgs_cues.front().end_sec < sec_pts - 2.0) {
+            player->secondary_pgs_cues.pop_front();
+        }
+        for (const auto& cue : player->secondary_pgs_cues) {
+            if (sec_pts >= cue.start_sec && sec_pts < cue.end_sec && !cue.rects.empty()) {
+                sec_pgs_cue = &cue;
+                break;
+            }
+        }
+    }
+
+    // Resolve active primary & secondary ASS/SRT frames (for non-bitmap slots)
     int change_pri = 0;
     int change_sec = 0;
-    ASS_Image* img_pri = player->ass_track
-        ? ass_render_frame(player->ass_renderer, player->ass_track, pri_ms, &change_pri)
+    ASS_Image* img_pri = (!player->has_bitmap_subs && player->ass_renderer && player->ass_track)
+        ? ass_render_frame(player->ass_renderer, player->ass_track, static_cast<long long>(std::max(0.0, pri_pts) * 1000.0), &change_pri)
         : nullptr;
     ASS_Renderer* sec_rend = player->secondary_ass_renderer ? player->secondary_ass_renderer : player->ass_renderer;
-    ASS_Image* img_sec = (player->secondary_ass_track && sec_rend)
-        ? ass_render_frame(sec_rend, player->secondary_ass_track, sec_ms, &change_sec)
+    ASS_Image* img_sec = (!player->secondary_has_bitmap_subs && sec_rend && player->secondary_ass_track)
+        ? ass_render_frame(sec_rend, player->secondary_ass_track, static_cast<long long>(std::max(0.0, sec_pts) * 1000.0), &change_sec)
         : nullptr;
 
-    if (!img_pri && !img_sec) {
+    const bool has_pri = (pri_pgs_cue != nullptr) || (img_pri != nullptr);
+    const bool has_sec = (sec_pgs_cue != nullptr) || (img_sec != nullptr);
+    if (!has_pri && !has_sec) {
         if (player->sub_last_non_empty) {
             clear_subtitle_canvas(canvas_w, canvas_h);
             player->sub_last_non_empty = false;
+            player->rendered_pgs_gen = 0;
+            player->rendered_secondary_pgs_gen = 0;
             player->sub_serial++;
         }
         *out_serial = player->sub_serial;
         return false;
     }
 
-    if (change_pri != 0 || change_sec != 0 || !player->sub_last_non_empty || player->sub_style_dirty ||
-        player->sub_rgba_buf.size() != static_cast<size_t>(canvas_w) * canvas_h * 4) {
+    const uint64_t cur_pri_pgs_id = pri_pgs_cue ? pri_pgs_cue->id : 0;
+    const uint64_t cur_sec_pgs_id = sec_pgs_cue ? sec_pgs_cue->id : 0;
+    const bool pri_pgs_changed = (cur_pri_pgs_id != player->rendered_pgs_gen);
+    const bool sec_pgs_changed = (cur_sec_pgs_id != player->rendered_secondary_pgs_gen);
+    const bool buf_mismatch = (player->sub_rgba_buf.size() != static_cast<size_t>(canvas_w) * static_cast<size_t>(canvas_h) * 4);
+
+    if (pri_pgs_changed || sec_pgs_changed || change_pri != 0 || change_sec != 0 ||
+        !player->sub_last_non_empty || player->sub_style_dirty || canvas_resized || buf_mismatch) {
         player->sub_style_dirty = false;
         clear_subtitle_canvas(canvas_w, canvas_h);
+
+        DKRenderedSubLayer pri_layer;
+        if (pri_pgs_cue) {
+            dk_render_pgs_cue_to_layer_locked(player, *pri_pgs_cue, false, canvas_w, canvas_h, player->sub_layer_pri_buf, pri_layer);
+        } else if (img_pri) {
+            dk_render_ass_images_to_layer_locked(img_pri, canvas_w, canvas_h, player->sub_layer_pri_buf, pri_layer);
+        }
+
+        DKRenderedSubLayer sec_layer;
+        if (sec_pgs_cue) {
+            dk_render_pgs_cue_to_layer_locked(player, *sec_pgs_cue, true, canvas_w, canvas_h, player->sub_layer_sec_buf, sec_layer);
+        } else if (img_sec) {
+            dk_render_ass_images_to_layer_locked(img_sec, canvas_w, canvas_h, player->sub_layer_sec_buf, sec_layer);
+        }
+
         int new_y0 = canvas_h;
         int new_y1 = 0;
-        int pri_y0 = canvas_h;
-        int pri_y1 = 0;
-        if (img_pri) {
-            dk_composite_ass_images_to_rgba(img_pri, player->sub_rgba_buf.data(), canvas_w, canvas_h, 0, pri_y0, pri_y1);
-            new_y0 = std::min(new_y0, pri_y0);
-            new_y1 = std::max(new_y1, pri_y1);
-        }
-        if (img_sec) {
-            int sec_raw_y0 = canvas_h;
-            int sec_raw_y1 = 0;
-            for (ASS_Image* cur = img_sec; cur != nullptr; cur = cur->next) {
-                if (cur->w <= 0 || cur->h <= 0 || !cur->bitmap) continue;
-                sec_raw_y0 = std::min(sec_raw_y0, cur->dst_y);
-                sec_raw_y1 = std::max(sec_raw_y1, cur->dst_y + cur->h);
-            }
-            int y_offset = 0;
-            if (pri_y1 > pri_y0 && sec_raw_y1 > pri_y0 - 6) {
-                y_offset = (pri_y0 - 8) - sec_raw_y1;
-            }
-            dk_composite_ass_images_to_rgba(img_sec, player->sub_rgba_buf.data(), canvas_w, canvas_h, y_offset, new_y0, new_y1);
-        }
+        dk_composite_dual_layers_locked(player, pri_layer, sec_layer, player->sub_rgba_buf.data(), canvas_w, canvas_h, new_y0, new_y1);
         if (new_y1 > new_y0) {
             player->sub_dirty_y0 = new_y0;
             player->sub_dirty_y1 = new_y1;
         }
+        player->rendered_pgs_gen = cur_pri_pgs_id;
+        player->rendered_secondary_pgs_gen = cur_sec_pgs_id;
         player->sub_last_non_empty = true;
         player->sub_serial++;
     }

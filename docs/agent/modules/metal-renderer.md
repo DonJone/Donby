@@ -1,6 +1,6 @@
 # Module Map: Metal EDR Video Renderer (`DonbyMetalRenderer`)
 
-> Last synced: `v1.4.7`. Load this doc for CVDisplayLink presentation, Metal shaders, HDR10/Dolby Vision EDR tone mapping, GPU snapshots, first-frame callbacks, and subtitle overlay rendering.
+> Last synced: `v1.4.8`. Load this doc for CVDisplayLink presentation, Metal shaders, HDR10/Dolby Vision EDR tone mapping, GPU snapshots, first-frame callbacks, and subtitle overlay rendering.
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyMetalRenderer/DKMetalVideoView.swift` (~1666L)

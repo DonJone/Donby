@@ -1929,7 +1929,11 @@ public struct PlayerView: View {
                 override_ass_style: styleSnap.overrideASSStyle,
                 forced_only: styleSnap.forcedOnly,
                 unify_pingfang_font: styleSnap.unifyPingFangFont,
-                enhance_secondary_yellow: styleSnap.enhanceSecondaryYellow
+                enhance_secondary_yellow: styleSnap.enhanceSecondaryYellow,
+                secondary_scale: Float(styleSnap.secondaryScale),
+                dual_gap_px: Float(styleSnap.dualSubtitleGapPx),
+                primary_on_top: styleSnap.primaryOnTop,
+                dual_layout_mode: Int32(styleSnap.dualLayoutMode)
             )
             dk_player_set_subtitle_style(handle, &initialSubCfg)
             dk_player_set_buffer_limit_mb(handle, cachePoolMB)
@@ -2339,7 +2343,11 @@ public struct PlayerView: View {
             override_ass_style: s.overrideASSStyle,
             forced_only: s.forcedOnly,
             unify_pingfang_font: s.unifyPingFangFont,
-            enhance_secondary_yellow: s.enhanceSecondaryYellow
+            enhance_secondary_yellow: s.enhanceSecondaryYellow,
+            secondary_scale: Float(s.secondaryScale),
+            dual_gap_px: Float(s.dualSubtitleGapPx),
+            primary_on_top: s.primaryOnTop,
+            dual_layout_mode: Int32(s.dualLayoutMode)
         )
         dk_player_set_subtitle_style(handle, &cfg)
         subtitleStyleRevision &+= 1
@@ -2440,7 +2448,7 @@ public struct PlayerView: View {
     }
 
     private func exportRedactedDiagnostics() {
-        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.7"
+        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.8"
         var lines: [String] = []
         lines.append("Donby Diagnostics Report (v\(appVer))")
         lines.append("Time: \(ISO8601DateFormatter().string(from: Date()))")

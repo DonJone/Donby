@@ -297,6 +297,10 @@ public struct SubtitleStyleConfiguration: Codable, Equatable, Sendable {
     public var antiOcclusionEnabled: Bool
     public var unifyPingFangFont: Bool
     public var enhanceSecondaryYellow: Bool
+    public var secondaryScale: Double
+    public var dualSubtitleGapPx: Double
+    public var primaryOnTop: Bool
+    public var dualLayoutMode: Int
 
     public init(
         scale: Double = 1.0,
@@ -310,7 +314,11 @@ public struct SubtitleStyleConfiguration: Codable, Equatable, Sendable {
         hdrPeakNits: SubtitleHDRPeakNits = .nits203,
         antiOcclusionEnabled: Bool = true,
         unifyPingFangFont: Bool = true,
-        enhanceSecondaryYellow: Bool = true
+        enhanceSecondaryYellow: Bool = true,
+        secondaryScale: Double = 0.80,
+        dualSubtitleGapPx: Double = 10.0,
+        primaryOnTop: Bool = true,
+        dualLayoutMode: Int = 0
     ) {
         self.scale = scale
         self.borderWidth = borderWidth
@@ -324,12 +332,17 @@ public struct SubtitleStyleConfiguration: Codable, Equatable, Sendable {
         self.antiOcclusionEnabled = antiOcclusionEnabled
         self.unifyPingFangFont = unifyPingFangFont
         self.enhanceSecondaryYellow = enhanceSecondaryYellow
+        self.secondaryScale = secondaryScale
+        self.dualSubtitleGapPx = dualSubtitleGapPx
+        self.primaryOnTop = primaryOnTop
+        self.dualLayoutMode = dualLayoutMode
     }
 
     private enum CodingKeys: String, CodingKey {
         case scale, borderWidth, verticalPositionPercent, primaryDelaySeconds, secondaryDelaySeconds
         case overrideASSStyle, forcedOnly, transform, hdrPeakNits, antiOcclusionEnabled
         case unifyPingFangFont, enhanceSecondaryYellow
+        case secondaryScale, dualSubtitleGapPx, primaryOnTop, dualLayoutMode
     }
 
     public init(from decoder: Decoder) throws {
@@ -346,6 +359,10 @@ public struct SubtitleStyleConfiguration: Codable, Equatable, Sendable {
         self.antiOcclusionEnabled = try c.decodeIfPresent(Bool.self, forKey: .antiOcclusionEnabled) ?? true
         self.unifyPingFangFont = try c.decodeIfPresent(Bool.self, forKey: .unifyPingFangFont) ?? true
         self.enhanceSecondaryYellow = try c.decodeIfPresent(Bool.self, forKey: .enhanceSecondaryYellow) ?? true
+        self.secondaryScale = try c.decodeIfPresent(Double.self, forKey: .secondaryScale) ?? 0.80
+        self.dualSubtitleGapPx = try c.decodeIfPresent(Double.self, forKey: .dualSubtitleGapPx) ?? 10.0
+        self.primaryOnTop = try c.decodeIfPresent(Bool.self, forKey: .primaryOnTop) ?? true
+        self.dualLayoutMode = try c.decodeIfPresent(Int.self, forKey: .dualLayoutMode) ?? 0
     }
 }
 
@@ -741,7 +758,7 @@ public struct SubtitleTrackCandidate: Sendable {
 
 public enum SubtitleTrackMatcher {
     private static let descriptorTokens: [String] = [
-        "简体", "繁体", "繁體", "双语", "雙語", "特效", "chs", "cht", "ass", "srt", "vtt",
+        "简英", "简中英", "繁英", "简体", "繁体", "繁體", "双语", "雙語", "特效", "chs", "cht", "ass", "srt", "vtt",
         "pgs", "sup", "forced", "sdh", "commentary", "zh-cn", "zh-tw", "zh-hk", "中英", "中日"
     ]
 
@@ -830,14 +847,79 @@ public enum SubtitleTrackMatcher {
 
     public static func defaultPreferredIndex(in candidates: [SubtitleTrackCandidate]) -> Int? {
         guard !candidates.isEmpty else { return nil }
-        let chinesePreference = SubtitleTrackPreference(
-            language: nil,
-            titleHint: "简体 中文",
-            codec: "ass",
-            isExternal: false
-        )
-        if let matched = bestMatchIndex(in: candidates, for: chinesePreference) {
-            return matched
+
+        var bestIndex: Int?
+        var bestScore = Int.min
+
+        for (idx, candidate) in candidates.enumerated() {
+            let lang = (candidate.language ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let title = candidate.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let codec = (candidate.codec ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let combined = "\(lang) \(title)"
+            let bucket = SubtitleLanguageBucket.detect(language: candidate.language, title: candidate.title)
+
+            let hasSimplified = (bucket == .simplifiedChinese) ||
+                combined.contains("简英") || combined.contains("简中") || combined.contains("简体") ||
+                combined.contains("chs") || combined.contains("zh-cn") || combined.contains("zh-hans") ||
+                combined.contains("sc&en") || combined.contains("sc+en") || combined.contains("sc_en")
+            let hasTraditional = (bucket == .traditionalChinese) ||
+                combined.contains("繁英") || combined.contains("繁中") || combined.contains("繁体") ||
+                combined.contains("繁體") || combined.contains("cht") || combined.contains("zh-tw") || combined.contains("zh-hk")
+            let hasBilingual =
+                combined.contains("简英") || combined.contains("简中英") || combined.contains("繁英") ||
+                combined.contains("中英") || combined.contains("双语") || combined.contains("雙語") ||
+                combined.contains("bilingual") || combined.contains("chs&eng") || combined.contains("chs+eng") ||
+                combined.contains("chs_eng") || combined.contains("sc&en") || combined.contains("sc+en") ||
+                combined.contains("cht&eng") || combined.contains("cht+eng") ||
+                ((hasSimplified || hasTraditional || bucket.isChinese) && (combined.contains("英") || combined.contains("eng")))
+
+            var score = 0
+            // Tier 1: Simplified Chinese + English bilingual ("简英" / "简中英" / "chs&eng")
+            if hasSimplified && hasBilingual {
+                score += 140
+            } else if combined.contains("简英") || combined.contains("简中英") {
+                score += 140
+            }
+            // Tier 2: Traditional/General Chinese + English bilingual ("繁英" / "中英" / "双语")
+            else if hasBilingual && (bucket.isChinese || hasTraditional) {
+                score += 105
+            }
+            // Tier 3: Pure Simplified Chinese
+            else if hasSimplified {
+                score += 78
+            }
+            // Tier 4: Pure Traditional / General Chinese
+            else if bucket.isChinese {
+                score += 50
+            }
+
+            // Slight preference for text-based subtitles over bitmap when in the same language tier
+            if codec.contains("ass") || codec.contains("ssa") {
+                score += 10
+            } else if codec.contains("srt") || codec.contains("subrip") || codec.contains("vtt") {
+                score += 8
+            }
+
+            // Penalize commentary / forced-only tracks so main dialogue tracks win
+            if combined.contains("commentary") || combined.contains("评论") || combined.contains("評論") || combined.contains("解说") {
+                score -= 90
+            }
+            if combined.contains("forced") || combined.contains("强制") || combined.contains("強制") {
+                score -= 35
+            }
+
+            if candidate.isDefault {
+                score += 2
+            }
+
+            if score > bestScore {
+                bestScore = score
+                bestIndex = idx
+            }
+        }
+
+        if let bestIndex, bestScore > 0 {
+            return bestIndex
         }
         return candidates.firstIndex(where: \.isDefault) ?? 0
     }

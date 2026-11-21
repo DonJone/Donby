@@ -66,6 +66,10 @@ typedef struct {
     bool    forced_only;
     bool    unify_pingfang_font;
     bool    enhance_secondary_yellow;
+    float   secondary_scale;      // relative scale of secondary subtitle vs primary (default 0.80)
+    float   dual_gap_px;          // vertical spacing in px between primary and secondary layers (default 10.0)
+    bool    primary_on_top;       // true = primary above secondary (classic CN-top / EN-bottom)
+    int32_t dual_layout_mode;     // 0 = bottom stacked, 1 = split (primary bottom, secondary top)
 } DKSubtitleStyleConfig;
 
 typedef int     (*DKCustomIOReadCallback)(void* opaque, uint8_t* buf, int buf_size);
