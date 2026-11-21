@@ -1175,7 +1175,7 @@ public struct HeroTopEdgeBackdropView: View {
     }()
 
     private var stripCacheKey: String {
-        "hero_top_edge_v1|\(server?.activeBaseURL ?? "")|\(item.id)"
+        "hero_top_edge_v2|\(server?.activeBaseURL ?? "")|\(item.id)"
     }
 
     public var body: some View {
@@ -1183,7 +1183,7 @@ public struct HeroTopEdgeBackdropView: View {
             if let strip = synthesizedStrip ?? Self.stripCache.object(forKey: stripCacheKey as NSString) {
                 Image(decorative: strip, scale: 1.0)
                     .resizable()
-                    .interpolation(.high)
+                    .interpolation(.medium)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 Color.clear
@@ -1199,7 +1199,7 @@ public struct HeroTopEdgeBackdropView: View {
                 server: server,
                 item: item,
                 kind: .backdrop,
-                maxWidth: 640,
+                maxWidth: 1200,
                 priority: .normal
             ), !Task.isCancelled else { return }
 
@@ -1219,15 +1219,15 @@ public struct HeroTopEdgeBackdropView: View {
         let srcH = cgImage.height
         guard srcW >= 8, srcH >= 8 else { return nil }
 
-        // Skip top 2px border in case source has a thin dark encoding/letterbox edge
-        let skipY = min(2, max(0, srcH / 20))
-        let cropH = min(14, max(4, srcH - skipY))
+        // Skip top 1px edge in case source has a 1px dark encoding border
+        let skipY = min(1, max(0, srcH / 40))
+        let cropH = min(8, max(4, srcH - skipY))
         guard let topCrop = cgImage.cropping(to: CGRect(x: 0, y: skipY, width: srcW, height: cropH)) else {
             return nil
         }
 
-        let sampleW = 128
-        let sampleRows = 12
+        let sampleW = min(512, srcW)
+        let sampleRows = min(8, cropH)
         let outH = 64
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         var band = [UInt8](repeating: 0, count: sampleW * sampleRows * 4)
@@ -1240,7 +1240,7 @@ public struct HeroTopEdgeBackdropView: View {
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
-        ctx.interpolationQuality = .medium
+        ctx.interpolationQuality = .high
         ctx.draw(topCrop, in: CGRect(x: 0, y: 0, width: sampleW, height: sampleRows))
 
         let outPixels = HeroTopEdgeSynthesizer.synthesizeWeightedStrip(

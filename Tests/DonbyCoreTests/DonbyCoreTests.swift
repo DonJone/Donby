@@ -7,10 +7,10 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "1.4.27")
+        #expect(DonbyAppInfo.fallbackVersion == "1.4.28")
     }
 
-    @Test func heroTopEdgeSynthesizerPreservesHorizontalGradientAndSuppressesOutlierSpike() {
+    @Test func heroTopEdgeSynthesizerPreservesSharpColumnBoundaryAndSuppressesOutlierSpike() {
         let w = 32
         let rows = 8
         let outH = 16
@@ -32,16 +32,21 @@ struct DonbyCoreTests {
         let out = HeroTopEdgeSynthesizer.synthesizeWeightedStrip(topBandRGBA: band, width: w, rows: rows, outputHeight: outH)
         #expect(out.count == w * outH * 4)
 
-        let leftBot = ((outH - 1) * w + 2) * 4
-        let rightBot = ((outH - 1) * w + 28) * 4
-        #expect(Int(out[leftBot]) > Int(out[leftBot + 2]) + 100)
-        #expect(Int(out[rightBot + 2]) > Int(out[rightBot]) + 100)
+        // Zero horizontal Gaussian blur: adjacent columns right across x=15 | x=16 stay crisp!
+        let leftEdge = ((outH - 1) * w + 15) * 4
+        let rightEdge = ((outH - 1) * w + 16) * 4
+        #expect(Int(out[leftEdge]) > 200 && Int(out[leftEdge + 2]) < 60)
+        #expect(Int(out[rightEdge + 2]) > 190 && Int(out[rightEdge]) < 50)
 
+        // Outlier spike at x=24 is attenuated compared to raw 255 white
         let spikeColBot = ((outH - 1) * w + 24) * 4
-        #expect(out[spikeColBot] < 120)
+        #expect(out[spikeColBot] < 160)
 
+        // Top row gently eases toward global mean without turning muddy
         let leftTop = (0 * w + 2) * 4
+        let leftBot = ((outH - 1) * w + 2) * 4
         #expect(Int(out[leftTop]) < Int(out[leftBot]))
+        #expect(Int(out[leftTop]) > 195)
     }
 
     @Test func subtitleDecoderUTF8BOMAndGB18030() {

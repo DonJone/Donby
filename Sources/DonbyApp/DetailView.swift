@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import DonbyCore
 import DonbyNetwork
 import DonbyKernelC
@@ -122,6 +123,7 @@ public struct DetailView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(canvasCol)
                     }
+                    .background(DetailScrollViewTopInsetFix())
                 }
                 .scrollContentBackground(.hidden)
                 .ignoresSafeArea(.container, edges: .top)
@@ -1946,5 +1948,45 @@ public struct EpisodeInfoSheet: View {
         .padding(22)
         .frame(width: 440)
         .background(DonbyGlassPalette.canvas(isLight: isLightMode))
+    }
+}
+
+/// Disables AppKit's automatic 28pt titlebar contentInset on DetailView's edge-to-edge ScrollView
+/// so releasing a two-finger pull-down always bounces cleanly back to y=0 instead of hanging at +28pt.
+private struct DetailScrollViewTopInsetFix: NSViewRepresentable {
+    final class ProbeView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            applyZeroTopInset()
+            DispatchQueue.main.async { [weak self] in
+                self?.applyZeroTopInset()
+            }
+        }
+
+        func applyZeroTopInset() {
+            guard let sv = enclosingScrollView else { return }
+            if sv.automaticallyAdjustsContentInsets {
+                sv.automaticallyAdjustsContentInsets = false
+            }
+            if sv.contentInsets.top != 0 {
+                var insets = sv.contentInsets
+                insets.top = 0
+                sv.contentInsets = insets
+            }
+            if sv.contentView.bounds.origin.y < 0 {
+                sv.contentView.scroll(to: NSPoint(x: sv.contentView.bounds.origin.x, y: 0))
+                sv.reflectScrolledClipView(sv.contentView)
+            }
+        }
+    }
+
+    func makeNSView(context: Context) -> ProbeView {
+        let v = ProbeView(frame: .zero)
+        v.isHidden = true
+        return v
+    }
+
+    func updateNSView(_ nsView: ProbeView, context: Context) {
+        nsView.applyZeroTopInset()
     }
 }
