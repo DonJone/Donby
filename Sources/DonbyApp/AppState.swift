@@ -1926,7 +1926,7 @@ public final class AppState: ObservableObject {
                 embyItemId: targetItem.id,
                 resolutionTag: targetItem.resolutionBadge ?? "4K UHD"
             )
-            DonbyLogger.shared.log("媒体流解析成功: \(resource.streamURL.absoluteString)", level: .info, subsystem: "Playback")
+            DonbyLogger.shared.log("媒体流解析成功: \(PlaybackDiagnosticsRedactor.redact(resource.streamURL.absoluteString))", level: .info, subsystem: "Playback")
             lastCompletedPlaybackKey = startKey
             lastCompletedPlaybackTimestamp = ProcessInfo.processInfo.systemUptime
             self.activePlayback = ActivePlaybackSession(

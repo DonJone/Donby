@@ -61,6 +61,10 @@ public struct PlayerView: View {
     @State private var showRemainingTime: Bool = false
     @State private var showControls: Bool = true
     @State private var isOpeningMedia: Bool = true
+    @State private var hasRenderedFirstFrame: Bool = false
+    @State private var isWaitingForSeekOrBuffer: Bool = false
+    @State private var lastObservedPos: Double = -1.0
+    @State private var lastObservedPosUptime: TimeInterval = 0
     @State private var openingErrorMessage: String? = nil
     @State private var showLogSheet: Bool = false
     @State private var activeDrawer: PlayerDrawerTab? = nil
@@ -133,7 +137,14 @@ public struct PlayerView: View {
                 playerHandle: playerHandle,
                 controlsOcclusionHeight: showControls ? bottomControlBarHeight : 0,
                 subtitleHDRPeakNits: Float(appState.subtitleStyle.hdrPeakNits.rawValue),
-                antiOcclusionEnabled: appState.subtitleStyle.antiOcclusionEnabled
+                antiOcclusionEnabled: appState.subtitleStyle.antiOcclusionEnabled,
+                onFirstFrameRendered: {
+                    if !hasRenderedFirstFrame {
+                        withAnimation(.easeOut(duration: 0.16)) {
+                            hasRenderedFirstFrame = true
+                        }
+                    }
+                }
             )
                 .ignoresSafeArea()
                 .onContinuousHover { _ in
@@ -158,7 +169,7 @@ public struct PlayerView: View {
                     }
                 }
 
-            if isOpeningMedia {
+            if isOpeningMedia || (!hasRenderedFirstFrame && openingErrorMessage == nil) {
                 VStack {
                     Spacer()
                     HStack(spacing: 10) {
@@ -197,6 +208,35 @@ public struct PlayerView: View {
                     )
                     .padding(.bottom, 34)
                 }
+                .transition(.opacity)
+            } else if isWaitingForSeekOrBuffer && openingErrorMessage == nil {
+                VStack {
+                    Spacer()
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(.white.opacity(0.82))
+                        Text("正在缓冲...")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.84))
+                        if displayDownloadSpeedMBs > 0.05 {
+                            Text(String(format: "%.1f MB/s", displayDownloadSpeedMBs))
+                                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.68))
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(
+                        ZStack {
+                            Capsule().fill(.ultraThinMaterial)
+                            Capsule().fill(Color.black.opacity(0.48))
+                            Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.6)
+                        }
+                    )
+                    .padding(.bottom, showControls ? (bottomControlBarHeight + 18) : 34)
+                }
+                .allowsHitTesting(false)
                 .transition(.opacity)
             }
 
@@ -408,11 +448,31 @@ public struct PlayerView: View {
         .onReceive(progressTimer) { _ in
             updateClock()
             guard let handle = playerHandle, !isScrubbing else { return }
+            let nowUptime = ProcessInfo.processInfo.systemUptime
             let newPos = dk_player_get_position(handle)
-            let sinceSeek = ProcessInfo.processInfo.systemUptime - lastSeekCommitUptime
-            let isSettlingSeek = sinceSeek < 1.2 && abs(newPos - lastSeekCommitTarget) > 8.0
+            let sinceSeek = nowUptime - lastSeekCommitUptime
+            let isSettlingSeek = sinceSeek < 2.5 && abs(newPos - lastSeekCommitTarget) > 8.0
             if !isSettlingSeek && abs(currentTime - newPos) > 0.05 {
                 currentTime = newPos
+            }
+            if isPlaying && hasRenderedFirstFrame && !didHandlePlaybackEnded && !isOpeningMedia {
+                if lastObservedPos < 0 || abs(newPos - lastObservedPos) > 0.04 {
+                    lastObservedPos = newPos
+                    lastObservedPosUptime = nowUptime
+                    if isWaitingForSeekOrBuffer {
+                        withAnimation(.easeOut(duration: 0.14)) {
+                            isWaitingForSeekOrBuffer = false
+                        }
+                    }
+                } else if (nowUptime - lastObservedPosUptime) >= 0.48 {
+                    if !isWaitingForSeekOrBuffer {
+                        withAnimation(.easeIn(duration: 0.14)) {
+                            isWaitingForSeekOrBuffer = true
+                        }
+                    }
+                }
+            } else if isWaitingForSeekOrBuffer {
+                isWaitingForSeekOrBuffer = false
             }
             let newBuffered = dk_player_get_buffered_duration(handle)
             if abs(bufferedAheadSeconds - newBuffered) > 0.25 {
@@ -1622,6 +1682,10 @@ public struct PlayerView: View {
         activePlaybackGeneration &+= 1
         let thisGeneration = activePlaybackGeneration
         isOpeningMedia = true
+        hasRenderedFirstFrame = false
+        isWaitingForSeekOrBuffer = false
+        lastObservedPos = -1.0
+        lastObservedPosUptime = ProcessInfo.processInfo.systemUptime
         openingErrorMessage = nil
         didHandlePlaybackEnded = false
         finishedItemPendingCleanup = nil
@@ -2156,6 +2220,8 @@ public struct PlayerView: View {
         seekGeneration += 1
         lastSeekCommitUptime = ProcessInfo.processInfo.systemUptime
         lastSeekCommitTarget = seconds
+        lastObservedPos = seconds
+        lastObservedPosUptime = lastSeekCommitUptime
         currentTime = seconds
         if let handle = playerHandle {
             dk_player_seek(handle, seconds, accurate)
@@ -2274,7 +2340,7 @@ public struct PlayerView: View {
     }
 
     private func exportRedactedDiagnostics() {
-        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.34"
+        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.0"
         var lines: [String] = []
         lines.append("Donby Diagnostics Report (v\(appVer))")
         lines.append("Time: \(ISO8601DateFormatter().string(from: Date()))")
@@ -2367,6 +2433,7 @@ public struct PlayerView: View {
         selectedAudioIdx = option.embyIndex ?? option.avStreamIndex
         if let handle = playerHandle {
             dk_player_select_track(handle, 1, Int32(option.avStreamIndex))
+            activeTurboHandle?.wakeWaitingReads()
             appState.showToast("已切换音轨: \(option.label)", icon: "speaker.wave.2.fill")
         }
     }

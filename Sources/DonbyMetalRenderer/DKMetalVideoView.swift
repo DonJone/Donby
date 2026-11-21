@@ -949,6 +949,15 @@ public final class DKMetalLayerView: NSView {
         }
     }
 
+    public func clearDisplayedFrame() {
+        renderLock.lock()
+        lastPixelBuffer = nil
+        renderLock.unlock()
+        snapshotLock.lock()
+        snapshotPixelBuffer = nil
+        snapshotLock.unlock()
+    }
+
     public func renderLastPixelBuffer() {
         guard renderLock.try() else { return }
         defer { renderLock.unlock() }
@@ -1437,17 +1446,20 @@ public struct DKMetalVideoView: NSViewRepresentable {
     public let controlsOcclusionHeight: CGFloat
     public let subtitleHDRPeakNits: Float
     public let antiOcclusionEnabled: Bool
+    public let onFirstFrameRendered: (() -> Void)?
 
     public init(
         playerHandle: OpaquePointer?,
         controlsOcclusionHeight: CGFloat = 0,
         subtitleHDRPeakNits: Float = 203.0,
-        antiOcclusionEnabled: Bool = true
+        antiOcclusionEnabled: Bool = true,
+        onFirstFrameRendered: (() -> Void)? = nil
     ) {
         self.playerHandle = playerHandle
         self.controlsOcclusionHeight = controlsOcclusionHeight
         self.subtitleHDRPeakNits = subtitleHDRPeakNits
         self.antiOcclusionEnabled = antiOcclusionEnabled
+        self.onFirstFrameRendered = onFirstFrameRendered
     }
 
     public func makeNSView(context: Context) -> DKMetalLayerView {
@@ -1456,6 +1468,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
         view.subtitleHDRPeakNits = subtitleHDRPeakNits
         view.antiOcclusionEnabled = antiOcclusionEnabled
         let coordinator = context.coordinator
+        coordinator.onFirstFrameRendered = onFirstFrameRendered
         view.onDetachFromWindow = { [weak coordinator] in
             coordinator?.stopDisplayLink()
         }
@@ -1467,6 +1480,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
         nsView.controlsOcclusionHeightPoints = controlsOcclusionHeight
         nsView.subtitleHDRPeakNits = subtitleHDRPeakNits
         nsView.antiOcclusionEnabled = antiOcclusionEnabled
+        context.coordinator.onFirstFrameRendered = onFirstFrameRendered
         if context.coordinator.player != playerHandle {
             context.coordinator.updatePlayer(playerHandle)
         }
@@ -1503,6 +1517,8 @@ public struct DKMetalVideoView: NSViewRepresentable {
         var lastBufferPtr: UnsafeMutableRawPointer?
         var lastSubSerial: UInt64 = UInt64.max
         private var lastPausedCheckTime: TimeInterval = 0
+        private var didNotifyFirstFrame: Bool = false
+        public var onFirstFrameRendered: (() -> Void)?
 
         private final class SubtitleSyncBox {
             unowned let view: DKMetalLayerView
@@ -1522,6 +1538,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
             self.lastSubSerial = UInt64.max
             playerLock.lock()
             self._player = player
+            self.didNotifyFirstFrame = false
             playerLock.unlock()
 
             driver.start { [weak self] in
@@ -1532,12 +1549,14 @@ public struct DKMetalVideoView: NSViewRepresentable {
         public func updatePlayer(_ newPlayer: OpaquePointer?) {
             if newPlayer == nil {
                 driver.stop()
+                view?.clearDisplayedFrame()
             }
             playerLock.lock()
             _player = newPlayer
             lastPts = -1.0
             lastBufferPtr = nil
             lastSubSerial = UInt64.max
+            didNotifyFirstFrame = false
             playerLock.unlock()
             view?.updateSubtitleOverlay(rgbaPtr: nil, width: 0, height: 0)
             if newPlayer != nil && view != nil {
@@ -1623,6 +1642,18 @@ public struct DKMetalVideoView: NSViewRepresentable {
                 lastPts = pts
                 lastBufferPtr = bufPtr
                 lastSubSerial = syncBox.updatedSerial
+                var notifyCallback: (() -> Void)? = nil
+                playerLock.lock()
+                if !didNotifyFirstFrame && _player == p {
+                    didNotifyFirstFrame = true
+                    notifyCallback = onFirstFrameRendered
+                }
+                playerLock.unlock()
+                if let notifyCallback {
+                    DispatchQueue.main.async {
+                        notifyCallback()
+                    }
+                }
             } else if subtitleChanged {
                 v.needsRedrawOnSameFrame = true
             }

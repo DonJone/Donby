@@ -51,7 +51,7 @@ private actor EmbyPlaybackInfoCache {
         return hit.response
     }
 
-    func set(_ response: EmbyPlaybackInfoResponse, serverId: UUID, baseURL: String, itemId: String, mediaSourceId: String?, ttlSeconds: TimeInterval = 90) {
+    func set(_ response: EmbyPlaybackInfoResponse, serverId: UUID, baseURL: String, itemId: String, mediaSourceId: String?, ttlSeconds: TimeInterval = 300) {
         let key = makeKey(serverId: serverId, baseURL: baseURL, itemId: itemId, mediaSourceId: mediaSourceId)
         let now = Date()
         if entries.count >= Self.maxEntries {
@@ -98,7 +98,7 @@ public final class EmbyClient: Sendable {
 
     public let clientName = "Donby"
     public var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.34"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.0"
     }
     public let deviceName: String
     public let deviceId: String

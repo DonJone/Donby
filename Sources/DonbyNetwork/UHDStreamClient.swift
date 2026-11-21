@@ -580,7 +580,7 @@ private actor UHDAssetResponseCache {
         return nil
     }
 
-    func set(_ dto: UHDAssetResponseDTO, serverId: UUID, itemType: String, itemId: String, ttlSeconds: TimeInterval = 90) {
+    func set(_ dto: UHDAssetResponseDTO, serverId: UUID, itemType: String, itemId: String, ttlSeconds: TimeInterval = 300) {
         if entries.count > 128 {
             let now = Date()
             entries = entries.filter { $0.value.expiresAt > now }
@@ -619,7 +619,7 @@ public final class UHDStreamClient: Sendable {
     }
 
     public var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.34"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.0"
     }
 
     private func normalizedAPIBase(_ raw: String) -> String {
@@ -788,27 +788,33 @@ public final class UHDStreamClient: Sendable {
         )
         let domains = try await performRequest([UHDPlaybackDomainDTO].self, request: req, priority: .normal)
         let sorted = domains.sorted { $0.sortOrder < $1.sortOrder }
-        var lines: [ServerLineInfo] = []
-        for dom in sorted {
-            let existingURL = server.backupLines.first(where: { $0.domainId == dom.id })?.url
-            let resolvedOrPlaceholder: String
-            if let existingURL, existingURL.hasPrefix("http") {
-                resolvedOrPlaceholder = existingURL
-            } else if let url = try? await resolvePlaybackDomain(server: server, domainId: dom.id) {
-                resolvedOrPlaceholder = url.absoluteString
-            } else {
-                resolvedOrPlaceholder = server.mainLineURL
+        var resolvedMap: [String: String] = [:]
+        await withTaskGroup(of: (String, String).self) { group in
+            for dom in sorted {
+                let existingURL = server.backupLines.first(where: { $0.domainId == dom.id })?.url
+                if let existingURL, existingURL.hasPrefix("http") {
+                    resolvedMap[dom.id] = existingURL
+                } else {
+                    group.addTask {
+                        if let url = try? await self.resolvePlaybackDomain(server: server, domainId: dom.id) {
+                            return (dom.id, url.absoluteString)
+                        }
+                        return (dom.id, server.mainLineURL)
+                    }
+                }
             }
-            lines.append(
-                ServerLineInfo(
-                    name: dom.description?.isEmpty == false ? "\(dom.name) · \(dom.description!)" : dom.name,
-                    url: resolvedOrPlaceholder,
-                    domainId: dom.id,
-                    isAutoSynced: true
-                )
+            for await (domId, resolvedURL) in group {
+                resolvedMap[domId] = resolvedURL
+            }
+        }
+        return sorted.map { dom in
+            ServerLineInfo(
+                name: dom.description?.isEmpty == false ? "\(dom.name) · \(dom.description!)" : dom.name,
+                url: resolvedMap[dom.id] ?? server.mainLineURL,
+                domainId: dom.id,
+                isAutoSynced: true
             )
         }
-        return lines
     }
 
     public func resolvePlaybackDomain(server: EmbyServerConfig, domainId: String) async throws -> URL {
