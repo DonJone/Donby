@@ -1736,6 +1736,10 @@ public struct PlayerView: View {
         let openBox = OpeningPlayerBox()
         self.openingBox = openBox
 
+        // Stop any background detail-page preload immediately so active playback owns full bandwidth
+        // and inherits all already-preloaded chunks from the shared TieredAssetChunkStore.
+        DonbyTurboCacheEngine.shared.cancelDetailPreload()
+
         // Prepare Turbo Multi-Connection Range Engine for remote HTTP(S) VOD streams
         let lowerURL = urlStr.lowercased()
         let isRemoteHTTPVOD = (lowerURL.hasPrefix("http://") || lowerURL.hasPrefix("https://"))
@@ -2341,7 +2345,7 @@ public struct PlayerView: View {
     }
 
     private func exportRedactedDiagnostics() {
-        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.2"
+        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.3"
         var lines: [String] = []
         lines.append("Donby Diagnostics Report (v\(appVer))")
         lines.append("Time: \(ISO8601DateFormatter().string(from: Date()))")

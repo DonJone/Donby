@@ -501,6 +501,29 @@ public struct SettingsView: View {
                     .frame(width: 185)
                 }
 
+                Toggle("进入详情页自动预加载", isOn: $appState.detailPreloadEnabled)
+                Text("打开影片详情页时在后台预读片头或续播点附近码流至缓存，点击播放更快起播（开启后将消耗对应流量）")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+
+                HStack {
+                    Text("详情页预加载时长")
+                        .font(.system(size: 13))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    Spacer()
+                    Picker("", selection: $appState.detailPreloadSeconds) {
+                        Text("15 秒 (默认)").tag(15)
+                        Text("30 秒").tag(30)
+                        Text("60 秒").tag(60)
+                        Text("5 分钟").tag(300)
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 150)
+                    .disabled(!appState.detailPreloadEnabled)
+                }
+                .padding(.leading, 22)
+                .opacity(appState.detailPreloadEnabled ? 1.0 : 0.55)
+
                 Toggle("完整缓存后自动归档到离线库", isOn: $appState.autoSaveFullCacheToOffline)
                 Text("单集或影片缓存至 100% 时保存至 ~/Movies/Donby（需账户允许下载）")
                     .font(.system(size: 11.5))
@@ -763,6 +786,28 @@ public struct SettingsView: View {
             Toggle("自动检查更新", isOn: $updater.autoCheckEnabled)
                 .font(.system(size: 13))
                 .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("更新通道")
+                        .font(.system(size: 13))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    Text(updater.updateChannel.summaryDescription)
+                        .font(.system(size: 11))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                }
+                Spacer()
+                Picker("", selection: $updater.updateChannelRaw) {
+                    ForEach(AppUpdateChannel.allCases) { ch in
+                        Text(ch.displayTitle).tag(ch.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 175)
+                .onChange(of: updater.updateChannelRaw) { _, _ in
+                    Task { await updater.checkForUpdates(manual: true) }
+                }
+            }
         }
         .padding(18)
         .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
@@ -803,6 +848,15 @@ public struct SettingsView: View {
                     Text("发现新版本 v\(release.version)")
                         .font(.system(size: 12.5, weight: .bold))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    if release.isPrerelease {
+                        Text("Pre-release")
+                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                            .foregroundStyle(appState.accentColor)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(appState.accentColor.opacity(0.14))
+                            .clipShape(Capsule())
+                    }
                     if let pub = release.publishedAt {
                         Text(Self.updateDateFormatter.string(from: pub))
                             .font(.system(size: 11))

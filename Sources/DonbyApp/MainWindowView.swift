@@ -288,9 +288,20 @@ private struct AppUpdatePromptSheet: View {
                         .font(.system(size: 28))
                         .foregroundStyle(accentColor)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("发现 Donby 新版本 v\(release.version)")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: isLightMode))
+                        HStack(spacing: 6) {
+                            Text("发现 Donby 新版本 v\(release.version)")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: isLightMode))
+                            if release.isPrerelease {
+                                Text("Pre-release")
+                                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(accentColor)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(accentColor.opacity(0.14))
+                                    .clipShape(Capsule())
+                            }
+                        }
                         Text("当前版本 v\(AppUpdateManager.currentVersion) -> 最新版本 v\(release.version)")
                             .font(.system(size: 12))
                             .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))

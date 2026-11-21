@@ -1,5 +1,26 @@
 import Foundation
 
+public enum AppUpdateChannel: String, CaseIterable, Codable, Identifiable, Sendable {
+    case stable = "stable"
+    case prerelease = "prerelease"
+
+    public var id: String { rawValue }
+
+    public var displayTitle: String {
+        switch self {
+        case .stable: return "正式版 (Stable)"
+        case .prerelease: return "预览版 (Pre-release)"
+        }
+    }
+
+    public var summaryDescription: String {
+        switch self {
+        case .stable: return "仅接收稳定正式版更新"
+        case .prerelease: return "接收抢先体验与最新修复版本（含正式版）"
+        }
+    }
+}
+
 public struct AppReleaseAsset: Codable, Equatable, Sendable {
     public let name: String
     public let browserDownloadURL: URL
@@ -22,6 +43,7 @@ public struct AppReleaseInfo: Codable, Equatable, Identifiable, Sendable {
     public let body: String
     public let htmlURL: URL
     public let publishedAt: Date?
+    public let isPrerelease: Bool
     public let zipAsset: AppReleaseAsset?
     public let dmgAsset: AppReleaseAsset?
     public let checksumAsset: AppReleaseAsset?
@@ -37,6 +59,7 @@ public struct AppReleaseInfo: Codable, Equatable, Identifiable, Sendable {
         body: String,
         htmlURL: URL,
         publishedAt: Date?,
+        isPrerelease: Bool = false,
         zipAsset: AppReleaseAsset? = nil,
         dmgAsset: AppReleaseAsset?,
         checksumAsset: AppReleaseAsset?
@@ -47,6 +70,7 @@ public struct AppReleaseInfo: Codable, Equatable, Identifiable, Sendable {
         self.body = body
         self.htmlURL = htmlURL
         self.publishedAt = publishedAt
+        self.isPrerelease = isPrerelease
         self.zipAsset = zipAsset
         self.dmgAsset = dmgAsset
         self.checksumAsset = checksumAsset
@@ -126,10 +150,42 @@ public enum AppVersionComparator {
     public static func parseGitHubLatestRelease(data: Data, preferredArch: String = "arm64") throws -> AppReleaseInfo {
         let decoder = JSONDecoder()
         guard let dto = try? decoder.decode(GitHubReleaseDTO.self, from: data),
-              let htmlURL = URL(string: dto.html_url) else {
+              let info = buildReleaseInfo(from: dto, preferredArch: preferredArch) else {
             throw AppUpdateParseError.invalidPayload
         }
+        return info
+    }
 
+    public static func parseGitHubReleasesList(
+        data: Data,
+        preferredArch: String = "arm64",
+        includePrereleases: Bool
+    ) throws -> AppReleaseInfo? {
+        let decoder = JSONDecoder()
+        guard let list = try? decoder.decode([GitHubReleaseDTO].self, from: data) else {
+            throw AppUpdateParseError.invalidPayload
+        }
+        let filtered = list.filter { dto in
+            if dto.draft == true { return false }
+            if !includePrereleases && dto.prerelease == true { return false }
+            return true
+        }
+        var best: AppReleaseInfo? = nil
+        for dto in filtered {
+            guard let info = buildReleaseInfo(from: dto, preferredArch: preferredArch) else { continue }
+            if let currentBest = best {
+                if isVersion(info.version, newerThan: currentBest.version) {
+                    best = info
+                }
+            } else {
+                best = info
+            }
+        }
+        return best
+    }
+
+    private static func buildReleaseInfo(from dto: GitHubReleaseDTO, preferredArch: String) -> AppReleaseInfo? {
+        guard let htmlURL = URL(string: dto.html_url) else { return nil }
         let assets = (dto.assets ?? []).compactMap { asset -> AppReleaseAsset? in
             guard let url = URL(string: asset.browser_download_url) else { return nil }
             return AppReleaseAsset(name: asset.name, browserDownloadURL: url, size: max(0, asset.size ?? 0))
@@ -170,6 +226,7 @@ public enum AppVersionComparator {
             body: cleanReleaseNotes(dto.body ?? ""),
             htmlURL: htmlURL,
             publishedAt: parsedDate,
+            isPrerelease: dto.prerelease == true,
             zipAsset: selectedZip,
             dmgAsset: selectedDmg,
             checksumAsset: checksumAsset

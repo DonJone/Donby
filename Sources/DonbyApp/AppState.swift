@@ -173,6 +173,8 @@ public final class AppState: ObservableObject {
     @AppStorage("donby.turboMemoryCacheMB") public var turboMemoryCacheMB: Int = 500
     @AppStorage("donby.turboDiskCacheMB") public var turboDiskCacheMB: Int = 2048
     @AppStorage("donby.turboPrefetchSeconds") public var turboPrefetchSeconds: Double = 60.0
+    @AppStorage("donby.detailPreloadEnabled") public var detailPreloadEnabled: Bool = false
+    @AppStorage("donby.detailPreloadSeconds") public var detailPreloadSeconds: Int = 15
     @AppStorage("donby.autoSkipIntroOutro") public var autoSkipIntroOutro: Bool = false
     @AppStorage("donby.autoNextEpisode") public var autoNextEpisode: Bool = true
     @AppStorage("donby.autoSaveFullCacheToOffline") public var autoSaveFullCacheToOffline: Bool = false

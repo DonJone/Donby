@@ -9,10 +9,10 @@ Before grepping or reading large source files (`dk_engine.cpp`, `TurboCacheAndDo
 3. Check `docs/agent/decisions/` before changing streaming concurrency, caching, or kernel architecture.
 4. For local test harness paths and real-server benchmark commands, check `docs/agent/local/` (git-ignored, local-only).
 
-## 2. Mandatory Commit, Version & Documentation Sync Protocol
-Every **code commit** MUST bind **Version Bump + Structured Commit + `docs/agent/` Sync** together as one atomic unit (pure `docs:`-only commits do not bump the version):
+## 2. Mandatory Commit, Version, Release & Documentation Sync Protocol
+Every **code commit** MUST bind **Version Bump + Structured Commit + `docs/agent/` Sync + GitHub Release** together (pure `docs:`-only commits do not bump the version or publish a release):
 1. **Atomic Version Bump (`vX.Y.Z`)**:
-   - Increment the patch version (e.g. `1.4.0 -> 1.4.1`, or minor on user request) across ALL 6 locations in the same commit:
+   - Increment the patch version (e.g. `1.4.2 -> 1.4.3`, or minor on user request) across ALL 6 locations in the same commit:
      - `build_app.sh` (`APP_VERSION="${DONBY_VERSION:-X.Y.Z}"`)
      - `Sources/DonbyApp/PlayerView.swift` (fallback `appVer`)
      - `Sources/DonbyNetwork/AppUpdateManager.swift` (`currentVersion` fallback)
@@ -20,14 +20,17 @@ Every **code commit** MUST bind **Version Bump + Structured Commit + `docs/agent
      - `Sources/DonbyNetwork/UHDStreamClient.swift` (`clientVersion` fallback)
      - `docs/agent/INDEX.md` (`Current Version`)
 2. **Structured Commit Message**:
-   - Header: `<type>(<scope>): <concise summary> (vX.Y.Z)` (Conventional Commits; version suffix mandatory for code commits).
+   - Header: `<type>(<scope>): <concise summary> (vX.Y.Z) [local-release]` (Conventional Commits; version suffix mandatory for code commits; append `[local-release]` when publishing locally via `scripts/release_local.sh` to skip redundant cloud CI).
    - Body (recommended for non-trivial commits): `Why` / `What` / `Invariants` / `Verified`.
-3. **Append to Active Changelog Shard**:
-   - Add one structured entry at the top of the current version shard under `docs/agent/changelog/` (currently `docs/agent/changelog/v1.4.md`) keyed by **`vX.Y.Z`** (never `(next)` or bare `main`) following `docs/agent/changelog/TEMPLATE.md`.
+3. **Mandatory GitHub Release on Every Version Bump (Channel-Aware)**:
+   - Every time the version number `vX.Y.Z` changes, publish a GitHub Release via `./scripts/release_local.sh X.Y.Z [--prerelease|--stable]`.
+   - **Default Channel = `pre-release` (`--prerelease`)**: Unless the user explicitly requests a Stable / formal release (`--stable`), ALWAYS publish to the **`pre-release`** channel (`--prerelease`). Stable releases require explicit user confirmation and pass `--stable` (which sets GitHub `--latest`).
+4. **Append to Active Changelog Shard**:
+   - Add one structured entry at the top of the current version shard under `docs/agent/changelog/` (currently `docs/agent/changelog/v1.4.md`) keyed by **`vX.Y.Z`** (never `(next)` or bare `main`) following `docs/agent/changelog/TEMPLATE.md`, including release channel (`Pre-release` or `Stable`).
    - Start a new shard when bumping a minor version (e.g., `v1.5.md`) or when a shard exceeds ~300 lines.
-4. **Incremental Module Map Update**:
+5. **Incremental Module Map Update**:
    - Update the affected `docs/agent/modules/*.md` (including its `Last synced: vX.Y.Z` header) ONLY when symbols, state machines, lock ordering, key thresholds, or invariants change. Do NOT rewrite untouched docs or copy full source code into docs.
-5. **ADR Creation**:
+6. **ADR Creation**:
    - Add a numbered file under `docs/agent/decisions/` when making a non-obvious architectural trade-off or rejecting an approach that failed in real testing (prevents future agents from retrying failed ideas).
 
 ## 3. Hard Redlines

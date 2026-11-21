@@ -21,6 +21,7 @@ public enum AppUpdateState: Equatable, Sendable {
 public final class AppUpdateManager: ObservableObject {
     public static let shared = AppUpdateManager()
     public static let githubLatestReleaseAPI = URL(string: "https://api.github.com/repos/DonJone/Donby/releases/latest")!
+    public static let githubReleasesListAPI = URL(string: "https://api.github.com/repos/DonJone/Donby/releases?per_page=15")!
     public static let githubStaticManifestURL = URL(string: "https://github.com/DonJone/Donby/releases/latest/download/latest.json")!
     public static let githubReleasesPageURL = URL(string: "https://github.com/DonJone/Donby/releases")!
 
@@ -30,8 +31,14 @@ public final class AppUpdateManager: ObservableObject {
     public private(set) var isTerminatingForUpdate: Bool = false
 
     @AppStorage("donby.autoCheckForUpdates") public var autoCheckEnabled: Bool = true
+    @AppStorage("donby.updateChannel") public var updateChannelRaw: String = AppUpdateChannel.stable.rawValue
     @AppStorage("donby.lastUpdateCheckTimestamp") private var lastCheckTimestamp: Double = 0
     @AppStorage("donby.skippedUpdateVersion") public var skippedVersion: String = ""
+
+    public var updateChannel: AppUpdateChannel {
+        get { AppUpdateChannel(rawValue: updateChannelRaw) ?? .stable }
+        set { updateChannelRaw = newValue.rawValue }
+    }
 
     private var activeDownloadTask: Task<Void, Never>? = nil
     private var didAutoCheckThisSession: Bool = false
@@ -40,7 +47,7 @@ public final class AppUpdateManager: ObservableObject {
     private init() {}
 
     public static var currentVersion: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.4.2"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.4.3"
     }
 
     public var lastCheckedDate: Date? {
@@ -108,6 +115,29 @@ public final class AppUpdateManager: ObservableObject {
             return "x86_64"
             #endif
         }()
+
+        let channel = updateChannel
+        if channel == .prerelease {
+            var listReq = URLRequest(url: Self.githubReleasesListAPI, timeoutInterval: 10)
+            listReq.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+            listReq.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+            listReq.setValue("Donby/\(Self.currentVersion)", forHTTPHeaderField: "User-Agent")
+
+            if let (data, response) = try? await URLSession.shared.data(for: listReq),
+               let http = response as? HTTPURLResponse {
+                if http.statusCode == 404 {
+                    return nil
+                }
+                if (200...299).contains(http.statusCode),
+                   let parsed = try? AppVersionComparator.parseGitHubReleasesList(
+                       data: data,
+                       preferredArch: preferredArch,
+                       includePrereleases: true
+                   ) {
+                    return parsed
+                }
+            }
+        }
 
         var req = URLRequest(url: Self.githubLatestReleaseAPI, timeoutInterval: 10)
         req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")

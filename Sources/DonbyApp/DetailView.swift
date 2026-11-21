@@ -91,21 +91,105 @@ public struct DetailView: View {
         .task(id: initialItem.id) {
             await loadFullDetailData()
         }
-        .task(id: "\(item.id)|\(heroTargetEpisode?.id ?? "")|\(selectedSourceId)|\(isLoadingDetails)") {
-            guard !isLoadingDetails else { return }
-            guard let server = effectiveDetailServer, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            if item.isSeries && heroTargetEpisode == nil { return }
-            let target = heroResolvedPlayTarget
-            try? await Task.sleep(nanoseconds: 120_000_000)
-            guard !Task.isCancelled else { return }
-            let sourceHint = (target.id == item.id && !selectedSourceId.isEmpty) ? selectedSourceId : nil
-            if server.type == .uhdNative {
-                await UHDStreamClient.shared.prewarmPlaybackDomain(server: server)
-                if target.isEpisode {
-                    _ = try? await UHDStreamClient.shared.fetchAssetMediaSources(server: server, item: target)
-                }
-            } else {
-                await EmbyClient.shared.prewarmPlaybackInfo(server: server, itemId: target.id, mediaSourceId: sourceHint)
+        .onDisappear {
+            DonbyTurboCacheEngine.shared.cancelDetailPreload()
+        }
+        .task(id: "\(item.id)|\(heroTargetEpisode?.id ?? "")|\(selectedSourceId)|\(isLoadingDetails)|\(appState.detailPreloadEnabled)|\(appState.detailPreloadSeconds)") {
+            await runDetailPrewarmAndPreload()
+        }
+    }
+
+    private func runDetailPrewarmAndPreload() async {
+        guard !isLoadingDetails else { return }
+        guard let server = effectiveDetailServer, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if item.isSeries && heroTargetEpisode == nil { return }
+        let target = heroResolvedPlayTarget
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        guard !Task.isCancelled else { return }
+        let sourceHint = (target.id == item.id && !selectedSourceId.isEmpty) ? selectedSourceId : nil
+        if server.type == .uhdNative {
+            await UHDStreamClient.shared.prewarmPlaybackDomain(server: server)
+            if target.isEpisode {
+                _ = try? await UHDStreamClient.shared.fetchAssetMediaSources(server: server, item: target)
+            }
+        } else {
+            await EmbyClient.shared.prewarmPlaybackInfo(server: server, itemId: target.id, mediaSourceId: sourceHint)
+        }
+
+        guard appState.detailPreloadEnabled,
+              appState.turboEnabled,
+              appState.activePlayback == nil,
+              DonbyDownloadManager.shared.completedEntry(for: target.id, serverId: server.id) == nil else {
+            return
+        }
+        // Gentle debounce so quick detail browsing never wastes traffic
+        try? await Task.sleep(nanoseconds: 350_000_000)
+        guard !Task.isCancelled, appState.activePlayback == nil else { return }
+
+        let preset = appState.preferredVersionPreset
+        let enable302 = appState.enable302Cache && server.cache302Request
+        let resolved: ResolvedPlaybackResource?
+        if server.type == .uhdNative {
+            resolved = try? await UHDStreamClient.shared.resolvePlaybackResource(
+                server: server,
+                item: target,
+                preferredSourceId: sourceHint,
+                preferredPreset: preset
+            )
+        } else {
+            resolved = try? await EmbyClient.shared.resolvePlaybackResource(
+                server: server,
+                item: target,
+                preferredSourceId: sourceHint,
+                preferredPreset: preset,
+                enable302Cache: enable302,
+                defer302ProbeWhenTurbo: true
+            )
+        }
+        guard !Task.isCancelled, appState.activePlayback == nil, let res = resolved else { return }
+        let urlStr = res.streamURL.absoluteString.lowercased()
+        guard (urlStr.hasPrefix("http://") || urlStr.hasPrefix("https://")),
+              !urlStr.contains(".m3u8"), !urlStr.contains(".mpd") else {
+            return
+        }
+
+        let assetKey = DonbyTurboCacheEngine.makeAssetKey(
+            serverId: server.id,
+            itemId: target.id,
+            mediaSourceId: res.mediaSource.id
+        )
+        let redirectKey = EmbyClient.redirectCacheKey(
+            serverId: server.id,
+            itemId: target.id,
+            mediaSourceId: res.mediaSource.id,
+            baseURL: server.activeBaseURL
+        )
+        let originURL = res.originStreamURL ?? res.streamURL
+        let cachedRedirectURL: URL? = (res.originStreamURL != nil && res.originStreamURL != res.streamURL) ? res.streamURL : nil
+        let durationSec = Double(target.runTimeTicks ?? res.mediaSource.runTimeTicks ?? 0) / 10_000_000.0
+        let resumeSec = target.resumePositionSeconds
+        let redirectHandler: (@Sendable (URL) -> Void)? = enable302
+            ? Self.makeRedirectStoreHandler(key: redirectKey)
+            : nil
+
+        DonbyTurboCacheEngine.shared.startDetailPreload(
+            assetKey: assetKey,
+            streamURL: originURL,
+            cachedRedirectURL: cachedRedirectURL,
+            headers: res.headers,
+            knownTotalSize: res.mediaSource.size,
+            durationSeconds: durationSec,
+            resumePositionSeconds: resumeSec,
+            preloadSeconds: appState.detailPreloadSeconds,
+            maxMemoryBytes: max(64, appState.turboMemoryCacheMB) * 1024 * 1024,
+            onResolvedRedirectURL: redirectHandler
+        )
+    }
+
+    private nonisolated static func makeRedirectStoreHandler(key: String) -> @Sendable (URL) -> Void {
+        { finalURL in
+            Task {
+                await RedirectCacheStore.shared.storeRedirect(finalURL, for: key)
             }
         }
     }

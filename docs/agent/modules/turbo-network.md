@@ -1,6 +1,6 @@
 # Module Map: Turbo Cache, Streaming & Network (`DonbyNetwork`)
 
-> Last synced: `v1.4.0` (`f35082e`). Load this doc for streaming, seek latency, HTTP/2 Range, L1/L2 caching, Emby/UHD API, offline downloads, and auto-updates.
+> Last synced: `v1.4.3`. Load this doc for streaming, seek latency, HTTP/2 Range, L1/L2 caching, detail-page preloading, Emby/UHD API, offline downloads, and channel-aware auto-updates.
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyNetwork/TurboCacheAndDownloadEngine.swift` (~4754L)
@@ -9,15 +9,15 @@
   - `ChunkStoreMeta` + `TieredAssetChunkStore` — L1 in-memory chunk pool + L2 disk persistence (`media.bin` + `chunks/<idx>.chk` + `meta.json`).
   - `TurboStreamingSessionHub` — shared `URLSession` hub, `URLSessionTaskMetrics` protocol detection (`hostProtocolMultiplexed` for `h2`/`h3` vs `http/1.1`), redirect caching.
   - `TurboStreamByteHandle` — custom `AVIOContext` byte-stream provider (`read(at:length:)`, `seek`, `wakeWaitingReads()`, `directSlices`, `ActiveAttemptRecord`).
-  - `DonbyTurboCacheEngine` — asset lifecycle, download queue, cache eviction, offline materialization, auto-archive.
+  - `DonbyTurboCacheEngine` — asset lifecycle, download queue, cache eviction, offline materialization, auto-archive, and single-slot background detail-page preloader (`startDetailPreload` / `cancelDetailPreload`).
 - `Sources/DonbyNetwork/EmbyClient.swift` (~1135L)
   - `RedirectCacheStore`, `EmbyPlaybackInfoCache` (TTL `300s`), `EmbyHostWarmCache`, `NoRedirectDelegate`, `EmbyClient`.
 - `Sources/DonbyNetwork/UHDStreamClient.swift` (~1682L)
   - UHD native API client: auth, subscriptions/limits, parallel domain resolution (`/playback/domains/*/resolve`), asset cache (TTL `300s`), `/play/*`, `/download/*`, speed-test.
 - `Sources/DonbyNetwork/OfflineMediaLibrary.swift` (~576L)
   - `DonbyOfflineLibraryStorage`, `OfflineSeriesSidecar`, `OfflineEpisodeOrMovieSidecar`, pinned chunk-to-offline linkage.
-- `Sources/DonbyNetwork/AppUpdateManager.swift` (~720L)
-  - GitHub Releases / `latest.json` static manifest checker, `.app.zip` download, `ditto` hot-replace preserving `/Applications/Donby.app` inode.
+- `Sources/DonbyNetwork/AppUpdateManager.swift` (~750L)
+  - Channel-aware (`AppUpdateChannel`: `.stable` vs `.prerelease`) GitHub Releases / `latest.json` checker, `.app.zip` download, `ditto` hot-replace preserving `/Applications/Donby.app` inode.
 
 ## 2. Streaming & Caching Architecture (`TurboCacheAndDownloadEngine`)
 - **Chunk Geometry**: `512 KiB` aligned chunks (`chunkSize`).

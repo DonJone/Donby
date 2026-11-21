@@ -5,6 +5,7 @@ cd "$(dirname "$0")/.."
 
 DEFAULT_VERSION="$(sed -n 's/^APP_VERSION="\${DONBY_VERSION:-\(.*\)}"$/\1/p' build_app.sh | head -n 1)"
 ALLOW_DIRTY=0
+CHANNEL="prerelease"
 VERSION=""
 
 for arg in "$@"; do
@@ -12,9 +13,16 @@ for arg in "$@"; do
         --allow-dirty)
             ALLOW_DIRTY=1
             ;;
+        --stable)
+            CHANNEL="stable"
+            ;;
+        --prerelease)
+            CHANNEL="prerelease"
+            ;;
         -h|--help)
-            echo "Usage: $0 [version] [--allow-dirty]"
+            echo "Usage: $0 [version] [--prerelease|--stable] [--allow-dirty]"
             echo "Builds Donby locally on macOS and publishes Release artifacts directly via gh CLI."
+            echo "Default channel is --prerelease unless --stable is explicitly passed."
             exit 0
             ;;
         *)
@@ -88,19 +96,35 @@ cat > "$NOTES_FILE" <<'MD'
    ```
 MD
 
-echo "==> [3/4] Publishing GitHub Release ${TAG} directly from local artifacts..."
+echo "==> [3/4] Publishing GitHub Release ${TAG} (channel=${CHANNEL}) directly from local artifacts..."
+if [ "$CHANNEL" = "stable" ]; then
+    CHANNEL_FLAGS=(--latest --prerelease=false)
+else
+    CHANNEL_FLAGS=(--prerelease --latest=false)
+fi
+
 if gh release view "$TAG" >/dev/null 2>&1; then
     gh release upload "$TAG" "$DMG_PATH" "$ZIP_PATH" "$MANIFEST_PATH" "$SUMS_PATH" --clobber
-    gh release edit "$TAG" --latest --notes-file "$NOTES_FILE"
+    gh release edit "$TAG" "${CHANNEL_FLAGS[@]}" --notes-file "$NOTES_FILE"
 else
     RELEASE_NOTES="$(cat "$NOTES_FILE")"
-    gh release create "$TAG" \
-        "$DMG_PATH" "$ZIP_PATH" "$MANIFEST_PATH" "$SUMS_PATH" \
-        --target "$TARGET_SHA" \
-        --title "$TAG" \
-        --generate-notes \
-        --notes "$RELEASE_NOTES" \
-        --latest
+    if [ "$CHANNEL" = "stable" ]; then
+        gh release create "$TAG" \
+            "$DMG_PATH" "$ZIP_PATH" "$MANIFEST_PATH" "$SUMS_PATH" \
+            --target "$TARGET_SHA" \
+            --title "$TAG" \
+            --generate-notes \
+            --notes "$RELEASE_NOTES" \
+            --latest
+    else
+        gh release create "$TAG" \
+            "$DMG_PATH" "$ZIP_PATH" "$MANIFEST_PATH" "$SUMS_PATH" \
+            --target "$TARGET_SHA" \
+            --title "${TAG} (Pre-release)" \
+            --generate-notes \
+            --notes "$RELEASE_NOTES" \
+            --prerelease
+    fi
 fi
 
 echo "==> [4/4] Syncing tag ${TAG} locally..."
