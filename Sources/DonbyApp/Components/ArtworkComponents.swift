@@ -1156,16 +1156,18 @@ public struct MediaArtworkView: View {
 }
 
 /// Static weighted top-edge color-extension backdrop rendered behind DetailView's transparent ScrollView.
-/// Hidden behind the crisp hero at rest; smoothly revealed on pull-down overscroll with zero zoom or jitter.
+/// Matches the exact color space, horizontal `.scaledToFill()` visible slice, and saturation/contrast of the hero poster.
 public struct HeroTopEdgeBackdropView: View {
     public let server: EmbyServerConfig?
     public let item: EmbyItem
+    public var viewportAspect: CGFloat = 16.0 / 9.0
 
     @State private var synthesizedStrip: CGImage? = nil
 
-    public init(server: EmbyServerConfig?, item: EmbyItem) {
+    public init(server: EmbyServerConfig?, item: EmbyItem, viewportAspect: CGFloat = 16.0 / 9.0) {
         self.server = server
         self.item = item
+        self.viewportAspect = viewportAspect
     }
 
     private static let stripCache: NSCache<NSString, CGImage> = {
@@ -1174,8 +1176,12 @@ public struct HeroTopEdgeBackdropView: View {
         return c
     }()
 
+    private var quantizedAspectBucket: Int {
+        Int((max(0.5, min(4.0, viewportAspect)) * 20.0).rounded())
+    }
+
     private var stripCacheKey: String {
-        "hero_top_edge_v2|\(server?.activeBaseURL ?? "")|\(item.id)"
+        "hero_top_edge_v3|\(server?.activeBaseURL ?? "")|\(item.id)|\(quantizedAspectBucket)"
     }
 
     public var body: some View {
@@ -1185,26 +1191,36 @@ public struct HeroTopEdgeBackdropView: View {
                     .resizable()
                     .interpolation(.medium)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .saturation(1.10)
+                    .contrast(1.04)
             } else {
                 Color.clear
             }
         }
         .task(id: stripCacheKey) {
             let key = stripCacheKey
+            let aspect = viewportAspect
             if let cached = Self.stripCache.object(forKey: key as NSString) {
                 self.synthesizedStrip = cached
                 return
             }
-            guard let backdrop = await MediaArtworkView.loadOrFetchCGImage(
-                server: server,
-                item: item,
-                kind: .backdrop,
-                maxWidth: 1200,
-                priority: .normal
-            ), !Task.isCancelled else { return }
+            // Prefer the exact UHD backdrop already in memory for 100% identical gamut & pixels
+            let backdrop: CGImage?
+            if let memUHD = MediaArtworkView.cachedCGImageInMemory(item: item, kind: .backdrop, maxWidth: 3840) {
+                backdrop = memUHD
+            } else {
+                backdrop = await MediaArtworkView.loadOrFetchCGImage(
+                    server: server,
+                    item: item,
+                    kind: .backdrop,
+                    maxWidth: 3840,
+                    priority: .normal
+                )
+            }
+            guard let backdrop, !Task.isCancelled else { return }
 
             let strip: CGImage? = await Task.detached(priority: .userInitiated) {
-                Self.buildWeightedTopStrip(from: backdrop)
+                Self.buildWeightedTopStrip(from: backdrop, viewportAspect: aspect)
             }.value
             guard !Task.isCancelled, let strip else { return }
             Self.stripCache.setObject(strip, forKey: key as NSString)
@@ -1214,22 +1230,32 @@ public struct HeroTopEdgeBackdropView: View {
         }
     }
 
-    nonisolated private static func buildWeightedTopStrip(from cgImage: CGImage) -> CGImage? {
+    nonisolated private static func buildWeightedTopStrip(from cgImage: CGImage, viewportAspect: CGFloat) -> CGImage? {
         let srcW = cgImage.width
         let srcH = cgImage.height
         guard srcW >= 8, srcH >= 8 else { return nil }
 
-        // Skip top 1px edge in case source has a 1px dark encoding border
-        let skipY = min(1, max(0, srcH / 40))
-        let cropH = min(8, max(4, srcH - skipY))
-        guard let topCrop = cgImage.cropping(to: CGRect(x: 0, y: skipY, width: srcW, height: cropH)) else {
+        // Match exact horizontal crop that `.scaledToFill()` with `.top` alignment shows in the hero container
+        let imgAspect = CGFloat(srcW) / CGFloat(srcH)
+        let cropX: Int
+        let visibleW: Int
+        if viewportAspect > 0.2 && viewportAspect < imgAspect {
+            let frac = viewportAspect / imgAspect
+            visibleW = max(8, Int((CGFloat(srcW) * frac).rounded()))
+            cropX = max(0, (srcW - visibleW) / 2)
+        } else {
+            cropX = 0
+            visibleW = srcW
+        }
+
+        let sampleRows = min(4, srcH)
+        guard let topCrop = cgImage.cropping(to: CGRect(x: cropX, y: 0, width: visibleW, height: sampleRows)) else {
             return nil
         }
 
-        let sampleW = min(512, srcW)
-        let sampleRows = min(8, cropH)
-        let outH = 64
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let sampleW = min(1024, visibleW)
+        // Preserve the source image's exact display color space (Display P3 / sRGB) so colors never wash out
+        let colorSpace = cgImage.colorSpace ?? CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
         var band = [UInt8](repeating: 0, count: sampleW * sampleRows * 4)
         guard let ctx = CGContext(
             data: &band,
@@ -1247,14 +1273,14 @@ public struct HeroTopEdgeBackdropView: View {
             topBandRGBA: band,
             width: sampleW,
             rows: sampleRows,
-            outputHeight: outH
+            outputHeight: 1
         )
-        guard outPixels.count == sampleW * outH * 4 else { return nil }
+        guard outPixels.count == sampleW * 4 else { return nil }
         let providerData = Data(outPixels) as CFData
         guard let provider = CGDataProvider(data: providerData) else { return nil }
         return CGImage(
             width: sampleW,
-            height: outH,
+            height: 1,
             bitsPerComponent: 8,
             bitsPerPixel: 32,
             bytesPerRow: sampleW * 4,

@@ -7,13 +7,12 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "1.4.28")
+        #expect(DonbyAppInfo.fallbackVersion == "1.4.29")
     }
 
-    @Test func heroTopEdgeSynthesizerPreservesSharpColumnBoundaryAndSuppressesOutlierSpike() {
+    @Test func heroTopEdgeSynthesizerPreservesExactColorContrastAndSuppressesOutlierSpike() {
         let w = 32
-        let rows = 8
-        let outH = 16
+        let rows = 4
         var band = [UInt8](repeating: 255, count: w * rows * 4)
         for y in 0..<rows {
             for x in 0..<w {
@@ -29,24 +28,18 @@ struct DonbyCoreTests {
         let spikeIdx = (0 * w + 24) * 4
         band[spikeIdx] = 255; band[spikeIdx + 1] = 255; band[spikeIdx + 2] = 255
 
-        let out = HeroTopEdgeSynthesizer.synthesizeWeightedStrip(topBandRGBA: band, width: w, rows: rows, outputHeight: outH)
-        #expect(out.count == w * outH * 4)
+        let out = HeroTopEdgeSynthesizer.synthesizeWeightedStrip(topBandRGBA: band, width: w, rows: rows, outputHeight: 1)
+        #expect(out.count == w * 4)
 
-        // Zero horizontal Gaussian blur: adjacent columns right across x=15 | x=16 stay crisp!
-        let leftEdge = ((outH - 1) * w + 15) * 4
-        let rightEdge = ((outH - 1) * w + 16) * 4
-        #expect(Int(out[leftEdge]) > 200 && Int(out[leftEdge + 2]) < 60)
-        #expect(Int(out[rightEdge + 2]) > 190 && Int(out[rightEdge]) < 50)
+        // Exact 1:1 color preservation across adjacent boundary columns (zero horizontal blur, zero contrast washout)
+        let leftEdge = 15 * 4
+        let rightEdge = 16 * 4
+        #expect(out[leftEdge] == 220 && out[leftEdge + 1] == 100 && out[leftEdge + 2] == 40)
+        #expect(out[rightEdge] == 30 && out[rightEdge + 1] == 80 && out[rightEdge + 2] == 210)
 
         // Outlier spike at x=24 is attenuated compared to raw 255 white
-        let spikeColBot = ((outH - 1) * w + 24) * 4
-        #expect(out[spikeColBot] < 160)
-
-        // Top row gently eases toward global mean without turning muddy
-        let leftTop = (0 * w + 2) * 4
-        let leftBot = ((outH - 1) * w + 2) * 4
-        #expect(Int(out[leftTop]) < Int(out[leftBot]))
-        #expect(Int(out[leftTop]) > 195)
+        let spikeCol = 24 * 4
+        #expect(out[spikeCol] < 160)
     }
 
     @Test func subtitleDecoderUTF8BOMAndGB18030() {

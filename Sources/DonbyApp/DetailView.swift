@@ -92,11 +92,15 @@ public struct DetailView: View {
                 canvasCol
                     .ignoresSafeArea(.container, edges: .top)
 
-                // Static weighted top-edge color-extension strip (#03 enhanced):
+                // Static 1:1 color-matched weighted top-edge strip (#03):
                 // hidden behind the crisp hero at rest; smoothly revealed on pull-down overscroll with zero zoom or jitter.
-                HeroTopEdgeBackdropView(server: effectiveDetailServer, item: item)
-                    .frame(width: viewportGeo.size.width, height: 240)
-                    .allowsHitTesting(false)
+                HeroTopEdgeBackdropView(
+                    server: effectiveDetailServer,
+                    item: item,
+                    viewportAspect: viewportGeo.size.width / max(1, heroHeight)
+                )
+                .frame(width: viewportGeo.size.width, height: 240)
+                .allowsHitTesting(false)
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {

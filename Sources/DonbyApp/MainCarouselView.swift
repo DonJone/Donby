@@ -83,17 +83,19 @@ private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
         }
 
         private func handleScrollWheel(_ event: NSEvent) -> NSEvent? {
-           // Reset state unconditionally at gesture start / completion
-           if event.phase == .began || event.phase == .ended || event.phase == .cancelled {
-               accumulatedDeltaX = 0
-               didFireForCurrentSwipe = false
-           }
+            // Never swallow gesture lifecycle boundaries so enclosing/frontmost NSScrollViews
+            // always receive finger-lift (.ended/.cancelled) and bounce back cleanly.
+            if event.phase == .began || event.phase == .ended || event.phase == .cancelled || event.phase == .mayBegin {
+                accumulatedDeltaX = 0
+                didFireForCurrentSwipe = false
+                return event
+            }
 
             let dx = event.scrollingDeltaX
             let dy = event.scrollingDeltaY
 
-            // Early fast-path exit: let vertical page scrolling pass through instantly without coordinate math
-           if abs(dy) > abs(dx) * 1.25 && abs(dy) > 1.0 {
+            // Only intercept clear horizontal swipes; always pass vertical or zero-delta events through.
+            guard abs(dx) > abs(dy) * 1.25 && abs(dx) > 0.5 else {
                 return event
             }
 
@@ -109,7 +111,7 @@ private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
                 return event
             }
 
-            // Ignore post-lift trackpad inertia so one flick advances exactly one poster
+            // Swallow only horizontal post-lift trackpad inertia so one horizontal flick advances one poster
             if !event.momentumPhase.isEmpty {
                 return nil
             }
@@ -119,7 +121,7 @@ private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
                 // Normalize finger motion: swiping two fingers LEFT advances to next poster
                 let fingerDeltaX = event.isDirectionInvertedFromDevice ? dx : -dx
                 accumulatedDeltaX += fingerDeltaX
-               let threshold: CGFloat = 20.0
+                let threshold: CGFloat = 20.0
                 if accumulatedDeltaX <= -threshold {
                     didFireForCurrentSwipe = true
                     accumulatedDeltaX = 0
@@ -322,7 +324,7 @@ public struct MainCarouselView: View {
             .frame(height: height)
             .background(
                 TrackpadHorizontalSwipeDetector(
-                   isEnabled: true,
+                    isEnabled: appState.currentDetailItem == nil && appState.activePlayback == nil,
                     onSwipeNext: { stepSlide(1) },
                     onSwipePrev: { stepSlide(-1) }
                 )
