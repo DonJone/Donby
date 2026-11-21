@@ -128,7 +128,7 @@ public struct DownloadsView: View {
                 .padding(.leading, 58)
             }
 
-            Text(displayMode == .library ? "离线下载" : "下载队列与缓存")
+            Text(displayMode == .library ? "已下载" : "下载队列与缓存")
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                 .lineLimit(1)
@@ -433,7 +433,7 @@ public struct DownloadsView: View {
             Button {
                 DonbyTurboCacheEngine.shared.clearAllUnpinnedCache()
                 refreshDiskUsage(runMigration: false)
-                appState.showToast("已清理临时分片缓存（离线下载已保留）", icon: "sparkles")
+                appState.showToast("已清理临时分片缓存（已下载内容已保留）", icon: "sparkles")
             } label: {
                 Text("清理临时缓存")
                     .font(.system(size: 12, weight: .semibold))

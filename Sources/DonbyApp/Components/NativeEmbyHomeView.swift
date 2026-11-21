@@ -109,6 +109,9 @@ private final class NativeHomeShelfView: FlippedLayerHostView, NSCollectionViewD
         horizontalScrollView.hasVerticalScroller = false
         horizontalScrollView.hasHorizontalScroller = false
         horizontalScrollView.autohidesScrollers = true
+        horizontalScrollView.scrollerStyle = .overlay
+        horizontalScrollView.horizontalScroller?.isHidden = true
+        horizontalScrollView.horizontalScroller?.alphaValue = 0
 
         let layout = FixedShelfFlowLayout()
         layout.scrollDirection = .horizontal

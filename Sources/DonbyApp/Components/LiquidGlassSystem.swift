@@ -651,18 +651,16 @@ public struct DonbyDownloadedBadgePill: View {
 
     public var body: some View {
         let symbolTint = isCompleted ? Color.white.opacity(0.95) : accentColor
-        let borderTint = isCompleted ? Color.white.opacity(0.24) : accentColor.opacity(0.45)
-        HStack(spacing: 4) {
-            DownloadVectorIcon(
-                state: isCompleted ? .completed : .idle,
-                size: max(9.5, fontSize + 0.5),
-                color: symbolTint
-            )
+        let borderTint = isCompleted ? Color.white.opacity(0.22) : accentColor.opacity(0.45)
+        HStack(spacing: 3.5) {
+            Image(systemName: isCompleted ? "checkmark" : "arrow.down")
+                .font(.system(size: max(8.0, fontSize - 1.0), weight: .bold))
+                .foregroundStyle(symbolTint)
             Text(text)
                 .font(.system(size: fontSize, weight: .semibold, design: .rounded))
                 .foregroundStyle(Color.white.opacity(0.95))
         }
-        .padding(.horizontal, 7)
+        .padding(.horizontal, 6.5)
         .padding(.vertical, 2.5)
         .background(Color.black.opacity(0.64))
         .clipShape(Capsule())

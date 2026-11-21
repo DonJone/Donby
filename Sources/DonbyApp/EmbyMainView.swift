@@ -404,12 +404,6 @@ public struct EmbyMainView: View {
         .padding(.horizontal, 24)
         .frame(height: 54)
         .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
-        .overlay(
-            Rectangle()
-                .fill(DonbyGlassPalette.separator(isLight: appState.isLightMode))
-                .frame(height: 0.6),
-            alignment: .bottom
-        )
     }
 
     private var inlineSearchResults: [EmbyItem] {

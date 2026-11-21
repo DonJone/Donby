@@ -173,16 +173,6 @@ public struct PosterCardView: View, Equatable {
 
                 VStack {
                     HStack(alignment: .top, spacing: 4) {
-                        if appearance.showResolutionBadge, let resBadge = item.resolutionBadge {
-                            Text(resBadge)
-                                .font(.system(size: 9.5, weight: .heavy, design: .rounded))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 5.5)
-                                .padding(.vertical, 2)
-                                .background(Color.black.opacity(0.68))
-                                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                        }
-
                         Spacer()
 
                         if let unplayed = item.userData?.unplayedItemCount, unplayed > 0 {
@@ -204,18 +194,13 @@ public struct PosterCardView: View, Equatable {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 4) {
                             if appearance.showRatingBadge, let rating = item.communityRating, rating > 0 {
-                                HStack(spacing: 3) {
-                                    Image(systemName: "star.fill")
-                                        .font(.system(size: 8.5))
-                                        .foregroundStyle(.yellow)
-                                    Text(String(format: "%.1f", rating))
-                                        .font(.system(size: 10.5, weight: .bold, design: .rounded))
-                                        .foregroundStyle(.white)
-                                }
-                                .padding(.horizontal, 5.5)
-                                .padding(.vertical, 2)
-                                .background(Color.black.opacity(0.62))
-                                .clipShape(Capsule())
+                                Text(String(format: "%.1f", rating))
+                                    .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 6.5)
+                                    .padding(.vertical, 2)
+                                    .background(Color.black.opacity(0.62))
+                                    .clipShape(Capsule())
                             }
 
                             if let dlBadge = appearance.downloadStatusIndex.badgeText(for: item) {
@@ -327,14 +312,6 @@ public struct LandscapeCardView: View, Equatable {
                         if let epCode = item.episodeCodeString {
                             Text(epCode)
                                 .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.black.opacity(0.65))
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                        } else if let res = item.resolutionBadge {
-                            Text(res)
-                                .font(.system(size: 10, weight: .bold, design: .rounded))
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)

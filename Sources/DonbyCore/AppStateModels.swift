@@ -1,12 +1,12 @@
 import Foundation
 
 public enum MainNavigationTab: String, CaseIterable, Identifiable, Sendable {
-    case files = "files"
+    case search = "search"
     case servers = "servers"
-    case iptv = "iptv"
+    case files = "files"
     case records = "records"
     case downloads = "downloads"
-    case search = "search"
+    case iptv = "iptv"
     case settings = "settings"
 
     public var id: String { rawValue }

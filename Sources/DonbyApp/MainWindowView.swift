@@ -181,32 +181,37 @@ public struct MainWindowView: View {
             }
             .frame(height: 52)
 
-            VStack(alignment: .leading, spacing: 3) {
-                ForEach(MainNavigationTab.allCases) { tab in
-                    let isSelected = (appState.openedServerId == nil && appState.currentDetailItem == nil && appState.selectedTab == tab)
-                    SidebarTabItemButton(tab: tab, isSelected: isSelected)
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, 4)
+            let visibleServers = appState.servers.filter { !appState.hideEncryptedServers || !$0.isEncrypted }
 
-            Text("服务器")
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                .padding(.horizontal, 22)
-                .padding(.top, 18)
-                .padding(.bottom, 6)
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    if !visibleServers.isEmpty {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(visibleServers) { server in
+                                SidebarServerItemButton(server: server)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.top, 4)
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(appState.servers.filter { !appState.hideEncryptedServers || !$0.isEncrypted }) { server in
-                        SidebarServerItemButton(server: server)
+                        Rectangle()
+                            .fill(DonbyGlassPalette.separator(isLight: appState.isLightMode))
+                            .frame(height: 1)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 12)
                     }
-                }
-                .padding(.horizontal, 12)
-            }
 
-            Spacer()
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(MainNavigationTab.allCases) { tab in
+                            let isSelected = (appState.openedServerId == nil && appState.currentDetailItem == nil && appState.selectedTab == tab)
+                            SidebarTabItemButton(tab: tab, isSelected: isSelected)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.top, visibleServers.isEmpty ? 4 : 0)
+                    .padding(.bottom, 16)
+                }
+            }
         }
     }
 }
@@ -227,16 +232,10 @@ private struct SidebarTabItemButton: View {
                 let iconFg = isSelected
                     ? (appState.isMonochromeTheme ? Color.white : appState.accentTextColor)
                     : (isHovered ? DonbyGlassPalette.primaryText(isLight: appState.isLightMode) : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                Group {
-                    if tab == .downloads {
-                        DownloadVectorIcon(state: .idle, size: 15, color: iconFg)
-                    } else {
-                        Image(systemName: tab.icon)
-                            .font(.system(size: 14.5, weight: isSelected ? .semibold : .medium))
-                            .foregroundStyle(iconFg)
-                    }
-                }
-                .frame(width: 20, alignment: .center)
+                Image(systemName: tab.icon)
+                    .font(.system(size: 14.5, weight: isSelected ? .semibold : .medium))
+                    .foregroundStyle(iconFg)
+                    .frame(width: 20, alignment: .center)
 
                 Text(tab.title)
                     .font(.system(size: 13.5, weight: isSelected ? .semibold : .regular))

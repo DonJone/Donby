@@ -238,15 +238,6 @@ public struct MainCarouselView: View {
 
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 8) {
-                        if let res = item.resolutionBadge {
-                            Text(res)
-                                .font(.system(size: 11, weight: .heavy, design: .rounded))
-                                .foregroundStyle(appState.accentTextColor)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(appState.accentColor)
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                        }
                         if let audioTag = item.audioSummaryTag {
                             Text(audioTag)
                                 .font(.system(size: 11, weight: .semibold, design: .rounded))
@@ -257,14 +248,11 @@ public struct MainCarouselView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
                         }
                         if let rating = item.communityRating, rating > 0 {
-                            HStack(spacing: 4) {
-                                Image(systemName: "star.fill").font(.system(size: 10)).foregroundStyle(.yellow)
-                                Text(String(format: "%.1f", rating))
-                                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                                    .foregroundStyle(.white)
-                            }
-                            .padding(.horizontal, 8).padding(.vertical, 3)
-                            .background(Color.black.opacity(0.45)).clipShape(Capsule())
+                            Text(String(format: "%.1f", rating))
+                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 8).padding(.vertical, 3)
+                                .background(Color.black.opacity(0.45)).clipShape(Capsule())
                         }
                         if let year = item.productionYear {
                             Text(String(year)).font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.82))

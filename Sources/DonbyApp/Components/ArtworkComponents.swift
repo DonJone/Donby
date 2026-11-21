@@ -1535,21 +1535,27 @@ public struct ClearLogoHeaderView: View {
                 Image(nsImage: img)
                     .resizable()
                     .scaledToFit()
-                    .frame(maxWidth: 380, maxHeight: 78, alignment: .leading)
-                    .shadow(color: Color.black.opacity(isLightMode ? 0.14 : 0.45), radius: 4, y: 2)
+                    .frame(maxWidth: 380, maxHeight: 86, alignment: .leading)
+                    .shadow(color: Color.black.opacity(isLightMode ? 0.18 : 0.48), radius: 5, y: 2)
+                if item.isEpisode && !subtitle.isEmpty && subtitle != showTitle {
+                    Text(subtitle)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))
+                        .lineLimit(1)
+                }
             } else {
                 Text(showTitle)
                     .font(.system(size: item.isEpisode ? 32 : 38, weight: .heavy, design: .rounded))
-                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: isLightMode))
-                    .shadow(color: isLightMode ? Color.white.opacity(0.85) : Color.black.opacity(0.50), radius: 3, y: 1)
+                    .foregroundStyle(.white)
+                    .shadow(color: Color.black.opacity(0.45), radius: 6, y: 2)
                     .lineLimit(2)
-            }
-
-            if !subtitle.isEmpty && subtitle != showTitle {
-                Text(subtitle)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))
-                    .lineLimit(1)
+                if !subtitle.isEmpty && subtitle != showTitle {
+                    Text(subtitle)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.84))
+                        .shadow(color: Color.black.opacity(0.38), radius: 4, y: 1)
+                        .lineLimit(1)
+                }
             }
         }
         .task(id: "\(server?.activeBaseURL ?? "")|\(item.id)|\(item.seriesId ?? "")") {

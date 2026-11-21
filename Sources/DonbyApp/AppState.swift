@@ -2255,7 +2255,7 @@ public final class AppState: ObservableObject {
     ) async {
         await refreshServerCapabilities(for: server)
         guard canDownload(from: server) else {
-            showToast("当前账号或订阅套餐不允许离线下载", icon: "lock.fill", isError: true)
+            showToast("当前账号或订阅套餐不允许下载", icon: "lock.fill", isError: true)
             return
         }
         do {
@@ -2338,9 +2338,9 @@ public final class AppState: ObservableObject {
                 seriesArtworkURLs: (poster: seriesPoster, backdrop: seriesBackdrop, logo: seriesLogo),
                 connectionBudgetPerTask: budget
             )
-            showToast("已加入离线下载队列：\(meta.title)", icon: "arrow.down.circle.fill")
+            showToast("已加入下载队列：\(meta.title)", icon: "arrow.down.circle.fill")
         } catch {
-            showToast("添加离线下载失败: \(error.localizedDescription)", icon: "exclamationmark.triangle.fill", isError: true)
+            showToast("添加下载失败: \(error.localizedDescription)", icon: "exclamationmark.triangle.fill", isError: true)
         }
     }
 
@@ -2404,7 +2404,7 @@ public final class AppState: ObservableObject {
             guard canDownload(from: server) else {
                 store.setPinned(false)
                 if !isAutoSave {
-                    showToast("当前账户订阅不允许转存离线下载", icon: "lock.fill", isError: true)
+                    showToast("当前账户订阅不允许转存下载", icon: "lock.fill", isError: true)
                 }
                 return
             }

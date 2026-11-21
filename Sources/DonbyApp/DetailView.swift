@@ -112,22 +112,24 @@ public struct DetailView: View {
 
     private var heroHeaderSection: some View {
         ZStack(alignment: .bottomLeading) {
-            // 1. Clear High-Resolution Backdrop Fanart (Cinematic bleed)
+            // 1. Clear High-Resolution Backdrop Fanart (Cinematic bleed, vivid contrast)
             GeometryReader { bgGeo in
                 MediaArtworkView(server: effectiveDetailServer, item: item, kind: .backdrop, maxWidth: 3840)
                     .frame(width: bgGeo.size.width, height: bgGeo.size.height)
+                    .saturation(1.10)
+                    .contrast(1.04)
                     .clipped()
             }
             .frame(height: 440)
             .clipped()
 
-            // 2. Ambient Gradient Dissolve into Canvas
+            // 2. Cinematic Bottom Scrim (keep upper 52% completely clear & vivid; ensure crisp white text contrast)
             LinearGradient(
                 stops: [
                     .init(color: .clear, location: 0.0),
-                    .init(color: (appState.isLightMode ? DonbyGlassPalette.canvasLight : DonbyGlassPalette.canvasBlack).opacity(0.18), location: 0.44),
-                    .init(color: (appState.isLightMode ? DonbyGlassPalette.canvasLight : DonbyGlassPalette.canvasBlack).opacity(0.74), location: 0.74),
-                    .init(color: (appState.isLightMode ? DonbyGlassPalette.canvasLight : DonbyGlassPalette.canvasBlack), location: 1.0)
+                    .init(color: .clear, location: 0.50),
+                    .init(color: Color.black.opacity(appState.isLightMode ? 0.34 : 0.42), location: 0.72),
+                    .init(color: Color.black.opacity(appState.isLightMode ? 0.64 : 0.82), location: 1.0)
                 ],
                 startPoint: .top,
                 endPoint: .bottom
@@ -429,13 +431,13 @@ public struct DetailView: View {
                                         .foregroundStyle(AppState.appleMusicRed)
                                     Text(String(format: "%.1f", item.communityRating ?? 10.0))
                                         .font(.system(size: 13.5, weight: .heavy, design: .rounded))
-                                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                                        .foregroundStyle(.white)
                                 }
 
                                 if let genres = item.genres, !genres.isEmpty {
                                     Text(genres.joined(separator: " · "))
                                         .font(.system(size: 12.5, weight: .semibold))
-                                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                                        .foregroundStyle(Color.white.opacity(0.86))
                                 }
 
                                 if let dlSummary = heroDownloadedBadgeText {
@@ -451,18 +453,19 @@ public struct DetailView: View {
                             // Specs Line (e.g. 45 分钟 · 2026年11月2日 · 4K · 25FPS · 1.11 GB)
                             Text(specsSummaryLine)
                                 .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                                .foregroundStyle(Color.white.opacity(0.78))
                                 .lineLimit(1)
 
                             // Synopsis Overview
                             if let overview = item.overview, !overview.isEmpty {
                                 Text(overview)
                                     .font(.system(size: 12.5))
-                                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                                    .foregroundStyle(Color.white.opacity(0.92))
                                     .lineLimit(3)
                                     .frame(maxWidth: 580, alignment: .leading)
                             }
                         }
+                        .shadow(color: Color.black.opacity(0.32), radius: 3, y: 1)
                         .padding(.top, 2)
                     }
                 }
@@ -478,7 +481,7 @@ public struct DetailView: View {
             return cnt > 0 ? "已下载 \(cnt) 集" : nil
         }
         if downloadManager.completedEntry(for: item.id) != nil {
-            return "已离线下载"
+            return "已下载"
         }
         if let active = downloadManager.activeOrCompletedEntry(for: item.id),
            active.status == .downloading || active.status == .queued {
@@ -534,9 +537,9 @@ public struct DetailView: View {
             }
         }()
         let tip: String = {
-            if !serverAllows { return "当前账户套餐不允许离线下载" }
+            if !serverAllows { return "当前账户套餐不允许下载" }
             switch matchingEntry?.status {
-            case .completed: return "已离线缓存（点击打开下载页面）"
+            case .completed: return "已下载（点击打开下载页面）"
             case .downloading:
                 return String(format: "下载中 %.0f%%", (matchingEntry?.progressFraction ?? 0) * 100)
             case .queued: return "已在下载队列等待"
@@ -544,7 +547,7 @@ public struct DetailView: View {
                 if let cached = cachedSummary {
                     return String(format: "已播放缓存 %.0f%%（点击从断点继续下载至 ~/Movies/Donby）", cached.progressFraction * 100)
                 }
-                return item.isSeries ? "离线下载首集或未看剧集至 ~/Movies/Donby" : "离线下载至 ~/Movies/Donby"
+                return item.isSeries ? "下载首集或未看剧集至 ~/Movies/Donby" : "下载至 ~/Movies/Donby"
             }
         }()
 
@@ -1112,9 +1115,9 @@ public struct DetailView: View {
                         }
                     } label: {
                         if let cached = epCachedSummary {
-                            Label(String(format: "离线下载此集 (已缓存 %.0f%%)", cached.progressFraction * 100), systemImage: "arrow.down.circle")
+                            Label(String(format: "下载此集 (已缓存 %.0f%%)", cached.progressFraction * 100), systemImage: "arrow.down.circle")
                         } else {
-                            Label("离线下载此集", systemImage: "arrow.down.circle")
+                            Label("下载此集", systemImage: "arrow.down.circle")
                         }
                     }
                 }

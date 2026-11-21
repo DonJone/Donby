@@ -276,7 +276,6 @@ public struct SettingsView: View {
 
                 Toggle("默认折叠侧边栏", isOn: $appState.defaultSidebarCollapsed)
                 Toggle("界面透明材质", isOn: $appState.displayAeroGlass)
-                Toggle("卡片显示分辨率标签", isOn: $appState.showResolutionBadge)
                 Toggle("卡片显示评分", isOn: $appState.showRatingBadge)
                 Toggle("显示媒体规格统计", isOn: $appState.displayMediaStatistics)
             }
@@ -510,7 +509,7 @@ public struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Toggle("播放结束后清理自动归档", isOn: $appState.autoDeleteAutoArchivedAfterPlayback)
                         .disabled(!appState.autoSaveFullCacheToOffline)
-                    Text("仅清理自动归档文件及关联字幕，保留手动离线下载的内容")
+                    Text("仅清理自动归档文件及关联字幕，保留手动下载的内容")
                         .font(.system(size: 11))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }

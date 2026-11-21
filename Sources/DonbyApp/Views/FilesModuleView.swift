@@ -578,7 +578,7 @@ public struct FilesModuleView: View {
 
                         if matchingOffline != nil {
                             DonbyDownloadedBadgePill(
-                                text: "已离线",
+                                text: "已下载",
                                 isCompleted: true,
                                 accentColor: appState.accentColor,
                                 fontSize: 9.0

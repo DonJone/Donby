@@ -32,6 +32,14 @@ final class NonDraggableScrollView: NSScrollView {
 final class HorizontalShelfScrollView: NSScrollView {
     override var mouseDownCanMoveWindow: Bool { false }
 
+    override func tile() {
+        super.tile()
+        if let scroller = horizontalScroller {
+            scroller.isHidden = true
+            scroller.alphaValue = 0
+        }
+    }
+
     override func scrollWheel(with event: NSEvent) {
         if abs(event.scrollingDeltaY) > abs(event.scrollingDeltaX) {
             nextResponder?.scrollWheel(with: event)
@@ -682,7 +690,7 @@ enum NativeCardLayerCache {
     }
 
     static func ratingPillImage(ratingText: String) -> CGImage? {
-        let key = "rating|\(ratingText)"
+        let key = "rating_v2|\(ratingText)"
         if let cached = pillCache[key] { return cached }
         return cachedPillImage(
             cacheKey: key,
@@ -691,11 +699,8 @@ enum NativeCardLayerCache {
             textColor: .white,
             backgroundColor: ratingBadgeBg,
             cornerRadius: nil,
-            horizontalPadding: 5.5,
-            verticalPadding: 2.0,
-            leadingSymbol: "star.fill",
-            symbolPointSize: 8.5,
-            symbolColor: .systemYellow
+            horizontalPadding: 6.5,
+            verticalPadding: 2.0
         )
     }
 
@@ -715,14 +720,14 @@ enum NativeCardLayerCache {
     }
 
     static func downloadedBadgeImage(text: String, isCompleted: Bool, accentColor: NSColor, accentKey: String? = nil) -> CGImage? {
-        let key = "dl_glass_v2|\(text)|\(isCompleted ? "done" : (accentKey ?? colorKey(accentColor)))"
+        let key = "dl_glass_v3|\(text)|\(isCompleted ? "done" : (accentKey ?? colorKey(accentColor)))"
         if let cached = pillCache[key] { return cached }
-        let bg = NSColor.black.withAlphaComponent(0.66)
+        let bg = NSColor.black.withAlphaComponent(0.64)
         let border = isCompleted
             ? NSColor.white.withAlphaComponent(0.22)
-            : accentColor.withAlphaComponent(0.55)
+            : accentColor.withAlphaComponent(0.45)
         let symColor = isCompleted
-            ? NSColor(srgbRed: 0.42, green: 0.88, blue: 0.68, alpha: 0.96)
+            ? NSColor.white.withAlphaComponent(0.95)
             : accentColor
         return cachedPillImage(
             cacheKey: key,
@@ -731,9 +736,9 @@ enum NativeCardLayerCache {
             textColor: NSColor.white.withAlphaComponent(0.95),
             backgroundColor: bg,
             cornerRadius: nil,
-            horizontalPadding: 6.0,
+            horizontalPadding: 6.5,
             verticalPadding: 2.0,
-            leadingSymbol: isCompleted ? "arrow.down.to.line" : "arrow.down",
+            leadingSymbol: isCompleted ? "checkmark" : "arrow.down",
             symbolPointSize: 8.5,
             symbolColor: symColor,
             borderColor: border
@@ -1168,12 +1173,7 @@ final class NativePosterCollectionItem: NSCollectionViewItem, HoverableCollectio
         }
         lastIsLightMode = appearance.isLightMode
 
-        if appearance.showResolutionBadge, let res = item.resolutionBadge {
-            configureBadgeLayer(resBadgeLayer, with: NativeCardLayerCache.resolutionBadgeImage(text: res))
-            resBadgeLayer.isHidden = false
-        } else {
-            resBadgeLayer.isHidden = true
-        }
+        resBadgeLayer.isHidden = true
 
         if let unplayed = item.userData?.unplayedItemCount, unplayed > 0 {
             configureBadgeLayer(
@@ -1575,15 +1575,6 @@ final class NativeLandscapeCollectionItem: NSCollectionViewItem, HoverableCollec
         var dlX: CGFloat = 7
         if let epCode = item.episodeCodeString {
             let cg = NativeCardLayerCache.resolutionBadgeImage(text: epCode, monospaced: true)
-            configureBadgeLayer(topLeftBadgeLayer, with: cg)
-            if let cg {
-                let bw = CGFloat(cg.width) * 0.5
-                topLeftBadgeLayer.frame = CGRect(x: 7, y: 7, width: bw, height: CGFloat(cg.height) * 0.5)
-                dlX = 7 + bw + 5
-            }
-            topLeftBadgeLayer.isHidden = false
-        } else if let res = item.resolutionBadge {
-            let cg = NativeCardLayerCache.resolutionBadgeImage(text: res)
             configureBadgeLayer(topLeftBadgeLayer, with: cg)
             if let cg {
                 let bw = CGFloat(cg.width) * 0.5

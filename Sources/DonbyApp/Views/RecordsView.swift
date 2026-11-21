@@ -138,16 +138,6 @@ public struct RecordsView: View {
                         .font(.system(size: 15, weight: .bold))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 
-                    if let tag = record.resolutionTag {
-                        Text(tag)
-                            .font(.system(size: 10, weight: .semibold, design: .rounded))
-                            .foregroundStyle(appState.accentColor)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(appState.accentColor.opacity(0.12))
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
-                    }
-
                     Text(record.sourceType)
                         .font(.system(size: 10.5))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
