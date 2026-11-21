@@ -1546,14 +1546,13 @@ public struct ClearLogoHeaderView: View {
             } else {
                 Text(showTitle)
                     .font(.system(size: item.isEpisode ? 32 : 38, weight: .heavy, design: .rounded))
-                    .foregroundStyle(.white)
-                    .shadow(color: Color.black.opacity(0.45), radius: 6, y: 2)
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: isLightMode))
+                    .shadow(color: Color.black.opacity(isLightMode ? 0.08 : 0.45), radius: 2, y: 1)
                     .lineLimit(2)
                 if !subtitle.isEmpty && subtitle != showTitle {
                     Text(subtitle)
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Color.white.opacity(0.84))
-                        .shadow(color: Color.black.opacity(0.38), radius: 4, y: 1)
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))
                         .lineLimit(1)
                 }
             }

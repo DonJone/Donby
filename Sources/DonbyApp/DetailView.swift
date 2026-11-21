@@ -111,7 +111,9 @@ public struct DetailView: View {
     }
 
     private var heroHeaderSection: some View {
-        ZStack(alignment: .bottomLeading) {
+        let heroHeight: CGFloat = 440
+        let canvasCol = appState.isLightMode ? DonbyGlassPalette.canvasLight : DonbyGlassPalette.canvasBlack
+        return ZStack(alignment: .bottomLeading) {
             // 1. Clear High-Resolution Backdrop Fanart (Cinematic bleed, vivid contrast)
             GeometryReader { bgGeo in
                 MediaArtworkView(server: effectiveDetailServer, item: item, kind: .backdrop, maxWidth: 3840)
@@ -120,21 +122,23 @@ public struct DetailView: View {
                     .contrast(1.04)
                     .clipped()
             }
-            .frame(height: 440)
+            .frame(height: heroHeight)
             .clipped()
 
-            // 2. Cinematic Bottom Scrim (keep upper 52% completely clear & vivid; ensure crisp white text contrast)
+            // 2. Silky Ambient Gradient Dissolve into Canvas (upper 46% completely clear & vivid)
             LinearGradient(
                 stops: [
                     .init(color: .clear, location: 0.0),
-                    .init(color: .clear, location: 0.50),
-                    .init(color: Color.black.opacity(appState.isLightMode ? 0.34 : 0.42), location: 0.72),
-                    .init(color: Color.black.opacity(appState.isLightMode ? 0.64 : 0.82), location: 1.0)
+                    .init(color: .clear, location: 0.46),
+                    .init(color: canvasCol.opacity(0.26), location: 0.62),
+                    .init(color: canvasCol.opacity(0.76), location: 0.76),
+                    .init(color: canvasCol.opacity(0.96), location: 0.90),
+                    .init(color: canvasCol, location: 1.0)
                 ],
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .frame(height: 440)
+            .frame(height: heroHeight)
 
             // 3. Floating Navigation Capsules & Hero Metadata Content
             VStack(alignment: .leading, spacing: 0) {
@@ -431,13 +435,13 @@ public struct DetailView: View {
                                         .foregroundStyle(AppState.appleMusicRed)
                                     Text(String(format: "%.1f", item.communityRating ?? 10.0))
                                         .font(.system(size: 13.5, weight: .heavy, design: .rounded))
-                                        .foregroundStyle(.white)
+                                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                                 }
 
                                 if let genres = item.genres, !genres.isEmpty {
                                     Text(genres.joined(separator: " · "))
                                         .font(.system(size: 12.5, weight: .semibold))
-                                        .foregroundStyle(Color.white.opacity(0.86))
+                                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                                 }
 
                                 if let dlSummary = heroDownloadedBadgeText {
@@ -453,19 +457,18 @@ public struct DetailView: View {
                             // Specs Line (e.g. 45 分钟 · 2026年11月2日 · 4K · 25FPS · 1.11 GB)
                             Text(specsSummaryLine)
                                 .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(Color.white.opacity(0.78))
+                                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                                 .lineLimit(1)
 
                             // Synopsis Overview
                             if let overview = item.overview, !overview.isEmpty {
                                 Text(overview)
                                     .font(.system(size: 12.5))
-                                    .foregroundStyle(Color.white.opacity(0.92))
+                                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                                     .lineLimit(3)
                                     .frame(maxWidth: 580, alignment: .leading)
                             }
                         }
-                        .shadow(color: Color.black.opacity(0.32), radius: 3, y: 1)
                         .padding(.top, 2)
                     }
                 }

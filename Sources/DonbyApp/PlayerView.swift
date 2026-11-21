@@ -782,11 +782,12 @@ public struct PlayerView: View {
     }
 
     private var specResolutionString: String {
+        let w = kernelStats.width > 0 ? kernelStats.width : Int32(currentItem.primaryVideoStream?.width ?? 0)
         let h = kernelStats.height > 0 ? kernelStats.height : Int32(currentItem.primaryVideoStream?.height ?? 0)
-        if h >= 2000 { return "2160P" }
-        if h >= 1400 { return "1440P" }
-        if h >= 1000 { return "1080P" }
-        if h >= 700  { return "720P" }
+        if w >= 3600 || h >= 2000 { return "2160P" }
+        if w >= 2500 || h >= 1400 { return "1440P" }
+        if w >= 1800 || h >= 1000 { return "1080P" }
+        if w >= 1200 || h >= 700  { return "720P" }
         if h > 0     { return "\(h)P" }
         if let res = currentItem.resolutionBadge, !res.isEmpty {
             let u = res.uppercased()

@@ -2634,6 +2634,13 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                     let f = (failedCount[curIdx] ?? 0) + 1
                     failedCount[curIdx] = f
                     chunkNextRetryTime[curIdx] = now + min(1.5, 0.15 * Double(f))
+                    if f == 1 || f == 6 {
+                        DonbyLogger.shared.log(
+                            "Turbo 分片拉取失败 (chunk=\(curIdx), status=\(statusCode), retry=\(f)/6, redirected=\(usedRedirectedURL))",
+                            level: .warning,
+                            subsystem: "Turbo"
+                        )
+                    }
                 }
             }
         }
