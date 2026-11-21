@@ -70,6 +70,7 @@ typedef struct {
     float   dual_gap_px;          // vertical spacing in px between primary and secondary layers (default 10.0)
     bool    primary_on_top;       // true = primary above secondary (classic CN-top / EN-bottom)
     int32_t dual_layout_mode;     // 0 = bottom stacked, 1 = split (primary bottom, secondary top)
+    int32_t dual_anchor_mode;     // 0 = auto (prefer English/Latin), 1 = primary anchor, 2 = secondary anchor
 } DKSubtitleStyleConfig;
 
 typedef int     (*DKCustomIOReadCallback)(void* opaque, uint8_t* buf, int buf_size);

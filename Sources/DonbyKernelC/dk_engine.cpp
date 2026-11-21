@@ -275,7 +275,7 @@ struct DKPlayer {
     uint64_t paired_layout_hash{0};
     int sub_dirty_y0{0};
     int sub_dirty_y1{0};
-    DKSubtitleStyleConfig sub_style{1.0f, 2.2f, 92.0f, 0.0, 0.0, 0, false, false, true, true, 0.60f, 7.0f, true, 0};
+    DKSubtitleStyleConfig sub_style{1.0f, 2.2f, 92.0f, 0.0, 0.0, 0, false, false, true, true, 0.60f, 7.0f, true, 0, 0};
     struct OriginalAssStyle {
         std::string font_name;
         double font_size{56.0};
@@ -4945,9 +4945,138 @@ static bool dk_has_multi_speaker_dashes(const std::vector<std::string>& lines) {
     return false;
 }
 
+static bool dk_try_split_counterpart_by_anchor_ratio(
+    const std::string& line,
+    double anchor_ratio,
+    std::string& out_a,
+    std::string& out_b
+) {
+    // 1. Prefer explicit inline speaker dash first ("- A? - B.")
+    if (dk_try_split_inline_two_speakers(line, out_a, out_b)) return true;
+
+    const size_t total_vis = dk_utf8_visible_len(line);
+    if (total_vis < 4) return false;
+    const double clamped_target = std::clamp(anchor_ratio, 0.18, 0.82);
+
+    struct Candidate {
+        size_t split_after_byte; // end of left substring
+        size_t next_start_byte;  // start of right substring
+        double ratio;
+        int tier;                // 1 = sentence-end punct (? ! 。 …), 2 = space / comma / semicolon
+    };
+    std::vector<Candidate> cands;
+
+    size_t vis_so_far = 0;
+    bool in_brace = false;
+    for (size_t i = 0; i < line.size(); ) {
+        if (line[i] == '{') {
+            in_brace = true;
+            i++;
+            continue;
+        }
+        if (in_brace) {
+            if (line[i] == '}') in_brace = false;
+            i++;
+            continue;
+        }
+        unsigned char c = static_cast<unsigned char>(line[i]);
+        size_t ch_len = 1;
+        if ((c & 0xE0) == 0xC0) ch_len = 2;
+        else if ((c & 0xF0) == 0xE0) ch_len = 3;
+        else if ((c & 0xF8) == 0xF0) ch_len = 4;
+        if (i + ch_len > line.size()) ch_len = 1;
+
+        std::string_view ch(line.data() + i, ch_len);
+        vis_so_far++;
+
+        // Tier 1: strong sentence-ending punctuation (ASCII or CJK fullwidth)
+        const bool is_sent_end =
+            (ch == "?" || ch == "!" ||
+             ch == "\xEF\xBC\x9F" || // ？
+             ch == "\xEF\xBC\x81" || // ！
+             ch == "\xE3\x80\x82" || // 。
+             ch == "\xE2\x80\xA6");  // …
+        // Tier 2: space (Netflix CN space-delimited style), fullwidth space, comma, semicolon
+        const bool is_soft_sep =
+            (ch == " " || ch == "\t" ||
+             ch == "\xE3\x80\x80" || // fullwidth space
+             ch == "\xEF\xBC\x8C" || // ，
+             ch == "\xEF\xBC\x9B");  // ；
+
+        if (is_sent_end) {
+            size_t split_end = i + ch_len;
+            // Absorb repeated punctuation (e.g. "？！" or "……")
+            while (split_end < line.size() && (line[split_end] == '?' || line[split_end] == '!' || line[split_end] == '.')) {
+                split_end++;
+                vis_so_far++;
+            }
+            size_t next_s = split_end;
+            while (next_s < line.size() && (line[next_s] == ' ' || line[next_s] == '\t')) next_s++;
+            if (next_s < line.size()) {
+                double r = static_cast<double>(vis_so_far) / static_cast<double>(total_vis);
+                if (r >= 0.15 && r <= 0.85) {
+                    cands.push_back({split_end, next_s, r, 1});
+                }
+            }
+            i = split_end;
+            continue;
+        }
+        if (is_soft_sep) {
+            const bool keep_punct_left = (ch == "\xEF\xBC\x8C" || ch == "\xEF\xBC\x9B");
+            size_t split_end = keep_punct_left ? (i + ch_len) : i;
+            size_t next_s = i + ch_len;
+            while (next_s < line.size() && (line[next_s] == ' ' || line[next_s] == '\t')) next_s++;
+            if (split_end > 0 && next_s < line.size()) {
+                double r = static_cast<double>(vis_so_far) / static_cast<double>(total_vis);
+                if (r >= 0.15 && r <= 0.85) {
+                    cands.push_back({split_end, next_s, r, 2});
+                }
+            }
+            i = next_s;
+            continue;
+        }
+        i += ch_len;
+    }
+
+    const Candidate* best = nullptr;
+    double best_score = 1e9;
+    for (const auto& cand : cands) {
+        double dist = std::fabs(cand.ratio - clamped_target);
+        if (cand.tier == 2 && dist > 0.28) continue;
+        // Strongly prefer Tier 1 (sentence-end punctuation) over Tier 2 (space/comma)
+        double score = dist + (cand.tier == 2 ? 0.12 : 0.0);
+        if (score < best_score) {
+            best_score = score;
+            best = &cand;
+        }
+    }
+    if (!best) return false;
+
+    out_a = dk_trim_sub_ws(line.substr(0, best->split_after_byte));
+    out_b = dk_trim_sub_ws(line.substr(best->next_start_byte));
+    return !out_a.empty() && !out_b.empty();
+}
+
+static bool dk_track_looks_predominantly_latin(const ASS_Track* tr) {
+    if (!tr || !tr->events || tr->n_events <= 0) return false;
+    int latin_hits = 0;
+    int cjk_hits = 0;
+    int step = std::max(1, tr->n_events / 24);
+    for (int i = 0; i < tr->n_events && (latin_hits + cjk_hits) < 20; i += step) {
+        const char* txt = tr->events[i].Text;
+        if (!txt || !*txt) continue;
+        std::string clean = dk_trim_sub_ws(dk_strip_ass_braces(txt));
+        if (clean.size() < 3) continue;
+        if (dk_has_cjk_utf8(clean)) cjk_hits++;
+        else if (dk_is_mostly_latin_line(clean)) latin_hits++;
+    }
+    return latin_hits > cjk_hits;
+}
+
 static std::vector<DKSemanticTurn> dk_build_paired_turns(
     const std::vector<std::pair<std::string, bool>>& pri_track_tagged,
-    const std::vector<std::string>& sec_track_lines
+    const std::vector<std::string>& sec_track_lines,
+    bool anchor_is_secondary = true
 ) {
     std::vector<DKSemanticTurn> turns;
 
@@ -4955,13 +5084,34 @@ static std::vector<DKSemanticTurn> dk_build_paired_turns(
         cns = dk_group_by_speaker_dash(cns, false);
         ens = dk_group_by_speaker_dash(ens, true);
 
-        // Smart repair: if one track has 2 speaker-dash lines and the other packed both speakers onto 1 line
-        if (cns.size() == 2 && ens.size() == 1 && dk_looks_like_speaker_dash(cns[0]) && dk_looks_like_speaker_dash(cns[1])) {
+        // Smart repair for 2-speaker exchanges (speaker order 1 -> 2 is invariant across CN/EN!):
+        // When the anchor track (or either track) explicitly marks 2 speakers with leading '-',
+        // rescue a 1-line counterpart even if it dropped '-' and used punctuation or Netflix-style spaces.
+        auto compute_split_ratio = [](const std::string& a, const std::string& b) -> double {
+            size_t la = std::max<size_t>(1, dk_utf8_visible_len(a));
+            size_t lb = std::max<size_t>(1, dk_utf8_visible_len(b));
+            return static_cast<double>(la) / static_cast<double>(la + lb);
+        };
+
+        const bool en_has_2spk = (ens.size() == 2 && (dk_looks_like_speaker_dash(ens[0]) || dk_looks_like_speaker_dash(ens[1])) && dk_looks_like_speaker_dash(ens[1]));
+        const bool cn_has_2spk = (cns.size() == 2 && (dk_looks_like_speaker_dash(cns[0]) || dk_looks_like_speaker_dash(cns[1])) && dk_looks_like_speaker_dash(cns[1]));
+
+        if (en_has_2spk && cns.size() == 1) {
             std::string a, b;
-            if (dk_try_split_inline_two_speakers(ens[0], a, b)) ens = {a, b};
-        } else if (ens.size() == 2 && cns.size() == 1 && dk_looks_like_speaker_dash(ens[0]) && dk_looks_like_speaker_dash(ens[1])) {
+            double ratio = compute_split_ratio(ens[0], ens[1]);
+            bool split_ok = anchor_is_secondary
+                ? dk_try_split_counterpart_by_anchor_ratio(cns[0], ratio, a, b)
+                : dk_try_split_inline_two_speakers(cns[0], a, b);
+            if (!split_ok) split_ok = dk_try_split_counterpart_by_anchor_ratio(cns[0], ratio, a, b);
+            if (split_ok) cns = {a, b};
+        } else if (cn_has_2spk && ens.size() == 1) {
             std::string a, b;
-            if (dk_try_split_inline_two_speakers(cns[0], a, b)) cns = {a, b};
+            double ratio = compute_split_ratio(cns[0], cns[1]);
+            bool split_ok = !anchor_is_secondary
+                ? dk_try_split_counterpart_by_anchor_ratio(ens[0], ratio, a, b)
+                : dk_try_split_inline_two_speakers(ens[0], a, b);
+            if (!split_ok) split_ok = dk_try_split_counterpart_by_anchor_ratio(ens[0], ratio, a, b);
+            if (split_ok) ens = {a, b};
         }
 
         if (cns.empty()) {
@@ -5226,36 +5376,137 @@ static int dk_try_render_paired_bilingual_locked(
     const long long pri_ms = static_cast<long long>(std::max(0.0, pri_pts) * 1000.0);
     const long long sec_ms = static_cast<long long>(std::max(0.0, sec_pts) * 1000.0);
 
+    // Resolve Dual-Track Anchor:
+    // - dual_anchor_mode == 1 -> primary track is anchor (e.g. Native Chinese media)
+    // - dual_anchor_mode == 2 -> secondary track is anchor (e.g. English-native or third-language media with EN secondary)
+    // - dual_anchor_mode == 0 -> auto consensus (prefer Latin/English track over CJK track)
+    bool anchor_is_secondary = false;
+    if (player->ass_track && player->secondary_ass_track) {
+        if (player->sub_style.dual_anchor_mode == 2) {
+            anchor_is_secondary = true;
+        } else if (player->sub_style.dual_anchor_mode == 1) {
+            anchor_is_secondary = false;
+        } else {
+            const bool sec_latin = dk_track_looks_predominantly_latin(player->secondary_ass_track);
+            const bool pri_latin = dk_track_looks_predominantly_latin(player->ass_track);
+            anchor_is_secondary = (sec_latin && !pri_latin);
+        }
+    } else if (player->secondary_ass_track && !player->ass_track) {
+        anchor_is_secondary = true;
+    }
+
     std::vector<std::pair<std::string, bool>> pri_tagged;
     std::vector<std::string> sec_lines;
 
-    auto collect_track = [&](const ASS_Track* tr, long long now_ms, bool is_secondary) -> bool {
-        if (!tr || !tr->events || tr->n_events <= 0) return true;
-        for (int i = 0; i < tr->n_events; i++) {
-            const ASS_Event& ev = tr->events[i];
-            if (ev.Duration <= 0) continue;
-            if (now_ms < ev.Start || now_ms >= ev.Start + ev.Duration) continue;
-            if (!player->sub_style.override_ass_style && dk_event_has_special_ass_effects(tr, ev)) {
-                return false; // Special positioned/vector ASS effect active -> preserve via native libass!
-            }
-            bool style_foreign = is_secondary;
-            if (!is_secondary && ev.Style >= 0 && ev.Style < tr->n_styles) {
-                const ASS_Style& st = tr->styles[ev.Style];
-                if (dk_style_looks_like_foreign_secondary(st.Name)) style_foreign = true;
-            }
-            if (is_secondary) {
-                std::vector<std::pair<std::string, bool>> tmp;
-                dk_extract_clean_lines_from_ass_text(ev.Text, true, tmp);
-                for (auto& kv : tmp) sec_lines.push_back(std::move(kv.first));
-            } else {
-                dk_extract_clean_lines_from_ass_text(ev.Text, style_foreign, pri_tagged);
-            }
+    auto append_event_lines = [&](const ASS_Track* tr, const ASS_Event& ev, bool is_secondary) -> bool {
+        if (!player->sub_style.override_ass_style && dk_event_has_special_ass_effects(tr, ev)) {
+            return false; // Special positioned/vector ASS effect active -> preserve via native libass!
+        }
+        bool style_foreign = is_secondary;
+        if (!is_secondary && ev.Style >= 0 && ev.Style < tr->n_styles) {
+            const ASS_Style& st = tr->styles[ev.Style];
+            if (dk_style_looks_like_foreign_secondary(st.Name)) style_foreign = true;
+        }
+        if (is_secondary) {
+            std::vector<std::pair<std::string, bool>> tmp;
+            dk_extract_clean_lines_from_ass_text(ev.Text, true, tmp);
+            for (auto& kv : tmp) sec_lines.push_back(std::move(kv.first));
+        } else {
+            dk_extract_clean_lines_from_ass_text(ev.Text, style_foreign, pri_tagged);
         }
         return true;
     };
 
-    if (!collect_track(player->ass_track, pri_ms, false)) return -1;
-    if (!collect_track(player->secondary_ass_track, sec_ms, true)) return -1;
+    if (player->ass_track && player->secondary_ass_track) {
+        // Dual-Track Anchor-Synchronized Collection with +/-260ms Anti-Flicker Snap:
+        // Eliminates the annoying 100-250ms staggered flash where one language pops in/out just before the other.
+        constexpr long long kSnapMs = 260;
+        const ASS_Track* anchor_tr = anchor_is_secondary ? player->secondary_ass_track : player->ass_track;
+        const ASS_Track* other_tr  = anchor_is_secondary ? player->ass_track : player->secondary_ass_track;
+        const long long anchor_ms  = anchor_is_secondary ? sec_ms : pri_ms;
+        const long long other_ms   = anchor_is_secondary ? pri_ms : sec_ms;
+
+        bool has_anchor_active = false;
+        long long anchor_win_s = LLONG_MAX;
+        long long anchor_win_e = 0;
+
+        if (anchor_tr && anchor_tr->events && anchor_tr->n_events > 0) {
+            for (int i = 0; i < anchor_tr->n_events; i++) {
+                const ASS_Event& ev = anchor_tr->events[i];
+                if (ev.Duration <= 0) continue;
+                const long long es = ev.Start;
+                const long long ee = ev.Start + ev.Duration;
+                if (anchor_ms < es || anchor_ms >= ee) continue;
+                if (!append_event_lines(anchor_tr, ev, anchor_is_secondary)) return -1;
+                has_anchor_active = true;
+                anchor_win_s = std::min(anchor_win_s, es);
+                anchor_win_e = std::max(anchor_win_e, ee);
+            }
+        }
+
+        if (other_tr && other_tr->events && other_tr->n_events > 0) {
+            const long long anchor_dur = has_anchor_active ? std::max<long long>(1, anchor_win_e - anchor_win_s) : 0;
+            for (int i = 0; i < other_tr->n_events; i++) {
+                const ASS_Event& ev = other_tr->events[i];
+                if (ev.Duration <= 0) continue;
+                const long long es = ev.Start;
+                const long long ee = ev.Start + ev.Duration;
+                bool include = false;
+
+                if (has_anchor_active) {
+                    const long long ov = std::min(ee, anchor_win_e) - std::max(es, anchor_win_s);
+                    const long long min_ov = std::min<long long>(300, std::max<long long>(1, std::min<long long>(ev.Duration, anchor_dur) * 4 / 10));
+                    if (ov >= min_ov) {
+                        const long long eff_s = (std::llabs(es - anchor_win_s) <= kSnapMs) ? anchor_win_s : es;
+                        const long long eff_e = (std::llabs(ee - anchor_win_e) <= kSnapMs) ? anchor_win_e : ee;
+                        include = (other_ms >= eff_s && other_ms < eff_e);
+                    } else {
+                        include = (other_ms >= es && other_ms < ee);
+                    }
+                } else if (other_ms >= es && other_ms < ee) {
+                    // Anchor is silent right now: suppress brief <=260ms leading/trailing overhang tied to a nearby anchor cue
+                    bool suppressed_edge = false;
+                    if (anchor_tr && anchor_tr->events && anchor_tr->n_events > 0) {
+                        for (int j = 0; j < anchor_tr->n_events; j++) {
+                            const ASS_Event& aev = anchor_tr->events[j];
+                            if (aev.Duration <= 0) continue;
+                            const long long as = aev.Start;
+                            const long long ae = aev.Start + aev.Duration;
+                            const long long ov = std::min(ee, ae) - std::max(es, as);
+                            const long long min_ov = std::min<long long>(300, std::max<long long>(1, std::min<long long>(ev.Duration, aev.Duration) * 4 / 10));
+                            if (ov < min_ov) continue;
+                            if (other_ms < as && (as - other_ms) <= kSnapMs && std::llabs(es - as) <= kSnapMs) {
+                                suppressed_edge = true;
+                                break;
+                            }
+                            if (other_ms >= ae && (other_ms - ae) <= kSnapMs && std::llabs(ee - ae) <= kSnapMs) {
+                                suppressed_edge = true;
+                                break;
+                            }
+                        }
+                    }
+                    include = !suppressed_edge;
+                }
+
+                if (include) {
+                    if (!append_event_lines(other_tr, ev, !anchor_is_secondary)) return -1;
+                }
+            }
+        }
+    } else {
+        auto collect_single = [&](const ASS_Track* tr, long long now_ms, bool is_secondary) -> bool {
+            if (!tr || !tr->events || tr->n_events <= 0) return true;
+            for (int i = 0; i < tr->n_events; i++) {
+                const ASS_Event& ev = tr->events[i];
+                if (ev.Duration <= 0) continue;
+                if (now_ms < ev.Start || now_ms >= ev.Start + ev.Duration) continue;
+                if (!append_event_lines(tr, ev, is_secondary)) return false;
+            }
+            return true;
+        };
+        if (!collect_single(player->ass_track, pri_ms, false)) return -1;
+        if (!collect_single(player->secondary_ass_track, sec_ms, true)) return -1;
+    }
 
     if (pri_tagged.empty() && sec_lines.empty()) {
         if (player->sub_last_non_empty) {
@@ -5268,7 +5519,7 @@ static int dk_try_render_paired_bilingual_locked(
         return 0;
     }
 
-    auto turns = dk_build_paired_turns(pri_tagged, sec_lines);
+    auto turns = dk_build_paired_turns(pri_tagged, sec_lines, anchor_is_secondary);
     if (turns.empty()) return 0;
 
     // Compute fast deterministic fingerprint for zero-cost frame deduplication
@@ -5285,6 +5536,7 @@ static int dk_try_render_paired_bilingual_locked(
     dk_hash_mix(h, player->sub_style.enhance_secondary_yellow ? 1ULL : 0ULL);
     dk_hash_mix(h, player->sub_style.primary_on_top ? 1ULL : 0ULL);
     dk_hash_mix(h, static_cast<uint64_t>(player->sub_style.dual_layout_mode));
+    dk_hash_mix(h, static_cast<uint64_t>(player->sub_style.dual_anchor_mode));
     for (const auto& t : turns) {
         dk_hash_mix(h, 0xAAAA);
         for (const auto& l : t.priLines) dk_hash_str(h, l);

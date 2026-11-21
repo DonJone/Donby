@@ -1,6 +1,6 @@
 # Module Map: Playback Kernel (`DonbyKernelC` & `KernelRust`)
 
-> Last synced: `v1.4.10`. Load this doc for FFmpeg demuxing, VideoToolbox decoding, AudioQueue A/V sync, seek flush, rebuffer cushions, libass/PGS subtitles, and Rust kernel helpers.
+> Last synced: `v1.4.11`. Load this doc for FFmpeg demuxing, VideoToolbox decoding, AudioQueue A/V sync, seek flush, rebuffer cushions, libass/PGS subtitles, and Rust kernel helpers.
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyKernelC/include/donby_kernel.h` (~192L)
@@ -33,6 +33,7 @@
   - **Pair-A Cinema Semantic Bilingual Engine** (`dk_try_render_paired_bilingual_locked`, `dk_build_paired_turns`, `dk_raster_paired_line_locked` using dedicated `paired_ass_renderer` + FNV `paired_layout_hash` 0ms frame cache):
     - Applies to single-track and dual-track text subtitles (`SRT/VTT`, standard dialogue `ASS`, dual-track `Text+Text`) when `unify_pingfang_font` is enabled and no special ASS effects (`\pos`, `\move`, `\org`, `\clip`, `\p1..9`, top alignments) are active (special ASS events fall back untouched to native `libass`).
     - Constant cinema typography anchored to `1200px` reference viewport height (`PingFang SC` Bold / `PingFangSC-Medium`, primary `58px` `#FFFFFF`, secondary `35px` (`0.60x`) classic warm orange-gold `#FFB22E`, outline `2.2/1.8`, shadow `1.0/0.9`); NEVER shrinks font size on multi-line/4-line cues.
+    - Dual-track Anchor & Anti-Flicker Snap (`dual_anchor_mode`: `0=auto/English-preferred`, `1=primary`, `2=secondary`): Native Chinese media anchors to Chinese; English and third-language (JP/KR/EU) media anchor to English. Snaps overlapping non-anchor cue start/end edges within `±260ms` (and suppresses `<=260ms` leading/trailing overhangs) so dual lines enter/exit in lockstep, and uses anchor 2-speaker dashes to rescue dash-less single-line counterparts (`dk_try_split_counterpart_by_anchor_ratio` via sentence punctuation or ratio-matched spaces) without mis-splitting single-speaker inverted clauses.
     - Interleaved semantic pairing & smart reflow (`dk_reflow_non_dialogue_lines`, `dk_group_by_speaker_dash`): unwraps unnecessary streaming SRT/ASS hard line breaks within single-speaker turns (so short/medium English or CN+EN cues stay on one crisp line and only wrap cleanly via `WrapStyle: 0` when exceeding viewport width), groups wrapped 2-speaker continuations, re-pairs single-track block-separated (`CN1/CN2/EN1/EN2`), dual-track 2-speaker dialogue, and mismatched inline (`- A? - B.`) turns into `CN1+EN1` / `CN2+EN2` with exact per-line bounding-box placement (0px overlap).
     - Bottom-anchored growth & optical black-bar centering: single-turn cues sit optically centered inside bottom letterbox black bars (`42%` of spare bar height at default `92%`, minimum `26px` bottom bezel margin even at `100%`); multi-turn/4-line cues hold the bottom anchor (`28px` margin) and expand smoothly upward into the lower movie frame.
   - Symmetric primary + secondary slots: both slots independently support ASS/SRT (`libass` + `CFStringTransform`) AND PGS bitmap (`PgsCue`), enabling all 4 dual combinations (`Text+Text`, `PGS+Text`, `Text+PGS`, `PGS+PGS`).

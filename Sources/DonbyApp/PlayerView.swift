@@ -1982,6 +1982,7 @@ public struct PlayerView: View {
                 return
             }
             let styleSnap = await MainActor.run { appState.subtitleStyle }
+            let initialAnchor = await MainActor.run { resolvedDualAnchorMode() }
             var initialSubCfg = DKSubtitleStyleConfig(
                 scale: Float(styleSnap.scale),
                 border_width: Float(styleSnap.borderWidth),
@@ -1996,7 +1997,8 @@ public struct PlayerView: View {
                 secondary_scale: Float(styleSnap.secondaryScale),
                 dual_gap_px: Float(styleSnap.dualSubtitleGapPx),
                 primary_on_top: styleSnap.primaryOnTop,
-                dual_layout_mode: Int32(styleSnap.dualLayoutMode)
+                dual_layout_mode: Int32(styleSnap.dualLayoutMode),
+                dual_anchor_mode: initialAnchor
             )
             dk_player_set_subtitle_style(handle, &initialSubCfg)
             dk_player_set_buffer_limit_mb(handle, cachePoolMB)
@@ -2393,6 +2395,81 @@ public struct PlayerView: View {
         }
     }
 
+    /// Weighted consensus for dual-subtitle timing & speaker-split anchor:
+    /// - Native Chinese media (CJK OriginalTitle / non-dub Chinese audio) -> Chinese subtitle track is anchor.
+    /// - All other media (English-native, Japanese/Korean/European, or unknown) -> English subtitle track is anchor.
+    /// Returns: 0 = auto (kernel English-preferred fallback), 1 = primary track anchor, 2 = secondary track anchor.
+    private func resolvedDualAnchorMode() -> Int32 {
+        func isChineseTag(_ raw: String) -> Bool {
+            let l = raw.lowercased()
+            return l.contains("chi") || l.contains("zho") || l.contains("zh") ||
+                   l.contains("cmn") || l.contains("yue") || l.contains("chs") || l.contains("cht") ||
+                   l.contains("简") || l.contains("繁") || l.contains("中") || l.contains("国语") || l.contains("粤语")
+        }
+        func isEnglishTag(_ raw: String) -> Bool {
+            let l = raw.lowercased()
+            return l.contains("eng") || l.contains("english") || l.contains("英")
+        }
+        func isDubAudioTitle(_ raw: String) -> Bool {
+            let l = raw.lowercased()
+            return l.contains("国配") || l.contains("台配") || l.contains("粤配") ||
+                   l.contains("配音") || l.contains("dub")
+        }
+
+        // 1. Metadata OriginalTitle script consensus (immune to dubbed remux audio track 0)
+        var titleSaysChinese = false
+        var titleSaysNonChinese = false
+        if let orig = currentItem.originalTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !orig.isEmpty {
+            var cjk = 0, kana = 0, hangul = 0, latin = 0
+            for scalar in orig.unicodeScalars {
+                let v = scalar.value
+                if (v >= 0x4E00 && v <= 0x9FFF) || (v >= 0x3400 && v <= 0x4DBF) {
+                    cjk += 1
+                } else if (v >= 0x3040 && v <= 0x30FF) {
+                    kana += 1
+                } else if (v >= 0xAC00 && v <= 0xD7AF) {
+                    hangul += 1
+                } else if (v >= 0x41 && v <= 0x5A) || (v >= 0x61 && v <= 0x7A) {
+                    latin += 1
+                }
+            }
+            if cjk > 0 && kana == 0 && hangul == 0 && latin <= cjk {
+                titleSaysChinese = true
+            } else if kana > 0 || hangul > 0 || (latin > 0 && cjk == 0) {
+                titleSaysNonChinese = true
+            }
+        }
+
+        // 2. Active (or default) audio track language check (ignoring dubbed tracks)
+        let audioStreams = !kernelAudioTracks.isEmpty
+            ? kernelAudioTracks
+            : (currentResource.mediaSource.mediaStreams?.filter { ($0.type ?? "").lowercased() == "audio" } ?? [])
+        let activeAudio = audioStreams.first(where: { $0.index == activeAudioAVIndex })
+            ?? audioStreams.first(where: { $0.isDefault == true })
+            ?? audioStreams.first
+        let audioLangTitle = [activeAudio?.language, activeAudio?.displayLanguage, activeAudio?.title, activeAudio?.displayTitle]
+            .compactMap { $0 }.joined(separator: " ")
+        let audioIsNonDubChinese = !audioLangTitle.isEmpty && isChineseTag(audioLangTitle) && !isDubAudioTitle(audioLangTitle)
+
+        let preferChineseAnchor = titleSaysChinese || (!titleSaysNonChinese && audioIsNonDubChinese)
+
+        // 3. Map preferred anchor language to primary (1) or secondary (2) slot
+        let options = resolvedSubtitleOptions
+        let priOpt = options.first(where: { $0.selection == activeSubtitleSelection })
+        let secOpt = options.first(where: { $0.selection == activeSecondarySubtitleSelection })
+        let priDesc = [priOpt?.language, priOpt?.label].compactMap { $0 }.joined(separator: " ")
+        let secDesc = [secOpt?.language, secOpt?.label].compactMap { $0 }.joined(separator: " ")
+
+        if preferChineseAnchor {
+            if isChineseTag(priDesc) && !isEnglishTag(priDesc) { return 1 }
+            if isChineseTag(secDesc) && !isEnglishTag(secDesc) { return 2 }
+        } else {
+            if isEnglishTag(secDesc) && !isChineseTag(secDesc) { return 2 }
+            if isEnglishTag(priDesc) && !isChineseTag(priDesc) { return 1 }
+        }
+        return 0
+    }
+
     private func applyKernelSubtitleStyle() {
         guard let handle = playerHandle else { return }
         let s = appState.subtitleStyle
@@ -2410,7 +2487,8 @@ public struct PlayerView: View {
             secondary_scale: Float(s.secondaryScale),
             dual_gap_px: Float(s.dualSubtitleGapPx),
             primary_on_top: s.primaryOnTop,
-            dual_layout_mode: Int32(s.dualLayoutMode)
+            dual_layout_mode: Int32(s.dualLayoutMode),
+            dual_anchor_mode: resolvedDualAnchorMode()
         )
         dk_player_set_subtitle_style(handle, &cfg)
         subtitleStyleRevision &+= 1
@@ -2511,7 +2589,7 @@ public struct PlayerView: View {
     }
 
     private func exportRedactedDiagnostics() {
-        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.10"
+        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.11"
         var lines: [String] = []
         lines.append("Donby Diagnostics Report (v\(appVer))")
         lines.append("Time: \(ISO8601DateFormatter().string(from: Date()))")
@@ -2604,6 +2682,7 @@ public struct PlayerView: View {
         selectedAudioIdx = option.embyIndex ?? option.avStreamIndex
         if let handle = playerHandle {
             dk_player_select_track(handle, 1, Int32(option.avStreamIndex))
+            applyKernelSubtitleStyle()
             activeTurboHandle?.wakeWaitingReads()
             appState.showToast("已切换音轨: \(option.label)", icon: "speaker.wave.2.fill")
         }
