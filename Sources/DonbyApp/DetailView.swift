@@ -102,7 +102,7 @@ public struct DetailView: View {
                 .frame(width: viewportGeo.size.width, height: 240)
                 .allowsHitTesting(false)
 
-                ScrollView {
+                ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 0) {
                         heroHeaderSection(heroHeight: heroHeight)
 
@@ -1969,6 +1969,12 @@ private struct DetailScrollViewTopInsetFix: NSViewRepresentable {
 
         func applyZeroTopInset() {
             guard let sv = enclosingScrollView else { return }
+            if sv.hasVerticalScroller {
+                sv.hasVerticalScroller = false
+            }
+            if sv.hasHorizontalScroller {
+                sv.hasHorizontalScroller = false
+            }
             if sv.automaticallyAdjustsContentInsets {
                 sv.automaticallyAdjustsContentInsets = false
             }
