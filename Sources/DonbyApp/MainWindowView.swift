@@ -3,7 +3,6 @@ import AppKit
 import UniformTypeIdentifiers
 import DonbyCore
 import DonbyNetwork
-import DonbyStorage
 
 public struct MainWindowView: View {
     @EnvironmentObject private var appState: AppState

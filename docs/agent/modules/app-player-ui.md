@@ -1,6 +1,6 @@
 # Module Map: App, Player HUD & Native UI (`DonbyApp`)
 
-> Last synced: `v1.4.11`. Load this doc for `PlayerView`, `AppState`, `DetailView`, 120Hz native collection views, artwork caching, Liquid Glass UI, and module views.
+> Last synced: `v1.4.12`. Load this doc for `PlayerView`, `AppState`, `DetailView`, 120Hz native collection views, artwork caching, Liquid Glass UI, and module views.
 
 ## 1. File Inventory & Core Symbols
 - **App Entry & Global State**:
@@ -8,9 +8,8 @@
   - `Sources/DonbyApp/AppState.swift` (~2637L) — `@MainActor` central state: server configs, Emby/UHD clients, playback session lifecycle, watch history (max 300, deduplicated), search history, per-season skip prefs (`SeasonSkipPreference`), `ServerHomeCacheStore`.
   - `Sources/DonbyApp/MainWindowView.swift` (~450L) — sidebar navigation, `AppUpdatePromptSheet`.
 - **Player Surface & Controls**:
-  - `Sources/DonbyApp/PlayerView.swift` (~2983L) — playback orchestration: `computePreOpenTrackHints`, `applySubtitleOptionOnStartup`, `prefetchNextEpisodeIfNearEnd`, `isSettlingSeek` guard (`2.5s`), loading pill (`hasRenderedFirstFrame`), delayed rebuffer pill (`>= 0.48s` `"正在缓冲..."`), track switching (`activeTurboHandle?.wakeWaitingReads()`), health recovery (`PlaybackHealthPolicy`), chapter/OP/ED skipping.
-  - `Sources/DonbyApp/Player/PlayerControls.swift` (~328L) — `PlayerTimelineScrubberView`, `PlayerDrawerTab`, `OpeningPlayerBox`, track option models.
-  - `Sources/DonbyApp/NativePlayerSurface.swift` (~35L) — player window/surface wrapper.
+  - `Sources/DonbyApp/PlayerView.swift` (~3210L) — playback orchestration: `computePreOpenTrackHints`, `makeKernelSubtitleStyleConfig`, `applySubtitleOptionOnStartup`, `prefetchNextEpisodeIfNearEnd`, `isSettlingSeek` guard (`2.5s`), loading pill (`hasRenderedFirstFrame`), delayed rebuffer pill (`>= 0.48s` `"正在缓冲..."`), track switching (`activeTurboHandle?.wakeWaitingReads()`), health recovery (`PlaybackHealthPolicy`), chapter/OP/ED skipping.
+  - `Sources/DonbyApp/Player/PlayerControls.swift` (~319L) — `PlayerTimelineScrubberView`, `PlayerDrawerTab`, `OpeningPlayerBox`, `PlayerAutoHideBox`, track option models.
 - **High-FPS Browse & Artwork Pipeline**:
   - `Sources/DonbyApp/Components/NativeCardLayers.swift` (~1928L) — AppKit `NSCollectionView` / `CALayer` cells (`InteractiveCollectionView`, `ScrollHoverGate`, `NativeCardLayerCache`, `CardTextBitmapCache`).
   - `Sources/DonbyApp/Components/NativeEmbyHomeView.swift` (~696L) & `NativePosterGridView.swift` (~571L) — 120Hz ProMotion scrolling shelves & poster grids.
@@ -33,5 +32,5 @@
 4. **Card Interaction, Badge & Copy Consistency**: Clicking any poster or landscape card always enters `DetailView` (no center hover play button triggering immediate playback). Cards omit resolution badges and rating stars; downloaded badges use unified monochrome smoked-glass pill + white `checkmark` with `"已下载"` copy (never `"已离线下载"`). Sidebar places concrete servers at top above `搜索 -> 服务器 -> 文件 -> 记录 -> 下载 -> IPTV -> 设置`.
 5. **Detail Preload Play-Button Binding (`v1.4.4`)**: `DetailView.effectivePlayButtonStartSeconds` binds background preloading directly to the Play button's exact start position (resume position, or automatic intro-skip landing position when starting at 0s) and re-evaluates whenever target/source/start position updates.
 6. **Menu Flicker Prevention (`v1.4.7`)**: Keep `PlayerView` timers (`progressTimer`, `embySyncTimer`) on `.default` RunLoop mode (never `.common`, which fires during macOS `NSMenu` `.eventTracking`), store high-frequency mouse-move/auto-hide state in non-observable `PlayerAutoHideBox`, and keep hover `@State` inside isolated label child views (`PlayerCircleMenuVisual`, `LiquidGlassCircleMenuVisual`, `LiquidGlassSelectorCardVisual`) so hover changes never rebuild SwiftUI `Menu` items.
-7. **Version Fallback**: When bumping versions, update fallback version strings in `PlayerView.swift`, `AppUpdateManager.swift`, `EmbyClient.swift`, `UHDStreamClient.swift`, `build_app.sh` (and `scripts/package_dmg.sh` if hardcoded).
+7. **Version Source of Truth**: All Swift modules read `DonbyAppInfo.version` (`Sources/DonbyCore/AppUpdatePolicies.swift`); when bumping versions, update `build_app.sh`, `DonbyAppInfo.fallbackVersion`, and `docs/agent/INDEX.md`.
 8. **Log Redaction**: `AppState` `媒体流解析成功` log must keep stream URL host/query redacted.

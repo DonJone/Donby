@@ -483,36 +483,6 @@ public final class DKMetalLayerView: NSView {
         updateScreenHeadroom()
     }
 
-    public func captureSnapshotImage() -> NSImage? {
-        snapshotLock.lock()
-        let pb = snapshotPixelBuffer
-        let uniforms = snapshotColorUniforms
-        snapshotLock.unlock()
-        guard let pb,
-              let cgImg = Self.renderOffscreenCGImage(
-                  pixelBuffer: pb,
-                  colorUniforms: uniforms,
-                  edrHeadroom: currentEDRHeadroom
-              ) else {
-            return nil
-        }
-        return NSImage(cgImage: cgImg, size: NSSize(width: cgImg.width, height: cgImg.height))
-    }
-
-    public func captureSnapshotCGImage(maxDimension: Int? = nil) -> CGImage? {
-        snapshotLock.lock()
-        let pb = snapshotPixelBuffer
-        let uniforms = snapshotColorUniforms
-        snapshotLock.unlock()
-        guard let pb else { return nil }
-        return Self.renderOffscreenCGImage(
-            pixelBuffer: pb,
-            colorUniforms: uniforms,
-            edrHeadroom: currentEDRHeadroom,
-            maxDimension: maxDimension
-        )
-    }
-
     public func currentFrameSnapshotInput() -> (pixelBuffer: CVPixelBuffer, colorUniforms: DKGpuColorUniforms, edrHeadroom: Float)? {
         snapshotLock.lock()
         let pb = snapshotPixelBuffer
@@ -1576,7 +1546,19 @@ public struct DKMetalVideoView: NSViewRepresentable {
         var lastSubSerial: UInt64 = UInt64.max
         private var lastPausedCheckTime: TimeInterval = 0
         private var didNotifyFirstFrame: Bool = false
-        public var onFirstFrameRendered: (() -> Void)?
+        private var _onFirstFrameRendered: (() -> Void)?
+        public var onFirstFrameRendered: (() -> Void)? {
+            get {
+                playerLock.lock()
+                defer { playerLock.unlock() }
+                return _onFirstFrameRendered
+            }
+            set {
+                playerLock.lock()
+                _onFirstFrameRendered = newValue
+                playerLock.unlock()
+            }
+        }
 
         private final class SubtitleSyncBox {
             unowned let view: DKMetalLayerView
@@ -1590,11 +1572,11 @@ public struct DKMetalVideoView: NSViewRepresentable {
         }
 
         public func startDisplayLink(for view: DKMetalLayerView, player: OpaquePointer?) {
+            playerLock.lock()
             self.view = view
             self.lastPts = -1.0
             self.lastBufferPtr = nil
             self.lastSubSerial = UInt64.max
-            playerLock.lock()
             self._player = player
             self.didNotifyFirstFrame = false
             playerLock.unlock()
@@ -1638,13 +1620,16 @@ public struct DKMetalVideoView: NSViewRepresentable {
             playerLock.lock()
             let p = _player
             let v = self.view
+            let prevPts = lastPts
+            let prevBufferPtr = lastBufferPtr
+            let prevSubSerial = lastSubSerial
             playerLock.unlock()
             guard let p = p, let v = v else { return }
 
             let liftAnimating = v.stepSubtitleLiftAnimation(dt: Float(1.0 / 60.0))
             let needsRedraw = v.needsRedrawOnSameFrame || liftAnimating
             let state = dk_player_get_state(p)
-            if !needsRedraw && lastBufferPtr != nil && (state == DK_STATE_PAUSED || state == DK_STATE_ENDED) {
+            if !needsRedraw && prevBufferPtr != nil && (state == DK_STATE_PAUSED || state == DK_STATE_ENDED) {
                 let now = ProcessInfo.processInfo.systemUptime
                 if now - lastPausedCheckTime < 0.05 {
                     return
@@ -1666,9 +1651,9 @@ public struct DKMetalVideoView: NSViewRepresentable {
             let videoH = max(360, CVPixelBufferGetHeight(pixbuf))
             let vp = v.subtitleViewportMetrics(videoWidth: videoW, videoHeight: videoH)
             dk_player_set_subtitle_viewport(p, vp.canvasW, vp.canvasH, Int32(videoW), Int32(videoH), vp.marginT, vp.marginB, vp.marginL, vp.marginR)
-            let syncBox = SubtitleSyncBox(view: v, serial: lastSubSerial)
+            let syncBox = SubtitleSyncBox(view: v, serial: prevSubSerial)
             let boxPtr = Unmanaged.passUnretained(syncBox).toOpaque()
-            dk_player_sync_subtitle_rgba(p, subClockPts, vp.canvasW, vp.canvasH, lastSubSerial, { rgba, w, h, serial, ctx in
+            dk_player_sync_subtitle_rgba(p, subClockPts, vp.canvasW, vp.canvasH, prevSubSerial, { rgba, w, h, serial, ctx in
                 guard let ctx else { return }
                 let box = Unmanaged<SubtitleSyncBox>.fromOpaque(ctx).takeUnretainedValue()
                 box.updatedSerial = serial
@@ -1694,19 +1679,21 @@ public struct DKMetalVideoView: NSViewRepresentable {
 
             // Deduplication: if PTS and pointer match the last displayed frame and the view
             // has not resized and subtitle overlay has not changed, avoid redundant GPU load
-            if bufPtr == lastBufferPtr && pts == lastPts && !subtitleChanged && !needsRedraw {
+            if bufPtr == prevBufferPtr && pts == prevPts && !subtitleChanged && !needsRedraw {
                 return
             }
 
             if v.renderPixelBuffer(pixbuf, colorUniforms: colorUniforms) {
-                lastPts = pts
-                lastBufferPtr = bufPtr
-                lastSubSerial = syncBox.updatedSerial
                 var notifyCallback: (() -> Void)? = nil
                 playerLock.lock()
-                if !didNotifyFirstFrame && _player == p {
-                    didNotifyFirstFrame = true
-                    notifyCallback = onFirstFrameRendered
+                if _player == p {
+                    lastPts = pts
+                    lastBufferPtr = bufPtr
+                    lastSubSerial = syncBox.updatedSerial
+                    if !didNotifyFirstFrame {
+                        didNotifyFirstFrame = true
+                        notifyCallback = _onFirstFrameRendered
+                    }
                 }
                 playerLock.unlock()
                 if let notifyCallback {

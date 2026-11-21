@@ -1983,23 +1983,7 @@ public struct PlayerView: View {
             }
             let styleSnap = await MainActor.run { appState.subtitleStyle }
             let initialAnchor = await MainActor.run { resolvedDualAnchorMode() }
-            var initialSubCfg = DKSubtitleStyleConfig(
-                scale: Float(styleSnap.scale),
-                border_width: Float(styleSnap.borderWidth),
-                vertical_pos_percent: Float(styleSnap.verticalPositionPercent),
-                primary_delay_sec: styleSnap.primaryDelaySeconds,
-                secondary_delay_sec: styleSnap.secondaryDelaySeconds,
-                text_transform: Int32(styleSnap.transform.rawValue),
-                override_ass_style: styleSnap.overrideASSStyle,
-                forced_only: styleSnap.forcedOnly,
-                unify_pingfang_font: styleSnap.unifyPingFangFont,
-                enhance_secondary_yellow: styleSnap.enhanceSecondaryYellow,
-                secondary_scale: Float(styleSnap.secondaryScale),
-                dual_gap_px: Float(styleSnap.dualSubtitleGapPx),
-                primary_on_top: styleSnap.primaryOnTop,
-                dual_layout_mode: Int32(styleSnap.dualLayoutMode),
-                dual_anchor_mode: initialAnchor
-            )
+            var initialSubCfg = Self.makeKernelSubtitleStyleConfig(styleSnap, anchorMode: initialAnchor)
             dk_player_set_subtitle_style(handle, &initialSubCfg)
             dk_player_set_buffer_limit_mb(handle, cachePoolMB)
             if let turboHandle = preparedTurboHandle {
@@ -2470,10 +2454,11 @@ public struct PlayerView: View {
         return 0
     }
 
-    private func applyKernelSubtitleStyle() {
-        guard let handle = playerHandle else { return }
-        let s = appState.subtitleStyle
-        var cfg = DKSubtitleStyleConfig(
+    nonisolated private static func makeKernelSubtitleStyleConfig(
+        _ s: SubtitleStyleConfiguration,
+        anchorMode: Int32
+    ) -> DKSubtitleStyleConfig {
+        DKSubtitleStyleConfig(
             scale: Float(s.scale),
             border_width: Float(s.borderWidth),
             vertical_pos_percent: Float(s.verticalPositionPercent),
@@ -2488,8 +2473,13 @@ public struct PlayerView: View {
             dual_gap_px: Float(s.dualSubtitleGapPx),
             primary_on_top: s.primaryOnTop,
             dual_layout_mode: Int32(s.dualLayoutMode),
-            dual_anchor_mode: resolvedDualAnchorMode()
+            dual_anchor_mode: anchorMode
         )
+    }
+
+    private func applyKernelSubtitleStyle() {
+        guard let handle = playerHandle else { return }
+        var cfg = Self.makeKernelSubtitleStyleConfig(appState.subtitleStyle, anchorMode: resolvedDualAnchorMode())
         dk_player_set_subtitle_style(handle, &cfg)
         subtitleStyleRevision &+= 1
     }
@@ -2589,7 +2579,7 @@ public struct PlayerView: View {
     }
 
     private func exportRedactedDiagnostics() {
-        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.11"
+        let appVer = DonbyAppInfo.version
         var lines: [String] = []
         lines.append("Donby Diagnostics Report (v\(appVer))")
         lines.append("Time: \(ISO8601DateFormatter().string(from: Date()))")

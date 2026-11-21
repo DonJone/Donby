@@ -7,7 +7,6 @@ set(CMAKE_C_STANDARD 11)
 
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/Sources/DonbyKernelC/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/KernelRust/include
     /opt/homebrew/include
     /opt/homebrew/opt/ffmpeg/include
     /opt/homebrew/opt/libass/include
@@ -17,7 +16,6 @@ link_directories(
     /opt/homebrew/lib
     /opt/homebrew/opt/ffmpeg/lib
     /opt/homebrew/opt/libass/lib
-    ${CMAKE_CURRENT_SOURCE_DIR}/KernelRust/target/release
 )
 
 add_library(donby_kernel STATIC
@@ -25,7 +23,6 @@ add_library(donby_kernel STATIC
 )
 
 target_link_libraries(donby_kernel
-    donby_rs
     avformat
     avcodec
     avutil

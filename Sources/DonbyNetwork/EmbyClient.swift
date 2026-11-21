@@ -27,10 +27,6 @@ public actor RedirectCacheStore {
         }
         cache[key] = (url: url, expiresAt: now.addingTimeInterval(ttlSeconds))
     }
-
-    public func clearAll() {
-        cache.removeAll()
-    }
 }
 
 private actor EmbyPlaybackInfoCache {
@@ -98,7 +94,7 @@ public final class EmbyClient: Sendable {
 
     public let clientName = "Donby"
     public var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.11"
+        DonbyAppInfo.version
     }
     public let deviceName: String
     public let deviceId: String

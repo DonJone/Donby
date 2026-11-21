@@ -13,7 +13,6 @@ let package = Package(
     products: [
         .library(name: "DonbyCore", targets: ["DonbyCore"]),
         .library(name: "DonbyNetwork", targets: ["DonbyNetwork"]),
-        .library(name: "DonbyStorage", targets: ["DonbyStorage"]),
         .library(name: "DonbyKernelC", targets: ["DonbyKernelC"]),
         .library(name: "DonbyMetalRenderer", targets: ["DonbyMetalRenderer"]),
         .executable(name: "Donby", targets: ["DonbyApp"])
@@ -29,16 +28,10 @@ let package = Package(
             path: "Sources/DonbyNetwork"
         ),
         .target(
-            name: "DonbyStorage",
-            dependencies: ["DonbyCore"],
-            path: "Sources/DonbyStorage"
-        ),
-        .target(
             name: "DonbyKernelC",
             path: "Sources/DonbyKernelC",
             publicHeadersPath: "include",
             cxxSettings: [
-                .headerSearchPath("../../KernelRust/include"),
                 .unsafeFlags([
                     "-I\(homebrewPrefix)/include",
                     "-I\(homebrewPrefix)/opt/ffmpeg/include",
@@ -72,11 +65,16 @@ let package = Package(
         ),
         .executableTarget(
             name: "DonbyApp",
-            dependencies: ["DonbyCore", "DonbyNetwork", "DonbyStorage", "DonbyKernelC", "DonbyMetalRenderer"],
+            dependencies: ["DonbyCore", "DonbyNetwork", "DonbyKernelC", "DonbyMetalRenderer"],
             path: "Sources/DonbyApp",
             linkerSettings: [
                 .unsafeFlags(["-Xlinker", "-headerpad_max_install_names"])
             ]
+        ),
+        .testTarget(
+            name: "DonbyCoreTests",
+            dependencies: ["DonbyCore"],
+            path: "Tests/DonbyCoreTests"
         )
     ],
     cxxLanguageStandard: .cxx20

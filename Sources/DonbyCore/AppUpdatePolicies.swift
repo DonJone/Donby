@@ -1,5 +1,12 @@
 import Foundation
 
+public enum DonbyAppInfo {
+    public static let fallbackVersion = "1.4.12"
+    public static var version: String {
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? fallbackVersion
+    }
+}
+
 public enum AppUpdateChannel: String, CaseIterable, Codable, Identifiable, Sendable {
     case stable = "stable"
     case prerelease = "prerelease"

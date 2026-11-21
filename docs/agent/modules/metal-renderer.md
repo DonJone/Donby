@@ -1,6 +1,6 @@
 # Module Map: Metal EDR Video Renderer (`DonbyMetalRenderer`)
 
-> Last synced: `v1.4.8`. Load this doc for CVDisplayLink presentation, Metal shaders, HDR10/Dolby Vision EDR tone mapping, GPU snapshots, first-frame callbacks, and subtitle overlay rendering.
+> Last synced: `v1.4.12`. Load this doc for CVDisplayLink presentation, Metal shaders, HDR10/Dolby Vision EDR tone mapping, GPU snapshots, first-frame callbacks, and subtitle overlay rendering.
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyMetalRenderer/DKMetalVideoView.swift` (~1666L)
@@ -26,6 +26,6 @@
   - `onFirstFrameRendered` callback fires on `MainActor` once the first real video frame is presented on screen, allowing `PlayerView` to dismiss the loading pill with zero black-frame gap.
 
 ## 3. Critical Invariants & Pitfalls (DO NOT BREAK)
-1. **Zero Main-Thread / Render-Thread Blocking**: `renderLocked(_:colorUniforms:)` runs on the DisplayLink path; never perform synchronous SwiftUI state mutations or blocking I/O there (dispatch `onFirstFrameRendered` asynchronously to `MainActor`).
+1. **Zero Main-Thread / Render-Thread Blocking & Coordinator Lock Hygiene**: `renderLocked(_:colorUniforms:)` runs on the DisplayLink path; never perform synchronous SwiftUI state mutations or blocking I/O there (dispatch `onFirstFrameRendered` asynchronously to `MainActor`). All cross-thread `Coordinator` state (`_player`, `onFirstFrameRendered`, `lastPts`, `lastBufferPtr`, `lastSubSerial`, `didNotifyFirstFrame`) MUST be synchronized with `playerLock`.
 2. **Stale Frame Cleanup**: Always invoke `clearDisplayedFrame()` when switching/closing players so the previous item's last frame never flashes during new item startup.
 3. **sRGB Snapshot Color Accuracy**: `OffscreenMetalContext` must convert HDR/EDR frames to sRGB for saved watch-record thumbnails (`v1.3.17` fix).

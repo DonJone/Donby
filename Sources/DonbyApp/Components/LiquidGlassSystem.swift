@@ -9,7 +9,6 @@ public enum DonbyGlassPalette {
     public static let canvasBlack = Color(red: 0.043, green: 0.046, blue: 0.056)
     /// SenPlayer-inspired Light Mode canvas
     public static let canvasLight = Color(red: 0.945, green: 0.948, blue: 0.960)
-    public static let smokedBacking = Color(red: 0.020, green: 0.024, blue: 0.036)
 
     public static func canvas(isLight: Bool) -> Color {
         isLight ? canvasLight : canvasBlack
@@ -29,10 +28,6 @@ public enum DonbyGlassPalette {
 
     public static func secondaryText(isLight: Bool) -> Color {
         isLight ? Color(red: 0.42, green: 0.42, blue: 0.46) : Color(white: 0.60)
-    }
-
-    public static func tertiaryText(isLight: Bool) -> Color {
-        isLight ? Color(red: 0.58, green: 0.58, blue: 0.62) : Color(white: 0.42)
     }
 
     public static func separator(isLight: Bool) -> Color {
@@ -61,35 +56,6 @@ public struct DonbyVisualEffectView: NSViewRepresentable {
     public func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
         nsView.material = material
         nsView.blendingMode = blendingMode
-    }
-
-    public func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSVisualEffectView, context: Context) -> CGSize? {
-        proposal.replacingUnspecifiedDimensions()
-    }
-}
-
-public struct DonbyBackdropBlur: NSViewRepresentable {
-    var material: NSVisualEffectView.Material = .hudWindow
-    var alpha: CGFloat = 0.45
-
-    public init(material: NSVisualEffectView.Material = .hudWindow, alpha: CGFloat = 0.45) {
-        self.material = material
-        self.alpha = alpha
-    }
-
-    public func makeNSView(context: Context) -> NSVisualEffectView {
-        let v = NSVisualEffectView()
-        v.material = material
-        v.blendingMode = .withinWindow
-        v.state = .active
-        v.appearance = NSAppearance(named: .darkAqua)
-        v.alphaValue = alpha
-        return v
-    }
-
-    public func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
-        nsView.material = material
-        nsView.alphaValue = alpha
     }
 
     public func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSVisualEffectView, context: Context) -> CGSize? {
@@ -215,23 +181,6 @@ public extension View {
 
     func donbyLiquidGlassRect(cornerRadius: CGFloat = 15, tint: Color? = nil, interactive: Bool = false, isHovered: Bool = false) -> some View {
         modifier(DonbyLiquidGlassRectModifier(cornerRadius: cornerRadius, tint: tint, interactive: interactive, isHovered: isHovered))
-    }
-}
-
-public struct DonbyLiquidGlassRoundedSurface: View {
-    public var cornerRadius: CGFloat = 14
-    public var tint: Color? = nil
-    public var isHovered: Bool = false
-
-    public init(cornerRadius: CGFloat = 14, tint: Color? = nil, isHovered: Bool = false) {
-        self.cornerRadius = cornerRadius
-        self.tint = tint
-        self.isHovered = isHovered
-    }
-
-    public var body: some View {
-        Color.clear
-            .donbyLiquidGlassRect(cornerRadius: cornerRadius, tint: tint, interactive: false, isHovered: isHovered)
     }
 }
 

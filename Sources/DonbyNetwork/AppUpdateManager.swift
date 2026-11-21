@@ -47,7 +47,7 @@ public final class AppUpdateManager: ObservableObject {
     private init() {}
 
     public static var currentVersion: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.4.11"
+        DonbyAppInfo.version
     }
 
     public var lastCheckedDate: Date? {
@@ -193,7 +193,9 @@ public final class AppUpdateManager: ObservableObject {
     }
 
     public func startDownloadAndInstall(_ release: AppReleaseInfo) {
-        guard !isBusy || matchesDownloading(release) == false else { return }
+        if isBusy {
+            guard case .downloading(let active, _, _, _) = state, active.tagName != release.tagName else { return }
+        }
         guard let asset = release.preferredUpdateAsset else {
             NSWorkspace.shared.open(release.htmlURL)
             return
@@ -354,13 +356,6 @@ public final class AppUpdateManager: ObservableObject {
         }
     }
 
-    private func matchesDownloading(_ release: AppReleaseInfo) -> Bool {
-        if case .downloading(let r, _, _, _) = state {
-            return r.tagName == release.tagName
-        }
-        return false
-    }
-
     nonisolated private static func currentWritableAppBundleURL() -> URL? {
         let bundleURL = Bundle.main.bundleURL
         guard bundleURL.pathExtension.lowercased() == "app" else { return nil }
@@ -498,7 +493,7 @@ public final class AppUpdateManager: ObservableObject {
         }
 
         var req = URLRequest(url: remoteURL, timeoutInterval: 180)
-        req.setValue("Donby/\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0")", forHTTPHeaderField: "User-Agent")
+        req.setValue("Donby/\(DonbyAppInfo.version)", forHTTPHeaderField: "User-Agent")
 
         let delegate = Delegate(expectedSize: expectedSize, onProgress: onProgress)
         let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)

@@ -124,17 +124,6 @@ public enum ServerType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .smb: return "SMB"
         }
     }
-    public var assetIconName: String {
-        switch self {
-        case .emby: return "emby"
-        case .uhdNative: return "uhd"
-        case .jellyfin: return "jellyfin"
-        case .feiniu: return "feiniu"
-        case .plex: return "plex"
-        case .webdav: return "webdav"
-        case .smb: return "smb"
-        }
-    }
 }
 
 public struct ServerLineInfo: Codable, Identifiable, Hashable, Sendable {
@@ -244,16 +233,6 @@ public struct EmbyServerConfig: Codable, Identifiable, Hashable, Sendable {
     public var activeLineName: String {
         if let selectedLineId, let line = backupLines.first(where: { $0.id == selectedLineId }) { return line.name }
         return "主线路"
-    }
-
-    public var activeLineIsAutoSynced: Bool {
-        if let selectedLineId, let line = backupLines.first(where: { $0.id == selectedLineId }) { return line.isAutoSynced }
-        return false
-    }
-
-    public var activeLineLatencyMs: Int? {
-        if let selectedLineId, let line = backupLines.first(where: { $0.id == selectedLineId }) { return line.latencyMs }
-        return mainLineLatencyMs
     }
 
     public var autoSyncedLineCount: Int { backupLines.filter(\.isAutoSynced).count }
@@ -437,7 +416,6 @@ public struct EmbyItem: Codable, Identifiable, Hashable, Sendable {
         return t == "series" || t == "show" || t == "season"
     }
     public var isEpisode: Bool { type?.lowercased() == "episode" }
-    public var isMovie: Bool { type?.lowercased() == "movie" }
 
     public func withSeriesName(_ newSeriesName: String) -> EmbyItem {
         EmbyItem(

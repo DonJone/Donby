@@ -35,13 +35,4 @@ public enum DemoServerData {
             isDemoServer: false
         )
     }
-
-    public static let allMediaItems: [EmbyItem] = []
-    public static let libraries: [EmbyItem] = []
-    public static let nextUpEpisodes: [EmbyItem] = []
-    public static let demoExtDomains: [EmbyExtDomainItem] = []
-    public static func makeDemoSeasons(for seriesId: String) -> [EmbyItem] { [] }
-    public static func makeDemoEpisodes(for series: EmbyItem, seasonIndex: Int) -> [EmbyItem] { [] }
 }
-
-public typealias UHDNowPreset = DemoServerData

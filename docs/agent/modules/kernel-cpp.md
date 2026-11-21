@@ -1,21 +1,19 @@
-# Module Map: Playback Kernel (`DonbyKernelC` & `KernelRust`)
+# Module Map: Playback Kernel (`DonbyKernelC`)
 
-> Last synced: `v1.4.11`. Load this doc for FFmpeg demuxing, VideoToolbox decoding, AudioQueue A/V sync, seek flush, rebuffer cushions, libass/PGS subtitles, and Rust kernel helpers.
+> Last synced: `v1.4.12`. Load this doc for FFmpeg demuxing, VideoToolbox decoding, AudioQueue A/V sync, seek flush, rebuffer cushions, and libass/PGS subtitles.
 
 ## 1. File Inventory & Core Symbols
-- `Sources/DonbyKernelC/include/donby_kernel.h` (~192L)
-  - Public C ABI bridging Swift <-> C++: `dk_player_create/destroy`, `dk_player_open/open_with_tracks`, `dk_player_set_custom_io`, `dk_player_play/pause/seek`, `dk_player_acquire_frame`, `dk_player_should_yield_read`, subtitle/track setters, telemetry getters.
-- `Sources/DonbyKernelC/dk_engine.cpp` (~4488L)
-  - Core struct `DKPlayer` (line ~117): FFmpeg contexts (`AVFormatContext`, `AVCodecContext`, `SwrContext`), custom `AVIOContext`, `AudioQueueRef`, `ASS_Library`/`ASS_Renderer`/primary+secondary `ASS_Track`, `VideoFrameEntry` queue, `AudioChunk` queue, `PgsCue` queue.
-  - Key RAII & sync guards: `DKReaderGuard` (~314), `AudioStartingGuard` (~1033), `SeekScopeGuard` (~2081).
+- `Sources/DonbyKernelC/include/donby_kernel.h` (~195L)
+  - Public C ABI bridging Swift <-> C++: `dk_player_create/destroy`, `dk_player_open_with_tracks`, `dk_player_set_custom_io`, `dk_player_play/pause/seek`, `dk_player_acquire_frame`, `dk_player_sync_subtitle_rgba`, `dk_player_should_yield_read`, subtitle/track setters, telemetry getters.
+- `Sources/DonbyKernelC/dk_engine.cpp` (~6160L)
+  - Core struct `DKPlayer`: FFmpeg contexts (`AVFormatContext`, `AVCodecContext`, `SwrContext`), custom `AVIOContext`, `AudioQueueRef`, `ASS_Library`/`ASS_Renderer`/primary+secondary `ASS_Track`, `VideoFrameEntry` queue, `AudioChunk` queue, `PgsCue` queue.
+  - Key RAII & sync guards: `DKReaderGuard`, `AudioStartingGuard`, `SeekScopeGuard`.
   - Key functions:
+    - `dk_check_dovi_fel(const uint8_t*, size_t)` — inline HEVC NAL 62/63 Dolby Vision RPU/FEL detector (replaced standalone `KernelRust` crate in `v1.4.12`).
     - `dk_required_audio_preroll_samples(const DKPlayer*)` — adaptive audio preroll (`24000` samples = `0.50s` when `rebuf == 0`, scales up on underrun rebuffers).
     - `dk_try_start_audio_queue_if_ready(DKPlayer*)` — primes & starts `AudioQueue`.
     - `dk_audio_decode_worker` / `dk_video_decode_worker` / `dk_demux_worker` — background pipeline threads.
     - `dk_player_acquire_frame` — called on CVDisplayLink thread; MUST NEVER block on CoreAudio or network I/O.
-- `KernelRust/src/lib.rs` (~241L) + `KernelRust/include/donby_rs.h` (~34L)
-  - `dk_rs_check_dovi_fel` (active in `dk_engine.cpp` to detect Dolby Vision Profile 7 FEL).
-  - `dk_rs_cache_*` (`CacheInner` ring/arena cache, available as static lib `libdonby_rs.a`).
 
 ## 2. Threading, Sync & State Machine
 - **Master Clock**: Driven by `AudioQueue` hardware playback timeline (with monotonic fallback when silent/audio-EOF so video never stalls at audio EOF).

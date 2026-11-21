@@ -5,22 +5,22 @@
 
 ## 1. Repository Overview
 - **Product**: Donby — native macOS media player (macOS 14+, Apple Silicon) for Emby / Jellyfin / UHDNow / local media.
-- **Stack**: SwiftUI + AppKit (`DonbyApp`, `DonbyCore`, `DonbyNetwork`, `DonbyStorage`), Metal EDR renderer (`DonbyMetalRenderer`), C++20/FFmpeg/VideoToolbox/AudioToolbox/libass playback kernel (`DonbyKernelC`), Rust static helper (`KernelRust`).
-- **Current Version**: `1.4.11` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
+- **Stack**: SwiftUI + AppKit (`DonbyApp`, `DonbyCore`, `DonbyNetwork`), Metal EDR renderer (`DonbyMetalRenderer`), C++20/FFmpeg/VideoToolbox/AudioToolbox/libass playback kernel (`DonbyKernelC`).
+- **Current Version**: `1.4.12` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
 
 ## 2. Task-to-Module Routing Table
 
 | If your task involves... | Read FIRST (L1) | Key Source Files |
 | :--- | :--- | :--- |
 | Streaming, seek latency, HTTP/2, Range, L1/L2 cache, offline downloads, Emby/UHD API, auto-updater | [modules/turbo-network.md](modules/turbo-network.md) | `Sources/DonbyNetwork/TurboCacheAndDownloadEngine.swift`, `EmbyClient.swift`, `UHDStreamClient.swift`, `OfflineMediaLibrary.swift`, `AppUpdateManager.swift` |
-| Demuxing, decoding, A/V sync, AudioQueue, rebuffer, seek flush, libass/PGS subtitles, FFmpeg AVIO | [modules/kernel-cpp.md](modules/kernel-cpp.md) | `Sources/DonbyKernelC/dk_engine.cpp`, `include/donby_kernel.h`, `KernelRust/src/lib.rs` |
+| Demuxing, decoding, A/V sync, AudioQueue, rebuffer, seek flush, libass/PGS subtitles, FFmpeg AVIO | [modules/kernel-cpp.md](modules/kernel-cpp.md) | `Sources/DonbyKernelC/dk_engine.cpp`, `include/donby_kernel.h` |
 | Video presentation, CVDisplayLink, HDR10/DoVi EDR, Metal shaders, first-frame callback, subtitle lift | [modules/metal-renderer.md](modules/metal-renderer.md) | `Sources/DonbyMetalRenderer/DKMetalVideoView.swift` |
 | Player HUD, scrubber, seek debounce, AppState, Liquid Glass UI, 120Hz home/grid, artwork cache, views | [modules/app-player-ui.md](modules/app-player-ui.md) | `Sources/DonbyApp/PlayerView.swift`, `AppState.swift`, `DetailView.swift`, `Components/*`, `Views/*` |
-| Core models, storage paths (`DONBY_HOME`), logger, subtitle encoding/policies, Keychain | [modules/storage-core.md](modules/storage-core.md) | `Sources/DonbyCore/*`, `Sources/DonbyStorage/KeychainStorage.swift` |
-| Building, CMake/Cargo, `.app` signing, Dock inode preservation, DMG/ZIP packaging, local release, CI | [modules/build-release.md](modules/build-release.md) | `build_app.sh`, `build_kernel.sh`, `scripts/*`, `.github/workflows/build-dmg.yml` |
+| Core models, storage paths (`DONBY_HOME`), logger, subtitle encoding/policies, version info, core tests | [modules/storage-core.md](modules/storage-core.md) | `Sources/DonbyCore/*`, `Tests/DonbyCoreTests/DonbyCoreTests.swift` |
+| Building, CMake, `.app` signing, Dock inode preservation, DMG/ZIP packaging, local release, CI | [modules/build-release.md](modules/build-release.md) | `build_app.sh`, `build_kernel.sh`, `scripts/*`, `.github/workflows/build-dmg.yml` |
 
 ## 3. Architecture Decision Records (L3)
-- [decisions/001-native-kernel-over-libmpv.md](decisions/001-native-kernel-over-libmpv.md) — Why Donby keeps custom C++/Metal/Rust kernel instead of `libmpv`.
+- [decisions/001-native-kernel-over-libmpv.md](decisions/001-native-kernel-over-libmpv.md) — Why Donby keeps custom C++/Metal kernel instead of `libmpv`.
 - [decisions/002-h2-adaptive-concurrency-and-l2-cache.md](decisions/002-h2-adaptive-concurrency-and-l2-cache.md) — HTTP/2 concurrency tuning, EWMA TTFB rescue, async L2 persistence, and rejected approaches.
 
 ## 4. Changelog Shards (L2)
@@ -39,10 +39,10 @@
 swift build --sdk /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
 
 # L1 Kernel C++ rebuild (required after editing dk_engine.cpp / donby_kernel.h)
-cmake --build /Users/don/git/Donby/build_kernel
+./build_kernel.sh
 
-# L1 Rust kernel check (required after editing KernelRust/)
-cargo test --manifest-path /Users/don/git/Donby/KernelRust/Cargo.toml
+# L2 Core unit tests
+swift test --sdk /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk --disable-xctest
 
 # L3 Release build & in-place /Applications/Donby.app install (only on release/explicit request)
 ./build_app.sh

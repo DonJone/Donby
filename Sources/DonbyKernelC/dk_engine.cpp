@@ -1,5 +1,4 @@
 #include "donby_kernel.h"
-#include <donby_rs.h>
 
 #include <atomic>
 #include <thread>
@@ -2339,6 +2338,17 @@ static void dk_signal_seek_request(DKPlayer* player, double target_sec, bool acc
 }
 
 // Worker: Demuxing, thread-safe seeking, and cache writing
+static bool dk_check_dovi_fel(const uint8_t* nalu_data, size_t nalu_len) {
+    if (!nalu_data || nalu_len < 4) return false;
+    for (size_t i = 0; i + 3 < nalu_len; ++i) {
+        if (nalu_data[i] == 0x00 && nalu_data[i + 1] == 0x00 && nalu_data[i + 2] == 0x01) {
+            const uint8_t nal_type = (nalu_data[i + 3] >> 1) & 0x3F;
+            if (nal_type == 62 || nal_type == 63) return true;
+        }
+    }
+    return false;
+}
+
 static void dk_demux_worker(DKPlayer* player) {
     AVPacket* pkt = av_packet_alloc();
     int consecutive_io_errors = 0;
@@ -2645,7 +2655,7 @@ static void dk_demux_worker(DKPlayer* player) {
                 player->format_ctx &&
                 player->format_ctx->streams[pkt->stream_index]->codecpar->codec_id == AV_CODEC_ID_HEVC) {
                 dovi_probe_packets++;
-                if (dk_rs_check_dovi_fel(pkt->data, pkt->size)) {
+                if (dk_check_dovi_fel(pkt->data, static_cast<size_t>(std::max(0, pkt->size)))) {
                     player->dovi_detected.store(true, std::memory_order_relaxed);
                     std::lock_guard<std::mutex> lock(player->stats_mtx);
                     player->stats.is_dolby_vision = true;
@@ -2852,10 +2862,6 @@ void dk_player_request_abort(DKPlayer* player) {
     player->video_decode_cv.notify_all();
     player->audio_decode_cv.notify_all();
     player->video_frame_cv.notify_all();
-}
-
-int dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, double start_sec, bool hw_decode) {
-    return dk_player_open_with_tracks(player, url, headers_crlf, start_sec, hw_decode, -1, -1);
 }
 
 static int dk_score_auto_subtitle_stream(const AVStream* st) {
@@ -4307,10 +4313,6 @@ CVPixelBufferRef dk_player_acquire_frame(DKPlayer* player, double* out_pts, DKGp
         return player->last_frame;
     }
     return nullptr;
-}
-
-CVPixelBufferRef dk_player_acquire_frame_for_host_time(DKPlayer* player, double* out_pts) {
-    return dk_player_acquire_frame(player, out_pts, nullptr);
 }
 
 static void dk_composite_ass_images_to_rgba(
@@ -5896,24 +5898,6 @@ static bool dk_update_subtitle_rgba_locked(
     return true;
 }
 
-bool dk_player_get_subtitle_rgba(
-    DKPlayer* player,
-    double pts,
-    int32_t canvas_w,
-    int32_t canvas_h,
-    const uint8_t** out_rgba,
-    int32_t* out_w,
-    int32_t* out_h,
-    uint64_t* out_serial
-) {
-    DKReaderGuard guard(player);
-    if (!guard || !out_rgba || !out_w || !out_h || !out_serial) return false;
-    if (canvas_w <= 0 || canvas_h <= 0) return false;
-
-    std::lock_guard<std::mutex> lock(player->ass_mtx);
-    return dk_update_subtitle_rgba_locked(player, pts, canvas_w, canvas_h, out_rgba, out_w, out_h, out_serial);
-}
-
 void dk_player_sync_subtitle_rgba(
     DKPlayer* player,
     double pts,
@@ -5935,24 +5919,6 @@ void dk_player_sync_subtitle_rgba(
     if (serial != last_serial) {
         callback(has_sub ? rgba : nullptr, has_sub ? w : 0, has_sub ? h : 0, serial, context);
     }
-}
-
-bool dk_player_get_subtitle_overlay(DKPlayer* player, double pts, DKSubtitleBitmap* out_bitmap) {
-    DKReaderGuard guard(player);
-    if (!guard || !player->ass_renderer || !player->ass_track || !out_bitmap) return false;
-    std::lock_guard<std::mutex> lock(player->ass_mtx);
-    long long now_ms = static_cast<long long>(pts * 1000.0);
-    int change = 0;
-    ASS_Image* img = ass_render_frame(player->ass_renderer, player->ass_track, now_ms, &change);
-    if (!img) return false;
-
-    out_bitmap->x = img->dst_x;
-    out_bitmap->y = img->dst_y;
-    out_bitmap->w = img->w;
-    out_bitmap->h = img->h;
-    out_bitmap->stride = img->stride;
-    out_bitmap->rgba_data = img->bitmap;
-    return true;
 }
 
 DKPlayerState dk_player_get_state(DKPlayer* player) {
@@ -6005,25 +5971,7 @@ double dk_player_get_buffered_duration(DKPlayer* player) {
     return std::max(0.0, ahead);
 }
 
-void dk_player_get_stats(DKPlayer* player, DKRuntimeStats* out_stats) {
-    DKReaderGuard guard(player);
-    if (guard && out_stats) {
-        int64_t total_bytes = dk_player_get_total_bytes_read(player);
-        double speed_mbs = dk_player_get_download_speed_mbs(player);
-        int64_t cached = std::max<int64_t>(0, player->queued_pkt_bytes.load(std::memory_order_relaxed));
-        std::lock_guard<std::mutex> lock(player->stats_mtx);
-        *out_stats = player->stats;
-        out_stats->cached_bytes = cached;
-        out_stats->total_bytes_read = total_bytes;
-        out_stats->download_speed_mbs = speed_mbs;
-    }
-}
-
-double dk_player_get_download_speed_mbs(DKPlayer* player) {
-    DKReaderGuard guard(player);
-    if (!guard) return 0.0;
-
-    auto now = std::chrono::steady_clock::now();
+static int64_t dk_player_get_total_bytes_read(DKPlayer* player) {
     int64_t cur_bytes = player->total_bytes_read.load(std::memory_order_relaxed);
     if (player->format_ctx && player->format_ctx->pb) {
         int64_t pb_bytes = player->format_ctx->pb->bytes_read;
@@ -6032,6 +5980,12 @@ double dk_player_get_download_speed_mbs(DKPlayer* player) {
             player->total_bytes_read.store(cur_bytes, std::memory_order_relaxed);
         }
     }
+    return cur_bytes;
+}
+
+static double dk_player_get_download_speed_mbs(DKPlayer* player) {
+    auto now = std::chrono::steady_clock::now();
+    int64_t cur_bytes = dk_player_get_total_bytes_read(player);
 
     std::lock_guard<std::mutex> lock(player->speed_mtx);
     double dt = std::chrono::duration<double>(now - player->last_speed_time).count();
@@ -6055,18 +6009,18 @@ double dk_player_get_download_speed_mbs(DKPlayer* player) {
     return std::max(0.0, player->instant_download_speed_mbs.load(std::memory_order_relaxed));
 }
 
-int64_t dk_player_get_total_bytes_read(DKPlayer* player) {
+void dk_player_get_stats(DKPlayer* player, DKRuntimeStats* out_stats) {
     DKReaderGuard guard(player);
-    if (!guard) return 0;
-    int64_t cur_bytes = player->total_bytes_read.load(std::memory_order_relaxed);
-    if (player->format_ctx && player->format_ctx->pb) {
-        int64_t pb_bytes = player->format_ctx->pb->bytes_read;
-        if (pb_bytes > cur_bytes) {
-            cur_bytes = pb_bytes;
-            player->total_bytes_read.store(cur_bytes, std::memory_order_relaxed);
-        }
+    if (guard && out_stats) {
+        int64_t total_bytes = dk_player_get_total_bytes_read(player);
+        double speed_mbs = dk_player_get_download_speed_mbs(player);
+        int64_t cached = std::max<int64_t>(0, player->queued_pkt_bytes.load(std::memory_order_relaxed));
+        std::lock_guard<std::mutex> lock(player->stats_mtx);
+        *out_stats = player->stats;
+        out_stats->cached_bytes = cached;
+        out_stats->total_bytes_read = total_bytes;
+        out_stats->download_speed_mbs = speed_mbs;
     }
-    return cur_bytes;
 }
 
 CGImageRef dk_extract_video_thumbnail(const char* file_path_or_url, double target_sec) {

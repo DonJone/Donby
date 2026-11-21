@@ -76,14 +76,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: KernelRust
-
       - name: Install FFmpeg & libass via Homebrew
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
@@ -99,7 +91,8 @@ jobs:
           elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VER="${GITHUB_REF_NAME#v}"
           else
-            VER="1.1.0-${GITHUB_SHA::7}"
+            BASE_VER="$(sed -n 's/^APP_VERSION="\${DONBY_VERSION:-\(.*\)}"$/\1/p' build_app.sh | head -n 1)"
+            VER="${BASE_VER:-1.4.12}-${GITHUB_SHA::7}"
           fi
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "Resolved Donby version: ${VER}"

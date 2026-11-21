@@ -56,6 +56,7 @@ public final class DonbyLogger: ObservableObject {
     @Published public private(set) var entries: [DonbyLogEntry] = []
 
     private let lock = NSLock()
+    private let ioQueue = DispatchQueue(label: "com.donby.logger.io", qos: .utility)
     private let maxEntries = 2000
     private var pendingEntries: [DonbyLogEntry] = []
     private var isFlushScheduled = false
@@ -85,10 +86,10 @@ public final class DonbyLogger: ObservableObject {
         self.fileHandle = try? FileHandle(forWritingTo: logFileURL)
         self.fileHandle?.seekToEndOfFile()
 
-        logInitialBanner()
+        writeInitialBannerOnIOQueue()
     }
 
-    private func logInitialBanner() {
+    private func writeInitialBannerOnIOQueue() {
         let banner = "\n======================================================\n" +
                      "  Donby Media Player Runtime Log Session Started\n" +
                      "  Date: \(Date())\n" +
@@ -100,12 +101,13 @@ public final class DonbyLogger: ObservableObject {
 
     public func log(_ message: String, level: DonbyLogLevel = .info, subsystem: String = "App") {
         let entry = DonbyLogEntry(timestamp: Date(), level: level, subsystem: subsystem, message: message)
-        let line = entry.fullLine + "\n"
+        if let data = (entry.fullLine + "\n").data(using: .utf8) {
+            ioQueue.async { [weak self] in
+                self?.fileHandle?.write(data)
+            }
+        }
 
         lock.lock()
-        if let data = line.data(using: .utf8) {
-            fileHandle?.write(data)
-        }
         pendingEntries.append(entry)
         let shouldScheduleFlush = !isFlushScheduled
         if shouldScheduleFlush {
@@ -145,9 +147,13 @@ public final class DonbyLogger: ObservableObject {
     public func clear() {
         lock.lock()
         pendingEntries.removeAll(keepingCapacity: true)
-        try? fileHandle?.truncate(atOffset: 0)
-        logInitialBanner()
         lock.unlock()
+
+        ioQueue.async { [weak self] in
+            guard let self else { return }
+            try? self.fileHandle?.truncate(atOffset: 0)
+            self.writeInitialBannerOnIOQueue()
+        }
 
         DispatchQueue.main.async { [weak self] in
             self?.entries.removeAll()
@@ -155,8 +161,7 @@ public final class DonbyLogger: ObservableObject {
     }
 
     public func exportAllText() -> String {
-        lock.lock()
-        defer { lock.unlock() }
+        ioQueue.sync {}
         if let data = try? Data(contentsOf: logFileURL), let str = String(data: data, encoding: .utf8) {
             return str
         }

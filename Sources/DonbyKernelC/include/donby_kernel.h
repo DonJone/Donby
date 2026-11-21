@@ -78,15 +78,6 @@ typedef int64_t (*DKCustomIOSeekCallback)(void* opaque, int64_t offset, int when
 typedef void    (*DKCustomIOAbortCallback)(void* opaque);
 typedef void    (*DKCustomIOCloseCallback)(void* opaque);
 
-typedef struct {
-    int32_t x;
-    int32_t y;
-    int32_t w;
-    int32_t h;
-    int32_t stride;
-    const uint8_t* rgba_data;
-} DKSubtitleBitmap;
-
 // Shared 4-byte-aligned GPU color/HDR/DolbyVision descriptor synchronized per video frame
 typedef struct {
     // Group 0 (16B)
@@ -138,7 +129,6 @@ typedef void (*DKSubtitleRgbaCallback)(const uint8_t* rgba, int32_t width, int32
 DKPlayer* dk_player_create(void);
 void      dk_player_destroy(DKPlayer* player);
 
-int       dk_player_open(DKPlayer* player, const char* url, const char* headers_crlf, double start_sec, bool hw_decode);
 int       dk_player_open_with_tracks(
     DKPlayer* player,
     const char* url,
@@ -189,18 +179,13 @@ bool      dk_player_get_subtitle_vertical_bounds(DKPlayer* player, int32_t* out_
 int       dk_player_get_chapter_count(DKPlayer* player);
 bool      dk_player_get_chapter_info(DKPlayer* player, int ordinal, DKChapterInfo* out_info);
 
-CVPixelBufferRef dk_player_acquire_frame_for_host_time(DKPlayer* player, double* out_pts);
 CVPixelBufferRef dk_player_acquire_frame(DKPlayer* player, double* out_pts, DKGpuColorUniforms* out_color);
-bool      dk_player_get_subtitle_overlay(DKPlayer* player, double pts, DKSubtitleBitmap* out_bitmap);
-bool      dk_player_get_subtitle_rgba(DKPlayer* player, double pts, int32_t canvas_w, int32_t canvas_h, const uint8_t** out_rgba, int32_t* out_w, int32_t* out_h, uint64_t* out_serial);
 void      dk_player_sync_subtitle_rgba(DKPlayer* player, double pts, int32_t canvas_w, int32_t canvas_h, uint64_t last_serial, DKSubtitleRgbaCallback callback, void* context);
 
 DKPlayerState dk_player_get_state(DKPlayer* player);
 double        dk_player_get_position(DKPlayer* player);
 double        dk_player_get_duration(DKPlayer* player);
 double        dk_player_get_buffered_duration(DKPlayer* player);
-double        dk_player_get_download_speed_mbs(DKPlayer* player);
-int64_t       dk_player_get_total_bytes_read(DKPlayer* player);
 void          dk_player_get_stats(DKPlayer* player, DKRuntimeStats* out_stats);
 
 CGImageRef    dk_extract_video_thumbnail(const char* file_path_or_url, double target_sec);

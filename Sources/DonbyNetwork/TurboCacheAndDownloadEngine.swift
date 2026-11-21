@@ -1246,15 +1246,6 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         condition.unlock()
     }
 
-    public func interruptPendingReadForSeek() {
-        wakeWaitingReads()
-    }
-
-    private func shouldYieldCurrentReadLocked() -> Bool {
-        if isAborted || isClosed { return true }
-        return shouldYieldReadHandler?() ?? false
-    }
-
     private func shouldYieldReadAtOffsetLocked(_ offset: Int64, totalSize: Int64, chunkSize: Int) -> Bool {
         if isAborted || isClosed { return true }
         // Never abort a near-tail container index read (e.g. 64+ KB Matroska Cues at the end of a 3h 30GB MKV)
@@ -1263,12 +1254,6 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             return false
         }
         return shouldYieldReadHandler?() ?? false
-    }
-
-    private func isChunkInFlight(_ chunkIndex: Int) -> Bool {
-        condition.lock()
-        defer { condition.unlock() }
-        return inFlightChunks.contains(chunkIndex)
     }
 
     /// Signals that FFmpeg header/stream probing has finished so full multi-connection lookahead may engage.
@@ -3551,11 +3536,6 @@ public final class DonbyDownloadManager: ObservableObject {
             (serverId == nil || entry.serverId == serverId) &&
             (mediaSourceId == nil || mediaSourceId?.isEmpty == true || entry.mediaSourceId == mediaSourceId)
         }
-    }
-
-    public func isDownloadedAndReady(assetKey: String) -> Bool {
-        guard let item = entry(for: assetKey), item.status == .completed else { return false }
-        return hasPlayableBackingFile(for: item)
     }
 
     private func hasPlayableBackingFile(for entry: DownloadEntry) -> Bool {

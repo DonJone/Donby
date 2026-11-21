@@ -1344,14 +1344,6 @@ public struct DetailView: View {
         }
     }
 
-    private func specPill(_ text: String, highlight: Bool = false) -> some View {
-        Text(text)
-            .font(.system(size: 11, weight: .bold, design: .rounded))
-            .foregroundStyle(highlight ? appState.accentTextColor : .white)
-            .padding(.horizontal, 8).padding(.vertical, 3.5)
-            .donbyLiquidGlassRect(cornerRadius: 6, tint: highlight ? appState.accentColor : nil, interactive: false, isHovered: false)
-    }
-
     private func playHighestSpecification() {
         let sources = item.mediaSources ?? []
         let bestSource = sources.max { a, b in

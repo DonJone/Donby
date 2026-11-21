@@ -2,7 +2,6 @@ import SwiftUI
 import AppKit
 import DonbyCore
 import DonbyNetwork
-import DonbyStorage
 
 public struct ServerListView: View {
     @EnvironmentObject private var appState: AppState

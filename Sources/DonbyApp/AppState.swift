@@ -4,7 +4,6 @@ import Combine
 import AppKit
 import DonbyCore
 import DonbyNetwork
-import DonbyStorage
 import DonbyKernelC
 import DonbyMetalRenderer
 
@@ -1338,13 +1337,6 @@ public final class AppState: ObservableObject {
         }
     }
 
-    public func switchLine(to lineId: UUID?, for serverId: UUID) async {
-        switchLineImmediate(to: lineId, for: serverId, triggerReload: false)
-        if activeServer?.id == serverId {
-            await loadActiveServerHome(syncDomains: false)
-        }
-    }
-
     public func switchLineImmediate(to lineId: UUID?, for serverId: UUID, triggerReload: Bool = true) {
         guard let idx = servers.firstIndex(where: { $0.id == serverId }) else { return }
         servers[idx].selectedLineId = lineId
@@ -1372,38 +1364,19 @@ public final class AppState: ObservableObject {
         let token = server.accessToken
         let backupSnapshot = server.backupLines
         let pingTimeout = TimeInterval(max(1, pingTimeoutSeconds))
+        let isUHDNative = (server.type == .uhdNative)
 
-        if server.type == .uhdNative {
-            async let mainPing = UHDStreamClient.shared.pingLine(server: server, line: nil)
-            var linePings: [UUID: Int?] = [:]
-            await withTaskGroup(of: (UUID, Int?).self) { group in
-                for line in backupSnapshot {
-                    group.addTask {
-                        let ms = await UHDStreamClient.shared.pingLine(server: server, line: line)
-                        return (line.id, ms)
-                    }
-                }
-                for await (id, ms) in group { linePings[id] = ms }
-            }
-            let resolvedMainPing = await mainPing
-            guard let currentIdx = servers.firstIndex(where: { $0.id == serverId }) else { return }
-            servers[currentIdx].mainLineLatencyMs = resolvedMainPing
-            for i in servers[currentIdx].backupLines.indices {
-                let lineId = servers[currentIdx].backupLines[i].id
-                if let pingVal = linePings[lineId] {
-                    servers[currentIdx].backupLines[i].latencyMs = pingVal
-                    servers[currentIdx].backupLines[i].lastCheckedAt = Date()
-                }
-            }
-            return
-        }
+        async let mainPing: Int? = isUHDNative
+            ? await UHDStreamClient.shared.pingLine(server: server, line: nil)
+            : await EmbyClient.shared.pingLine(baseURL: mainURL, token: token, timeout: pingTimeout)
 
-        async let mainPing = EmbyClient.shared.pingLine(baseURL: mainURL, token: token, timeout: pingTimeout)
         var linePings: [UUID: Int?] = [:]
         await withTaskGroup(of: (UUID, Int?).self) { group in
             for line in backupSnapshot {
                 group.addTask {
-                    let ms = await EmbyClient.shared.pingLine(baseURL: line.url, token: token, timeout: pingTimeout)
+                    let ms: Int? = isUHDNative
+                        ? await UHDStreamClient.shared.pingLine(server: server, line: line)
+                        : await EmbyClient.shared.pingLine(baseURL: line.url, token: token, timeout: pingTimeout)
                     return (line.id, ms)
                 }
             }
@@ -1419,27 +1392,6 @@ public final class AppState: ObservableObject {
                 servers[currentIdx].backupLines[i].latencyMs = pingVal
                 servers[currentIdx].backupLines[i].lastCheckedAt = Date()
             }
-        }
-    }
-
-    public func selectFastestLine(for serverId: UUID) async {
-        await pingAllLines(for: serverId)
-        guard let server = servers.first(where: { $0.id == serverId }) else { return }
-
-        var bestLineId: UUID? = nil
-        var bestMs: Int = server.mainLineLatencyMs ?? Int.max
-
-        for line in server.backupLines {
-            if let ms = line.latencyMs, ms < bestMs {
-                bestMs = ms
-                bestLineId = line.id
-            }
-        }
-
-        if bestMs < Int.max {
-            switchLineImmediate(to: bestLineId, for: serverId, triggerReload: true)
-        } else {
-            showToast("暂未测出有效延迟，请检查网络", icon: "wifi.exclamationmark", isError: true)
         }
     }
 
