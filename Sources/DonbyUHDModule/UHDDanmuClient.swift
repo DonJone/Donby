@@ -49,6 +49,35 @@ private struct DanmuRawCommentDTO: Decodable {
     let m: String?
 }
 
+private actor DanmuSessionCache {
+    static let shared = DanmuSessionCache()
+    private var bangumiByKeyword: [String: (animeTitle: String, episodes: [UHDDanmuEpisodeOption])] = [:]
+    private var commentsByEpisodeId: [Int: [UHDDanmuComment]] = [:]
+    private var recentEpisodeOrder: [Int] = []
+
+    func cachedBangumi(for keyword: String) -> (animeTitle: String, episodes: [UHDDanmuEpisodeOption])? {
+        bangumiByKeyword[keyword.lowercased()]
+    }
+
+    func storeBangumi(keyword: String, animeTitle: String, episodes: [UHDDanmuEpisodeOption]) {
+        bangumiByKeyword[keyword.lowercased()] = (animeTitle, episodes)
+    }
+
+    func cachedComments(for episodeId: Int) -> [UHDDanmuComment]? {
+        commentsByEpisodeId[episodeId]
+    }
+
+    func storeComments(_ comments: [UHDDanmuComment], for episodeId: Int) {
+        commentsByEpisodeId[episodeId] = comments
+        recentEpisodeOrder.removeAll { $0 == episodeId }
+        recentEpisodeOrder.append(episodeId)
+        if recentEpisodeOrder.count > 8, let oldest = recentEpisodeOrder.first {
+            recentEpisodeOrder.removeFirst()
+            commentsByEpisodeId.removeValue(forKey: oldest)
+        }
+    }
+}
+
 /// Client for UHD's managed Danmu API (`/api/v1/danmu/{token}/api/v2/...`).
 /// Uses the resolved playback domain host and path-scoped token authentication.
 /// Danmu traffic does NOT count toward UHD traffic quota or video delivery concurrency.
@@ -154,6 +183,9 @@ public final class UHDDanmuClient: Sendable {
     }
 
     public func fetchComments(server: EmbyServerConfig, commentId: Int) async throws -> [UHDDanmuComment] {
+        if let cached = await DanmuSessionCache.shared.cachedComments(for: commentId) {
+            return cached
+        }
         let base = try await danmuBaseURL(server: server)
         guard var comps = URLComponents(string: "\(base)/api/v2/comment/\(commentId)") else {
             throw EmbyClientError.invalidServerURL("danmu/comment")
@@ -168,10 +200,12 @@ public final class UHDDanmuClient: Sendable {
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue("Donby/\(DonbyAppInfo.version) (macOS)", forHTTPHeaderField: "User-Agent")
         let data = try await performData(request: req)
-        return try await Task.detached(priority: .utility) {
+        let parsed = try await Task.detached(priority: .utility) {
             let dto = try JSONDecoder().decode(DanmuCommentsResponseDTO.self, from: data)
             return Self.parseComments(dto.comments ?? [])
         }.value
+        await DanmuSessionCache.shared.storeComments(parsed, for: commentId)
+        return parsed
     }
 
     /// Convenience helper: auto-matches a movie or episode and loads its danmu comments.
@@ -180,6 +214,41 @@ public final class UHDDanmuClient: Sendable {
         item: EmbyItem,
         mediaSource: MediaSourceInfo?
     ) async throws -> (matchedTitle: String, episodeId: Int, comments: [UHDDanmuComment])? {
+        let keyword = (item.isEpisode ? (item.seriesName ?? item.name) : item.name)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 1. Fast path: hit in-memory series bangumi episode map (0ms lookup when switching episodes)
+        if !keyword.isEmpty, let cached = await DanmuSessionCache.shared.cachedBangumi(for: keyword), !cached.episodes.isEmpty {
+            let chosen: UHDDanmuEpisodeOption = {
+                if item.isEpisode, let epNum = item.indexNumber, epNum >= 1, epNum <= cached.episodes.count {
+                    return cached.episodes[epNum - 1]
+                }
+                return cached.episodes[0]
+            }()
+            let comments = try await fetchComments(server: server, commentId: chosen.episodeId)
+            return ("\(cached.animeTitle) · \(chosen.episodeTitle)", chosen.episodeId, comments)
+        }
+
+        // 2. For series episodes with a clean series title & episode index, go straight to keyword search + bangumi
+        //    (avoids wasting 2-3s on a dummy zero-hash /match POST that misses on Chinese drama episodes).
+        if item.isEpisode, !keyword.isEmpty {
+            if let searchResults = try? await searchAnime(server: server, keyword: keyword),
+               let firstAnime = searchResults.first,
+               let episodes = try? await fetchBangumiEpisodes(server: server, animeId: firstAnime.animeId),
+               !episodes.isEmpty {
+                await DanmuSessionCache.shared.storeBangumi(keyword: keyword, animeTitle: firstAnime.animeTitle, episodes: episodes)
+                let chosen: UHDDanmuEpisodeOption = {
+                    if let epNum = item.indexNumber, epNum >= 1, epNum <= episodes.count {
+                        return episodes[epNum - 1]
+                    }
+                    return episodes[0]
+                }()
+                let comments = try await fetchComments(server: server, commentId: chosen.episodeId)
+                return ("\(firstAnime.animeTitle) · \(chosen.episodeTitle)", chosen.episodeId, comments)
+            }
+        }
+
+        // 3. Fallback: fileName match -> keyword search
         let queryName: String = {
             if item.isEpisode, let series = item.seriesName, !series.isEmpty {
                 let epStr = item.episodeCodeString ?? (item.indexNumber.map { "E\($0)" } ?? "")
@@ -204,14 +273,12 @@ public final class UHDDanmuClient: Sendable {
             return (label.isEmpty ? item.name : label, epId, comments)
         }
 
-        // Fallback: search by title + pick matching episode index
-        let keyword = (item.isEpisode ? (item.seriesName ?? item.name) : item.name)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !keyword.isEmpty else { return nil }
         let searchResults = try await searchAnime(server: server, keyword: keyword)
         guard let firstAnime = searchResults.first else { return nil }
         let episodes = try await fetchBangumiEpisodes(server: server, animeId: firstAnime.animeId)
         guard !episodes.isEmpty else { return nil }
+        await DanmuSessionCache.shared.storeBangumi(keyword: keyword, animeTitle: firstAnime.animeTitle, episodes: episodes)
         let chosen: UHDDanmuEpisodeOption = {
             if item.isEpisode, let epNum = item.indexNumber, epNum >= 1, epNum <= episodes.count {
                 return episodes[epNum - 1]

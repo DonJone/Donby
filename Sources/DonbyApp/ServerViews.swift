@@ -883,6 +883,10 @@ public struct ServerConfigSheet: View {
         }
     }
 
+    private var isUHDFormMode: Bool {
+        draft.type == .uhdNative && isUHDEnabled
+    }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             // Donby Header
@@ -893,14 +897,14 @@ public struct ServerConfigSheet: View {
                     Text(isEditingExisting ? "编辑服务" : "添加服务")
                         .font(.system(size: 16.5, weight: .bold))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    Text(draft.type == .uhdNative ? "自动接入优选节点" : "配置服务器地址与账号")
+                    Text(isUHDFormMode ? "自动接入优选节点" : "配置服务器地址与账号")
                         .font(.system(size: 11.5))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
 
                 Spacer()
 
-                if draft.type != .uhdNative {
+                if !isUHDFormMode {
                     Button { pasteFromClipboard() } label: {
                         HStack(spacing: 5) {
                             Image(systemName: "doc.on.clipboard")
@@ -928,7 +932,7 @@ public struct ServerConfigSheet: View {
             // Donby Service Type Segmented Bar
             HStack(spacing: 4) {
                 ForEach(primaryTypes) { sType in
-                    let isSelected = (draft.type == sType)
+                    let isSelected = (draft.type == sType) || (!isUHDEnabled && draft.type == .uhdNative && sType == .emby)
                     Button {
                         withAnimation(.easeOut(duration: 0.14)) {
                             selectServerType(sType)
@@ -1010,7 +1014,7 @@ public struct ServerConfigSheet: View {
 
             // Main Donby Settings-Style Form Card
             VStack(alignment: .leading, spacing: 12) {
-                if draft.type == .uhdNative {
+                if isUHDFormMode {
                     uhdFormContent
                 } else {
                     standardServerFormContent
@@ -1069,7 +1073,7 @@ public struct ServerConfigSheet: View {
                             .donbyFlatTextField(isLight: appState.isLightMode, cornerRadius: 8, horizontalPadding: 10, verticalPadding: 6.5)
                     }
 
-                    if draft.type == .uhdNative {
+                    if isUHDFormMode {
                         VStack(alignment: .leading, spacing: 4) {
                             TextField("自定义接入地址（留空自动优选节点）", text: $uhdCustomEndpoint)
                                 .font(.system(size: 12, design: .monospaced))

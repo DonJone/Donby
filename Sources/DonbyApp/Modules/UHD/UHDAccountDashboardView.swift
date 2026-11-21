@@ -219,7 +219,7 @@ public struct UHDAccountDashboardContent: View {
                     let daysText = sub?.remainingDays.map { d -> String in
                         if d < 0 { return "已过期" }
                         if d == 0 { return "今日到期" }
-                        return "剩 \(d) 天"
+                        return "剩余 \(d) 天"
                     } ?? ""
                     Text("\(expStr) · \(daysText)")
                         .font(.system(size: 11.5, weight: .medium, design: .monospaced))
@@ -232,7 +232,7 @@ public struct UHDAccountDashboardContent: View {
                     columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)],
                     spacing: 10
                 ) {
-                    metricTile("并发连接", "\(sub.activeVideoDeliveryLimit) 路")
+                    metricTile("最大并发", "\(sub.activeVideoDeliveryLimit) 个连接")
                     metricTile("离线下载", sub.allowDownload ? "允许" : "不支持")
                     metricTile("登录设备", sub.plan?.loginDeviceLimit.map { "\($0) 台" } ?? "默认")
                     if let quota = sub.plan?.memberQuota, quota > 0 {
@@ -286,7 +286,7 @@ public struct UHDAccountDashboardContent: View {
                     HStack(spacing: 10) {
                         metricTile("成员", "\(team.memberCount) / \(team.memberLimit == 0 ? "不限" : "\(team.memberLimit)")")
                         metricTile("团队流量", "\(UHDTrafficSummary.formatBytes(team.trafficUsedBytes)) / \(UHDTrafficSummary.formatBytes(team.trafficLimitBytes))")
-                        metricTile("并发策略", team.settings.activeVideoDeliveryLimit == 0 ? "不限" : "\(team.settings.activeVideoDeliveryLimit) 路")
+                        metricTile("并发上限", team.settings.activeVideoDeliveryLimit == 0 ? "不限" : "\(team.settings.activeVideoDeliveryLimit) 个连接")
                     }
 
                     HStack(spacing: 8) {
@@ -333,7 +333,7 @@ public struct UHDAccountDashboardContent: View {
                                             appState.showToast("已重置 \(member.username) 流量", icon: "checkmark.circle.fill")
                                         }
                                     } label: {
-                                        Text("清零")
+                                        Text("重置额度")
                                             .font(.system(size: 11, weight: .medium))
                                             .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                                             .padding(.horizontal, 10)

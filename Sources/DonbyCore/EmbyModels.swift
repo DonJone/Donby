@@ -172,21 +172,21 @@ public struct ServerLineInfo: Codable, Identifiable, Hashable, Sendable {
         return trimmed
     }
 
-    /// Normalizes verbose backend line names into concise Donby UI labels.
-    /// Known Anycast CDN hosts map directly to their CDN tier without geographic copy.
+    /// Normalizes verbose backend line names into concise, professional Donby UI labels.
+    /// Known Anycast CDN hosts map directly to their full CDN tier name without geographic copy.
     public var cleanDisplayName: String {
         let host = cleanDisplayHost.lowercased()
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let lower = trimmed.lowercased()
 
         if host == "smart.uhdnow.com" || (host.contains("uhd") && (lower.contains("中国") || lower.contains("大陆") || lower == "cn cdn")) {
-            return "CN CDN"
+            return "中国大陆 CDN"
         }
-        if host == "v1.uhdnow.com" || (host.contains("uhd") && (lower.contains("cloudflare pro") || lower == "cf cdn pro")) {
-            return "CF CDN Pro"
+        if host == "v1.uhdnow.com" || (host.contains("uhd") && (lower.contains("cloudflare pro") || lower == "cf cdn pro" || lower == "cloudflare cdn pro")) {
+            return "Cloudflare Pro CDN"
         }
-        if host == "v1.uhdgo.com" || (host.contains("uhd") && (lower.contains("备用") || lower == "cf cdn")) {
-            return "CF CDN"
+        if host == "v1.uhdgo.com" || (host.contains("uhd") && (lower.contains("备用") || lower == "cf cdn" || lower == "cloudflare cdn")) {
+            return "Cloudflare CDN"
         }
         if let range = trimmed.range(of: " · ") {
             let head = String(trimmed[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)

@@ -4,7 +4,6 @@ import DonbyCore
 
 public struct LogViewerSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject private var logger = DonbyLogger.shared
     @EnvironmentObject private var appState: AppState
 
@@ -15,7 +14,7 @@ public struct LogViewerSheet: View {
     @State private var autoScroll: Bool = true
     @State private var copiedFeedback: Bool = false
 
-    private var isLight: Bool { colorScheme == .light }
+    private var isLight: Bool { appState.isLightMode }
 
     private var effectiveAccent: Color {
         if appState.isMonochromeTheme {
@@ -230,10 +229,13 @@ public struct LogViewerSheet: View {
             baseContent
                 .frame(minWidth: 800, minHeight: 520)
                 .background(DonbyGlassPalette.canvas(isLight: isLight))
+                .environment(\.colorScheme, isLight ? .light : .dark)
+                .preferredColorScheme(isLight ? .light : .dark)
         } else {
             baseContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(DonbyGlassPalette.canvas(isLight: isLight))
+                .environment(\.colorScheme, isLight ? .light : .dark)
         }
     }
 

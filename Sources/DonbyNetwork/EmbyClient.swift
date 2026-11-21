@@ -544,26 +544,59 @@ public final class EmbyClient: Sendable {
         return try await requestJSON(EmbyItemsResponse.self, for: req)
     }
 
+    private func isUHDNativeExtensionActive(for server: EmbyServerConfig) -> Bool {
+        server.type == .uhdNative && DonbyMediaServiceRegistry.shared.isRegistered(.uhdNative)
+    }
+
+    private func normalizeEmbyItemId(_ rawId: String, server: EmbyServerConfig, defaultPrefix: String = "m") -> String {
+        guard !isUHDNativeExtensionActive(for: server),
+              rawId.count == 26,
+              rawId.hasPrefix("01"),
+              (server.type == .uhdNative || server.host.lowercased().contains("uhd")) else {
+            return rawId
+        }
+        return "\(defaultPrefix)\(rawId)"
+    }
+
     public func fetchItemDetail(server: EmbyServerConfig, itemId: String) async throws -> EmbyItem {
         let query = [URLQueryItem(name: "Fields", value: Self.detailItemFields)]
-        let req = try makeRequest(
-            baseURL: server.activeBaseURL,
-            path: "/Users/\(server.userId)/Items/\(itemId)",
-            queryItems: query,
-            token: server.accessToken,
-            userId: server.userId
-        )
-        return try await requestJSON(EmbyItem.self, for: req)
+        let primaryId = normalizeEmbyItemId(itemId, server: server, defaultPrefix: "m")
+        do {
+            let req = try makeRequest(
+                baseURL: server.activeBaseURL,
+                path: "/Users/\(server.userId)/Items/\(primaryId)",
+                queryItems: query,
+                token: server.accessToken,
+                userId: server.userId
+            )
+            return try await requestJSON(EmbyItem.self, for: req)
+        } catch {
+            if itemId.count == 26 && itemId.hasPrefix("01") {
+                for prefix in ["e", "s", "m"] where "\(prefix)\(itemId)" != primaryId {
+                    if let req = try? makeRequest(
+                        baseURL: server.activeBaseURL,
+                        path: "/Users/\(server.userId)/Items/\(prefix)\(itemId)",
+                        queryItems: query,
+                        token: server.accessToken,
+                        userId: server.userId
+                    ), let found = try? await requestJSON(EmbyItem.self, for: req) {
+                        return found
+                    }
+                }
+            }
+            throw error
+        }
     }
 
     public func fetchSeasons(server: EmbyServerConfig, seriesId: String) async throws -> [EmbyItem] {
+        let normalizedSeriesId = normalizeEmbyItemId(seriesId, server: server, defaultPrefix: "s")
         let query = [
             URLQueryItem(name: "UserId", value: server.userId),
             URLQueryItem(name: "Fields", value: "BasicSyncInfo,Overview,PrimaryImageAspectRatio,UserData,ChildCount")
         ]
         let req = try makeRequest(
             baseURL: server.activeBaseURL,
-            path: "/Shows/\(seriesId)/Seasons",
+            path: "/Shows/\(normalizedSeriesId)/Seasons",
             queryItems: query,
             token: server.accessToken,
             userId: server.userId
@@ -572,6 +605,7 @@ public final class EmbyClient: Sendable {
     }
 
     public func fetchEpisodes(server: EmbyServerConfig, seriesId: String, seasonId: String? = nil) async throws -> [EmbyItem] {
+        let normalizedSeriesId = normalizeEmbyItemId(seriesId, server: server, defaultPrefix: "s")
         var query = [
             URLQueryItem(name: "UserId", value: server.userId),
             URLQueryItem(name: "Fields", value: Self.detailItemFields)
@@ -579,7 +613,7 @@ public final class EmbyClient: Sendable {
         if let seasonId, !seasonId.isEmpty { query.append(URLQueryItem(name: "SeasonId", value: seasonId)) }
         let req = try makeRequest(
             baseURL: server.activeBaseURL,
-            path: "/Shows/\(seriesId)/Episodes",
+            path: "/Shows/\(normalizedSeriesId)/Episodes",
             queryItems: query,
             token: server.accessToken,
             userId: server.userId
@@ -588,6 +622,7 @@ public final class EmbyClient: Sendable {
     }
 
     public func fetchSimilarItems(server: EmbyServerConfig, itemId: String, limit: Int = 12) async throws -> [EmbyItem] {
+        let normalizedId = normalizeEmbyItemId(itemId, server: server, defaultPrefix: "m")
         let query = [
             URLQueryItem(name: "UserId", value: server.userId),
             URLQueryItem(name: "Limit", value: "\(limit)"),
@@ -595,7 +630,7 @@ public final class EmbyClient: Sendable {
         ]
         let req = try makeRequest(
             baseURL: server.activeBaseURL,
-            path: "/Items/\(itemId)/Similar",
+            path: "/Items/\(normalizedId)/Similar",
             queryItems: query,
             token: server.accessToken,
             userId: server.userId
@@ -625,23 +660,38 @@ public final class EmbyClient: Sendable {
         if let audioStreamIndex { query.append(URLQueryItem(name: "AudioStreamIndex", value: "\(audioStreamIndex)")) }
         if let subtitleStreamIndex { query.append(URLQueryItem(name: "SubtitleStreamIndex", value: "\(subtitleStreamIndex)")) }
 
-        let req = try makeRequest(
-            baseURL: base,
-            path: "/Items/\(itemId)/PlaybackInfo",
-            method: "POST",
-            queryItems: query,
-            token: server.accessToken,
-            userId: server.userId,
-            bodyData: deviceProfilePayloadData,
-            timeout: 15
-        )
-        let res = try await requestJSON(EmbyPlaybackInfoResponse.self, for: req, priority: .playback)
-        await EmbyPlaybackInfoCache.shared.set(res, serverId: server.id, baseURL: base, itemId: itemId, mediaSourceId: mediaSourceId)
-        return res
+        var candidateIds = [itemId]
+        if itemId.count == 26 && itemId.hasPrefix("01") {
+            candidateIds = ["e\(itemId)", "m\(itemId)", itemId]
+        }
+        var lastError: Error?
+        for cid in candidateIds {
+            do {
+                let req = try makeRequest(
+                    baseURL: base,
+                    path: "/Items/\(cid)/PlaybackInfo",
+                    method: "POST",
+                    queryItems: query,
+                    token: server.accessToken,
+                    userId: server.userId,
+                    bodyData: deviceProfilePayloadData,
+                    timeout: 15
+                )
+                let res = try await requestJSON(EmbyPlaybackInfoResponse.self, for: req, priority: .playback)
+                if let sources = res.mediaSources, !sources.isEmpty {
+                    await EmbyPlaybackInfoCache.shared.set(res, serverId: server.id, baseURL: base, itemId: itemId, mediaSourceId: mediaSourceId)
+                    return res
+                }
+            } catch {
+                lastError = error
+            }
+        }
+        if let lastError { throw lastError }
+        throw EmbyClientError.noPlayableStream
     }
 
     public func prewarmPlaybackInfo(server: EmbyServerConfig, itemId: String, mediaSourceId: String? = nil) async {
-        guard server.type != .uhdNative, !server.host.isEmpty else { return }
+        guard !isUHDNativeExtensionActive(for: server), !server.host.isEmpty else { return }
         let base = server.activeBaseURL
         if await EmbyPlaybackInfoCache.shared.get(serverId: server.id, baseURL: base, itemId: itemId, mediaSourceId: mediaSourceId) != nil {
             return
@@ -650,7 +700,7 @@ public final class EmbyClient: Sendable {
     }
 
     public func prewarmConnection(server: EmbyServerConfig) async {
-        guard server.type != .uhdNative, !server.host.isEmpty else { return }
+        guard !isUHDNativeExtensionActive(for: server), !server.host.isEmpty else { return }
         let base = server.activeBaseURL
         guard await EmbyHostWarmCache.shared.shouldWarm(baseURL: base) else { return }
         guard let req = try? makeRequest(
@@ -808,8 +858,12 @@ public final class EmbyClient: Sendable {
     private func resolveRelativeOrAbsoluteURL(_ raw: String, baseURL: String, token: String) -> String {
         if raw.hasPrefix("http://") || raw.hasPrefix("https://") { return raw }
         let cleanBase = ServerLineInfo.normalizeBaseURL(baseURL)
+        let isRootDirectPath = raw.hasPrefix("/emby/") || raw.hasPrefix("emby/")
+            || raw.hasPrefix("/play/") || raw.hasPrefix("play/")
+            || raw.hasPrefix("/api/") || raw.hasPrefix("api/")
+            || raw.hasPrefix("/stream/") || raw.hasPrefix("stream/")
         let prefix: String
-        if raw.hasPrefix("/emby/") || raw.hasPrefix("emby/") {
+        if isRootDirectPath {
             prefix = raw.hasPrefix("/") ? "" : "/"
         } else {
             prefix = raw.hasPrefix("/") ? "/emby" : "/emby/"
@@ -1000,7 +1054,7 @@ public final class EmbyClient: Sendable {
             if let s = item.uhdLogoURL, let u = URL(string: s) { return u }
         }
 
-        if server.type == .uhdNative {
+        if isUHDNativeExtensionActive(for: server) {
             return nil
         }
 
@@ -1009,7 +1063,8 @@ public final class EmbyClient: Sendable {
         }
 
         let base = server.activeBaseURL
-        var targetItemId = item.id
+        let defaultPref = item.isEpisode ? "e" : (item.isSeries ? "s" : "m")
+        var targetItemId = normalizeEmbyItemId(item.id, server: server, defaultPrefix: defaultPref)
         var tag: String?
 
         switch kind {
@@ -1066,7 +1121,7 @@ public final class EmbyClient: Sendable {
         if let direct = person.uhdImageURL, let u = URL(string: direct) {
             return [u]
         }
-        if server.type == .uhdNative {
+        if isUHDNativeExtensionActive(for: server) {
             return []
         }
         guard !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -1104,7 +1159,7 @@ public final class EmbyClient: Sendable {
     public func makeImageRequest(url: URL, server: EmbyServerConfig?) -> URLRequest {
         var req = URLRequest(url: url, timeoutInterval: 12)
         req.setValue("Donby/\(appVersion) (macOS)", forHTTPHeaderField: "User-Agent")
-        if let server, server.type != .uhdNative, !server.accessToken.isEmpty {
+        if let server, !isUHDNativeExtensionActive(for: server), !server.accessToken.isEmpty {
             req.setValue(server.accessToken, forHTTPHeaderField: "X-Emby-Token")
             req.setValue(buildAuthorizationHeader(userId: server.userId, token: server.accessToken), forHTTPHeaderField: "X-Emby-Authorization")
         }

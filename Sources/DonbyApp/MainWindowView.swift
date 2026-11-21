@@ -120,11 +120,13 @@ public struct MainWindowView: View {
             }
 
             if let toast = appState.toastMessage {
-                ToastBannerView(toast: toast)
-                    .environment(\.colorScheme, appState.activePlayback != nil ? .dark : (appState.isLightMode ? .light : .dark))
-                    .padding(.bottom, 26)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .zIndex(100)
+                ToastBannerView(
+                    toast: toast,
+                    isLightMode: appState.activePlayback == nil && appState.isLightMode
+                )
+                .padding(.bottom, 26)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .zIndex(100)
             }
         }
         .task(id: appState.isStartingPlayback) {

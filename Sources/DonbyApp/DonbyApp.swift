@@ -186,7 +186,7 @@ public struct DonbyApp: App {
             MainWindowView()
                 .environmentObject(appState)
                 .frame(minWidth: 920, minHeight: 640)
-                .preferredColorScheme(appState.colorScheme)
+                .preferredColorScheme(appState.activePlayback != nil ? .dark : appState.colorScheme)
                 .tint(appState.accentColor)
                 .onOpenURL { url in appState.handleIncomingURL(url) }
         }

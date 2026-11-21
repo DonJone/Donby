@@ -4779,7 +4779,7 @@ private actor DownloadBatchCoordinator {
                                 uhdMediaType: "tv"
                             )
                         )
-                    } else if server.type != .uhdNative {
+                    } else if !(server.type == .uhdNative && DonbyMediaServiceRegistry.shared.isRegistered(.uhdNative)) {
                         resolvedSeries = try? await EmbyClient.shared.fetchItemDetail(server: server, itemId: sid)
                     }
                 }
@@ -4905,7 +4905,7 @@ private actor DownloadBatchCoordinator {
                 let seriesLogo: URL?
 
                 if let server {
-                    let isUHD = server.type == .uhdNative
+                    let isUHD = (server.type == .uhdNative && DonbyMediaServiceRegistry.shared.isRegistered(.uhdNative))
                     let p = EmbyClient.shared.imageURL(server: server, item: targetItem, kind: .primary, maxWidth: 800)
                         ?? (isUHD ? nil : EmbyClient.shared.imageURL(server: server, itemId: targetItem.id, kind: .primary, maxWidth: 800))
                         ?? entry.posterURLString.flatMap { URL(string: $0) }

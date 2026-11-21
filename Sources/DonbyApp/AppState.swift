@@ -1321,7 +1321,7 @@ public final class AppState: ObservableObject {
 
         let syncedCount = server.autoSyncedLineCount
         if isUsingUHDExtension(for: server) && usedChinaOptimizedLine {
-            showToast("已登录 \(server.name) · CN CDN", icon: "checkmark.circle.fill")
+            showToast("已登录 \(server.name) · 中国大陆 CDN", icon: "checkmark.circle.fill")
         } else if syncedCount > 0 {
             showToast("已登录 \(server.name) · \(syncedCount) 条线路", icon: "checkmark.circle.fill")
         } else {

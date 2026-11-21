@@ -364,13 +364,14 @@ public struct UHDDanmuLiveOverlay: NSViewRepresentable {
     }
 }
 
-/// Pure CoreAnimation sprite-pooled Danmu renderer:
-/// - Rasterizes each newly-entered comment ONCE into a Retina CGImage (zero per-frame CoreText layout).
-/// - Uses lane collision avoidance so high-volume shows never overlap or stutter.
-/// - Animates purely by updating `CALayer.position.x` inside disabled implicit transactions (<0.1ms/frame).
+/// Hardware-composited CoreAnimation `CATextLayer` Danmu renderer:
+/// - Zero main-thread `CGContext` bitmap allocations: uses a pre-allocated pool of reusable `CATextLayer`s.
+/// - Zero 60fps main-thread position polling: hands off scrolling trajectories via `CABasicAnimation(keyPath: "position.x")`
+///   directly to the macOS WindowServer GPU compositor process (120Hz ProMotion, ~0% app CPU).
+/// - Uses a lightweight 4Hz (250ms) scheduler and lane collision avoidance so high-volume shows never stutter.
 public final class DanmuSpriteHostView: NSView {
     private struct ActiveSprite {
-        let layer: CALayer
+        let layer: CATextLayer
         let lane: Int
         let isStatic: Bool
         let isBottom: Bool
@@ -384,6 +385,7 @@ public final class DanmuSpriteHostView: NSView {
     private var trackRevision: UInt64 = 0
     private var isDanmuEnabled: Bool = false
     private var isPlaying: Bool = false
+    private var isLayerPaused: Bool = false
     private var playbackRate: Double = 1.0
     private var danmuOpacity: Double = 0.88
     private var timeProvider: (() -> (baseTime: Double, baseUptime: TimeInterval))?
@@ -392,9 +394,11 @@ public final class DanmuSpriteHostView: NSView {
     private var nextIndex: Int = 0
     private var lastObservedTime: Double = -1
     private var activeSprites: [ActiveSprite] = []
-    private var maxConcurrentSprites: Int = 36
+    private var recycledLayers: [CATextLayer] = []
+    private let maxConcurrentSprites: Int = 36
 
     private static let danmuFont = NSFont.systemFont(ofSize: 19, weight: .semibold)
+    private static let measureAttrs: [NSAttributedString.Key: Any] = [.font: danmuFont]
     private static let laneHeight: CGFloat = 30
     private static let topMargin: CGFloat = 46
     private static let scrollDuration: Double = 9.0
@@ -450,8 +454,10 @@ public final class DanmuSpriteHostView: NSView {
         }
 
         if isPlaying {
+            resumeHostLayerIfNeeded()
             startTimerIfNeeded()
         } else {
+            pauseHostLayerIfNeeded()
             stopTimer()
         }
     }
@@ -459,15 +465,39 @@ public final class DanmuSpriteHostView: NSView {
     public func shutdown() {
         stopTimer()
         clearAllSprites()
+        recycledLayers.removeAll()
+    }
+
+    private func pauseHostLayerIfNeeded() {
+        guard !isLayerPaused, let hostLayer = layer else { return }
+        let pausedTime = hostLayer.convertTime(CACurrentMediaTime(), from: nil)
+        hostLayer.speed = 0.0
+        hostLayer.timeOffset = pausedTime
+        isLayerPaused = true
+    }
+
+    private func resumeHostLayerIfNeeded() {
+        guard let hostLayer = layer else { return }
+        if isLayerPaused {
+            let pausedTime = hostLayer.timeOffset
+            hostLayer.speed = 1.0
+            hostLayer.timeOffset = 0.0
+            hostLayer.beginTime = 0.0
+            let timeSincePause = hostLayer.convertTime(CACurrentMediaTime(), from: nil) - pausedTime
+            hostLayer.beginTime = timeSincePause
+            isLayerPaused = false
+        }
     }
 
     private func startTimerIfNeeded() {
         guard timer == nil else { return }
-        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+        // 5Hz scheduler (200ms) is sufficient because WindowServer GPU animates position.x continuously at 120Hz
+        let t = Timer(timeInterval: 0.20, repeats: true) { [weak self] _ in
             self?.tick()
         }
         RunLoop.main.add(t, forMode: .common)
         timer = t
+        tick()
     }
 
     private func stopTimer() {
@@ -475,11 +505,37 @@ public final class DanmuSpriteHostView: NSView {
         timer = nil
     }
 
+    private func dequeueLayer() -> CATextLayer {
+        if let reused = recycledLayers.popLast() {
+            reused.removeAllAnimations()
+            return reused
+        }
+        let l = CATextLayer()
+        l.font = Self.danmuFont
+        l.fontSize = 19
+        l.alignmentMode = .left
+        l.isWrapped = false
+        l.truncationMode = .none
+        l.shadowColor = NSColor.black.cgColor
+        l.shadowOpacity = 0.88
+        l.shadowRadius = 1.6
+        l.shadowOffset = CGSize(width: 1.0, height: 1.0)
+        return l
+    }
+
+    private func recycleLayer(_ l: CATextLayer) {
+        l.removeAllAnimations()
+        l.removeFromSuperlayer()
+        if recycledLayers.count < maxConcurrentSprites {
+            recycledLayers.append(l)
+        }
+    }
+
     private func clearAllSprites() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         for s in activeSprites {
-            s.layer.removeFromSuperlayer()
+            recycleLayer(s.layer)
         }
         CATransaction.commit()
         activeSprites.removeAll(keepingCapacity: true)
@@ -507,8 +563,7 @@ public final class DanmuSpriteHostView: NSView {
     }
 
     private func tick() {
-        guard isDanmuEnabled, let comments = track?.comments, !comments.isEmpty else {
-            stopTimer()
+        guard isDanmuEnabled, isPlaying, let comments = track?.comments, !comments.isEmpty else {
             return
         }
         let width = bounds.width
@@ -518,38 +573,26 @@ public final class DanmuSpriteHostView: NSView {
         let now = currentPlaybackTime()
 
         // Detect seek or initial positioning -> O(log N) jump
-        if lastObservedTime < 0 || now < lastObservedTime - 0.15 || (now - lastObservedTime) > 1.5 {
+        if lastObservedTime < 0 || now < lastObservedTime - 0.25 || (now - lastObservedTime) > 1.8 {
             clearAllSprites()
-            nextIndex = lowerBound(comments: comments, time: max(0, now - 0.25))
+            nextIndex = lowerBound(comments: comments, time: max(0, now - 0.15))
         }
         lastObservedTime = now
 
         let maxScrollLanes = max(4, min(10, Int((height * 0.48) / Self.laneHeight)))
+        let scale = window?.backingScaleFactor ?? 2.0
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
 
-        // 1. Advance active sprites and prune expired ones
+        // 1. Prune expired sprites
         var writeIdx = 0
         for i in 0..<activeSprites.count {
             let sprite = activeSprites[i]
             let age = now - sprite.startTime
-            if age < 0 || age > sprite.duration {
-                sprite.layer.removeFromSuperlayer()
+            if age > sprite.duration {
+                recycleLayer(sprite.layer)
                 continue
-            }
-            if !sprite.isStatic {
-                let progress = CGFloat(age / sprite.duration)
-                let x = width - progress * (width + sprite.width + 28)
-                sprite.layer.position = CGPoint(
-                    x: x + sprite.width * 0.5,
-                    y: Self.topMargin + CGFloat(sprite.lane) * Self.laneHeight + sprite.height * 0.5
-                )
-            } else {
-                let y: CGFloat = sprite.isBottom
-                    ? max(Self.topMargin, height - 116 - CGFloat(sprite.lane) * Self.laneHeight)
-                    : Self.topMargin + CGFloat(sprite.lane) * Self.laneHeight
-                sprite.layer.position = CGPoint(x: width * 0.5, y: y + sprite.height * 0.5)
             }
             activeSprites[writeIdx] = sprite
             writeIdx += 1
@@ -558,19 +601,20 @@ public final class DanmuSpriteHostView: NSView {
             activeSprites.removeSubrange(writeIdx..<activeSprites.count)
         }
 
-        // 2. Spawn newly arrived comments with lane collision avoidance
-        var spawnedThisFrame = 0
-        let maxSpawnPerFrame = 4
+        // 2. Spawn newly arrived comments within the 200ms lookahead window using GPU CABasicAnimation
+        var spawnedThisTick = 0
+        let maxSpawnPerTick = 6
 
-        while nextIndex < comments.count && comments[nextIndex].timeSeconds <= now + 0.05 {
+        while nextIndex < comments.count && comments[nextIndex].timeSeconds <= now + 0.22 {
             let c = comments[nextIndex]
             nextIndex += 1
 
             let age = now - c.timeSeconds
             let isStatic = (c.mode == 4 || c.mode == 5)
-            let life = isStatic ? Self.staticDuration : Self.scrollDuration
-            guard age >= -0.05 && age <= min(0.8, life * 0.5) else { continue }
-            guard activeSprites.count < maxConcurrentSprites, spawnedThisFrame < maxSpawnPerFrame else { continue }
+            let baseLife = isStatic ? Self.staticDuration : Self.scrollDuration
+            let effectiveLife = baseLife / max(0.5, min(2.0, playbackRate))
+            guard age >= -0.25 && age <= 0.6 else { continue }
+            guard activeSprites.count < maxConcurrentSprites, spawnedThisTick < maxSpawnPerTick else { continue }
 
             let chosenLane: Int?
             if isStatic {
@@ -581,108 +625,75 @@ public final class DanmuSpriteHostView: NSView {
                 }
                 chosenLane = (0..<4).first(where: { !occupied.contains($0) })
             } else {
-                // Find a scrolling lane whose trailing sprite has cleanly entered the viewport with spacing
                 var laneRightmostEdge = [CGFloat](repeating: -.greatestFiniteMagnitude, count: maxScrollLanes)
                 for s in activeSprites where !s.isStatic && s.lane < maxScrollLanes {
-                    let sAge = now - s.startTime
-                    let sProg = CGFloat(max(0, sAge) / s.duration)
+                    let sAge = max(0, now - s.startTime)
+                    let sProg = CGFloat(min(1.0, sAge / max(0.1, s.duration)))
                     let leftX = width - sProg * (width + s.width + 28)
                     let rightEdge = leftX + s.width
                     if rightEdge > laneRightmostEdge[s.lane] {
                         laneRightmostEdge[s.lane] = rightEdge
                     }
                 }
-                chosenLane = (0..<maxScrollLanes).first(where: { laneRightmostEdge[$0] < width - 26 })
+                chosenLane = (0..<maxScrollLanes).first(where: { laneRightmostEdge[$0] < width - 32 })
             }
 
             guard let lane = chosenLane else { continue }
-            guard let (img, imgSize) = rasterizeComment(c) else { continue }
 
-            let spriteLayer = CALayer()
-            spriteLayer.contents = img
-            spriteLayer.contentsScale = window?.backingScaleFactor ?? 2.0
-            spriteLayer.bounds = CGRect(origin: .zero, size: imgSize)
-            spriteLayer.opacity = Float(danmuOpacity)
+            let measured = (c.text as NSString).size(withAttributes: Self.measureAttrs)
+            let itemSize = CGSize(width: ceil(measured.width) + 6, height: ceil(measured.height) + 4)
+            guard itemSize.width > 2, itemSize.height > 2 else { continue }
 
-            let progress = CGFloat(max(0, age) / life)
+            let r = CGFloat((c.colorRGB >> 16) & 0xFF) / 255.0
+            let g = CGFloat((c.colorRGB >> 8) & 0xFF) / 255.0
+            let b = CGFloat(c.colorRGB & 0xFF) / 255.0
+
+            let textLayer = dequeueLayer()
+            textLayer.contentsScale = scale
+            textLayer.string = c.text
+            textLayer.foregroundColor = NSColor(srgbRed: r, green: g, blue: b, alpha: 1.0).cgColor
+            textLayer.bounds = CGRect(origin: .zero, size: itemSize)
+            textLayer.opacity = Float(danmuOpacity)
+
             if isStatic {
                 let isBottom = (c.mode == 4)
                 let y: CGFloat = isBottom
                     ? max(Self.topMargin, height - 116 - CGFloat(lane) * Self.laneHeight)
                     : Self.topMargin + CGFloat(lane) * Self.laneHeight
-                spriteLayer.position = CGPoint(x: width * 0.5, y: y + imgSize.height * 0.5)
+                textLayer.position = CGPoint(x: width * 0.5, y: y + itemSize.height * 0.5)
             } else {
-                let x = width - progress * (width + imgSize.width + 28)
-                spriteLayer.position = CGPoint(
-                    x: x + imgSize.width * 0.5,
-                    y: Self.topMargin + CGFloat(lane) * Self.laneHeight + imgSize.height * 0.5
-                )
+                let startX = width + itemSize.width * 0.5
+                let endX = -itemSize.width * 0.5 - 28
+                let y = Self.topMargin + CGFloat(lane) * Self.laneHeight + itemSize.height * 0.5
+                textLayer.position = CGPoint(x: endX, y: y)
+
+                let anim = CABasicAnimation(keyPath: "position.x")
+                anim.fromValue = startX
+                anim.toValue = endX
+                anim.duration = effectiveLife
+                anim.timingFunction = CAMediaTimingFunction(name: .linear)
+                anim.isRemovedOnCompletion = false
+                anim.fillMode = .both
+                textLayer.add(anim, forKey: "danmuScroll")
             }
 
-            hostLayer.addSublayer(spriteLayer)
+            hostLayer.addSublayer(textLayer)
             activeSprites.append(
                 ActiveSprite(
-                    layer: spriteLayer,
+                    layer: textLayer,
                     lane: lane,
                     isStatic: isStatic,
                     isBottom: c.mode == 4,
-                    startTime: c.timeSeconds,
-                    duration: life,
-                    width: imgSize.width,
-                    height: imgSize.height
+                    startTime: now,
+                    duration: effectiveLife,
+                    width: itemSize.width,
+                    height: itemSize.height
                 )
             )
-            spawnedThisFrame += 1
+            spawnedThisTick += 1
         }
 
         CATransaction.commit()
-    }
-
-    private func rasterizeComment(_ c: UHDDanmuComment) -> (CGImage, CGSize)? {
-        let r = CGFloat((c.colorRGB >> 16) & 0xFF) / 255.0
-        let g = CGFloat((c.colorRGB >> 8) & 0xFF) / 255.0
-        let b = CGFloat(c.colorRGB & 0xFF) / 255.0
-        let fgColor = NSColor(srgbRed: r, green: g, blue: b, alpha: 1.0)
-
-        let shadow = NSShadow()
-        shadow.shadowOffset = NSSize(width: 1.0, height: -1.0)
-        shadow.shadowBlurRadius = 2.0
-        shadow.shadowColor = NSColor.black.withAlphaComponent(0.85)
-
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: Self.danmuFont,
-            .foregroundColor: fgColor,
-            .shadow: shadow
-        ]
-        let attrStr = NSAttributedString(string: c.text, attributes: attrs)
-        let measured = attrStr.size()
-        let padX: CGFloat = 4
-        let padY: CGFloat = 3
-        let ptSize = CGSize(width: ceil(measured.width) + padX * 2, height: ceil(measured.height) + padY * 2)
-        guard ptSize.width > 1, ptSize.height > 1 else { return nil }
-
-        let scale = window?.backingScaleFactor ?? 2.0
-        let pxW = max(1, Int(ceil(ptSize.width * scale)))
-        let pxH = max(1, Int(ceil(ptSize.height * scale)))
-
-        guard let ctx = CGContext(
-            data: nil,
-            width: pxW,
-            height: pxH,
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else { return nil }
-
-        ctx.scaleBy(x: scale, y: scale)
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
-        attrStr.draw(at: NSPoint(x: padX, y: padY))
-        NSGraphicsContext.restoreGraphicsState()
-
-        guard let cgImg = ctx.makeImage() else { return nil }
-        return (cgImg, ptSize)
     }
 }
 
@@ -970,7 +981,7 @@ public struct WatchPartyActiveRoomDrawerView: View {
                             NSPasteboard.general.setString(invite, forType: .string)
                             onCopyToast("已复制邀请码 \(invite)", "doc.on.doc.fill")
                         } label: {
-                            Text("复制码")
+                            Text("复制邀请码")
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 9)

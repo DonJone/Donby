@@ -258,9 +258,8 @@ public struct PlayerView: View {
                     .padding(.vertical, 7.5)
                     .background(
                         ZStack {
-                            Capsule().fill(.ultraThinMaterial)
-                            Capsule().fill(Color.black.opacity(0.42))
-                            Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.6)
+                            Capsule().fill(Color(red: 0.06, green: 0.065, blue: 0.08).opacity(0.88))
+                            Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.65)
                         }
                     )
                     .padding(.bottom, 34)
@@ -286,9 +285,8 @@ public struct PlayerView: View {
                     .padding(.vertical, 7)
                     .background(
                         ZStack {
-                            Capsule().fill(.ultraThinMaterial)
-                            Capsule().fill(Color.black.opacity(0.48))
-                            Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.6)
+                            Capsule().fill(Color(red: 0.06, green: 0.065, blue: 0.08).opacity(0.88))
+                            Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.65)
                         }
                     )
                     .padding(.bottom, showControls ? (bottomControlBarHeight + 18) : 34)
@@ -374,11 +372,9 @@ public struct PlayerView: View {
                     .background(
                         ZStack {
                             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .fill(.ultraThinMaterial)
+                                .fill(Color(red: 0.06, green: 0.065, blue: 0.08).opacity(0.92))
                             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .fill(Color.black.opacity(0.72))
-                            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6)
+                                .strokeBorder(Color.white.opacity(0.20), lineWidth: 0.65)
                         }
                     )
                 }
@@ -414,9 +410,8 @@ public struct PlayerView: View {
                                     .padding(.vertical, 8)
                                     .background(
                                         ZStack {
-                                            Capsule().fill(.ultraThinMaterial)
-                                            Capsule().fill(Color.black.opacity(0.55))
-                                            Capsule().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.7)
+                                            Capsule().fill(Color(red: 0.06, green: 0.065, blue: 0.08).opacity(0.88))
+                                            Capsule().strokeBorder(Color.white.opacity(0.24), lineWidth: 0.7)
                                         }
                                     )
                                 }
@@ -546,7 +541,7 @@ public struct PlayerView: View {
         .onAppear {
             bindActiveWatchPartyCallbacksIfNeeded()
         }
-        .task(id: "\(currentItem.id)|\(appState.enableDanmaku)") {
+        .task(id: "\(currentItem.id)|\(appState.enableDanmaku)|\(hasRenderedFirstFrame)") {
             await loadUHDDanmuIfEnabled()
         }
         .task(id: UHDModuleManager.shared.activeWatchPartySession?.roomId ?? "none") {
@@ -871,17 +866,25 @@ public struct PlayerView: View {
                             Text(appState.enableDanmaku && !(uhdDanmuTrack?.comments.isEmpty ?? true) ? "弹幕 \(uhdDanmuTrack?.comments.count ?? 0)" : "弹幕")
                                 .font(.system(size: 11.5, weight: .semibold))
                         }
-                        .foregroundStyle(appState.enableDanmaku ? .white : .white.opacity(0.60))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
+                        .foregroundStyle(appState.enableDanmaku ? .white : .white.opacity(0.72))
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 5.5)
                         .background(
                             Capsule()
                                 .fill(
                                     appState.enableDanmaku
-                                        ? (appState.isMonochromeTheme ? Color.white.opacity(0.22) : appState.accentColor.opacity(0.45))
-                                        : Color.black.opacity(0.50)
+                                        ? (appState.isMonochromeTheme
+                                            ? Color(red: 0.08, green: 0.085, blue: 0.105).opacity(0.84)
+                                            : appState.accentColor.opacity(0.82))
+                                        : Color(red: 0.06, green: 0.065, blue: 0.08).opacity(0.72)
                                 )
-                                .overlay(Capsule().strokeBorder(Color.white.opacity(appState.enableDanmaku ? 0.28 : 0.16), lineWidth: 0.6))
+                                .overlay(
+                                    Capsule()
+                                        .strokeBorder(
+                                            Color.white.opacity(appState.enableDanmaku ? 0.38 : 0.18),
+                                            lineWidth: 0.7
+                                        )
+                                )
                         )
                         .contentShape(Capsule())
                     }
@@ -930,7 +933,7 @@ public struct PlayerView: View {
             } label: {
                 Image(systemName: "list.bullet")
                     .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(activeDrawer == .playlist ? appState.accentColor : .white)
+                    .foregroundStyle(activeDrawer == .playlist ? drawerSelectedAccentTint() : .white)
                     .frame(width: 32, height: 32)
                     .contentShape(Rectangle())
             }
@@ -1096,7 +1099,7 @@ public struct PlayerView: View {
                     currentTime: currentTime,
                     bufferedAheadSeconds: bufferedAheadSeconds,
                     duration: duration,
-                    accentColor: appState.accentColor,
+                    accentColor: drawerSelectedAccentTint(),
                     isScrubbing: $isScrubbing,
                     scrubTime: $scrubTime,
                     onCommitSeek: { target in seekTo(target) }
@@ -1964,16 +1967,16 @@ public struct PlayerView: View {
                                             Text("字音对齐")
                                         }
                                         .font(.system(size: 11.5, weight: .semibold))
-                                        .foregroundStyle(.white.opacity(audioAlignDisabled ? 0.42 : 0.95))
+                                        .foregroundStyle(.white.opacity(audioAlignDisabled ? 0.48 : 0.96))
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 8)
                                         .background(
                                             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                                .fill(Color.white.opacity(audioAlignDisabled ? 0.04 : 0.12))
+                                                .fill(Color.white.opacity(audioAlignDisabled ? 0.06 : 0.16))
                                         )
                                         .overlay(
                                             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                                .strokeBorder(Color.white.opacity(audioAlignDisabled ? 0.05 : 0.14), lineWidth: 0.65)
+                                                .strokeBorder(Color.white.opacity(audioAlignDisabled ? 0.08 : 0.24), lineWidth: 0.7)
                                         )
                                         .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                                     }
@@ -1991,16 +1994,16 @@ public struct PlayerView: View {
                                             Text("双字对齐")
                                         }
                                         .font(.system(size: 11.5, weight: .semibold))
-                                        .foregroundStyle(.white.opacity(dualAlignDisabled ? 0.42 : 0.95))
+                                        .foregroundStyle(.white.opacity(dualAlignDisabled ? 0.48 : 0.96))
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 8)
                                         .background(
                                             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                                .fill(Color.white.opacity(dualAlignDisabled ? 0.04 : 0.12))
+                                                .fill(Color.white.opacity(dualAlignDisabled ? 0.06 : 0.16))
                                         )
                                         .overlay(
                                             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                                .strokeBorder(Color.white.opacity(dualAlignDisabled ? 0.05 : 0.14), lineWidth: 0.65)
+                                                .strokeBorder(Color.white.opacity(dualAlignDisabled ? 0.08 : 0.24), lineWidth: 0.7)
                                         )
                                         .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                                     }
@@ -2420,11 +2423,9 @@ public struct PlayerView: View {
         .background(
             ZStack {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(.ultraThinMaterial)
+                    .fill(Color(red: 0.06, green: 0.065, blue: 0.08).opacity(0.92))
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Color(red: 0.055, green: 0.06, blue: 0.075).opacity(0.76))
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.14), lineWidth: 0.7)
+                    .strokeBorder(Color.white.opacity(0.16), lineWidth: 0.7)
             }
             .opacity(isAdjustingSubtitleLayout ? 0.14 : 1.0)
         )
@@ -4049,7 +4050,7 @@ public struct PlayerView: View {
             if let wp = UHDModuleManager.shared.activeWatchPartySession {
                 WatchPartyActiveRoomDrawerView(
                     session: wp,
-                    accentColor: appState.accentColor,
+                    accentColor: drawerSelectedAccentTint(),
                     onCopyToast: { msg, icon in appState.showToast(msg, icon: icon) },
                     onLeave: {
                         UHDModuleManager.shared.leaveOrEndActiveWatchParty(endRoom: false)
@@ -4233,7 +4234,11 @@ public struct PlayerView: View {
 
     private func loadUHDDanmuIfEnabled() async {
         guard UHDModuleManager.shared.isActive(for: session.server), appState.enableDanmaku else { return }
+        guard hasRenderedFirstFrame else { return }
         guard !session.server.accessToken.isEmpty else { return }
+        // Yield slightly after first video frame renders so 2 MB danmu fetch never competes with initial stream buffering
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        guard !Task.isCancelled else { return }
         isLoadingUHDDanmu = true
         defer { isLoadingUHDDanmu = false }
         if let loaded = try? await UHDDanmuClient.shared.autoLoadComments(

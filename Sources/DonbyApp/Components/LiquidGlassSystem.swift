@@ -395,9 +395,7 @@ private struct DonbyLiquidGlassCapsuleModifier: ViewModifier {
                             .fill(Color.white.opacity(isHovered ? 0.94 : 0.88))
                     } else {
                         Capsule(style: .continuous)
-                            .fill(.ultraThinMaterial)
-                        Capsule(style: .continuous)
-                            .fill(Color.white.opacity(isHovered ? 0.14 : 0.08))
+                            .fill(Color(red: 0.11, green: 0.115, blue: 0.135).opacity(isHovered ? 0.94 : 0.88))
                     }
                 }
                 .clipShape(Capsule(style: .continuous))
@@ -438,8 +436,7 @@ private struct DonbyLiquidGlassRectModifier: ViewModifier {
                         shape.fill(.ultraThinMaterial)
                         shape.fill(Color.white.opacity(isHovered ? 0.94 : 0.88))
                     } else {
-                        shape.fill(.ultraThinMaterial)
-                        shape.fill(Color.white.opacity(isHovered ? 0.14 : 0.08))
+                        shape.fill(Color(red: 0.11, green: 0.115, blue: 0.135).opacity(isHovered ? 0.94 : 0.88))
                     }
                 }
                 .clipShape(shape)

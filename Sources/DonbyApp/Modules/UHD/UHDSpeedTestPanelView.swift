@@ -156,13 +156,11 @@ public struct UHDCapabilitySummaryStrip: View {
         let snap = uhd.accountSnapshots[server.id]
         let cap = appState.serverCapabilities[server.id]
         let planName = UHDDisplayNormalizer.formatPlanName(snap?.subscription?.plan?.name ?? cap?.planName)
-        let metaParts: [String] = {
-            var arr: [String] = []
-            if let cap { arr.append("并发 \(cap.activeVideoDeliveryLimit) 路") }
+        let expiryText: String? = {
             if let days = snap?.subscription?.remainingDays {
-                arr.append(days >= 0 ? "剩 \(days) 天" : "已到期")
+                return days >= 0 ? "剩余 \(days) 天" : "已到期"
             }
-            return arr
+            return nil
         }()
         HStack(spacing: 8) {
             if let planName {
@@ -170,8 +168,8 @@ public struct UHDCapabilitySummaryStrip: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
             }
-            if !metaParts.isEmpty {
-                Text(metaParts.joined(separator: " · "))
+            if let expiryText {
+                Text(expiryText)
                     .font(.system(size: 11.5))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }
@@ -182,7 +180,7 @@ public struct UHDCapabilitySummaryStrip: View {
                         .font(.system(size: 11.5, design: .monospaced))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 } else {
-                    Text("剩 \(UHDTrafficSummary.formatBytes(t.remainingBytes)) / \(UHDTrafficSummary.formatBytes(t.limitBytes))")
+                    Text("剩余 \(UHDTrafficSummary.formatBytes(t.remainingBytes)) / \(UHDTrafficSummary.formatBytes(t.limitBytes))")
                         .font(.system(size: 11.5, weight: .medium, design: .monospaced))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                 }
@@ -254,10 +252,10 @@ public struct UHDSpeedTestConsoleView: View {
                         Button {
                             model.launchSingle(server: server, domainId: activeDomainId, appState: appState)
                         } label: {
-                            Text("测当前")
+                            Text("当前线路测速")
                                 .font(.system(size: 11.5, weight: .semibold))
                                 .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                                .padding(.horizontal, 10)
+                                .padding(.horizontal, 11)
                                 .padding(.vertical, 5)
                                 .donbyLiquidGlassCapsule()
                                 .contentShape(Capsule())
@@ -269,10 +267,10 @@ public struct UHDSpeedTestConsoleView: View {
                         Button {
                             model.launchBatch(server: server, lines: uhdLines, appState: appState)
                         } label: {
-                            Text("测全部 (\(uhdLines.count))")
+                            Text("全部线路测速")
                                 .font(.system(size: 11.5, weight: .semibold))
                                 .foregroundStyle(appState.accentTextColor)
-                                .padding(.horizontal, 10)
+                                .padding(.horizontal, 11)
                                 .padding(.vertical, 5)
                                 .background(appState.accentColor)
                                 .clipShape(Capsule())

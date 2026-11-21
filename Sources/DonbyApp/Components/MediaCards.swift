@@ -481,8 +481,8 @@ public struct LibraryCardView: View, Equatable {
 
 // MARK: - Native Toast Banner
 public struct ToastBannerView: View {
-    @Environment(\.colorScheme) private var colorScheme
     public let toast: ToastMessage
+    public var isLightMode: Bool = false
 
     private static let classicRed = Color(
         red: ThemeColorPalette.appleMusicRedRGB.r,
@@ -490,36 +490,40 @@ public struct ToastBannerView: View {
         blue: ThemeColorPalette.appleMusicRedRGB.b
     )
 
+    public init(toast: ToastMessage, isLightMode: Bool = false) {
+        self.toast = toast
+        self.isLightMode = isLightMode
+    }
+
     public var body: some View {
-        let isLight = (colorScheme == .light)
         HStack(spacing: 8) {
             Image(systemName: toast.icon)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(
                     toast.isError
                         ? Self.classicRed
-                        : (isLight ? Color(red: 0.14, green: 0.14, blue: 0.16) : Color.white.opacity(0.88))
+                        : (isLightMode ? Color(red: 0.12, green: 0.12, blue: 0.14) : Color.white.opacity(0.92))
                 )
 
             Text(toast.text)
                 .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(isLight ? Color(red: 0.10, green: 0.10, blue: 0.12) : .white)
+                .foregroundStyle(isLightMode ? Color(red: 0.10, green: 0.10, blue: 0.12) : .white)
                 .lineLimit(2)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 9.5)
         .background(
             Capsule(style: .continuous)
-                .fill(isLight ? Color.white.opacity(0.96) : Color(red: 0.10, green: 0.105, blue: 0.12).opacity(0.92))
+                .fill(isLightMode ? Color.white.opacity(0.98) : Color(red: 0.08, green: 0.085, blue: 0.105).opacity(0.94))
         )
         .overlay(
             Capsule(style: .continuous)
-                .strokeBorder(isLight ? Color.black.opacity(0.10) : Color.white.opacity(0.16), lineWidth: 0.75)
+                .strokeBorder(isLightMode ? Color.black.opacity(0.14) : Color.white.opacity(0.20), lineWidth: 0.75)
         )
         .shadow(
-            color: isLight ? Color.black.opacity(0.12) : Color.black.opacity(0.45),
-            radius: isLight ? 10 : 14,
-            y: isLight ? 4 : 6
+            color: isLightMode ? Color.black.opacity(0.14) : Color.black.opacity(0.50),
+            radius: isLightMode ? 10 : 14,
+            y: isLightMode ? 4 : 6
         )
     }
 }
