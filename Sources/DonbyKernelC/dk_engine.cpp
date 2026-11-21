@@ -244,6 +244,7 @@ struct DKPlayer {
     ASS_Library* ass_lib{nullptr};
     ASS_Renderer* ass_renderer{nullptr};
     ASS_Renderer* secondary_ass_renderer{nullptr};
+    ASS_Renderer* paired_ass_renderer{nullptr};
     ASS_Track* ass_track{nullptr};
     ASS_Track* secondary_ass_track{nullptr};
     std::mutex ass_mtx;
@@ -270,9 +271,11 @@ struct DKPlayer {
     uint64_t sub_read_order{0};
     bool sub_last_non_empty{false};
     bool sub_style_dirty{false};
+    bool paired_layout_active{false};
+    uint64_t paired_layout_hash{0};
     int sub_dirty_y0{0};
     int sub_dirty_y1{0};
-    DKSubtitleStyleConfig sub_style{1.0f, 2.8f, 92.0f, 0.0, 0.0, 0, false, false, true, true, 0.80f, 10.0f, true, 0};
+    DKSubtitleStyleConfig sub_style{1.0f, 2.2f, 92.0f, 0.0, 0.0, 0, false, false, true, true, 0.60f, 7.0f, true, 0};
     struct OriginalAssStyle {
         std::string font_name;
         double font_size{56.0};
@@ -1679,7 +1682,7 @@ static std::string dk_filter_ass_tag_block(const std::string& block, bool strip_
                     uint8_t g = static_cast<uint8_t>((val >> 8) & 0xFF);
                     uint8_t b = static_cast<uint8_t>((val >> 16) & 0xFF);
                     if (dk_is_pale_yellow_rgb(r, g, b)) {
-                        out += "\\1c&H003FD2FF&";
+                        out += "\\1c&H002EB2FF&";
                         continue;
                     }
                 }
@@ -1736,7 +1739,7 @@ static std::string dk_transform_ass_payload(const std::string& payload, int32_t 
             bool has_color = (line2.find("\\1c&") != std::string::npos || line2.find("\\c&") != std::string::npos ||
                               line2.find("\\1C&") != std::string::npos || line2.find("\\C&") != std::string::npos);
             if (!has_color && dk_has_cjk_utf8(line1) && dk_is_mostly_latin_line(line2)) {
-                out = line1 + "\\N{\\1c&H003FD2FF&}" + line2;
+                out = line1 + "\\N{\\1c&H002EB2FF&}" + line2;
             }
         }
     }
@@ -1832,7 +1835,7 @@ static void dk_apply_style_to_ass_track_locked(DKPlayer* player, ASS_Track* trac
     // Keep base MarginV compact so ass_set_line_position() can smoothly place ASS/SRT all the way down into black letterbox bars
     int compact_margin_v = std::max(4, static_cast<int>(std::lround(14.0 * res_ratio)));
 
-    constexpr uint32_t kClassicGoldYellowRGBA = 0xFFD23F00u; // Rich cinema gold-yellow (#FFD23F, alpha=0 opaque)
+    constexpr uint32_t kClassicGoldYellowRGBA = 0xFFB22E00u; // Classic cinema warm orange-gold (#FFB22E, alpha=0 opaque)
     const bool unify_pf = player->sub_style.unify_pingfang_font;
     const bool enhance_yellow = player->sub_style.enhance_secondary_yellow;
     const bool override_all = player->sub_style.override_ass_style;
@@ -1862,8 +1865,8 @@ static void dk_apply_style_to_ass_track_locked(DKPlayer* player, ASS_Track* trac
         // 3. Base size & compact MarginV (overall user scale & vertical placement into letterbox are driven natively by
         //    ass_set_font_scale + ass_set_line_position + ass_set_use_margins so even inline \fs tags scale cleanly!)
         const double sec_rel_scale = std::clamp(
-            static_cast<double>(player->sub_style.secondary_scale > 0.2f ? player->sub_style.secondary_scale : 0.80f),
-            0.50,
+            static_cast<double>(player->sub_style.secondary_scale > 0.2f ? player->sub_style.secondary_scale : 0.60f),
+            0.45,
             1.40
         );
         const double role_rel = is_secondary ? sec_rel_scale : 1.0;
@@ -2737,6 +2740,10 @@ void dk_player_destroy(DKPlayer* player) {
     if (player->secondary_ass_renderer) {
         ass_renderer_done(player->secondary_ass_renderer);
         player->secondary_ass_renderer = nullptr;
+    }
+    if (player->paired_ass_renderer) {
+        ass_renderer_done(player->paired_ass_renderer);
+        player->paired_ass_renderer = nullptr;
     }
     if (player->ass_lib) {
         ass_library_done(player->ass_lib);
@@ -3871,7 +3878,7 @@ static void dk_populate_external_subtitle_track_locked(
                     std::string line1 = body_sanitized.substr(0, br);
                     std::string line2 = body_sanitized.substr(br + 2);
                     if (dk_has_cjk_utf8(line1) && dk_is_mostly_latin_line(line2) && line2.find("\\c&") == std::string::npos && line2.find("\\1c&") == std::string::npos) {
-                        body_sanitized = line1 + "\\N{\\fscx84\\fscy84\\1c&H003FD2FF&}" + line2;
+                        body_sanitized = line1 + "\\N{\\fscx62\\fscy62\\1c&H002EB2FF&}" + line2;
                     }
                 }
             }
@@ -4388,18 +4395,18 @@ static inline void dk_apply_pgs_pixel_overrides(
         const uint8_t ug = static_cast<uint8_t>(std::lround(g));
         const uint8_t ub = static_cast<uint8_t>(std::lround(b));
         if (dk_is_pale_yellow_rgb(ur, ug, ub)) {
-            // Enrich washed-out cream/pale-yellow PGS glyphs to classic cinema gold-yellow (#FFD23F) preserving luminance
-            const float lum_scale = std::clamp(luma / 215.0f, 0.35f, 1.05f);
+            // Enrich washed-out cream/pale-yellow PGS glyphs to classic cinema warm orange-gold (#FFB22E) preserving luminance
+            const float lum_scale = std::clamp(luma / 205.0f, 0.35f, 1.05f);
             r = std::min(255.0f, 255.0f * lum_scale);
-            g = std::min(255.0f, 210.0f * lum_scale);
-            b = std::min(255.0f, 63.0f * lum_scale);
+            g = std::min(255.0f, 178.0f * lum_scale);
+            b = std::min(255.0f, 46.0f * lum_scale);
         } else if (is_secondary && luma >= 120.0f) {
-            // Tint secondary PGS glyph cores to classic gold-yellow while keeping dark outlines pure black
+            // Tint secondary PGS glyph cores to classic cinema orange-gold while keeping dark outlines pure black
             const float tint_w = std::clamp((luma - 120.0f) / 80.0f, 0.0f, 1.0f);
-            const float lum_scale = std::clamp(luma / 225.0f, 0.45f, 1.04f);
+            const float lum_scale = std::clamp(luma / 220.0f, 0.45f, 1.04f);
             const float tr = std::min(255.0f, 255.0f * lum_scale);
-            const float tg = std::min(255.0f, 210.0f * lum_scale);
-            const float tb = std::min(255.0f, 63.0f * lum_scale);
+            const float tg = std::min(255.0f, 178.0f * lum_scale);
+            const float tb = std::min(255.0f, 46.0f * lum_scale);
             r = r + (tr - r) * tint_w;
             g = g + (tg - g) * tint_w;
             b = b + (tb - b) * tint_w;
@@ -4663,6 +4670,682 @@ static void dk_composite_dual_layers_locked(
     }
 }
 
+// MARK: - Donby Cinema Pair-A Semantic Bilingual Engine (Zero-Overlap, Zero-Split Multi-Line Engine)
+
+struct DKPairedLineRaster {
+    std::vector<uint8_t> buf;
+    int x0{0}, x1{0}, y0{0}, y1{0};
+    int w() const { return std::max(0, x1 - x0); }
+    int h() const { return std::max(0, y1 - y0); }
+};
+
+struct DKSemanticTurn {
+    std::vector<std::string> priLines;
+    std::vector<std::string> secLines;
+};
+
+static std::string dk_trim_sub_ws(const std::string& s) {
+    size_t a = 0;
+    while (a < s.size() && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r' || s[a] == '\n')) a++;
+    size_t b = s.size();
+    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r' || s[b - 1] == '\n')) b--;
+    return s.substr(a, b - a);
+}
+
+static bool dk_event_has_special_ass_effects(const ASS_Track* track, const ASS_Event& ev) {
+    if (track && ev.Style >= 0 && ev.Style < track->n_styles) {
+        if ((track->styles[ev.Style].Alignment & 0x0C) != 0) {
+            return true; // Top or center aligned annotation/sign
+        }
+    }
+    if (!ev.Text) return false;
+    const char* t = ev.Text;
+    // Scan {...} override blocks for positioning, vector drawing, clip, or non-bottom alignment
+    for (size_t i = 0; t[i] != '\0'; i++) {
+        if (t[i] != '{') continue;
+        size_t j = i + 1;
+        while (t[j] != '\0' && t[j] != '}') {
+            if (t[j] == '\\') {
+                const char c1 = static_cast<char>(std::tolower(static_cast<unsigned char>(t[j + 1])));
+                const char c2 = t[j + 1] ? static_cast<char>(std::tolower(static_cast<unsigned char>(t[j + 2]))) : '\0';
+                const char c3 = (t[j + 1] && t[j + 2]) ? static_cast<char>(std::tolower(static_cast<unsigned char>(t[j + 3]))) : '\0';
+                if ((c1 == 'p' && c2 == 'o' && c3 == 's') ||
+                    (c1 == 'm' && c2 == 'o' && c3 == 'v') ||
+                    (c1 == 'o' && c2 == 'r' && c3 == 'g') ||
+                    (c1 == 'c' && c2 == 'l' && c3 == 'i') ||
+                    (c1 == 'i' && c2 == 'c' && c3 == 'l')) {
+                    return true;
+                }
+                if (c1 == 'p' && c2 >= '1' && c2 <= '9') {
+                    return true; // ASS vector drawing mode \p1..\p9
+                }
+                if (c1 == 'a' && c2 == 'n' && c3 >= '4' && c3 <= '9') {
+                    return true; // Non-bottom \an4..\an9
+                }
+            }
+            j++;
+        }
+        if (t[j] == '\0') break;
+        i = j;
+    }
+    return false;
+}
+
+/// Cleans an ASS event Text into plain logical lines while preserving italics (`{\i1}`/`{\i0}`).
+static void dk_extract_clean_lines_from_ass_text(
+    const char* raw_text,
+    bool style_is_foreign,
+    std::vector<std::pair<std::string, bool>>& out_tagged_lines
+) {
+    if (!raw_text || !*raw_text) return;
+    std::string s(raw_text);
+    // Split on \N, \n, or raw newline
+    std::vector<std::string> raw_parts;
+    size_t start = 0;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '\\' && i + 1 < s.size() && (s[i + 1] == 'N' || s[i + 1] == 'n')) {
+            raw_parts.push_back(s.substr(start, i - start));
+            i += 1;
+            start = i + 1;
+        } else if (s[i] == '\n') {
+            raw_parts.push_back(s.substr(start, i - start));
+            start = i + 1;
+        }
+    }
+    raw_parts.push_back(s.substr(start));
+
+    bool cur_italic = false;
+    bool cur_foreign_hint = style_is_foreign;
+    for (const auto& part : raw_parts) {
+        std::string clean;
+        clean.reserve(part.size());
+        if (cur_italic) clean += "{\\i1}";
+        bool part_has_visible = false;
+        for (size_t i = 0; i < part.size(); i++) {
+            if (part[i] == '{') {
+                size_t close = part.find('}', i + 1);
+                if (close != std::string::npos) {
+                    std::string inner = part.substr(i + 1, close - i - 1);
+                    if (inner.find("\\i1") != std::string::npos || inner.find("\\I1") != std::string::npos) {
+                        if (!cur_italic) { clean += "{\\i1}"; cur_italic = true; }
+                    } else if (inner.find("\\i0") != std::string::npos || inner.find("\\I0") != std::string::npos) {
+                        if (cur_italic) { clean += "{\\i0}"; cur_italic = false; }
+                    }
+                    // Detect inline style switch like \rEng or \rEnglish
+                    size_t rpos = inner.find("\\r");
+                    if (rpos != std::string::npos) {
+                        size_t rend = inner.find('\\', rpos + 2);
+                        std::string rname = (rend == std::string::npos) ? inner.substr(rpos + 2) : inner.substr(rpos + 2, rend - (rpos + 2));
+                        if (!rname.empty() && dk_style_looks_like_foreign_secondary(rname.c_str())) {
+                            cur_foreign_hint = true;
+                        } else if (rname.empty()) {
+                            cur_foreign_hint = style_is_foreign;
+                        }
+                    }
+                    i = close;
+                    continue;
+                }
+            }
+            if (part[i] == '\\' && i + 1 < part.size() && part[i + 1] == 'h') {
+                clean.push_back(' ');
+                i += 1;
+                continue;
+            }
+            if (part[i] != '\r') {
+                clean.push_back(part[i]);
+                if (part[i] != ' ' && part[i] != '\t') part_has_visible = true;
+            }
+        }
+        std::string trimmed = dk_trim_sub_ws(clean);
+        if (!part_has_visible || trimmed.empty()) continue;
+
+        bool is_foreign = cur_foreign_hint;
+        if (dk_has_cjk_utf8(trimmed)) {
+            is_foreign = false;
+        } else if (dk_is_mostly_latin_line(trimmed)) {
+            is_foreign = true;
+        }
+        out_tagged_lines.push_back({std::move(trimmed), is_foreign});
+    }
+}
+
+static bool dk_looks_like_speaker_dash(const std::string& line) {
+    size_t i = 0;
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) i++;
+    if (i < line.size() && line[i] == '{') {
+        size_t close = line.find('}', i + 1);
+        if (close != std::string::npos) i = close + 1;
+        while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) i++;
+    }
+    if (i >= line.size()) return false;
+    if (line[i] == '-') return true;
+    // UTF-8 en-dash (E2 80 93) or em-dash (E2 80 94)
+    if (i + 2 < line.size() && static_cast<uint8_t>(line[i]) == 0xE2 && static_cast<uint8_t>(line[i + 1]) == 0x80 &&
+        (static_cast<uint8_t>(line[i + 2]) == 0x93 || static_cast<uint8_t>(line[i + 2]) == 0x94)) {
+        return true;
+    }
+    return false;
+}
+
+static bool dk_try_split_inline_two_speakers(const std::string& line, std::string& out_a, std::string& out_b) {
+    // Splits lines like "- Are you sure? - Trust me." when counterpart language has 2 speaker lines
+    size_t search_from = 2;
+    size_t pos = line.find(" - ", search_from);
+    if (pos == std::string::npos) pos = line.find("? -", search_from);
+    if (pos == std::string::npos) pos = line.find("! -", search_from);
+    if (pos == std::string::npos) pos = line.find(". -", search_from);
+    if (pos == std::string::npos) return false;
+    size_t dash_pos = line.find('-', pos);
+    if (dash_pos == std::string::npos || dash_pos <= 1 || dash_pos + 1 >= line.size()) return false;
+    out_a = dk_trim_sub_ws(line.substr(0, dash_pos));
+    out_b = dk_trim_sub_ws(line.substr(dash_pos));
+    return !out_a.empty() && !out_b.empty();
+}
+
+static std::vector<DKSemanticTurn> dk_build_paired_turns(
+    const std::vector<std::pair<std::string, bool>>& pri_track_tagged,
+    const std::vector<std::string>& sec_track_lines
+) {
+    std::vector<DKSemanticTurn> turns;
+
+    // Mode 1: Dual tracks both active (Primary track + Secondary track)
+    if (!sec_track_lines.empty()) {
+        std::vector<std::string> pri_lines;
+        pri_lines.reserve(pri_track_tagged.size());
+        for (const auto& kv : pri_track_tagged) pri_lines.push_back(kv.first);
+
+        std::vector<std::string> sec_lines = sec_track_lines;
+        // Smart repair: if one track has 2 speaker-dash lines and the other packed both speakers onto 1 line
+        if (pri_lines.size() == 2 && sec_lines.size() == 1 &&
+            dk_looks_like_speaker_dash(pri_lines[0]) && dk_looks_like_speaker_dash(pri_lines[1])) {
+            std::string a, b;
+            if (dk_try_split_inline_two_speakers(sec_lines[0], a, b)) {
+                sec_lines = {a, b};
+            }
+        } else if (sec_lines.size() == 2 && pri_lines.size() == 1 &&
+                   dk_looks_like_speaker_dash(sec_lines[0]) && dk_looks_like_speaker_dash(sec_lines[1])) {
+            std::string a, b;
+            if (dk_try_split_inline_two_speakers(pri_lines[0], a, b)) {
+                pri_lines = {a, b};
+            }
+        }
+
+        if (pri_lines.empty()) {
+            turns.push_back({{}, sec_lines});
+            return turns;
+        }
+        if (pri_lines.size() == sec_lines.size() && pri_lines.size() >= 2) {
+            // Semantic 1-to-1 line pairing (CN1+EN1 / CN2+EN2) — eliminates split CN-CN / EN-EN blocks!
+            for (size_t i = 0; i < pri_lines.size(); i++) {
+                turns.push_back({{pri_lines[i]}, {sec_lines[i]}});
+            }
+            return turns;
+        }
+        turns.push_back({std::move(pri_lines), std::move(sec_lines)});
+        return turns;
+    }
+
+    // Mode 2: Single track (monolingual OR single-track bilingual SRT/ASS)
+    if (pri_track_tagged.empty()) return turns;
+
+    bool any_pri = false, any_sec = false;
+    for (const auto& kv : pri_track_tagged) {
+        if (kv.second) any_sec = true; else any_pri = true;
+    }
+    if (!any_pri || !any_sec) {
+        // Pure monolingual subtitle -> render all lines cleanly as Primary white
+        DKSemanticTurn t;
+        for (const auto& kv : pri_track_tagged) t.priLines.push_back(kv.first);
+        turns.push_back(std::move(t));
+        return turns;
+    }
+
+    // Check if lines are already interleaved (e.g. CN1, EN1, CN2, EN2)
+    bool is_interleaved = (pri_track_tagged.size() >= 4 && (pri_track_tagged.size() % 2 == 0));
+    if (is_interleaved) {
+        for (size_t i = 0; i < pri_track_tagged.size(); i += 2) {
+            if (pri_track_tagged[i].second == pri_track_tagged[i + 1].second) {
+                is_interleaved = false;
+                break;
+            }
+        }
+    }
+    if (is_interleaved) {
+        for (size_t i = 0; i < pri_track_tagged.size(); i += 2) {
+            DKSemanticTurn t;
+            if (!pri_track_tagged[i].second) {
+                t.priLines.push_back(pri_track_tagged[i].first);
+                t.secLines.push_back(pri_track_tagged[i + 1].first);
+            } else {
+                t.priLines.push_back(pri_track_tagged[i + 1].first);
+                t.secLines.push_back(pri_track_tagged[i].first);
+            }
+            turns.push_back(std::move(t));
+        }
+        return turns;
+    }
+
+    // Block-separated bilingual lines in one track (e.g. CN1, CN2, EN1, EN2) -> split & semantically pair!
+    std::vector<std::string> cns, ens;
+    for (const auto& kv : pri_track_tagged) {
+        if (kv.second) ens.push_back(kv.first);
+        else cns.push_back(kv.first);
+    }
+    if (cns.size() == 2 && ens.size() == 1 && dk_looks_like_speaker_dash(cns[0]) && dk_looks_like_speaker_dash(cns[1])) {
+        std::string a, b;
+        if (dk_try_split_inline_two_speakers(ens[0], a, b)) ens = {a, b};
+    } else if (ens.size() == 2 && cns.size() == 1 && dk_looks_like_speaker_dash(ens[0]) && dk_looks_like_speaker_dash(ens[1])) {
+        std::string a, b;
+        if (dk_try_split_inline_two_speakers(cns[0], a, b)) cns = {a, b};
+    }
+
+    if (cns.size() == ens.size() && cns.size() >= 2) {
+        for (size_t i = 0; i < cns.size(); i++) {
+            turns.push_back({{cns[i]}, {ens[i]}});
+        }
+    } else {
+        turns.push_back({std::move(cns), std::move(ens)});
+    }
+    return turns;
+}
+
+static DKPairedLineRaster dk_raster_paired_line_locked(
+    DKPlayer* player,
+    int canvas_w,
+    int canvas_h,
+    double font_size,
+    double spacing,
+    const char* color_ass,
+    double outline,
+    double shadow,
+    int margin_lr,
+    const std::string& text
+) {
+    DKPairedLineRaster out;
+    out.x0 = canvas_w; out.x1 = 0; out.y0 = canvas_h; out.y1 = 0;
+    if (!player || !player->ass_lib || text.empty() || canvas_w <= 0 || canvas_h <= 0) return out;
+    if (!player->paired_ass_renderer) {
+        player->paired_ass_renderer = ass_renderer_init(player->ass_lib);
+        if (player->paired_ass_renderer) {
+            ass_set_fonts(player->paired_ass_renderer, nullptr, "PingFang SC", 1, nullptr, 1);
+        }
+    }
+    ASS_Renderer* ren = player->paired_ass_renderer;
+    if (!ren) return out;
+
+    ass_set_frame_size(ren, canvas_w, canvas_h);
+    ass_set_storage_size(ren, canvas_w, canvas_h);
+    ass_set_margins(ren, 0, 0, 0, 0);
+    ass_set_use_margins(ren, 1);
+    ass_set_font_scale(ren, 1.0);
+    ass_set_line_position(ren, 0.0);
+
+    std::string doc;
+    doc.reserve(512 + text.size());
+    char hdr[640];
+    std::snprintf(
+        hdr, sizeof(hdr),
+        "[Script Info]\r\nScriptType: v4.00+\r\nPlayResX: %d\r\nPlayResY: %d\r\nScaledBorderAndShadow: yes\r\nWrapStyle: 0\r\n"
+        "[V4+ Styles]\r\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\r\n"
+        "Style: Default,PingFang SC,%.2f,%s,&H0000FFFF,&H10000000,&H80000000,-1,0,0,0,100,100,%.2f,0,1,%.2f,%.2f,2,%d,%d,16,1\r\n"
+        "[Events]\r\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\r\n"
+        "Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,",
+        canvas_w, canvas_h, font_size, color_ass, spacing, outline, shadow, margin_lr, margin_lr
+    );
+    doc = hdr;
+    doc += text;
+    doc += "\r\n";
+
+    ASS_Track* tr = ass_read_memory(player->ass_lib, doc.data(), doc.size(), nullptr);
+    if (!tr) return out;
+    int ch = 0;
+    ASS_Image* img = ass_render_frame(ren, tr, 1000, &ch);
+    for (ASS_Image* c = img; c; c = c->next) {
+        if (c->w <= 0 || c->h <= 0 || !c->bitmap) continue;
+        out.x0 = std::min(out.x0, c->dst_x);
+        out.x1 = std::max(out.x1, c->dst_x + c->w);
+        out.y0 = std::min(out.y0, c->dst_y);
+        out.y1 = std::max(out.y1, c->dst_y + c->h);
+    }
+    if (out.x1 > out.x0 && out.y1 > out.y0) {
+        const int bw = out.w();
+        const int bh = out.h();
+        out.buf.assign(static_cast<size_t>(bw) * static_cast<size_t>(bh) * 4, 0);
+        for (ASS_Image* c = img; c; c = c->next) {
+            if (c->w <= 0 || c->h <= 0 || !c->bitmap) continue;
+            const uint8_t r = (c->color >> 24) & 0xFF;
+            const uint8_t g = (c->color >> 16) & 0xFF;
+            const uint8_t b = (c->color >> 8) & 0xFF;
+            const uint8_t op = 255 - (c->color & 0xFF);
+            if (op == 0) continue;
+            for (int y = 0; y < c->h; y++) {
+                const int dy = c->dst_y + y - out.y0;
+                if (dy < 0 || dy >= bh) continue;
+                const uint8_t* src = c->bitmap + y * c->stride;
+                uint8_t* dst = out.buf.data() + static_cast<size_t>(dy) * bw * 4;
+                for (int x = 0; x < c->w; x++) {
+                    const int dx = c->dst_x + x - out.x0;
+                    if (dx < 0 || dx >= bw) continue;
+                    const uint32_t k = (static_cast<uint32_t>(src[x]) * op + 127) / 255;
+                    if (k == 0) continue;
+                    uint8_t* p = dst + dx * 4;
+                    const uint32_t inv = 255 - k;
+                    p[0] = static_cast<uint8_t>(std::min<uint32_t>(255, (r * k + 127) / 255 + (p[0] * inv + 127) / 255));
+                    p[1] = static_cast<uint8_t>(std::min<uint32_t>(255, (g * k + 127) / 255 + (p[1] * inv + 127) / 255));
+                    p[2] = static_cast<uint8_t>(std::min<uint32_t>(255, (b * k + 127) / 255 + (p[2] * inv + 127) / 255));
+                    p[3] = static_cast<uint8_t>(std::min<uint32_t>(255, k + (p[3] * inv + 127) / 255));
+                }
+            }
+        }
+    }
+    ass_free_track(tr);
+    return out;
+}
+
+static void dk_blit_paired_raster(
+    const DKPairedLineRaster& rl,
+    uint8_t* dst_rgba,
+    int dst_w,
+    int dst_h,
+    int dst_x,
+    int dst_y,
+    int& out_y0,
+    int& out_y1
+) {
+    const int bw = rl.w(), bh = rl.h();
+    if (bw <= 0 || bh <= 0 || !dst_rgba) return;
+    for (int y = 0; y < bh; y++) {
+        const int dy = dst_y + y;
+        if (dy < 0 || dy >= dst_h) continue;
+        out_y0 = std::min(out_y0, dy);
+        out_y1 = std::max(out_y1, dy + 1);
+        const uint8_t* srow = rl.buf.data() + static_cast<size_t>(y) * bw * 4;
+        uint8_t* drow = dst_rgba + static_cast<size_t>(dy) * dst_w * 4;
+        for (int x = 0; x < bw; x++) {
+            const int dx = dst_x + x;
+            if (dx < 0 || dx >= dst_w) continue;
+            const uint8_t sa = srow[x * 4 + 3];
+            if (sa == 0) continue;
+            const uint8_t inv = 255 - sa;
+            drow[dx * 4 + 0] = static_cast<uint8_t>(std::min(255, static_cast<int>(srow[x * 4 + 0]) + (drow[dx * 4 + 0] * inv + 127) / 255));
+            drow[dx * 4 + 1] = static_cast<uint8_t>(std::min(255, static_cast<int>(srow[x * 4 + 1]) + (drow[dx * 4 + 1] * inv + 127) / 255));
+            drow[dx * 4 + 2] = static_cast<uint8_t>(std::min(255, static_cast<int>(srow[x * 4 + 2]) + (drow[dx * 4 + 2] * inv + 127) / 255));
+            drow[dx * 4 + 3] = static_cast<uint8_t>(std::min(255, static_cast<int>(sa) + (drow[dx * 4 + 3] * inv + 127) / 255));
+        }
+    }
+}
+
+static inline void dk_hash_mix(uint64_t& h, uint64_t v) {
+    h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+}
+
+static inline void dk_hash_str(uint64_t& h, const std::string& s) {
+    for (unsigned char c : s) {
+        h = (h ^ c) * 1099511628211ULL;
+    }
+    dk_hash_mix(h, s.size());
+}
+
+/// Returns: 1 = rendered with Pair-A engine (has active subtitle), 0 = empty at this PTS, -1 = fallback to standard libass/PGS pipeline
+static int dk_try_render_paired_bilingual_locked(
+    DKPlayer* player,
+    double pri_pts,
+    double sec_pts,
+    int32_t canvas_w,
+    int32_t canvas_h,
+    bool canvas_resized,
+    const std::function<void(int, int)>& clear_subtitle_canvas
+) {
+    if (!player || !player->ass_lib) return -1;
+    if (!player->sub_style.unify_pingfang_font) return -1;
+    if (player->has_bitmap_subs || player->secondary_has_bitmap_subs) return -1;
+    if (!player->ass_track && !player->secondary_ass_track) return -1;
+
+    const long long pri_ms = static_cast<long long>(std::max(0.0, pri_pts) * 1000.0);
+    const long long sec_ms = static_cast<long long>(std::max(0.0, sec_pts) * 1000.0);
+
+    std::vector<std::pair<std::string, bool>> pri_tagged;
+    std::vector<std::string> sec_lines;
+
+    auto collect_track = [&](const ASS_Track* tr, long long now_ms, bool is_secondary) -> bool {
+        if (!tr || !tr->events || tr->n_events <= 0) return true;
+        for (int i = 0; i < tr->n_events; i++) {
+            const ASS_Event& ev = tr->events[i];
+            if (ev.Duration <= 0) continue;
+            if (now_ms < ev.Start || now_ms >= ev.Start + ev.Duration) continue;
+            if (!player->sub_style.override_ass_style && dk_event_has_special_ass_effects(tr, ev)) {
+                return false; // Special positioned/vector ASS effect active -> preserve via native libass!
+            }
+            bool style_foreign = is_secondary;
+            if (!is_secondary && ev.Style >= 0 && ev.Style < tr->n_styles) {
+                const ASS_Style& st = tr->styles[ev.Style];
+                if (dk_style_looks_like_foreign_secondary(st.Name)) style_foreign = true;
+            }
+            if (is_secondary) {
+                std::vector<std::pair<std::string, bool>> tmp;
+                dk_extract_clean_lines_from_ass_text(ev.Text, true, tmp);
+                for (auto& kv : tmp) sec_lines.push_back(std::move(kv.first));
+            } else {
+                dk_extract_clean_lines_from_ass_text(ev.Text, style_foreign, pri_tagged);
+            }
+        }
+        return true;
+    };
+
+    if (!collect_track(player->ass_track, pri_ms, false)) return -1;
+    if (!collect_track(player->secondary_ass_track, sec_ms, true)) return -1;
+
+    if (pri_tagged.empty() && sec_lines.empty()) {
+        if (player->sub_last_non_empty) {
+            clear_subtitle_canvas(canvas_w, canvas_h);
+            player->sub_last_non_empty = false;
+            player->paired_layout_active = false;
+            player->paired_layout_hash = 0;
+            player->sub_serial++;
+        }
+        return 0;
+    }
+
+    auto turns = dk_build_paired_turns(pri_tagged, sec_lines);
+    if (turns.empty()) return 0;
+
+    // Compute fast deterministic fingerprint for zero-cost frame deduplication
+    uint64_t h = 14695981039346656037ULL;
+    dk_hash_mix(h, static_cast<uint64_t>(canvas_w));
+    dk_hash_mix(h, static_cast<uint64_t>(canvas_h));
+    dk_hash_mix(h, static_cast<uint64_t>(player->sub_margin_b));
+    dk_hash_mix(h, static_cast<uint64_t>(player->sub_margin_t));
+    dk_hash_mix(h, static_cast<uint64_t>(std::lround(player->sub_style.scale * 1000.0f)));
+    dk_hash_mix(h, static_cast<uint64_t>(std::lround(player->sub_style.secondary_scale * 1000.0f)));
+    dk_hash_mix(h, static_cast<uint64_t>(std::lround(player->sub_style.vertical_pos_percent * 100.0f)));
+    dk_hash_mix(h, static_cast<uint64_t>(std::lround(player->sub_style.border_width * 100.0f)));
+    dk_hash_mix(h, static_cast<uint64_t>(std::lround(player->sub_style.dual_gap_px * 10.0f)));
+    dk_hash_mix(h, player->sub_style.enhance_secondary_yellow ? 1ULL : 0ULL);
+    dk_hash_mix(h, player->sub_style.primary_on_top ? 1ULL : 0ULL);
+    dk_hash_mix(h, static_cast<uint64_t>(player->sub_style.dual_layout_mode));
+    for (const auto& t : turns) {
+        dk_hash_mix(h, 0xAAAA);
+        for (const auto& l : t.priLines) dk_hash_str(h, l);
+        dk_hash_mix(h, 0xBBBB);
+        for (const auto& l : t.secLines) dk_hash_str(h, l);
+    }
+
+    const bool buf_mismatch = (player->sub_rgba_buf.size() != static_cast<size_t>(canvas_w) * static_cast<size_t>(canvas_h) * 4);
+    if (player->paired_layout_active && player->sub_last_non_empty && !player->sub_style_dirty &&
+        !canvas_resized && !buf_mismatch && h == player->paired_layout_hash) {
+        return 1; // Exact cache hit — 0ms cost!
+    }
+
+    player->sub_style_dirty = false;
+    clear_subtitle_canvas(canvas_w, canvas_h);
+
+    // Pair-A Cinema Reference Constants (anchored to 1200px reference viewport height; NEVER shrinks on multi-line!)
+    const double vh_ratio = static_cast<double>(canvas_h) / 1200.0;
+    const double user_scale = std::clamp(static_cast<double>(player->sub_style.scale > 0.1f ? player->sub_style.scale : 1.0f), 0.5, 2.5);
+    const double sec_rel = std::clamp(static_cast<double>(player->sub_style.secondary_scale > 0.2f ? player->sub_style.secondary_scale : 0.60f), 0.45, 1.40);
+    const double k_scale = vh_ratio * user_scale;
+    const double cn_size = 58.0 * k_scale;
+    const double en_size = 58.0 * sec_rel * k_scale;
+    const double base_border = std::clamp(static_cast<double>(player->sub_style.border_width >= 0.0f ? player->sub_style.border_width : 2.2f), 0.0, 8.0);
+    const double cn_outline = base_border * k_scale;
+    const double en_outline = base_border * 0.82 * k_scale;
+    const double cn_shadow = 1.0 * k_scale;
+    const double en_shadow = 0.9 * k_scale;
+    const double cn_spacing = 1.0 * k_scale;
+    const double en_spacing = 0.2 * k_scale;
+    const char* cn_color = "&H00FFFFFF";
+    const char* en_color = player->sub_style.enhance_secondary_yellow ? "&H002EB2FF" : "&H00EAEAEF";
+    const int margin_lr = std::max(48, static_cast<int>(std::lround(static_cast<double>(canvas_w) * 0.05)));
+
+    const int cn_inner_gap = std::max(2, static_cast<int>(std::lround(6.0 * k_scale)));
+    const int en_inner_gap = std::max(2, static_cast<int>(std::lround(4.0 * k_scale)));
+    const int pair_gap = std::max(1, static_cast<int>(std::lround((player->sub_style.dual_gap_px >= 0.0f ? player->sub_style.dual_gap_px : 7.0f) * k_scale)));
+    const int turn_gap = std::max(6, static_cast<int>(std::lround(16.0 * k_scale)));
+
+    const bool primary_on_top = player->sub_style.primary_on_top;
+    const int layout_mode = player->sub_style.dual_layout_mode;
+
+    struct RasterTurn {
+        std::vector<DKPairedLineRaster> pri;
+        std::vector<DKPairedLineRaster> sec;
+        int priH{0};
+        int secH{0};
+        int totalH{0};
+    };
+
+    std::vector<RasterTurn> r_turns;
+    r_turns.reserve(turns.size());
+    int total_bottom_h = 0;
+    int total_top_h = 0;
+
+    for (const auto& t : turns) {
+        RasterTurn rt;
+        for (size_t i = 0; i < t.priLines.size(); i++) {
+            auto r = dk_raster_paired_line_locked(player, canvas_w, canvas_h, cn_size, cn_spacing, cn_color, cn_outline, cn_shadow, margin_lr, t.priLines[i]);
+            if (r.h() > 0) {
+                rt.priH += r.h() + (rt.pri.empty() ? 0 : cn_inner_gap);
+                rt.pri.push_back(std::move(r));
+            }
+        }
+        for (size_t i = 0; i < t.secLines.size(); i++) {
+            auto r = dk_raster_paired_line_locked(player, canvas_w, canvas_h, en_size, en_spacing, en_color, en_outline, en_shadow, margin_lr, t.secLines[i]);
+            if (r.h() > 0) {
+                rt.secH += r.h() + (rt.sec.empty() ? 0 : en_inner_gap);
+                rt.sec.push_back(std::move(r));
+            }
+        }
+        if (layout_mode == 1) {
+            if (rt.priH > 0) total_bottom_h += rt.priH + (total_bottom_h > 0 ? turn_gap : 0);
+            if (rt.secH > 0) total_top_h += rt.secH + (total_top_h > 0 ? turn_gap : 0);
+        } else {
+            int pg = (rt.priH > 0 && rt.secH > 0) ? pair_gap : 0;
+            rt.totalH = rt.priH + pg + rt.secH;
+            if (rt.totalH > 0) total_bottom_h += rt.totalH + (total_bottom_h > 0 ? turn_gap : 0);
+        }
+        r_turns.push_back(std::move(rt));
+    }
+
+    int new_y0 = canvas_h;
+    int new_y1 = 0;
+    const float pos_pct = std::clamp(player->sub_style.vertical_pos_percent > 10.0f ? player->sub_style.vertical_pos_percent : 92.0f, 50.0f, 100.0f);
+    const int bar_h = player->sub_margin_b;
+    const int video_bottom_y = canvas_h - bar_h;
+    const int default_bottom_margin = std::max(14, static_cast<int>(std::lround(28.0 * vh_ratio)));
+
+    auto compute_bottom_block_top = [&](int block_h, bool is_single_turn) -> int {
+        if (block_h <= 0) return canvas_h;
+        // When bottom black bar exists and user position is in the black-bar comfort band (>= 88%):
+        // - Single turn fitting comfortably inside black bar sits gracefully centered inside the bar;
+        // - Multi-turn / multi-line exceeding black bar keeps EXACT font size, anchors cleanly at bottom,
+        //   and expands smoothly upward into the lower movie frame!
+        if (bar_h >= static_cast<int>(std::lround(90.0 * vh_ratio)) && pos_pct >= 88.0f) {
+            const float t_bar = std::clamp((pos_pct - 88.0f) / 12.0f, 0.0f, 1.0f); // 88%->0.0, 92%->0.33, 100%->1.0
+            if (is_single_turn && block_h <= bar_h - static_cast<int>(std::lround(36.0 * vh_ratio))) {
+                const int min_top = video_bottom_y + static_cast<int>(std::lround(12.0 * vh_ratio));
+                const int max_top = canvas_h - block_h - static_cast<int>(std::lround(10.0 * vh_ratio));
+                // Map 92% right to the golden 0.45 vertical center of the bottom black bar!
+                const float mapped = (t_bar <= 0.333f) ? (0.45f * (t_bar / 0.333f)) : (0.45f + 0.55f * ((t_bar - 0.333f) / 0.667f));
+                return std::clamp(min_top + static_cast<int>(std::lround((max_top - min_top) * mapped)), 8, std::max(8, canvas_h - block_h - 6));
+            } else {
+                const int min_margin = static_cast<int>(std::lround(10.0 * vh_ratio));
+                const int anchor_margin = std::max(min_margin, static_cast<int>(std::lround(default_bottom_margin * (1.0f - t_bar * 0.65f))));
+                return std::clamp((canvas_h - anchor_margin) - block_h, 8, std::max(8, canvas_h - block_h - 6));
+            }
+        }
+        // Standard full-viewport vertical anchor (16:9 no-letterbox OR user manually raised slider < 88%)
+        const int anchor_bottom = std::clamp(
+            static_cast<int>(std::lround(static_cast<double>(pos_pct) * 0.01 * static_cast<double>(canvas_h))),
+            block_h + 8,
+            canvas_h - 8
+        );
+        return std::max(8, anchor_bottom - block_h);
+    };
+
+    if (layout_mode == 1) {
+        // Split mode: Primary anchored at bottom/black bar, Secondary pinned cleanly at top
+        int cur_y = compute_bottom_block_top(total_bottom_h, r_turns.size() <= 1);
+        for (size_t ti = 0; ti < r_turns.size(); ti++) {
+            const auto& rt = r_turns[ti];
+            for (size_t i = 0; i < rt.pri.size(); i++) {
+                int x = (canvas_w - rt.pri[i].w()) / 2;
+                dk_blit_paired_raster(rt.pri[i], player->sub_rgba_buf.data(), canvas_w, canvas_h, x, cur_y, new_y0, new_y1);
+                cur_y += rt.pri[i].h() + (i + 1 < rt.pri.size() ? cn_inner_gap : 0);
+            }
+            if (rt.priH > 0) cur_y += turn_gap;
+        }
+        int top_y = std::max(14, player->sub_margin_t / 4 + 14);
+        for (size_t ti = 0; ti < r_turns.size(); ti++) {
+            const auto& rt = r_turns[ti];
+            for (size_t i = 0; i < rt.sec.size(); i++) {
+                int x = (canvas_w - rt.sec[i].w()) / 2;
+                dk_blit_paired_raster(rt.sec[i], player->sub_rgba_buf.data(), canvas_w, canvas_h, x, top_y, new_y0, new_y1);
+                top_y += rt.sec[i].h() + (i + 1 < rt.sec.size() ? en_inner_gap : 0);
+            }
+            if (rt.secH > 0) top_y += turn_gap;
+        }
+    } else {
+        // Pair-A Semantic Stacked Mode (CN+EN / CN+EN) — centered, constant size, zero overlap!
+        int cur_y = compute_bottom_block_top(total_bottom_h, r_turns.size() <= 1);
+        for (size_t ti = 0; ti < r_turns.size(); ti++) {
+            const auto& rt = r_turns[ti];
+            if (rt.totalH <= 0) continue;
+            const auto& first_group = primary_on_top ? rt.pri : rt.sec;
+            const auto& second_group = primary_on_top ? rt.sec : rt.pri;
+            const int first_gap = primary_on_top ? cn_inner_gap : en_inner_gap;
+            const int second_gap = primary_on_top ? en_inner_gap : cn_inner_gap;
+
+            for (size_t i = 0; i < first_group.size(); i++) {
+                int x = (canvas_w - first_group[i].w()) / 2;
+                dk_blit_paired_raster(first_group[i], player->sub_rgba_buf.data(), canvas_w, canvas_h, x, cur_y, new_y0, new_y1);
+                cur_y += first_group[i].h() + (i + 1 < first_group.size() ? first_gap : 0);
+            }
+            if (!first_group.empty() && !second_group.empty()) {
+                cur_y += pair_gap;
+            }
+            for (size_t i = 0; i < second_group.size(); i++) {
+                int x = (canvas_w - second_group[i].w()) / 2;
+                dk_blit_paired_raster(second_group[i], player->sub_rgba_buf.data(), canvas_w, canvas_h, x, cur_y, new_y0, new_y1);
+                cur_y += second_group[i].h() + (i + 1 < second_group.size() ? second_gap : 0);
+            }
+            if (ti + 1 < r_turns.size()) {
+                cur_y += turn_gap;
+            }
+        }
+    }
+
+    if (new_y1 > new_y0) {
+        player->sub_dirty_y0 = new_y0;
+        player->sub_dirty_y1 = new_y1;
+    }
+    player->paired_layout_active = true;
+    player->paired_layout_hash = h;
+    player->sub_last_non_empty = true;
+    player->sub_serial++;
+    return 1;
+}
+
 static bool dk_update_subtitle_rgba_locked(
     DKPlayer* player,
     double pts,
@@ -4719,6 +5402,26 @@ static bool dk_update_subtitle_rgba_locked(
         if (player->secondary_ass_renderer) {
             dk_sync_ass_renderer_params_locked(player, player->secondary_ass_renderer);
         }
+    }
+
+    // Fast path: Donby Cinema Pair-A Semantic Bilingual Engine for regular text SRT/VTT/ASS & dual-track text
+    const int paired_rc = dk_try_render_paired_bilingual_locked(
+        player, pri_pts, sec_pts, canvas_w, canvas_h, canvas_resized, clear_subtitle_canvas
+    );
+    if (paired_rc == 1) {
+        *out_rgba = player->sub_rgba_buf.data();
+        *out_w = canvas_w;
+        *out_h = canvas_h;
+        *out_serial = player->sub_serial;
+        return true;
+    } else if (paired_rc == 0) {
+        *out_serial = player->sub_serial;
+        return false;
+    }
+    if (player->paired_layout_active) {
+        player->paired_layout_active = false;
+        player->paired_layout_hash = 0;
+        player->sub_style_dirty = true;
     }
 
     // Resolve active primary PGS cue (if primary slot is bitmap)

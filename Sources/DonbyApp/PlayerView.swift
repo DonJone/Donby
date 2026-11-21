@@ -1493,6 +1493,34 @@ public struct PlayerView: View {
 
                         Divider().opacity(0.2)
 
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("双语副字幕").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
+                            Menu {
+                                Button("关闭副字幕") { disableSecondarySubtitle() }
+                                Divider()
+                                ForEach(subOptions) { opt in
+                                    Button(opt.label) { selectSecondarySubtitleOption(opt) }
+                                }
+                                Divider()
+                                Button("加载本地副字幕文件...") { promptLocalExternalSubtitleFile(asSecondary: true) }
+                            } label: {
+                                HStack {
+                                    Image(systemName: "captions.bubble")
+                                    Text(secondarySubtitleStatusTitle(options: subOptions))
+                                        .font(.system(size: 12, weight: .medium))
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 10))
+                                }
+                                .foregroundStyle(.white)
+                                .padding(9)
+                                .background(Color.white.opacity(0.06))
+                                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            }
+                        }
+
+                        Divider().opacity(0.2)
+
                         Text("字幕调节").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
 
                         VStack(alignment: .leading, spacing: 12) {
@@ -1580,34 +1608,55 @@ public struct PlayerView: View {
 
                         DisclosureGroup("更多设置", isExpanded: $showMoreSubtitleOptions) {
                             VStack(alignment: .leading, spacing: 10) {
-                                VStack(alignment: .leading, spacing: 6) {
-                                    Text("双语副字幕").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
-                                    Menu {
-                                        Button("关闭副字幕") { disableSecondarySubtitle() }
-                                        Divider()
-                                        ForEach(subOptions) { opt in
-                                            Button(opt.label) { selectSecondarySubtitleOption(opt) }
+                                Toggle("统一苹方与影院双语配对", isOn: $appState.subtitleStyle.unifyPingFangFont)
+                                Toggle("外语经典橙金增强", isOn: $appState.subtitleStyle.enhanceSecondaryYellow)
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack {
+                                        Text(String(format: "外语副行比例 %.2fx", appState.subtitleStyle.secondaryScale))
+                                            .font(.system(size: 11)).foregroundStyle(.white.opacity(0.8))
+                                        Spacer()
+                                        if abs(appState.subtitleStyle.secondaryScale - 0.60) > 0.01 {
+                                            Button("重置") { appState.subtitleStyle.secondaryScale = 0.60 }
+                                                .font(.system(size: 10)).buttonStyle(.plain).foregroundStyle(appState.accentColor)
                                         }
-                                        Divider()
-                                        Button("加载本地副字幕文件...") { promptLocalExternalSubtitleFile(asSecondary: true) }
-                                    } label: {
-                                        HStack {
-                                            Image(systemName: "captions.bubble")
-                                            Text(secondarySubtitleStatusTitle(options: subOptions))
-                                                .font(.system(size: 11.5, weight: .medium))
-                                                .lineLimit(1)
-                                            Spacer()
-                                            Image(systemName: "chevron.up.chevron.down").font(.system(size: 10))
-                                        }
-                                        .foregroundStyle(.white)
-                                        .padding(8)
-                                        .background(Color.white.opacity(0.06))
-                                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                                     }
+                                    Slider(
+                                        value: $appState.subtitleStyle.secondaryScale,
+                                        in: 0.45...0.90,
+                                        step: 0.02,
+                                        onEditingChanged: { editing in
+                                            withAnimation(.easeInOut(duration: 0.15)) {
+                                                isAdjustingSubtitleLayout = editing
+                                            }
+                                        }
+                                    )
                                 }
 
-                                Toggle("统一使用苹方字体", isOn: $appState.subtitleStyle.unifyPingFangFont)
-                                Toggle("外语字幕经典金黄增强", isOn: $appState.subtitleStyle.enhanceSecondaryYellow)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(String(format: "双语行间距 %.0f px", appState.subtitleStyle.dualSubtitleGapPx))
+                                        .font(.system(size: 11)).foregroundStyle(.white.opacity(0.8))
+                                    Slider(
+                                        value: $appState.subtitleStyle.dualSubtitleGapPx,
+                                        in: 2...20,
+                                        step: 1,
+                                        onEditingChanged: { editing in
+                                            withAnimation(.easeInOut(duration: 0.15)) {
+                                                isAdjustingSubtitleLayout = editing
+                                            }
+                                        }
+                                    )
+                                }
+
+                                Picker("双语排版", selection: $appState.subtitleStyle.dualLayoutMode) {
+                                    Text("底部语义配对").tag(0)
+                                    Text("主底副顶分离").tag(1)
+                                }
+                                .pickerStyle(.segmented)
+
+                                if appState.subtitleStyle.dualLayoutMode == 0 {
+                                    Toggle("主字幕在上、副字幕在下", isOn: $appState.subtitleStyle.primaryOnTop)
+                                }
 
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(String(format: "描边宽度 %.1f", appState.subtitleStyle.borderWidth))
@@ -2448,7 +2497,7 @@ public struct PlayerView: View {
     }
 
     private func exportRedactedDiagnostics() {
-        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.8"
+        let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.9"
         var lines: [String] = []
         lines.append("Donby Diagnostics Report (v\(appVer))")
         lines.append("Time: \(ISO8601DateFormatter().string(from: Date()))")

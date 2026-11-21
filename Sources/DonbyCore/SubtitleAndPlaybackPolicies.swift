@@ -304,7 +304,7 @@ public struct SubtitleStyleConfiguration: Codable, Equatable, Sendable {
 
     public init(
         scale: Double = 1.0,
-        borderWidth: Double = 2.8,
+        borderWidth: Double = 2.2,
         verticalPositionPercent: Double = 92.0,
         primaryDelaySeconds: Double = 0.0,
         secondaryDelaySeconds: Double = 0.0,
@@ -315,8 +315,8 @@ public struct SubtitleStyleConfiguration: Codable, Equatable, Sendable {
         antiOcclusionEnabled: Bool = true,
         unifyPingFangFont: Bool = true,
         enhanceSecondaryYellow: Bool = true,
-        secondaryScale: Double = 0.80,
-        dualSubtitleGapPx: Double = 10.0,
+        secondaryScale: Double = 0.60,
+        dualSubtitleGapPx: Double = 7.0,
         primaryOnTop: Bool = true,
         dualLayoutMode: Int = 0
     ) {
@@ -348,7 +348,7 @@ public struct SubtitleStyleConfiguration: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.scale = try c.decodeIfPresent(Double.self, forKey: .scale) ?? 1.0
-        self.borderWidth = try c.decodeIfPresent(Double.self, forKey: .borderWidth) ?? 2.8
+        self.borderWidth = try c.decodeIfPresent(Double.self, forKey: .borderWidth) ?? 2.2
         self.verticalPositionPercent = try c.decodeIfPresent(Double.self, forKey: .verticalPositionPercent) ?? 92.0
         self.primaryDelaySeconds = try c.decodeIfPresent(Double.self, forKey: .primaryDelaySeconds) ?? 0.0
         self.secondaryDelaySeconds = try c.decodeIfPresent(Double.self, forKey: .secondaryDelaySeconds) ?? 0.0
@@ -359,8 +359,8 @@ public struct SubtitleStyleConfiguration: Codable, Equatable, Sendable {
         self.antiOcclusionEnabled = try c.decodeIfPresent(Bool.self, forKey: .antiOcclusionEnabled) ?? true
         self.unifyPingFangFont = try c.decodeIfPresent(Bool.self, forKey: .unifyPingFangFont) ?? true
         self.enhanceSecondaryYellow = try c.decodeIfPresent(Bool.self, forKey: .enhanceSecondaryYellow) ?? true
-        self.secondaryScale = try c.decodeIfPresent(Double.self, forKey: .secondaryScale) ?? 0.80
-        self.dualSubtitleGapPx = try c.decodeIfPresent(Double.self, forKey: .dualSubtitleGapPx) ?? 10.0
+        self.secondaryScale = try c.decodeIfPresent(Double.self, forKey: .secondaryScale) ?? 0.60
+        self.dualSubtitleGapPx = try c.decodeIfPresent(Double.self, forKey: .dualSubtitleGapPx) ?? 7.0
         self.primaryOnTop = try c.decodeIfPresent(Bool.self, forKey: .primaryOnTop) ?? true
         self.dualLayoutMode = try c.decodeIfPresent(Int.self, forKey: .dualLayoutMode) ?? 0
     }
