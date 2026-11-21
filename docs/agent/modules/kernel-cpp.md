@@ -47,3 +47,6 @@
 4. **PGS/DVD Subtitle Probe Bypass (`v1.4.2`)**: Before `avformat_find_stream_info`, temporarily set `AVDISCARD_ALL` on subtitle streams and seed `1920x1080` on `0x0` `AV_CODEC_ID_HDMV_PGS_SUBTITLE` / `AV_CODEC_ID_DVD_SUBTITLE` streams, then immediately restore original `discard` and `0x0` dimensions after `avformat_find_stream_info` so FFmpeg never stalls reading 1-2 MiB waiting for a dialogue packet while keeping PGS/DVD decoding intact.
 5. **URL Redaction**: Keep `Opening URL` log redacted (strip host/query/token).
 6. **Rebuild Requirement**: Any edit to `dk_engine.cpp` or `donby_kernel.h` requires `cmake --build /Users/don/git/Donby/build_kernel` (or `./build_kernel.sh`) BEFORE `swift build`.
+
+## 4. Local Subtitle Format Test Matrix
+- For real-server regression testing across `SRT+SRT` dual-track, single/external `ASS`, 4K HDR/letterbox `PGS`, mixed `PGS+Text`, `VobSub`, and `DVBSub`, see the git-ignored local catalog at `docs/agent/local/SUBTITLE_TEST_MEDIA.md` (never copy server names or item URLs into tracked docs).
