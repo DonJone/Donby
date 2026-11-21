@@ -7,7 +7,7 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "1.4.15")
+        #expect(DonbyAppInfo.fallbackVersion == "1.4.16")
     }
 
     @Test func subtitleDecoderUTF8BOMAndGB18030() {
@@ -210,5 +210,57 @@ struct DonbyCoreTests {
         _ = cleanStore.persistSecretsAndSanitizeForDefaults([])
         #expect(backend.deleteCount == 1)
         #expect(backend.storedData == nil)
+    }
+
+    @Test func encryptedFileVaultRoundTripPermissionsAndTamperRejection() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("donby-vault-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let vaultURL = tmpDir.appendingPathComponent("credentials.vault")
+
+        let backend = EncryptedFileVaultBackend(fileURL: vaultURL, machineSalt: "unit-test-host-uuid")
+        let store = ServerCredentialStore(backend: backend, allowLegacyKeychainRescue: false)
+        let srv = EmbyServerConfig(name: "UHD", host: "uhd.local", username: "bob", password: "SuperSecretPassword!", accessToken: "tok_987654")
+
+        let sanitized = store.persistSecretsAndSanitizeForDefaults([srv])
+        #expect(sanitized[0].password.isEmpty)
+        #expect(sanitized[0].accessToken.isEmpty)
+
+        // Raw file on disk must be encrypted (no plaintext leakage) and owner-only 0600
+        let rawBytes = try Data(contentsOf: vaultURL)
+        #expect(rawBytes.starts(with: Data("DBV1".utf8)))
+        #expect(String(data: rawBytes, encoding: .utf8)?.contains("SuperSecretPassword!") != true)
+        #expect(rawBytes.range(of: Data("SuperSecretPassword!".utf8)) == nil)
+        #expect(rawBytes.range(of: Data("tok_987654".utf8)) == nil)
+        let attrs = try FileManager.default.attributesOfItem(atPath: vaultURL.path)
+        let perms = (attrs[.posixPermissions] as? NSNumber)?.intValue
+        #expect(perms == 0o600)
+
+        // Fresh instance decrypts cleanly with matching machine salt
+        let reloadStore = ServerCredentialStore(
+            backend: EncryptedFileVaultBackend(fileURL: vaultURL, machineSalt: "unit-test-host-uuid"),
+            allowLegacyKeychainRescue: false
+        )
+        let (hydrated, needsMigration) = reloadStore.hydrate(sanitized)
+        #expect(needsMigration == false)
+        #expect(hydrated[0].password == "SuperSecretPassword!")
+        #expect(hydrated[0].accessToken == "tok_987654")
+
+        // Wrong host key fails AES-GCM authentication
+        let otherHostBackend = EncryptedFileVaultBackend(fileURL: vaultURL, machineSalt: "different-mac-uuid")
+        if case .failure = otherHostBackend.readVaultData() {
+            // expected authentication failure
+        } else {
+            Issue.record("Expected decryption failure for different machine salt")
+        }
+
+        // Flipping 1 ciphertext byte fails AES-GCM authentication
+        var tampered = rawBytes
+        tampered[tampered.count - 1] ^= 0xFF
+        try tampered.write(to: vaultURL, options: .atomic)
+        if case .failure = backend.readVaultData() {
+            // expected tamper detection
+        } else {
+            Issue.record("Expected tamper detection failure")
+        }
     }
 }

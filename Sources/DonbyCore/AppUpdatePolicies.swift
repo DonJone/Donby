@@ -1,7 +1,7 @@
 import Foundation
 
 public enum DonbyAppInfo {
-    public static let fallbackVersion = "1.4.15"
+    public static let fallbackVersion = "1.4.16"
     public static var version: String {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? fallbackVersion
     }

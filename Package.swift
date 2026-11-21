@@ -22,6 +22,7 @@ let package = Package(
             name: "DonbyCore",
             path: "Sources/DonbyCore",
             linkerSettings: [
+                .linkedFramework("IOKit"),
                 .linkedFramework("Security")
             ]
         ),

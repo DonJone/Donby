@@ -439,7 +439,7 @@ public final class AppState: ObservableObject {
         self.servers = hydrated
         if needsMigration {
             saveServersToDisk()
-            DonbyLogger.shared.log("已完成旧版明文服务器凭证向 macOS 钥匙串的自动迁移", level: .info, subsystem: "Keychain")
+            DonbyLogger.shared.log("已完成服务器凭证向本地 AES-256-GCM 加密凭证库的自动迁移", level: .info, subsystem: "Credentials")
         }
     }
 
