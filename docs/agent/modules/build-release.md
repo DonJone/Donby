@@ -19,5 +19,5 @@
 ## 3. Critical Invariants & Pitfalls (DO NOT BREAK)
 1. **Preserve `/Applications/Donby.app` Inode**: `build_app.sh` and `AppUpdateManager` replace `/Applications/Donby.app/Contents` in-place rather than `rm -rf /Applications/Donby.app` so macOS Dock does not lose the pinned app reference or spawn duplicate Dock icons (`v1.3.33`).
 2. **No Stray `./Donby.app` in Workspace**: `build_app.sh` unregisters (`lsregister -u`) and removes `./Donby.app` to prevent LaunchServices duplicate bundle registration (`v1.3.17`).
-3. **Version Bump Checklist**: When bumping `vX.Y.Z`, check `build_app.sh` (`DONBY_VERSION`), `scripts/package_dmg.sh`, `Sources/DonbyApp/PlayerView.swift`, `Sources/DonbyNetwork/AppUpdateManager.swift`, `Sources/DonbyNetwork/EmbyClient.swift`, `Sources/DonbyNetwork/UHDStreamClient.swift`.
+3. **Version Bump Checklist (Mandatory on Every Code Commit)**: Always bump `vX.Y.Z` atomically in all 6 locations: `build_app.sh` (`DONBY_VERSION`), `Sources/DonbyApp/PlayerView.swift`, `Sources/DonbyNetwork/AppUpdateManager.swift`, `Sources/DonbyNetwork/EmbyClient.swift`, `Sources/DonbyNetwork/UHDStreamClient.swift`, and `docs/agent/INDEX.md`.
 4. **Tiered Verification Rule**: Never run `./build_app.sh` or DMG packaging during intermediate edits; use L1 `swift build` / `cmake --build build_kernel` until milestone delivery.

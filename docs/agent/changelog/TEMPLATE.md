@@ -1,10 +1,10 @@
 # Changelog Entry Template
 
-Append new entries to the **top** of the active version shard (`docs/agent/changelog/vX.Y.md`).
+Every **code commit** MUST bump `vX.Y.Z` across all 6 version locations (see `AGENTS.md` Section 2) and prepend one entry to the **top** of the active version shard (`docs/agent/changelog/vX.Y.md`) keyed by that exact version `vX.Y.Z`.
 Keep entries dense, factual, and free of raw source dumps or sensitive URLs/tokens.
 
 ```markdown
-## <hash> | <YYYY-MM-DD> | <tag or branch> | <short title>
+## vX.Y.Z | <YYYY-MM-DD> | <short title>
 - **Scope**: `<module1>, <module2>`
 - **Root Cause / Goal**: One or two crisp sentences explaining the bug or objective.
 - **Changes**:
@@ -14,7 +14,7 @@ Keep entries dense, factual, and free of raw source dumps or sensitive URLs/toke
 - **Verification**: Exact test suites / benchmarks run and key numeric results.
 ```
 
-## Git Commit Message Format (Recommended)
+## Git Commit Message Format (Mandatory for Code Commits)
 ```text
 <type>(<scope>): <concise summary> (vX.Y.Z)
 
