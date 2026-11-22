@@ -1,9 +1,9 @@
 # Module Map: Build, Packaging & Release Pipeline
 
-> Last synced: `v1.4.17`. Load this doc for compiling Swift/C++, bundling dylibs, signing `/Applications/Donby.app`, DMG/ZIP packaging, channel-aware local GitHub Releases, and CI.
+> Last synced: `v1.4.38`. Load this doc for compiling Swift/C++, bundling dylibs, signing `/Applications/Donby.app`, DMG/ZIP packaging, channel-aware local GitHub Releases, and CI.
 
 ## 1. File Inventory
-- `Package.swift` — SwiftPM manifest compiling `DonbyKernelC/dk_engine.cpp` directly at `-O3` (single compilation, cached by SwiftPM, no `-ldonby_kernel` duplicate link) plus `DonbyCoreTests`.
+- `Package.swift` — SwiftPM manifest compiling `DonbyKernelC/dk_engine.cpp` directly at `-O3` (single compilation, cached by SwiftPM, no `-ldonby_kernel` duplicate link), optional `DonbyUHDModule`, and `DonbyCoreTests`.
 - `scripts/dev.sh` (~58L) — Fast local CLI wrapper (`build` / `test` / `app` / `release`) that auto-selects valid CLT SDK, uses `--build-system native` (avoiding Swift 6.4 `swiftbuild` 54s no-op cache-invalidation bug), and passes CLT `Testing.framework` search paths + isolated `DONBY_HOME`.
 - `CMakeLists.txt` + `build_kernel.sh` — Standalone mtime-cached C++20 `libdonby_kernel.a` builder (only needed for standalone C++ test harnesses; skips compile when up to date).
 - `build_app.sh` (~147L) — Incremental Release build: uses `--build-system native` + multi-core incremental `-O` (`-no-whole-module-optimization -incremental`, opt-in `DONBY_WMO=1`), skips up-to-date `AppIcon.icns`, bundles `Resources/silero_vad_16k.safetensors` into `Contents/Resources/`, preserves `/Applications/Donby.app` inode and cached `Contents/Frameworks/` dylibs, signs app bundle (`codesign --force --sign -`), and verifies `--deep --strict`.
@@ -20,6 +20,6 @@
 ## 3. Critical Invariants & Pitfalls (DO NOT BREAK)
 1. **Preserve `/Applications/Donby.app` Inode**: `build_app.sh` and `AppUpdateManager` replace `/Applications/Donby.app/Contents` in-place rather than `rm -rf /Applications/Donby.app` so macOS Dock does not lose the pinned app reference or spawn duplicate Dock icons (`v1.3.33`).
 2. **No Stray `./Donby.app` in Workspace**: `build_app.sh` unregisters (`lsregister -u`) and removes `./Donby.app` to prevent LaunchServices duplicate bundle registration (`v1.3.17`).
-3. **Version Bump & Mandatory Release Checklist**: Every code commit MUST bump `vX.Y.Z` atomically in all 3 version sources (`build_app.sh`, `Sources/DonbyCore/AppUpdatePolicies.swift` `DonbyAppInfo.fallbackVersion`, `docs/agent/INDEX.md`) and publish a GitHub Release via `./scripts/release_local.sh X.Y.Z` (defaults to `--prerelease`; pass `--stable` ONLY when user explicitly requests a Stable release).
+3. **Version Bump & Mandatory Release Checklist**: Every code commit MUST bump `vX.Y.Z` atomically in all 5 version locations (`build_app.sh` `APP_VERSION`, `scripts/package_dmg.sh` `VERSION` fallback literal, `Sources/DonbyCore/AppUpdatePolicies.swift` `DonbyAppInfo.fallbackVersion`, `Tests/DonbyCoreTests/DonbyCoreTests.swift` `appVersionFallbackNonEmpty` assertion, and `docs/agent/INDEX.md` `Current Version`) and publish a GitHub Release via `./scripts/release_local.sh X.Y.Z` (defaults to `--prerelease`; pass `--stable` ONLY when user explicitly requests a Stable release). Pure `docs:` commits do not bump versions or publish releases.
 4. **Release Channels (`Stable` vs `Pre-release`)**: `AppUpdateChannel` (`DonbyCore/AppUpdatePolicies.swift`) + `AppUpdateManager.updateChannel` let users switch between `正式版 (Stable)` (`/releases/latest` + `latest.json`) and `预览版 (Pre-release)` (`/releases?per_page=15` including pre-releases).
-5. **Tiered Verification Rule**: Never run `./build_app.sh` or DMG packaging during intermediate edits; use L1 `swift build` / `cmake --build build_kernel` until milestone delivery or release.
+5. **Tiered Verification Rule**: Never run `./build_app.sh`, DMG packaging, or `./scripts/release_local.sh` during intermediate edits; use L1 `./scripts/dev.sh build` and L2 `./scripts/dev.sh test` until milestone delivery or explicit release.

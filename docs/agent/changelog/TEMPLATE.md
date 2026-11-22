@@ -1,10 +1,10 @@
 # Changelog Entry Template
 
-Every **code commit** MUST bump `vX.Y.Z` across all 6 version locations (see `AGENTS.md` Section 2) and prepend one entry to the **top** of the active version shard (`docs/agent/changelog/vX.Y.md`) keyed by that exact version `vX.Y.Z`.
-Keep entries dense, factual, and free of raw source dumps or sensitive URLs/tokens.
+Every **code commit** MUST bump `vX.Y.Z` across all 5 version locations (`build_app.sh`, `scripts/package_dmg.sh`, `Sources/DonbyCore/AppUpdatePolicies.swift`, `Tests/DonbyCoreTests/DonbyCoreTests.swift`, `docs/agent/INDEX.md` — see `AGENTS.md` Section 2) and prepend one entry to the **top** of the active version shard (`docs/agent/changelog/vX.Y.md`) keyed by that exact version `vX.Y.Z`.
+Pure `docs:`-only commits do not bump the version or publish a release. Keep entries dense, factual, and free of raw source dumps or sensitive URLs/tokens.
 
 ```markdown
-## vX.Y.Z | <YYYY-MM-DD> | <short title>
+## vX.Y.Z | <YYYY-MM-DD> | <Pre-release|Stable> | <short title>
 - **Scope**: `<module1>, <module2>`
 - **Root Cause / Goal**: One or two crisp sentences explaining the bug or objective.
 - **Changes**:
@@ -16,7 +16,7 @@ Keep entries dense, factual, and free of raw source dumps or sensitive URLs/toke
 
 ## Git Commit Message Format (Mandatory for Code Commits)
 ```text
-<type>(<scope>): <concise summary> (vX.Y.Z)
+<type>(<scope>): <concise summary> (vX.Y.Z) [local-release]
 
 Why: <root cause or user goal>
 What: <bulleted key file/symbol changes>

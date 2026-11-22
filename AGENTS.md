@@ -12,11 +12,13 @@ Before grepping or reading large source files (`dk_engine.cpp`, `TurboCacheAndDo
 ## 2. Mandatory Commit, Version, Release & Documentation Sync Protocol
 Every **code commit** MUST bind **Version Bump + Structured Commit + `docs/agent/` Sync + GitHub Release** together (pure `docs:`-only commits do not bump the version or publish a release):
 1. **Atomic Version Bump (`vX.Y.Z`)**:
-   - Increment the patch version (e.g. `1.4.11 -> 1.4.12`, or minor on user request) across ALL 3 version sources in the same commit:
+   - Increment the patch version (e.g. `1.4.11 -> 1.4.12`, or minor on user request) across ALL 5 version locations in the same commit:
      - `build_app.sh` (`APP_VERSION="${DONBY_VERSION:-X.Y.Z}"`)
+     - `scripts/package_dmg.sh` (`VERSION="${DONBY_VERSION:-${DEFAULT_VERSION:-X.Y.Z}}"`)
      - `Sources/DonbyCore/AppUpdatePolicies.swift` (`DonbyAppInfo.fallbackVersion`)
+     - `Tests/DonbyCoreTests/DonbyCoreTests.swift` (`#expect(DonbyAppInfo.fallbackVersion == "X.Y.Z")`)
      - `docs/agent/INDEX.md` (`Current Version`)
-     *(All Swift modules read `DonbyAppInfo.version`; `scripts/package_dmg.sh` and CI read `build_app.sh`.)*
+     *(All Swift modules read `DonbyAppInfo.version`; `scripts/package_dmg.sh` derives `DEFAULT_VERSION` from `build_app.sh` with a synced fallback literal, and CI reads tags / `build_app.sh`.)*
 2. **Structured Commit Message**:
    - Header: `<type>(<scope>): <concise summary> (vX.Y.Z) [local-release]` (Conventional Commits; version suffix mandatory for code commits; append `[local-release]` when publishing locally via `scripts/release_local.sh` to skip redundant cloud CI).
    - Body (recommended for non-trivial commits): `Why` / `What` / `Invariants` / `Verified`.

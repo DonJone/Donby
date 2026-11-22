@@ -24,7 +24,8 @@
 - [decisions/002-h2-adaptive-concurrency-and-l2-cache.md](decisions/002-h2-adaptive-concurrency-and-l2-cache.md) — HTTP/2 concurrency tuning, EWMA TTFB rescue, async L2 persistence, and rejected approaches.
 
 ## 4. Changelog Shards (L2)
-- [changelog/v1.4.md](changelog/v1.4.md) — Active shard (`v1.4.0` onward).
+- [changelog/v1.4.md](changelog/v1.4.md) — Active shard (`v1.4.22` onward: frontend overhaul, `#03` hero strip, UHDNow module, GPU danmu, non-blue Liquid Glass).
+- [changelog/v1.4.0-v1.4.21.md](changelog/v1.4.0-v1.4.21.md) — HTTP/2 adaptive streaming, async L2 cache, detail preloading, Silero VAD & Pair-A subtitles, AES-256-GCM vault, fast builds.
 - [changelog/v1.3.29-v1.3.34.md](changelog/v1.3.29-v1.3.34.md) — 4K Remux seek, multi-MiB Range streaming, prewarm, Dock inode fixes.
 - [changelog/v1.3.16-v1.3.28.md](changelog/v1.3.16-v1.3.28.md) — Modularization, 120Hz scrolling, subtitle suite, Turbo cache, offline library, updater, UHD startup cut.
 - [changelog/v1.0-v1.3.15.md](changelog/v1.0-v1.3.15.md) — Initial release, HDR/DoVi EDR, Liquid Glass, artwork pipeline, icons, UHDNow, search.
@@ -32,6 +33,9 @@
 
 ## 5. Local-Only Notes (Git-Ignored)
 - `docs/agent/local/ENVIRONMENT_AND_BENCHMARKS.md` — Local test harness paths, real-server benchmark recipes, and `tmp/` handoff index. Never commit `docs/agent/local/`.
+- `docs/agent/local/pm/BOARD.md` — Local Kanban board tracking active, in-review, and completed Task Cards (`DB-XXX`).
+- `docs/agent/local/pm/WORKFLOW.md` — Multi-session VP / Dev / Reviewer / QA governance and handoff protocol.
+- `docs/agent/local/SESSION_REGISTRY.md` — Active and archived local agent session registry.
 
 ## 6. Quick Commands
 ```bash
