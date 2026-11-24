@@ -5,7 +5,7 @@
 
 ## 1. Repository Overview
 - **Product**: Donby — native macOS media player (macOS 14+, Apple Silicon) for Emby / Jellyfin / UHDNow / local media.
-- **Stack**: SwiftUI + AppKit (`DonbyApp`, `DonbyCore`, `DonbyNetwork`, optional `DonbyUHDModule`), Metal EDR renderer (`DonbyMetalRenderer`), C++20/FFmpeg/VideoToolbox/AudioToolbox/libass playback kernel (`DonbyKernelC`).
+- **Stack**: SwiftUI + AppKit (`DonbyApp`, `DonbyCore`, `DonbyNetwork`, optional `DonbyUHDModule`), Metal EDR renderer (`DonbyMetalRenderer`), Rust + FFmpeg/VideoToolbox/AudioToolbox/libass playback kernel (`KernelRust` + C11 header shim `DonbyKernelC`, migrating on `feat/rust-kernel`; C++20 baseline archived on `legacy/cpp-kernel`).
 - **Current Version**: `1.4.38` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
 
 ## 2. Task-to-Module Routing Table
@@ -13,15 +13,16 @@
 | If your task involves... | Read FIRST (L1) | Key Source Files |
 | :--- | :--- | :--- |
 | Streaming, seek latency, HTTP/2, Range, L1/L2 cache, offline downloads, Emby/UHD API, auto-updater | [modules/turbo-network.md](modules/turbo-network.md) | `Sources/DonbyNetwork/*`, `Sources/DonbyUHDModule/*` |
-| Demuxing, decoding, A/V sync, AudioQueue, rebuffer, seek flush, libass/PGS subtitles, FFmpeg AVIO | [modules/kernel-cpp.md](modules/kernel-cpp.md) | `Sources/DonbyKernelC/dk_engine.cpp`, `include/donby_kernel.h` |
+| Demuxing, decoding, A/V sync, AudioQueue, rebuffer, seek flush, libass/PGS subtitles, FFmpeg AVIO | [modules/kernel-cpp.md](modules/kernel-cpp.md) | `KernelRust/src/*`, `Sources/DonbyKernelC/dk_ffi_shim.c`, `include/donby_kernel.h` |
 | Video presentation, CVDisplayLink, HDR10/DoVi EDR, Metal shaders, first-frame callback, subtitle lift | [modules/metal-renderer.md](modules/metal-renderer.md) | `Sources/DonbyMetalRenderer/DKMetalVideoView.swift` |
 | Player HUD, scrubber, seek debounce, AppState, Liquid Glass UI, 120Hz home/grid, artwork cache, views | [modules/app-player-ui.md](modules/app-player-ui.md) | `Sources/DonbyApp/PlayerView.swift`, `AppState.swift`, `DetailView.swift`, `Components/*`, `Views/*`, `Modules/UHD/*` |
 | Core models, storage paths (`DONBY_HOME`), logger, AES-256-GCM credential vault, subtitle encoding/policies, version info, core tests | [modules/storage-core.md](modules/storage-core.md) | `Sources/DonbyCore/*`, `Tests/DonbyCoreTests/DonbyCoreTests.swift` |
 | Building, CMake, `.app` signing, Dock inode preservation, DMG/ZIP packaging, local release, CI | [modules/build-release.md](modules/build-release.md) | `build_app.sh`, `build_kernel.sh`, `scripts/*`, `.github/workflows/build-dmg.yml` |
 
 ## 3. Architecture Decision Records (L3)
-- [decisions/001-native-kernel-over-libmpv.md](decisions/001-native-kernel-over-libmpv.md) — Why Donby keeps custom C++/Metal kernel instead of `libmpv`.
+- [decisions/001-native-kernel-over-libmpv.md](decisions/001-native-kernel-over-libmpv.md) — Why Donby keeps custom native kernel instead of `libmpv`.
 - [decisions/002-h2-adaptive-concurrency-and-l2-cache.md](decisions/002-h2-adaptive-concurrency-and-l2-cache.md) — HTTP/2 concurrency tuning, EWMA TTFB rescue, async L2 persistence, and rejected approaches.
+- [decisions/003-rust-kernel-migration.md](decisions/003-rust-kernel-migration.md) — Zero-dependency `KernelRust` rewrite architecture, C11 header shim rationale, and 4-phase parity plan (`legacy/cpp-kernel` -> `feat/rust-kernel` -> `v1.5.0`).
 
 ## 4. Changelog Shards (L2)
 - [changelog/v1.4.md](changelog/v1.4.md) — Active shard (`v1.4.22` onward: frontend overhaul, `#03` hero strip, UHDNow module, GPU danmu, non-blue Liquid Glass).

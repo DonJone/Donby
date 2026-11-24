@@ -1,19 +1,19 @@
-# Module Map: Playback Kernel (`DonbyKernelC`)
+# Module Map: Playback Kernel (`KernelRust` + `DonbyKernelC` ABI)
 
-> Last synced: `v1.4.21`. Load this doc for FFmpeg demuxing, VideoToolbox decoding, AudioQueue A/V sync, seek flush, rebuffer cushions, and libass/PGS subtitles.
+> Last synced: `feat/rust-kernel` Phase 0 (C++20 baseline archived on branch `legacy/cpp-kernel` @ `v1.4.38`). Read [../decisions/003-rust-kernel-migration.md](../decisions/003-rust-kernel-migration.md) for the active 4-phase Rust migration plan. Load this doc for FFmpeg demuxing, VideoToolbox decoding, AudioQueue A/V sync, seek flush, rebuffer cushions, and libass/PGS subtitles.
 
 ## 1. File Inventory & Core Symbols
-- `Sources/DonbyKernelC/include/donby_kernel.h` (~204L)
-  - Public C ABI bridging Swift <-> C++: `dk_player_create/destroy`, `dk_player_open_with_tracks`, `dk_player_set_custom_io`, `dk_player_play/pause/seek`, `dk_player_acquire_frame`, `dk_player_sync_subtitle_rgba`, `dk_player_should_yield_read`, subtitle/track setters, telemetry getters, plus VAD/alignment bridges (`DKSubtitleInterval`, `dk_player_copy_recent_audio_16k`, `dk_player_get_subtitle_intervals`, `dk_player_set_secondary_subtitle_time_scale`, `dk_player_get_secondary_subtitle_time_scale`).
-- `Sources/DonbyKernelC/dk_engine.cpp` (~6350L)
-  - Core struct `DKPlayer`: FFmpeg contexts (`AVFormatContext`, `AVCodecContext`, `SwrContext`), custom `AVIOContext`, `AudioQueueRef`, `ASS_Library`/`ASS_Renderer`/primary+secondary `ASS_Track`, `VideoFrameEntry` queue, `AudioChunk` queue, `PgsCue` queue, `vad_audio_ring` (`60s` @ `16kHz` mono under dedicated `vad_audio_mtx`), and `secondary_time_scale` (`1.0` default non-destructive affine timeline scale).
-  - Key RAII & sync guards: `DKReaderGuard`, `AudioStartingGuard`, `SeekScopeGuard`.
-  - Key functions:
-    - `dk_check_dovi_fel(const uint8_t*, size_t)` — inline HEVC NAL 62/63 Dolby Vision RPU/FEL detector (replaced standalone `KernelRust` crate in `v1.4.12`).
-    - `dk_required_audio_preroll_samples(const DKPlayer*)` — adaptive audio preroll (`24000` samples = `0.50s` when `rebuf == 0`, scales up on underrun rebuffers).
-    - `dk_try_start_audio_queue_if_ready(DKPlayer*)` — primes & starts `AudioQueue`.
-    - `dk_audio_decode_worker` / `dk_video_decode_worker` / `dk_demux_worker` — background pipeline threads.
-    - `dk_player_acquire_frame` — called on CVDisplayLink thread; MUST NEVER block on CoreAudio or network I/O.
+- `Sources/DonbyKernelC/include/donby_kernel.h` (~204L, **FROZEN C ABI**)
+  - Public C ABI bridging Swift <-> Rust: `dk_player_create/destroy`, `dk_player_open_with_tracks`, `dk_player_set_custom_io`, `dk_player_play/pause/seek`, `dk_player_acquire_frame`, `dk_player_sync_subtitle_rgba`, `dk_player_should_yield_read`, subtitle/track setters, telemetry getters, plus VAD/alignment bridges (`DKSubtitleInterval`, `dk_player_copy_recent_audio_16k`, `dk_player_get_subtitle_intervals`, `dk_player_set_secondary_subtitle_time_scale`, `dk_player_get_secondary_subtitle_time_scale`).
+- `Sources/DonbyKernelC/dk_ffi_shim.c` (pure C11, zero C++)
+  - Compile-time `_Static_assert`s locking `donby_kernel.h` struct sizes to `KernelRust/src/abi.rs`, `vsnprintf` variadic `av_log` callback bridge, and field-offset-safe C accessors for non-opaque FFmpeg/`libass` structs.
+- `KernelRust/` (`donby_kernel_rs`, zero external Cargo dependencies, outputs `build_kernel/libdonby_kernel.a`)
+  - `src/abi.rs` — `#[repr(C)]` structs/enums + `offset_of!` tests matching `donby_kernel.h`.
+  - `src/dovi.rs` — HEVC NAL 63 FEL detector, PQ EOTF, SDR/HDR/DoVi `DKGpuColorUniforms` builder.
+  - `src/vad.rs` — `VadAudioRing` (`60s @ 16kHz` mono 3:1 center-weighted decimator).
+  - `src/lib.rs` (+ upcoming `ffi.rs`, `demux.rs`, `video.rs`, `audio.rs`, `subtitle.rs` per ADR-003) — `DKPlayer` state and all 37 `#[no_mangle] pub unsafe extern "C" fn dk_*` entrypoints.
+- Legacy reference (`git show legacy/cpp-kernel:Sources/DonbyKernelC/dk_engine.cpp`, ~6498L):
+  - Core behavior specifications below MUST be preserved 1:1 during Phases 1-3 of the Rust port:
 
 ## 2. Threading, Sync & State Machine
 - **Master Clock**: Driven by `AudioQueue` hardware playback timeline (with monotonic fallback when silent/audio-EOF so video never stalls at audio EOF).

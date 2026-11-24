@@ -76,12 +76,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install FFmpeg & libass via Homebrew
+      - name: Install FFmpeg, libass & Rust toolchain
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
         run: |
           brew install ffmpeg libass
+          command -v cargo >/dev/null 2>&1 || brew install rust
 
       - name: Resolve build version
         id: meta

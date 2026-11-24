@@ -45,7 +45,7 @@ let package = Package(
             name: "DonbyKernelC",
             path: "Sources/DonbyKernelC",
             publicHeadersPath: "include",
-            cxxSettings: [
+            cSettings: [
                 .unsafeFlags([
                     "-O3",
                     "-I\(homebrewPrefix)/include",
@@ -55,6 +55,8 @@ let package = Package(
             ],
             linkerSettings: [
                 .unsafeFlags([
+                    "-L\(packageRoot)/build_kernel",
+                    "-ldonby_kernel",
                     "-L\(homebrewPrefix)/lib",
                     "-L\(homebrewPrefix)/opt/ffmpeg/lib",
                     "-L\(homebrewPrefix)/opt/libass/lib",
@@ -90,6 +92,5 @@ let package = Package(
             dependencies: ["DonbyCore", "DonbyUHDModule"],
             path: "Tests/DonbyCoreTests"
         )
-    ],
-    cxxLanguageStandard: .cxx20
+    ]
 )

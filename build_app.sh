@@ -36,6 +36,9 @@ if [ "$BUILD_CONFIG" = "release" ] && [ "${DONBY_WMO:-0}" != "1" ]; then
     SWIFT_OPT_ARGS=(-Xswiftc -no-whole-module-optimization -Xswiftc -incremental)
 fi
 
+echo "==> Building Rust playback kernel (libdonby_kernel.a)..."
+./build_kernel.sh
+
 echo "==> Building Donby (${BUILD_CONFIG}) binary..."
 swift build "${BUILD_SYS_ARGS[@]}" --sdk "$SDK_PATH" -c "$BUILD_CONFIG" "${SWIFT_OPT_ARGS[@]}"
 

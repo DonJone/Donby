@@ -44,9 +44,12 @@ shift || true
 
 case "$CMD" in
     build)
+        ./build_kernel.sh
         exec swift build "${BUILD_SYS_ARGS[@]}" --sdk "$SDK_PATH" "${COMMON_FW_ARGS[@]}" "$@"
         ;;
     test)
+        ./build_kernel.sh
+        cargo test --manifest-path KernelRust/Cargo.toml
         TMPHOME="$(mktemp -d)"
         trap 'rm -rf "$TMPHOME"' EXIT
         DONBY_HOME="$TMPHOME" swift test "${BUILD_SYS_ARGS[@]}" --sdk "$SDK_PATH" "${COMMON_FW_ARGS[@]}" --disable-xctest "$@"
