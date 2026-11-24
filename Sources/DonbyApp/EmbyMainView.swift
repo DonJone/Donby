@@ -142,13 +142,30 @@ public struct EmbyMainView: View {
                 countsByLibrary: counts
             ))
         }
-        if appState.showContinueWatching && !appState.resumeItems.isEmpty {
-            result.append(HomeShelfSection(
-                id: "continue_watching",
-                title: "继续观看",
-                kind: .landscape,
-                items: appState.resumeItems
-            ))
+        if appState.showContinueWatching {
+            var continueItems = appState.resumeItems
+            if !appState.nextUpItems.isEmpty {
+                var seenIds = Set(continueItems.map(\.id))
+                var seenSeriesIds = Set(continueItems.compactMap { item -> String? in
+                    if let sid = item.seriesId, !sid.isEmpty { return sid }
+                    return item.isSeries ? item.id : nil
+                })
+                for candidate in appState.nextUpItems {
+                    guard seenIds.insert(candidate.id).inserted else { continue }
+                    if let sid = candidate.seriesId, !sid.isEmpty {
+                        guard seenSeriesIds.insert(sid).inserted else { continue }
+                    }
+                    continueItems.append(candidate)
+                }
+            }
+            if !continueItems.isEmpty {
+                result.append(HomeShelfSection(
+                    id: "continue_watching",
+                    title: "继续观看",
+                    kind: .landscape,
+                    items: continueItems
+                ))
+            }
         }
         if appState.showFavorites && !appState.favoriteItems.isEmpty {
             result.append(HomeShelfSection(

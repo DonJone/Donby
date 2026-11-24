@@ -20,7 +20,7 @@ if !isPureBuild {
 var appDependencies: [Target.Dependency] = ["DonbyCore", "DonbyNetwork", "DonbyKernelC", "DonbyMetalRenderer"]
 var appExcludes: [String] = []
 var pureSwiftSettings: [SwiftSetting] = isPureBuild ? [.define("DONBY_PURE_BUILD")] : []
-var testDependencies: [Target.Dependency] = ["DonbyCore"]
+var testDependencies: [Target.Dependency] = ["DonbyCore", "DonbyNetwork"]
 if !isPureBuild {
     appDependencies.insert("DonbyUHDModule", at: 2)
     testDependencies.append("DonbyUHDModule")

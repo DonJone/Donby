@@ -1,6 +1,6 @@
 # Module Map: Turbo Cache, Streaming & Network (`DonbyNetwork`)
 
-> Last synced: `v1.4.38`. Load this doc for streaming, seek latency, HTTP/2 Range, L1/L2 caching, detail-page preloading, Emby API (including standard Emby fallback when UHD extension is disabled), optional `DonbyUHDModule` (Smart->V1 routing, speed test, Watch Party, Danmu), offline downloads, and channel-aware auto-updates.
+> Last synced: `v2.0.2`. Load this doc for streaming, seek latency, HTTP/2 Range, L1/L2 caching, detail-page preloading, Emby API (including standard Emby fallback when UHD extension is disabled), optional `DonbyUHDModule` (Smart->V1 routing, speed test, Watch Party, Danmu), offline downloads, and channel-aware auto-updates.
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyNetwork/TurboCacheAndDownloadEngine.swift` (~4754L)
@@ -10,13 +10,13 @@
   - `TurboStreamingSessionHub` — shared `URLSession` hub, `URLSessionTaskMetrics` protocol detection (`hostProtocolMultiplexed` for `h2`/`h3` vs `http/1.1`), redirect caching.
   - `TurboStreamByteHandle` — custom `AVIOContext` byte-stream provider (`read(at:length:)`, `seek`, `wakeWaitingReads()`, `directSlices`, `ActiveAttemptRecord`).
   - `DonbyTurboCacheEngine` — asset lifecycle, download queue, cache eviction, offline materialization, auto-archive, and single-slot background detail-page preloader (`startDetailPreload` / `cancelDetailPreload`).
-- `Sources/DonbyNetwork/EmbyClient.swift` (~1186L)
+- `Sources/DonbyNetwork/EmbyClient.swift` (~913L) & `EmbyClient+ArtworkAndFallback.swift` (~277L)
   - `RedirectCacheStore`, `EmbyPlaybackInfoCache` (TTL `300s`), `EmbyHostWarmCache`, `NoRedirectDelegate`, `EmbyClient`.
   - Standard Emby fallback helpers (`v1.4.37`): `isUHDNativeExtensionActive(for:)` (checks both `server.type == .uhdNative` and `DonbyMediaServiceRegistry.shared.isRegistered(.uhdNative)`), `resolveRelativeOrAbsoluteURL` (preserves root `/emby/`, `/play/`, `/api/`, `/stream/` direct paths without prepending `/emby`), and `normalizeEmbyItemId` (applies `m`/`s` prefix to bare 26-char `01...` ULIDs when falling back to Emby, plus `e`/`s`/`m` 404 retry in `fetchItemDetail`).
-- `Sources/DonbyUHDModule/` (Standalone optional SwiftPM target; cleanly toggleable/uninstallable; zero reverse dependency from `DonbyCore`/`DonbyNetwork`):
+- `Sources/DonbyUHDModule/` (Optional SwiftPM target; see [modules/uhd-module.md](uhd-module.md) for detailed file map, artwork/detail contracts, and endpoints):
   - `UHDModuleConfig.swift` (~265L) — `UHDModuleEndpoints` (zero-URL `smart.uhdnow.com` -> `v1.uhdnow.com` fallback & China-optimized primary line selection), `DonbyUHDServiceProvider` bridged into `DonbyMediaServiceRegistry`, `DonbyUHDModule.install()` / `uninstall()`.
-  - `UHDModels.swift` (~1080L) — UHD domain models, `UHDSpeedTestMetricsEngine`, `UHDLoginCodeNormalizer`, `UHDWatchPartyInviteParser`, `UHDTmdbSearchQueryParser`, `UHDRatingNormalizer`, `UHDDisplayNormalizer` (normalizes CDN labels to `Cloudflare Pro CDN`, `Cloudflare CDN`, `中国大陆 CDN`).
-  - `UHDStreamClient.swift` (~1720L) — UHD native API client (`streaming-openapi.yaml v1.0.0-draft.2` + `team-v2-openapi.yaml`): auto-fallback password/code/token login, full subscription/traffic account snapshots, domain listing & fresh `/resolve`, spec-compliant `TEST_BASE` chunk-delegate speed test (`32/64/100 MiB`, warmup exclusion, cancel-safe no-report, free `probeLineExitNetworkInfo`), hot/anime-hot/anime-calendar/genres/persons/person-works, cross-season `/tv/{id}/playback-state`, TMDB ID search, typed favorites (`movie`/`tv`/`person`), Team API v2 management, `/play/*`, `/download/*`.
+  - `UHDAPIModels.swift` (~791L) & `UHDDomainNormalizers.swift` (~417L) — UHD domain models, `UHDSpeedTestMetricsEngine`, `UHDLoginCodeNormalizer`, `UHDWatchPartyInviteParser`, `UHDTmdbSearchQueryParser`, `UHDRatingNormalizer`, `UHDDisplayNormalizer` (normalizes CDN labels to `Cloudflare Pro CDN`, `Cloudflare CDN`, `中国大陆 CDN`).
+  - `UHDStreamClient.swift` (~278L) + `UHDStreamClient+{AuthAndAccount,SpeedTestAndLines,CatalogAndSearch,DetailAndMapping,TeamAdmin}.swift` — UHD native API client (`streaming-openapi.yaml v1.0.0-draft.2` + `team-v2-openapi.yaml`): auto-fallback password/code/token login, full subscription/traffic account snapshots, domain listing & fresh `/resolve`, spec-compliant `TEST_BASE` chunk-delegate speed test (`32/64/100 MiB`, warmup exclusion, cancel-safe no-report, free `probeLineExitNetworkInfo`), hot/anime-hot/anime-calendar/genres/persons/person-works, cross-season `/tv/{id}/playback-state`, TMDB ID search, typed favorites (`movie`/`tv`/`person`), Team API v2 management, `/play/*`, `/download/*`.
   - `UHDWatchPartyClient.swift` (~450L) — Watch Party REST client + `@MainActor UHDWatchPartySession` WebSocket sync.
   - `UHDDanmuClient.swift` (~331L) — UHD managed Danmu proxy client (zero quota consumption) with off-MainActor decode/dedup/bucketing, `DanmuSessionCache` actor (caches series bangumi episode lists and parsed comment arrays across episode navigation; skips dummy-hash `/match` for series episodes).
 - `Sources/DonbyNetwork/OfflineMediaLibrary.swift` (~576L)

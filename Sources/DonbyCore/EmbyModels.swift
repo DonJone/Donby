@@ -576,6 +576,22 @@ public struct EmbyItem: Codable, Identifiable, Hashable, Sendable {
         )
     }
 
+    public func withInheritedArtworkFallback(
+        posterURL: String? = nil,
+        backdropURL: String? = nil,
+        logoURL: String? = nil
+    ) -> EmbyItem {
+        let resolvedPoster = (uhdPosterURL?.isEmpty == false) ? uhdPosterURL : posterURL
+        let resolvedBackdrop = (uhdBackdropURL?.isEmpty == false) ? uhdBackdropURL : backdropURL
+        let resolvedLogo = (uhdLogoURL?.isEmpty == false) ? uhdLogoURL : logoURL
+        if resolvedPoster == uhdPosterURL && resolvedBackdrop == uhdBackdropURL && resolvedLogo == uhdLogoURL {
+            return self
+        }
+        return EmbyItem(
+            id: id, name: name, originalTitle: originalTitle, serverId: serverId, type: type, collectionType: collectionType, overview: overview, taglines: taglines, genres: genres, communityRating: communityRating, criticRating: criticRating, officialRating: officialRating, productionYear: productionYear, premiereDate: premiereDate, endDate: endDate, status: status, runTimeTicks: runTimeTicks, container: container, path: path, isFolder: isFolder, parentId: parentId, seriesId: seriesId, seriesName: seriesName, seasonId: seasonId, seasonName: seasonName, indexNumber: indexNumber, parentIndexNumber: parentIndexNumber, childCount: childCount, recursiveItemCount: recursiveItemCount, imageTags: imageTags, backdropImageTags: backdropImageTags, parentBackdropItemId: parentBackdropItemId, parentBackdropImageTags: parentBackdropImageTags, seriesPrimaryImageTag: seriesPrimaryImageTag, primaryImageAspectRatio: primaryImageAspectRatio, userData: userData, mediaSources: mediaSources, mediaStreams: mediaStreams, people: people, studios: studios, providerIds: providerIds, chapters: chapters, dateCreated: dateCreated, uhdPosterURL: resolvedPoster, uhdBackdropURL: resolvedBackdrop, uhdLogoURL: resolvedLogo, uhdThumbURL: uhdThumbURL, uhdMediaType: uhdMediaType
+        )
+    }
+
     public var episodeCodeString: String? {
         if let s = parentIndexNumber, let e = indexNumber { return String(format: "S%02dE%02d", s, e) }
         else if let e = indexNumber, isEpisode { return "第\(e)集" }

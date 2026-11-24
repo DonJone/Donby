@@ -151,6 +151,8 @@ public struct WatchRecordItem: Codable, Identifiable, Hashable, Sendable {
     public var streamURLString: String?
     public var embyItemId: String?
     public var resolutionTag: String?
+    public var mediaType: String?
+    public var seriesId: String?
 
     public init(
         id: String = UUID().uuidString,
@@ -164,7 +166,9 @@ public struct WatchRecordItem: Codable, Identifiable, Hashable, Sendable {
         sourceType: String = "Emby",
         streamURLString: String? = nil,
         embyItemId: String? = nil,
-        resolutionTag: String? = "4K UHD"
+        resolutionTag: String? = "4K UHD",
+        mediaType: String? = nil,
+        seriesId: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -178,6 +182,8 @@ public struct WatchRecordItem: Codable, Identifiable, Hashable, Sendable {
         self.streamURLString = streamURLString
         self.embyItemId = embyItemId
         self.resolutionTag = resolutionTag
+        self.mediaType = mediaType
+        self.seriesId = seriesId
     }
 
     public var progressRatio: Double {

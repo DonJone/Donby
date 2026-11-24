@@ -2,15 +2,16 @@ import Foundation
 import Security
 import Testing
 @testable import DonbyCore
+@testable import DonbyNetwork
 #if canImport(DonbyUHDModule) && !DONBY_PURE_BUILD
 @testable import DonbyUHDModule
 #endif
 
-@Suite("DonbyCore Policy Tests")
+@Suite("DonbyCore Policy Tests", .serialized)
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "2.0.1")
+        #expect(DonbyAppInfo.fallbackVersion == "2.0.2")
     }
 
     @Test func heroTopEdgeSynthesizerPreservesExactColorContrastAndSuppressesOutlierSpike() {
@@ -828,4 +829,105 @@ struct DonbyCoreTests {
         #expect(UHDDisplayNormalizer.formatExitBadge(location: "广东省", isp: "ctcc") == "广东 · 中国电信")
     }
     #endif
+
+    @Test func embyClientDualModeEpisodeArtworkAndUHDTokenIsolation() {
+        let bareEpisodeULID = "0189ABCD1234567890ABCDEF12" // 26 chars starting with "01"
+        let bareSeriesULID = "0189ABCD1234567890ABCDEF99"
+        let uhdServer = EmbyServerConfig(
+            name: "UHD Test",
+            type: .uhdNative,
+            host: "uhd.example.com",
+            username: "tester",
+            accessToken: "jwt-uhd-secret"
+        )
+
+        #if canImport(DonbyUHDModule) && !DONBY_PURE_BUILD
+        let wasInstalled = DonbyUHDModule.isInstalled
+        defer {
+            if wasInstalled {
+                DonbyUHDModule.install()
+            } else {
+                DonbyUHDModule.uninstall()
+            }
+        }
+
+        DonbyUHDModule.install()
+        // When UHD extension is active, itemId-based /emby/Items/... URLs must return nil (prevents 401/404 storms and token leak)
+        #expect(EmbyClient.shared.imageURL(server: uhdServer, itemId: bareEpisodeULID, kind: .primary, maxWidth: 560) == nil)
+        #expect(EmbyClient.shared.imageURL(server: uhdServer, itemId: bareEpisodeULID, kind: .thumb, maxWidth: 560) == nil)
+        #expect(EmbyClient.shared.imageURL(server: uhdServer, itemId: bareSeriesULID, kind: .logo, maxWidth: 800) == nil)
+
+        // Episode with only thumb_url must resolve across .thumb, .primary, and .backdrop
+        let epThumbOnly = EmbyItem(
+            id: bareEpisodeULID,
+            name: "Episode 1",
+            type: "Episode",
+            seriesId: bareSeriesULID,
+            uhdThumbURL: "https://uhd.example.com/img/ep1-thumb.jpg",
+            uhdMediaType: "episode"
+        )
+        #expect(EmbyClient.shared.imageURL(server: uhdServer, item: epThumbOnly, kind: .thumb)?.absoluteString == "https://uhd.example.com/img/ep1-thumb.jpg")
+        #expect(EmbyClient.shared.imageURL(server: uhdServer, item: epThumbOnly, kind: .primary)?.absoluteString == "https://uhd.example.com/img/ep1-thumb.jpg")
+        #expect(EmbyClient.shared.imageURL(server: uhdServer, item: epThumbOnly, kind: .backdrop)?.absoluteString == "https://uhd.example.com/img/ep1-thumb.jpg")
+
+        // Unscraped episode missing thumb_url inherits season poster, series fanart, and logo cleanly
+        let epUnscraped = EmbyItem(
+            id: "0189ABCD1234567890ABCDEF13",
+            name: "Episode 2",
+            type: "Episode",
+            seriesId: bareSeriesULID,
+            uhdMediaType: "episode"
+        ).withInheritedArtworkFallback(
+            posterURL: "https://uhd.example.com/img/season1.jpg",
+            backdropURL: "https://uhd.example.com/img/series-fanart.jpg",
+            logoURL: "https://uhd.example.com/img/series-logo.png"
+        )
+        #expect(EmbyClient.shared.imageURL(server: uhdServer, item: epUnscraped, kind: .thumb)?.absoluteString == "https://uhd.example.com/img/series-fanart.jpg")
+        #expect(EmbyClient.shared.imageURL(server: uhdServer, item: epUnscraped, kind: .primary)?.absoluteString == "https://uhd.example.com/img/season1.jpg")
+        #expect(EmbyClient.shared.imageURL(server: uhdServer, item: epUnscraped, kind: .backdrop)?.absoluteString == "https://uhd.example.com/img/series-fanart.jpg")
+        #expect(EmbyClient.shared.imageURL(server: uhdServer, item: epUnscraped, kind: .logo)?.absoluteString == "https://uhd.example.com/img/series-logo.png")
+
+        DonbyUHDModule.uninstall()
+        #endif
+
+        // Standard Emby fallback (both when UHD module is uninstalled and in DONBY_PURE=1 builds)
+        let embyFallbackURL = EmbyClient.shared.imageURL(server: uhdServer, itemId: bareEpisodeULID, kind: .primary, maxWidth: 560)?.absoluteString
+        #expect(embyFallbackURL?.contains("/emby/Items/\(bareEpisodeULID)/Images/Primary") == true)
+
+        let epEmbyFallback = EmbyItem(
+            id: bareEpisodeULID,
+            name: "Episode 1",
+            type: "Episode",
+            seriesId: "s\(bareSeriesULID)",
+            imageTags: ["Primary": "tag123"]
+        )
+        let epThumbFallbackURL = EmbyClient.shared.imageURL(server: uhdServer, item: epEmbyFallback, kind: .thumb, maxWidth: 560)?.absoluteString
+        #expect(epThumbFallbackURL?.contains("/emby/Items/e\(bareEpisodeULID)/Images/Primary") == true)
+    }
+
+    @Test func watchRecordItemDecodesLegacyJSONAndPersistsEpisodeMetadata() throws {
+        let legacyJSON = """
+        {"id":"emby:01ep","title":"Show Name","positionSeconds":120.5,"durationSeconds":2400,"lastWatchedAt":0,"sourceType":"Emby","embyItemId":"01ep"}
+        """
+        let legacyRecord = try JSONDecoder().decode(WatchRecordItem.self, from: Data(legacyJSON.utf8))
+        #expect(legacyRecord.embyItemId == "01ep")
+        #expect(legacyRecord.mediaType == nil)
+        #expect(legacyRecord.seriesId == nil)
+
+        let episodeRecord = WatchRecordItem(
+            id: "emby:01ep2",
+            title: "Show Name",
+            subtitle: "S01E05 · Title",
+            positionSeconds: 450,
+            durationSeconds: 2700,
+            sourceType: "Emby",
+            embyItemId: "01ep2",
+            mediaType: "Episode",
+            seriesId: "01series"
+        )
+        let encoded = try JSONEncoder().encode(episodeRecord)
+        let decoded = try JSONDecoder().decode(WatchRecordItem.self, from: encoded)
+        #expect(decoded.mediaType == "Episode")
+        #expect(decoded.seriesId == "01series")
+    }
 }

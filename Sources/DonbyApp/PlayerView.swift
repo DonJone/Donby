@@ -4031,7 +4031,9 @@ public struct PlayerView: View {
             sourceType: resolvedSourceType,
             streamURLString: streamStr,
             embyItemId: embyId,
-            resolutionTag: isLocal ? (kernelStats.is_hw_accelerated ? "本地 4K" : "本地文件") : (kernelStats.is_hw_accelerated ? "HW 4K" : "4K UHD")
+            resolutionTag: isLocal ? (kernelStats.is_hw_accelerated ? "本地 4K" : "本地文件") : (kernelStats.is_hw_accelerated ? "HW 4K" : "4K UHD"),
+            mediaType: isEmby ? currentItem.type : nil,
+            seriesId: isEmby ? currentItem.seriesId : nil
         )
 
         DonbyDownloadManager.shared.updateOfflinePlaybackProgress(

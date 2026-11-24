@@ -530,7 +530,10 @@ public final class UHDModuleManager: ObservableObject {
                 tvId: seriesItem.id,
                 seasonId: matchedSeason.id,
                 seasonNumber: matchedSeason.indexNumber,
-                seriesName: seriesItem.name
+                seriesName: seriesItem.name,
+                posterFallback: matchedSeason.uhdPosterURL ?? seriesItem.uhdPosterURL,
+                fanartFallback: seriesItem.uhdBackdropURL,
+                logoFallback: seriesItem.uhdLogoURL
             ).items
             return (eps, eps.first(where: { $0.id == preferredEp.episodeId }))
         }
@@ -540,7 +543,10 @@ public final class UHDModuleManager: ObservableObject {
                 tvId: seriesItem.id,
                 seasonId: season.id,
                 seasonNumber: season.indexNumber,
-                seriesName: seriesItem.name
+                seriesName: seriesItem.name,
+                posterFallback: season.uhdPosterURL ?? seriesItem.uhdPosterURL,
+                fanartFallback: seriesItem.uhdBackdropURL,
+                logoFallback: seriesItem.uhdLogoURL
             ).items
             return (eps, nil)
         }
@@ -571,7 +577,10 @@ public final class UHDModuleManager: ObservableObject {
                     tvId: item.id,
                     seasonId: firstSeason.id,
                     seasonNumber: firstSeason.indexNumber,
-                    seriesName: item.name
+                    seriesName: item.name,
+                    posterFallback: firstSeason.uhdPosterURL ?? item.uhdPosterURL,
+                    fanartFallback: item.uhdBackdropURL,
+                    logoFallback: item.uhdLogoURL
                 ).items
                 if let firstEp = eps.first {
                     targetItem = firstEp
