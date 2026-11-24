@@ -1,16 +1,11 @@
 import SwiftUI
 import DonbyCore
 import DonbyNetwork
-#if canImport(DonbyUHDModule)
-import DonbyUHDModule
-#endif
 import DonbyKernelC
 
 public struct EmbyMainView: View {
     @EnvironmentObject private var appState: AppState
-    #if canImport(DonbyUHDModule)
-    @ObservedObject private var uhdModule = UHDModuleManager.shared
-    #endif
+    @ObservedObject private var extCenter = DonbyAppExtensionCenter.shared
     @State private var isSearchingInline: Bool = false
     @State private var showViewOptionsPopover: Bool = false
 
@@ -163,26 +158,9 @@ public struct EmbyMainView: View {
                 items: appState.favoriteItems
             ))
         }
-        #if canImport(DonbyUHDModule)
-        if uhdModule.isActive(for: appState.activeServer) {
-            if !uhdModule.hotItems.isEmpty {
-                result.append(HomeShelfSection(
-                    id: "uhd_hot",
-                    title: "热门影视",
-                    kind: .poster,
-                    items: uhdModule.hotItems
-                ))
-            }
-            if !uhdModule.animeHotItems.isEmpty {
-                result.append(HomeShelfSection(
-                    id: "uhd_anime_hot",
-                    title: "热门动漫",
-                    kind: .poster,
-                    items: uhdModule.animeHotItems
-                ))
-            }
+        if let extShelves = extCenter.plugin?.homeShelves(for: appState.activeServer) {
+            result.append(contentsOf: extShelves)
         }
-        #endif
         for lib in appState.libraryViews {
             if let items = appState.latestByLibrary[lib.id], !items.isEmpty {
                 result.append(HomeShelfSection(
@@ -254,9 +232,9 @@ public struct EmbyMainView: View {
             Spacer(minLength: 10)
 
             if let server = appState.activeServer {
-                #if canImport(DonbyUHDModule)
-                UHDEmbyToolbarButtons(server: server)
-                #endif
+                if let plugin = extCenter.plugin {
+                    plugin.makeEmbyToolbarButtons(server: server)
+                }
 
                 ToolbarVectorButton(
                     tooltip: "刷新媒体库并同步云端线路 (⌘R)",
@@ -775,13 +753,11 @@ public struct MLibListView: View {
             await loadLibraryItems(reset: true)
         }
         .task(id: appState.activeServer?.id) {
-            #if canImport(DonbyUHDModule)
-            if let srv = appState.activeServer, UHDModuleManager.shared.isActive(for: srv), availableGenreNames.isEmpty {
-                if let genres = try? await UHDStreamClient.shared.fetchGenres(server: srv) {
-                    availableGenreNames = genres.map(\.name)
-                }
+            if let srv = appState.activeServer, availableGenreNames.isEmpty,
+               let ext = DonbyAppExtensionCenter.shared.plugin, ext.isActive(for: srv),
+               let genres = await ext.fetchAvailableGenres(for: srv) {
+                availableGenreNames = genres
             }
-            #endif
         }
     }
 
@@ -807,89 +783,33 @@ public struct MLibListView: View {
 
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
-            #if canImport(DonbyUHDModule)
-            if UHDModuleManager.shared.isActive(for: server) {
-                if !q.isEmpty {
-                    let found = try await UHDStreamClient.shared.search(server: server, query: q, limit: 50)
-                    guard !Task.isCancelled, currentGen == loadGeneration else { return }
-                    self.items = found
-                    self.seenIds = Set(found.map(\.id))
-                    self.itemsRevision &+= 1
-                    self.totalCount = found.count
-                    self.nextCursor = nil
-                    self.hasMoreItems = false
-                    return
-                }
-                if filterFavoritesOnly {
-                    let libType: String? = {
-                        let lower = library.name.lowercased()
-                        if lower.contains("电影") || lower.contains("movie") { return "movie" }
-                        if lower.contains("剧") || lower.contains("动漫") || lower.contains("综艺") || lower.contains("tv") || lower.contains("series") { return "tv" }
-                        return nil
-                    }()
-                    let favPage = try await UHDStreamClient.shared.fetchFavorites(
-                        server: server,
-                        type: libType,
-                        limit: 50,
-                        cursor: reset ? nil : nextCursor
-                    )
-                    guard !Task.isCancelled, currentGen == loadGeneration else { return }
-                    var fetched = favPage.items
-                    if filterUnwatchedOnly { fetched = fetched.filter { $0.userData?.played != true } }
-                    if !selectedGenreFilter.isEmpty {
-                        fetched = fetched.filter { $0.genres?.contains(selectedGenreFilter) == true }
-                    }
-                    if reset {
-                        self.items = fetched
-                        self.seenIds = Set(fetched.map(\.id))
-                    } else {
-                        var added: [EmbyItem] = []
-                        for it in fetched where seenIds.insert(it.id).inserted { added.append(it) }
-                        self.items.append(contentsOf: added)
-                    }
-                    self.itemsRevision &+= 1
-                    self.nextCursor = favPage.nextCursor
-                    self.hasMoreItems = favPage.nextCursor != nil
-                    self.totalCount = max(self.items.count, favPage.total)
-                    return
-                }
-                let uhdSortBy: String = switch sortField {
-                case .premiereDate: "release_date"
-                case .communityRating: "rating"
-                case .hot: "hot"
-                case .sortName: "title"
-                default: "asset_updated_at"
-                }
-                let pageRes = try await UHDStreamClient.shared.fetchCollectionItems(
+            if let ext = DonbyAppExtensionCenter.shared.plugin, ext.isActive(for: server) {
+                let page = try await ext.fetchLibraryPage(
                     server: server,
-                    collectionId: library.id,
-                    sortBy: uhdSortBy,
-                    sortOrder: ascending ? "asc" : "desc",
-                    limit: 50,
-                    cursor: reset ? nil : nextCursor
+                    library: library,
+                    query: q,
+                    sortField: sortField,
+                    ascending: ascending,
+                    filterUnwatchedOnly: filterUnwatchedOnly,
+                    filterFavoritesOnly: filterFavoritesOnly,
+                    selectedGenreFilter: selectedGenreFilter,
+                    cursor: (reset || !q.isEmpty) ? nil : nextCursor
                 )
                 guard !Task.isCancelled, currentGen == loadGeneration else { return }
-                var fetched = pageRes.items
-                if filterUnwatchedOnly { fetched = fetched.filter { $0.userData?.played != true } }
-                if filterFavoritesOnly { fetched = fetched.filter { $0.userData?.isFavorite == true } }
-                if !selectedGenreFilter.isEmpty {
-                    fetched = fetched.filter { $0.genres?.contains(selectedGenreFilter) == true }
-                }
-                if reset {
-                    self.items = fetched
-                    self.seenIds = Set(fetched.map(\.id))
+                if reset || !q.isEmpty {
+                    self.items = page.items
+                    self.seenIds = Set(page.items.map(\.id))
                 } else {
                     var added: [EmbyItem] = []
-                    for it in fetched where seenIds.insert(it.id).inserted { added.append(it) }
+                    for it in page.items where seenIds.insert(it.id).inserted { added.append(it) }
                     self.items.append(contentsOf: added)
                 }
                 self.itemsRevision &+= 1
-                self.nextCursor = pageRes.nextCursor
-                self.hasMoreItems = pageRes.nextCursor != nil
-                self.totalCount = max(self.items.count, library.childCount ?? self.items.count)
+                self.nextCursor = page.nextCursor
+                self.hasMoreItems = page.hasMore
+                self.totalCount = max(self.items.count, page.totalOverride ?? self.items.count)
                 return
             }
-            #endif
 
             let resp = try await EmbyClient.shared.fetchItems(
                 server: server,

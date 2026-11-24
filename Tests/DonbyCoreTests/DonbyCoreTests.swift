@@ -2,13 +2,15 @@ import Foundation
 import Security
 import Testing
 @testable import DonbyCore
+#if canImport(DonbyUHDModule) && !DONBY_PURE_BUILD
 @testable import DonbyUHDModule
+#endif
 
 @Suite("DonbyCore Policy Tests")
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "2.0.0")
+        #expect(DonbyAppInfo.fallbackVersion == "2.0.1")
     }
 
     @Test func heroTopEdgeSynthesizerPreservesExactColorContrastAndSuppressesOutlierSpike() {
@@ -599,6 +601,55 @@ struct DonbyCoreTests {
         }
     }
 
+    @Test func keepSignedInVaultPolicyAndLegacyDecoding() throws {
+        // EmbyServerConfig backward-compatible decoding defaults keepSignedIn = true
+        let legacyJSON = """
+        {"id":"00000000-0000-0000-0000-000000000001","name":"OldServer","note":"","type":"uhdNative","host":"api.example.com","port":443,"isHttps":true,"path":"","username":"alice","password":"","accessToken":"","userId":"","serverId":"","serverName":"","serverVersion":"","iconURL":"uhd","isDefaultHome":false,"isEncrypted":false,"enableGlobalSearch":true,"strmUsePath":false,"cache302Request":true,"movieCount":0,"episodeCount":0,"backupLines":[],"isDemoServer":false}
+        """.data(using: .utf8)!
+        let decodedLegacy = try JSONDecoder().decode(EmbyServerConfig.self, from: legacyJSON)
+        #expect(decodedLegacy.keepSignedIn == true)
+        #expect(decodedLegacy.lastLoginDate == nil)
+
+        // ServerCredentialStore must skip persisting secrets when keepSignedIn == false
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("donby-keepsignedin-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let vaultFile = tempDir.appendingPathComponent("credentials.vault")
+        let backend = EncryptedFileVaultBackend(fileURL: vaultFile, machineSalt: "unit-test-keep-signed-in")
+        let store = ServerCredentialStore(backend: backend)
+
+        let ephemeralServer = EmbyServerConfig(
+            name: "TempServer",
+            type: .emby,
+            host: "api.example.com",
+            username: "bob",
+            password: "secret-password",
+            accessToken: "ephemeral-token",
+            keepSignedIn: false
+        )
+        let persistedServer = EmbyServerConfig(
+            name: "SavedServer",
+            type: .emby,
+            host: "api2.example.com",
+            username: "alice",
+            password: "saved-password",
+            accessToken: "saved-token",
+            keepSignedIn: true
+        )
+        let sanitized = store.persistSecretsAndSanitizeForDefaults([ephemeralServer, persistedServer])
+        #expect(sanitized.allSatisfy { $0.password.isEmpty && $0.accessToken.isEmpty })
+
+        // Re-hydrate in a fresh store instance (simulating app restart)
+        let freshStore = ServerCredentialStore(backend: EncryptedFileVaultBackend(fileURL: vaultFile, machineSalt: "unit-test-keep-signed-in"))
+        let (rehydrated, _) = freshStore.hydrate(sanitized)
+        let rehydratedEphemeral = rehydrated.first { $0.id == ephemeralServer.id }
+        let rehydratedPersisted = rehydrated.first { $0.id == persistedServer.id }
+        #expect(rehydratedEphemeral?.password == "")
+        #expect(rehydratedEphemeral?.accessToken == "")
+        #expect(rehydratedPersisted?.password == "saved-password")
+        #expect(rehydratedPersisted?.accessToken == "saved-token")
+    }
+
+    #if canImport(DonbyUHDModule) && !DONBY_PURE_BUILD
     @Test func uhdSpeedTestMetricsEngineWarmupAndRollingPeakAndShortFallback() {
         // 1. Steady 100 Mbps stream (12.5 MB/s) after warmup >= 300ms & > 1 MiB
         var engine = UHDSpeedTestMetricsEngine(startTimeSec: 10.0)
@@ -693,52 +744,6 @@ struct DonbyCoreTests {
         )
         // Paused never extrapolates forward
         #expect(abs(pausedSnap.extrapolatedPositionSeconds(estimatedServerNowMs: 1_010_000) - 120.0) < 0.001)
-
-        // EmbyServerConfig backward-compatible decoding defaults keepSignedIn = true
-        let legacyJSON = """
-        {"id":"00000000-0000-0000-0000-000000000001","name":"OldUHD","note":"","type":"uhdNative","host":"api.example.com","port":443,"isHttps":true,"path":"","username":"alice","password":"","accessToken":"","userId":"","serverId":"","serverName":"","serverVersion":"","iconURL":"uhd","isDefaultHome":false,"isEncrypted":false,"enableGlobalSearch":true,"strmUsePath":false,"cache302Request":true,"movieCount":0,"episodeCount":0,"backupLines":[],"isDemoServer":false}
-        """.data(using: .utf8)!
-        let decodedLegacy = try JSONDecoder().decode(EmbyServerConfig.self, from: legacyJSON)
-        #expect(decodedLegacy.keepSignedIn == true)
-        #expect(decodedLegacy.lastLoginDate == nil)
-
-        // ServerCredentialStore must skip persisting secrets when keepSignedIn == false
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("donby-keepsignedin-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
-        let vaultFile = tempDir.appendingPathComponent("credentials.vault")
-        let backend = EncryptedFileVaultBackend(fileURL: vaultFile, machineSalt: "unit-test-keep-signed-in")
-        let store = ServerCredentialStore(backend: backend)
-
-        let ephemeralServer = EmbyServerConfig(
-            name: "TempUHD",
-            type: .uhdNative,
-            host: "api.example.com",
-            username: "bob",
-            password: "secret-password",
-            accessToken: "ephemeral-token",
-            keepSignedIn: false
-        )
-        let persistedServer = EmbyServerConfig(
-            name: "SavedUHD",
-            type: .uhdNative,
-            host: "api2.example.com",
-            username: "alice",
-            password: "saved-password",
-            accessToken: "saved-token",
-            keepSignedIn: true
-        )
-        let sanitized = store.persistSecretsAndSanitizeForDefaults([ephemeralServer, persistedServer])
-        #expect(sanitized.allSatisfy { $0.password.isEmpty && $0.accessToken.isEmpty })
-
-        // Re-hydrate in a fresh store instance (simulating app restart)
-        let freshStore = ServerCredentialStore(backend: EncryptedFileVaultBackend(fileURL: vaultFile, machineSalt: "unit-test-keep-signed-in"))
-        let (rehydrated, _) = freshStore.hydrate(sanitized)
-        let rehydratedEphemeral = rehydrated.first { $0.id == ephemeralServer.id }
-        let rehydratedPersisted = rehydrated.first { $0.id == persistedServer.id }
-        #expect(rehydratedEphemeral?.password == "")
-        #expect(rehydratedEphemeral?.accessToken == "")
-        #expect(rehydratedPersisted?.password == "saved-password")
-        #expect(rehydratedPersisted?.accessToken == "saved-token")
     }
 
     @Test func uhdModuleEndpointsSmartToV1FallbackAndChinaOptimizedSelection() {
@@ -822,4 +827,5 @@ struct DonbyCoreTests {
         #expect(UHDDisplayNormalizer.formatExitBadge(location: "GB / 欧洲", isp: "") == "英国")
         #expect(UHDDisplayNormalizer.formatExitBadge(location: "广东省", isp: "ctcc") == "广东 · 中国电信")
     }
+    #endif
 }

@@ -176,9 +176,7 @@ public struct MainWindowView: View {
                 .preferredColorScheme(appState.colorScheme)
                 .tint(appState.accentColor)
         }
-        #if canImport(DonbyUHDModule)
-        .donbyUHDModuleSheets()
-        #endif
+        .donbyExtensionSheets()
         .sheet(isPresented: $appState.showLogViewer) {
             LogViewerSheet()
                 .environmentObject(appState)

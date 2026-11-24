@@ -6,7 +6,7 @@
 ## 1. Repository Overview
 - **Product**: Donby — native macOS media player (macOS 14+, Apple Silicon) for Emby / Jellyfin / UHDNow / local media.
 - **Stack**: SwiftUI + AppKit (`DonbyApp`, `DonbyCore`, `DonbyNetwork`, optional `DonbyUHDModule`), Metal EDR renderer (`DonbyMetalRenderer`), Rust + FFmpeg/VideoToolbox/AudioToolbox/libass playback kernel (`KernelRust` + C11 header shim `DonbyKernelC`; legacy C++20 baseline archived on `legacy/cpp-kernel`).
-- **Current Version**: `2.0.0` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
+- **Current Version**: `2.0.1` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
 
 ## 2. Task-to-Module Routing Table
 
@@ -52,4 +52,7 @@
 
 # Build KernelRust staticlib only (build_kernel/libdonby_kernel.a; content-hash cached)
 ./build_kernel.sh
+
+# Pure standalone core build & test (physically excludes DonbyUHDModule and Modules/UHD)
+DONBY_PURE=1 ./scripts/dev.sh build && DONBY_PURE=1 ./scripts/dev.sh test
 ```

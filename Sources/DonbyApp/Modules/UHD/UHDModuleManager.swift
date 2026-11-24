@@ -1,5 +1,6 @@
 #if canImport(DonbyUHDModule)
 import Foundation
+import Combine
 import SwiftUI
 import AppKit
 import DonbyCore
@@ -50,6 +51,8 @@ public final class UHDModuleManager: ObservableObject {
     @Published public var activePersonSheet: UHDPersonSheetTarget? = nil
     @Published public var activeWatchPartySession: UHDWatchPartySession? = nil
 
+    private var changeForwarder: AnyCancellable?
+
     private init() {
         let initialEnabled: Bool
         if UserDefaults.standard.object(forKey: Self.enabledKey) == nil {
@@ -62,6 +65,11 @@ public final class UHDModuleManager: ObservableObject {
             DonbyUHDModule.install()
         } else {
             DonbyUHDModule.uninstall()
+        }
+        self.changeForwarder = objectWillChange.sink { _ in
+            MainActor.assumeIsolated {
+                DonbyAppExtensionCenter.shared.objectWillChange.send()
+            }
         }
     }
 

@@ -2,15 +2,10 @@ import SwiftUI
 import AppKit
 import DonbyCore
 import DonbyNetwork
-#if canImport(DonbyUHDModule)
-import DonbyUHDModule
-#endif
 
 public struct ServerListView: View {
     @EnvironmentObject private var appState: AppState
-    #if canImport(DonbyUHDModule)
-    @ObservedObject private var uhdModule = UHDModuleManager.shared
-    #endif
+    @ObservedObject private var extCenter = DonbyAppExtensionCenter.shared
     @State private var searchText: String = ""
     @State private var showDisplayOptionsPopover: Bool = false
     @State private var isRefreshingAllServers: Bool = false
@@ -171,14 +166,7 @@ public struct ServerListView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
         .task(id: appState.servers.count) {
-            #if canImport(DonbyUHDModule)
-            guard uhdModule.isEnabled else { return }
-            for srv in appState.servers where srv.type == .uhdNative && !srv.host.isEmpty && !srv.accessToken.isEmpty {
-                if uhdModule.accountSnapshots[srv.id] == nil {
-                    await uhdModule.refreshAccountSnapshot(for: srv, appState: appState)
-                }
-            }
-            #endif
+            await extCenter.plugin?.refreshMissingAccountSnapshots(servers: appState.servers, appState: appState)
         }
     }
 }
@@ -220,9 +208,7 @@ private struct AddServerDashedCard: View {
 
 public struct ServerCardView: View {
     @EnvironmentObject private var appState: AppState
-    #if canImport(DonbyUHDModule)
-    @ObservedObject private var uhdModule = UHDModuleManager.shared
-    #endif
+    @ObservedObject private var extCenter = DonbyAppExtensionCenter.shared
     public let server: EmbyServerConfig
     @State private var isHovered: Bool = false
 
@@ -235,13 +221,7 @@ public struct ServerCardView: View {
     }
 
     private var uhdTrafficSummaryText: String? {
-        #if canImport(DonbyUHDModule)
-        guard uhdModule.isActive(for: server),
-              let traffic = uhdModule.accountSnapshots[server.id]?.traffic else { return nil }
-        return traffic.shortToolbarBadgeText
-        #else
-        return nil
-        #endif
+        extCenter.plugin?.serverCardBadgeText(for: server)
     }
 
     public init(server: EmbyServerConfig) {
@@ -251,11 +231,7 @@ public struct ServerCardView: View {
     public var body: some View {
         Button {
             if isUnconfigured || !hasValidSession {
-                #if canImport(DonbyUHDModule)
-                let preferred: ServerType? = (uhdModule.isEnabled && server.usesUHDLogo) ? .uhdNative : nil
-                #else
-                let preferred: ServerType? = nil
-                #endif
+                let preferred = extCenter.plugin?.preferredEditorType(forUnconfigured: server)
                 appState.presentServerEditor(for: server, preferredType: preferred)
             } else {
                 appState.openServer(server)
@@ -392,26 +368,18 @@ public struct ServerCardView: View {
 
 public struct ServerContextMenuItems: View {
     @EnvironmentObject private var appState: AppState
-    #if canImport(DonbyUHDModule)
-    @ObservedObject private var uhdModule = UHDModuleManager.shared
-    #endif
+    @ObservedObject private var extCenter = DonbyAppExtensionCenter.shared
     public let server: EmbyServerConfig
 
     public var body: some View {
         Button { appState.openServer(server) } label: { Label("打开媒体库", systemImage: "play.tv") }
         Button { appState.linePickerServer = server } label: {
-            let uhdActive = appState.isUsingUHDExtension(for: server)
-            Label(uhdActive ? "线路与测速" : "切换线路", systemImage: uhdActive ? "speedometer" : "bolt.horizontal.icloud")
+            let extActive = appState.isUsingUHDExtension(for: server)
+            Label(extActive ? "线路与测速" : "切换线路", systemImage: extActive ? "speedometer" : "bolt.horizontal.icloud")
         }
-        #if canImport(DonbyUHDModule)
-        if uhdModule.isActive(for: server) {
-            Button { uhdModule.accountSheetServer = server } label: { Label("账户与流量", systemImage: "gauge.with.dots.needle.67percent") }
-            Button {
-                appState.activeServerId = server.id
-                uhdModule.showWatchPartyJoinSheet = true
-            } label: { Label("加入同看", systemImage: "person.2.wave.2") }
+        if let plugin = extCenter.plugin {
+            plugin.makeServerContextMenuExtraItems(server: server)
         }
-        #endif
         Button { Task { await appState.syncExtDomains(for: server.id, showFeedback: true) } } label: { Label("同步云端线路", systemImage: "arrow.clockwise.icloud") }
         Button { appState.setDefaultHomeServer(server) } label: { Label(server.isDefaultHome ? "取消默认首页" : "设为默认首页", systemImage: "house") }
         Divider()
@@ -424,56 +392,44 @@ public struct ServerContextMenuItems: View {
             appState.updateServerInList(updated)
             appState.showToast("已切换图标", icon: "photo")
         } label: { Label("切换图标", systemImage: "photo") }
-        #if canImport(DonbyUHDModule)
-        if uhdModule.isActive(for: server) && !server.accessToken.isEmpty {
-            Button {
-                Task { await uhdModule.logoutServer(server, appState: appState) }
-            } label: { Label("退出登录", systemImage: "rectangle.portrait.and.arrow.right") }
+        if let plugin = extCenter.plugin {
+            plugin.makeServerLogoutMenuItem(server: server)
         }
-        #endif
         Button(role: .destructive) { appState.deleteServer(server) } label: { Label("删除", systemImage: "trash") }
     }
 }
 
-// MARK: - Line Picker Sheet (Core Donby + Optional UHD Speed Test Extension)
+// MARK: - Line Picker Sheet (Core Donby + Optional Extension Slot)
 
 public struct ServerLinePickSheet: View {
     @EnvironmentObject private var appState: AppState
+    @ObservedObject private var extCenter = DonbyAppExtensionCenter.shared
     @Environment(\.dismiss) private var dismiss
     public let serverId: UUID
 
-    private enum SheetTab: String, CaseIterable, Identifiable {
-        case lines = "线路"
-        case account = "账户"
-        var id: String { rawValue }
-    }
-
-    @State private var activeTab: SheetTab = .lines
-    #if canImport(DonbyUHDModule)
-    @ObservedObject private var uhdModule = UHDModuleManager.shared
-    @StateObject private var speedModel = UHDSpeedTestSessionModel()
-    #endif
-
     private var server: EmbyServerConfig? { appState.servers.first(where: { $0.id == serverId }) }
-
-    private var isUHDExtensionActive: Bool {
-        #if canImport(DonbyUHDModule)
-        return uhdModule.isActive(for: server)
-        #else
-        return false
-        #endif
-    }
 
     public init(serverId: UUID) { self.serverId = serverId }
 
     public var body: some View {
+        if let server,
+           let ext = extCenter.plugin,
+           ext.isActive(for: server),
+           let customView = ext.makeCustomLineSwitchView(serverId: serverId, onDismiss: { dismiss() }) {
+            customView
+        } else {
+            standardLineSwitchBody
+        }
+    }
+
+    private var standardLineSwitchBody: some View {
         VStack(alignment: .leading, spacing: 14) {
             if let server {
                 HStack(spacing: 12) {
                     ServerIconView(server: server, size: 34)
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(isUHDExtensionActive ? "线路与测速" : "切换线路")
+                        Text("切换线路")
                             .font(.system(size: 16, weight: .bold))
                             .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                         Text("\(server.name) · 当前：\(server.activeLineName)")
@@ -484,26 +440,7 @@ public struct ServerLinePickSheet: View {
 
                     Spacer()
 
-                    if isUHDExtensionActive {
-                        DonbySegmentedControl(
-                            options: SheetTab.allCases,
-                            selection: $activeTab,
-                            isLightMode: appState.isLightMode,
-                            accentColor: appState.accentColor,
-                            accentTextColor: appState.accentTextColor,
-                            fontSize: 12,
-                            horizontalPadding: 14,
-                            verticalPadding: 5,
-                            title: { $0.rawValue }
-                        )
-                    }
-
-                    ToolbarVectorButton(tooltip: "关闭", action: {
-                        #if canImport(DonbyUHDModule)
-                        speedModel.cancel()
-                        #endif
-                        dismiss()
-                    }) { hovered in
+                    ToolbarVectorButton(tooltip: "关闭", action: { dismiss() }) { hovered in
                         let iconCol = appState.isLightMode ? (hovered ? Color.black : Color(white: 0.35)) : (hovered ? .white : Color(white: 0.72))
                         Image(systemName: "xmark")
                             .font(.system(size: 12, weight: .bold))
@@ -513,80 +450,46 @@ public struct ServerLinePickSheet: View {
 
                 Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
 
-                #if canImport(DonbyUHDModule)
-                if isUHDExtensionActive && activeTab == .account {
-                    UHDAccountDashboardContent(server: server, showRouteSwitchAction: false, onDismiss: { dismiss() })
-                } else {
-                    linesBody(server: server)
-                }
-                #else
                 linesBody(server: server)
-                #endif
             }
         }
         .padding(22)
-        .frame(width: isUHDExtensionActive ? 610 : 540)
+        .frame(width: 540)
         .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
         )
-        .onDisappear {
-            #if canImport(DonbyUHDModule)
-            speedModel.cancel()
-            #endif
-        }
     }
 
     @ViewBuilder
     private func linesBody(server: EmbyServerConfig) -> some View {
-        #if canImport(DonbyUHDModule)
-        if isUHDExtensionActive {
-            UHDCapabilitySummaryStrip(server: server)
-        }
-        #endif
-
-        let rowCount = (isUHDExtensionActive && !server.backupLines.isEmpty) ? server.backupLines.count : (1 + server.backupLines.count)
+        let rowCount = 1 + server.backupLines.count
         let listHeight = min(max(CGFloat(rowCount) * 60, 124), 260)
 
         ScrollView {
             VStack(spacing: 8) {
-                if !isUHDExtensionActive || server.backupLines.isEmpty {
-                    ServerLineOptionRow(
-                        title: "默认主线路",
-                        url: ServerLineInfo(name: "默认主线路", url: server.mainLineURL).cleanDisplayHost,
-                        lastSpeedMbps: nil,
-                        isSelected: server.selectedLineId == nil,
-                        isTesting: false,
-                        onRunSpeedTest: nil
-                    ) {
-                        appState.switchLineImmediate(to: nil, for: server.id)
-                        dismiss()
-                    }
+                ServerLineOptionRow(
+                    title: "默认主线路",
+                    url: ServerLineInfo(name: "默认主线路", url: server.mainLineURL).cleanDisplayHost,
+                    lastSpeedMbps: nil,
+                    isSelected: server.selectedLineId == nil,
+                    isTesting: false,
+                    onRunSpeedTest: nil
+                ) {
+                    appState.switchLineImmediate(to: nil, for: server.id)
+                    dismiss()
                 }
 
                 ForEach(server.backupLines) { line in
-                    #if canImport(DonbyUHDModule)
-                    let canSpeedTest = isUHDExtensionActive && (line.domainId?.isEmpty == false)
-                    let isTestingLine = speedModel.isSpeedTesting && speedModel.testingDomainId == line.domainId
-                    let speedAction: (() -> Void)? = canSpeedTest ? {
-                        if let did = line.domainId, !speedModel.isSpeedTesting {
-                            speedModel.launchSingle(server: server, domainId: did, appState: appState)
-                        }
-                    } : nil
-                    #else
-                    let isTestingLine = false
-                    let speedAction: (() -> Void)? = nil
-                    #endif
-
                     ServerLineOptionRow(
                         title: line.cleanDisplayName,
                         url: line.cleanDisplayHost,
                         lastSpeedMbps: line.lastSpeedMbps,
                         isSelected: server.selectedLineId == line.id,
-                        isTesting: isTestingLine,
-                        onRunSpeedTest: speedAction
+                        isTesting: false,
+                        onRunSpeedTest: nil
                     ) {
                         appState.switchLineImmediate(to: line.id, for: server.id)
                         dismiss()
@@ -596,12 +499,6 @@ public struct ServerLinePickSheet: View {
             .padding(.vertical, 2)
         }
         .frame(height: listHeight)
-
-        #if canImport(DonbyUHDModule)
-        if isUHDExtensionActive {
-            UHDSpeedTestConsoleView(model: speedModel, server: server)
-        }
-        #endif
 
         Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
 
@@ -627,18 +524,9 @@ public struct ServerLinePickSheet: View {
             }
             .buttonStyle(.plain)
 
-            #if canImport(DonbyUHDModule)
-            if isUHDExtensionActive {
-                UHDProxyRulesPopoverButton()
-            }
-            #endif
-
             Spacer()
 
             Button {
-                #if canImport(DonbyUHDModule)
-                speedModel.cancel()
-                #endif
                 dismiss()
             } label: {
                 Text("完成")
@@ -652,15 +540,10 @@ public struct ServerLinePickSheet: View {
             }
             .buttonStyle(.plain)
         }
-        .task(id: server.id) {
-            if isUHDExtensionActive {
-                await appState.refreshServerCapabilities(for: server)
-            }
-        }
     }
 }
 
-private struct ServerLineOptionRow: View {
+struct ServerLineOptionRow: View {
     @EnvironmentObject private var appState: AppState
     let title: String
     let url: String
@@ -776,9 +659,7 @@ private struct ServerLineOptionRow: View {
 
 public struct ServerConfigSheet: View {
     @EnvironmentObject private var appState: AppState
-    #if canImport(DonbyUHDModule)
-    @ObservedObject private var uhdModule = UHDModuleManager.shared
-    #endif
+    @ObservedObject private var extCenter = DonbyAppExtensionCenter.shared
     @Environment(\.dismiss) private var dismiss
 
     private enum UHDAuthMode: String, CaseIterable, Identifiable {
@@ -805,11 +686,7 @@ public struct ServerConfigSheet: View {
     @State private var errorMessage: String? = nil
 
     private var isUHDEnabled: Bool {
-        #if canImport(DonbyUHDModule)
-        return uhdModule.isEnabled
-        #else
-        return false
-        #endif
+        extCenter.isEnabled
     }
 
     private var primaryTypes: [ServerType] {
@@ -855,16 +732,10 @@ public struct ServerConfigSheet: View {
         self._isEditingExisting = State(initialValue: editing)
         self._portText = State(initialValue: initial.port > 0 ? "\(initial.port)" : (initial.isHttps ? "443" : "80"))
 
-        #if canImport(DonbyUHDModule)
-        if initial.type == .uhdNative {
-            let hostLower = initial.host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if !hostLower.isEmpty
-                && hostLower != UHDModuleEndpoints.primaryChinaOptimizedHost
-                && hostLower != UHDModuleEndpoints.fallbackStandardHost {
-                self._uhdCustomEndpoint = State(initialValue: initial.mainLineURL)
-            }
+        if let extEndpoint = DonbyAppExtensionCenter.shared.plugin?.initialCustomEndpoint(for: initial),
+           !extEndpoint.isEmpty {
+            self._uhdCustomEndpoint = State(initialValue: extEndpoint)
         }
-        #endif
 
         if initial.type == .uhdNative && initial.password.isEmpty && !initial.accessToken.isEmpty && initial.username.isEmpty {
             self._uhdAuthMode = State(initialValue: .apiKey)
@@ -1149,21 +1020,11 @@ public struct ServerConfigSheet: View {
             HStack(spacing: 10) {
                 if isEditingExisting {
                     Button("仅保存") {
-                        #if canImport(DonbyUHDModule)
-                        if draft.type == .uhdNative {
-                            let custom = uhdCustomEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if !custom.isEmpty {
-                                let parsed = UHDModuleEndpoints.parseEndpointComponents(from: custom)
-                                draft.host = parsed.host
-                                draft.isHttps = parsed.isHttps
-                                draft.port = parsed.port
-                            }
+                        if draft.type == .uhdNative, let ext = extCenter.plugin {
+                            ext.applyCustomEndpointOnSaveOnly(uhdCustomEndpoint, to: &draft)
                         } else {
                             syncPortFromText()
                         }
-                        #else
-                        syncPortFromText()
-                        #endif
                         if draft.name.isEmpty { draft.name = draft.type == .uhdNative ? "UHDNow" : draft.host }
                         appState.updateServerInList(draft)
                         appState.showToast("已保存 \(draft.name)", icon: "checkmark.circle.fill")
@@ -1264,10 +1125,10 @@ public struct ServerConfigSheet: View {
                     .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                     .overlay(fieldBorder)
                     .onChange(of: uhdLoginCode) { _, next in
-                        #if canImport(DonbyUHDModule)
-                        let formatted = UHDLoginCodeNormalizer.formattedDisplay(next)
-                        if formatted != next { uhdLoginCode = formatted }
-                        #endif
+                        if let ext = extCenter.plugin {
+                            let formatted = ext.formatLoginCodeDisplay(next)
+                            if formatted != next { uhdLoginCode = formatted }
+                        }
                     }
                 Text("在网页后台「概览 → 设备 → 登录码」生成，3 分钟有效")
                     .font(.system(size: 11))
@@ -1447,11 +1308,7 @@ public struct ServerConfigSheet: View {
                 return !draft.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     && !draft.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             case .loginCode:
-                #if canImport(DonbyUHDModule)
-                return UHDLoginCodeNormalizer.normalize(uhdLoginCode) != nil
-                #else
-                return false
-                #endif
+                return extCenter.plugin?.isValidLoginCode(uhdLoginCode) ?? false
             case .apiKey:
                 return !draft.accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }

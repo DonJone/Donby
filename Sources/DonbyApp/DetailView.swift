@@ -2,9 +2,6 @@ import SwiftUI
 import AppKit
 import DonbyCore
 import DonbyNetwork
-#if canImport(DonbyUHDModule)
-import DonbyUHDModule
-#endif
 import DonbyKernelC
 
 public struct DetailView: View {
@@ -145,10 +142,11 @@ public struct DetailView: View {
             EpisodeInfoSheet(episode: ep, isLightMode: appState.isLightMode)
         }
         .sheet(isPresented: $showWatchPartyCreateSheet) {
-            #if canImport(DonbyUHDModule)
-            if let srv = effectiveDetailServer, UHDModuleManager.shared.isActive(for: srv) {
+            if let srv = effectiveDetailServer,
+               let ext = DonbyAppExtensionCenter.shared.plugin,
+               ext.isActive(for: srv) {
                 let target = heroResolvedPlayTarget
-                UHDWatchPartyCreateSheet(
+                ext.makeDetailWatchPartyCreateSheet(
                     server: srv,
                     item: target,
                     preferredSourceId: target.id == item.id && !selectedSourceId.isEmpty ? selectedSourceId : nil
@@ -156,7 +154,6 @@ public struct DetailView: View {
                 .environmentObject(appState)
                 .preferredColorScheme(appState.colorScheme)
             }
-            #endif
         }
         .onChange(of: selectedSourceId) { _, _ in
             syncStreamsForSelectedSource()
@@ -350,15 +347,13 @@ public struct DetailView: View {
                         } label: {
                             Label("切换线路 (\(server.activeLineName))", systemImage: "arrow.triangle.swap")
                         }
-                        #if canImport(DonbyUHDModule)
-                        if UHDModuleManager.shared.isActive(for: server) {
+                        if DonbyAppExtensionCenter.shared.isActive(for: server) {
                             Button {
                                 showWatchPartyCreateSheet = true
                             } label: {
                                 Label("发起同看", systemImage: "person.2.wave.2")
                             }
                         }
-                        #endif
                     }
 
                     Button {
@@ -577,8 +572,7 @@ public struct DetailView: View {
 
                                 detailDownloadButton
 
-                                #if canImport(DonbyUHDModule)
-                                if UHDModuleManager.shared.isActive(for: effectiveDetailServer) {
+                                if DonbyAppExtensionCenter.shared.isActive(for: effectiveDetailServer) {
                                     LiquidGlassCircleButton(
                                         systemImage: "person.2.wave.2",
                                         size: 38,
@@ -587,7 +581,6 @@ public struct DetailView: View {
                                         showWatchPartyCreateSheet = true
                                     }
                                 }
-                                #endif
                             }
 
                             // Main Wide Frosted Capsule Play Button (as in better1.png)
@@ -1386,19 +1379,11 @@ public struct DetailView: View {
                 LazyHStack(alignment: .top, spacing: 18) {
                     ForEach(people.prefix(20)) { person in
                         let subtitle = Self.localizedPersonSubtitle(for: person)
-                        let canOpenPerson: Bool = {
-                            #if canImport(DonbyUHDModule)
-                            return UHDModuleManager.shared.isActive(for: effectiveDetailServer)
-                            #else
-                            return false
-                            #endif
-                        }()
+                        let canOpenPerson = DonbyAppExtensionCenter.shared.isActive(for: effectiveDetailServer)
                         Button {
-                            #if canImport(DonbyUHDModule)
-                            if let srv = effectiveDetailServer, UHDModuleManager.shared.isActive(for: srv) {
-                                UHDModuleManager.shared.activePersonSheet = UHDPersonSheetTarget(server: srv, person: person)
+                            if let srv = effectiveDetailServer {
+                                DonbyAppExtensionCenter.shared.plugin?.openPersonSheet(server: srv, person: person)
                             }
-                            #endif
                         } label: {
                             VStack(spacing: 8) {
                                 PersonAvatarView(
@@ -1667,40 +1652,20 @@ public struct DetailView: View {
 
         let targetSeriesId: String? = initialItem.isSeries ? initialItem.id : (initialItem.isEpisode ? initialItem.seriesId : nil)
 
-        #if canImport(DonbyUHDModule)
-        if UHDModuleManager.shared.isActive(for: server) {
-            async let detailTask = try? UHDStreamClient.shared.fetchItemDetail(server: server, item: initialItem)
-            let creditMediaId = initialItem.isEpisode ? (initialItem.seriesId ?? initialItem.id) : initialItem.id
-            async let creditsTask = try? UHDStreamClient.shared.fetchCredits(server: server, mediaId: creditMediaId)
-            async let assetsTask: [MediaSourceInfo]? = {
-                guard !initialItem.isSeries else { return nil }
-                return try? await UHDStreamClient.shared.fetchAssetMediaSources(server: server, item: initialItem)
-            }()
-            async let seasonsTask: [EmbyItem]? = {
-                guard let sid = targetSeriesId, !sid.isEmpty else { return nil }
-                return try? await UHDStreamClient.shared.fetchSeasons(server: server, tvId: sid)
-            }()
-            async let tvPlaybackStateTask: UHDTVPlaybackState? = {
-                guard let sid = targetSeriesId, !sid.isEmpty else { return nil }
-                return try? await UHDStreamClient.shared.fetchTVPlaybackState(server: server, tvId: sid)
-            }()
-
-            if let detailed = await detailTask {
-                guard !Task.isCancelled else { return }
-                let loadedSources = await assetsTask
-                let loadedPeople = await creditsTask
-                self.item = detailed.withDetailEnrichment(mediaSources: loadedSources, people: loadedPeople)
-            }
+        if let ext = DonbyAppExtensionCenter.shared.plugin, ext.isActive(for: server) {
+            let payload = await ext.loadDetailPayload(server: server, initialItem: initialItem, targetSeriesId: targetSeriesId)
             guard !Task.isCancelled else { return }
+            if let enriched = payload.enrichedItem {
+                self.item = enriched
+            }
             syncDefaultTracks()
 
-            let tvPlaybackState = await tvPlaybackStateTask
-            if let preloadedSeasons = await seasonsTask, !preloadedSeasons.isEmpty {
+            if let preloadedSeasons = payload.seasons, !preloadedSeasons.isEmpty {
                 self.seasons = preloadedSeasons
                 if !userDidPickEpisodeLocally,
                    !initialItem.isEpisode,
                    appState.detailFocusedEpisode(forSeriesKey: detailSeriesKey) == nil,
-                   let prefEp = tvPlaybackState?.preferredEpisode,
+                   let prefEp = payload.preferredEpisode,
                    let matchedSeason = preloadedSeasons.first(where: { $0.id == prefEp.seasonId || $0.indexNumber == prefEp.seasonNumber }) {
                     await loadEpisodesForSeason(
                         matchedSeason,
@@ -1714,7 +1679,6 @@ public struct DetailView: View {
             self.similarItems = []
             return
         }
-        #endif
 
         async let detailTask = try? EmbyClient.shared.fetchItemDetail(server: server, itemId: initialItem.id)
         async let similarTask = try? EmbyClient.shared.fetchSimilarItems(server: server, itemId: initialItem.id)

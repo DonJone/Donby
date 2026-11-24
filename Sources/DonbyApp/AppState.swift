@@ -4,9 +4,6 @@ import Combine
 import AppKit
 import DonbyCore
 import DonbyNetwork
-#if canImport(DonbyUHDModule)
-import DonbyUHDModule
-#endif
 import DonbyKernelC
 import DonbyMetalRenderer
 
@@ -293,12 +290,9 @@ public final class AppState: ObservableObject {
         var seen = Set<String>()
         var result: [EmbyItem] = []
         var sources = [carouselItems, resumeItems, nextUpItems, favoriteItems] + Array(latestByLibrary.values)
-        #if canImport(DonbyUHDModule)
-        if UHDModuleManager.shared.isEnabled {
-            sources.append(UHDModuleManager.shared.hotItems)
-            sources.append(UHDModuleManager.shared.animeHotItems)
+        if let extLists = DonbyAppExtensionCenter.shared.plugin?.extraHomeItemLists() {
+            sources.append(contentsOf: extLists)
         }
-        #endif
         for list in sources {
             for item in list where !seen.contains(item.id) {
                 seen.insert(item.id)
@@ -333,9 +327,7 @@ public final class AppState: ObservableObject {
 
     public init() {
         AppState.sharedInstance = self
-        #if canImport(DonbyUHDModule)
-        _ = UHDModuleManager.shared
-        #endif
+        DonbyAppExtensionCenter.shared.installCompiledExtensionsIfNeeded()
         self.isSidebarCollapsed = UserDefaults.standard.bool(forKey: "donby.defaultSidebarCollapsed")
         self.searchHistory = UserDefaults.standard.stringArray(forKey: searchHistoryStorageKey) ?? []
         isLoadingFromDisk = true
@@ -1046,9 +1038,7 @@ public final class AppState: ObservableObject {
             embyInlineSearchLastServerId = nil
             embyInlineSearchLastFetchedQuery = ""
             librarySearchQueryById.removeAll()
-            #if canImport(DonbyUHDModule)
-            UHDModuleManager.shared.resetHomeShelves()
-            #endif
+            DonbyAppExtensionCenter.shared.plugin?.resetHomeShelves()
         }
 
         // Instantaneous switch from memory/disk snapshot
@@ -1245,18 +1235,16 @@ public final class AppState: ObservableObject {
         let hasUsername = !server.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         var usedChinaOptimizedLine = false
 
-        if isUsingUHDExtension(for: server) {
-            #if canImport(DonbyUHDModule)
-            let result = try await UHDModuleManager.shared.authenticateAndConfigureServer(
+        if isUsingUHDExtension(for: server), let ext = DonbyAppExtensionCenter.shared.plugin {
+            let result = try await ext.authenticateAndConfigureServer(
                 draft: server,
-                uhdLoginCode: uhdLoginCode,
+                loginCode: uhdLoginCode,
                 customEndpointOverride: customEndpointOverride,
                 autoSyncDomains: autoSyncDomains,
                 appState: self
             )
             server = result.server
             usedChinaOptimizedLine = result.usedChinaOptimizedLine
-            #endif
         } else {
             if hasUsername && hasPassword {
                 let auth = try await EmbyClient.shared.authenticate(
@@ -1332,11 +1320,7 @@ public final class AppState: ObservableObject {
     }
 
     public func isUsingUHDExtension(for server: EmbyServerConfig) -> Bool {
-        #if canImport(DonbyUHDModule)
-        return UHDModuleManager.shared.isActive(for: server)
-        #else
-        return false
-        #endif
+        DonbyAppExtensionCenter.shared.isActive(for: server)
     }
 
     /// Seamlessly transitions active server views between UHD extension mode and standard Emby mode
@@ -1373,10 +1357,8 @@ public final class AppState: ObservableObject {
             isSyncingDomains = activeSyncDomainsCount > 0
         }
 
-        if isUsingUHDExtension(for: server) {
-            #if canImport(DonbyUHDModule)
-            await UHDModuleManager.shared.syncPlaybackDomains(for: serverId, appState: self, showFeedback: showFeedback)
-            #endif
+        if isUsingUHDExtension(for: server), let ext = DonbyAppExtensionCenter.shared.plugin {
+            await ext.syncPlaybackDomains(for: serverId, appState: self, showFeedback: showFeedback)
             return
         }
 
@@ -1509,14 +1491,12 @@ public final class AppState: ObservableObject {
             Task { await EmbyClient.shared.prewarmConnection(server: server) }
         }
 
-        if isUsingUHDExtension(for: server) {
-            #if canImport(DonbyUHDModule)
-            await UHDModuleManager.shared.loadHomeContent(
+        if isUsingUHDExtension(for: server), let ext = DonbyAppExtensionCenter.shared.plugin {
+            await ext.loadHomeContent(
                 for: server,
                 appState: self,
                 isCurrentGeneration: { [weak self] in self?.homeLoadGeneration == currentGen }
             )
-            #endif
             return
         }
 
@@ -1855,16 +1835,12 @@ public final class AppState: ObservableObject {
                         resolvedQueue = allOfflineEps
                         targetItem = allOfflineEps.first(where: { !isItemWatchedOfflineOrLocal($0) }) ?? allOfflineEps[0]
                     }
-                } else if isUsingUHDExtension(for: server) {
-                    #if canImport(DonbyUHDModule)
-                    let uhdRes = try await UHDModuleManager.shared.resolveSeriesStartEpisode(server: server, seriesItem: item)
-                    eps = uhdRes.episodes
-                    if let exact = uhdRes.preferredTarget {
+                } else if isUsingUHDExtension(for: server), let ext = DonbyAppExtensionCenter.shared.plugin {
+                    let extRes = try await ext.resolveSeriesStartEpisode(server: server, seriesItem: item)
+                    eps = extRes.episodes
+                    if let exact = extRes.preferredTarget {
                         targetItem = exact
                     }
-                    #else
-                    eps = []
-                    #endif
                 } else {
                     eps = try await EmbyClient.shared.fetchEpisodes(server: server, seriesId: item.id)
                 }
@@ -2274,10 +2250,8 @@ public final class AppState: ObservableObject {
 
     public func refreshServerCapabilities(for server: EmbyServerConfig) async {
         guard !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        if isUsingUHDExtension(for: server) {
-            #if canImport(DonbyUHDModule)
-            await UHDModuleManager.shared.refreshAccountSnapshot(for: server, appState: self)
-            #endif
+        if isUsingUHDExtension(for: server), let ext = DonbyAppExtensionCenter.shared.plugin {
+            await ext.refreshAccountSnapshot(for: server, appState: self)
         } else {
             let allowDl = await EmbyClient.shared.fetchUserDownloadPermission(server: server)
             serverCapabilities[server.id] = ServerDeliveryCapabilities(allowDownload: allowDl)

@@ -278,9 +278,7 @@ public struct SettingsView: View {
                 Toggle("显示媒体规格统计", isOn: $appState.displayMediaStatistics)
             }
 
-            #if canImport(DonbyUHDModule)
-            UHDSettingsModuleCard()
-            #endif
+            DonbyExtensionSettingsCard()
         }
     }
 

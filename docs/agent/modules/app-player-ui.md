@@ -1,6 +1,6 @@
 # Module Map: App, Player HUD & Native UI (`DonbyApp`)
 
-> Last synced: `v1.4.38`. Load this doc for `PlayerView`, `AppState`, `DetailView`, 120Hz native collection views, artwork caching, Liquid Glass UI (`DonbySegmentedControl`, `DonbyCheckboxToggleStyle`, `DonbySwitchToggleStyle`, `DonbySlider`, `donbyFlatTextField`), optional `Modules/UHD/` plugin UI, and module views.
+> Last synced: `v2.0.1`. Load this doc for `PlayerView`, `AppState`, `DetailView`, 120Hz native collection views, artwork caching, Liquid Glass UI (`DonbySegmentedControl`, `DonbyCheckboxToggleStyle`, `DonbySwitchToggleStyle`, `DonbySlider`, `donbyFlatTextField`), `DonbyAppExtensionCenter` plugin slots (`Modules/UHD/`), and module views.
 
 ## 1. File Inventory & Core Symbols
 - **App Entry & Global State**:
@@ -18,7 +18,7 @@
 - **Feature Views**:
   - `DetailView.swift` (~2081L — `heroHeaderSection`, viewport-pinned `floatingTopNavBar`, `DetailScrollViewTopInsetFix`), `EmbyMainView.swift` (~907L), `MainCarouselView.swift` (~398L — `TrackpadHorizontalSwipeDetector`), `ServerViews.swift` (~997L), `LogViewerSheet.swift` (~345L).
   - `Views/DownloadsView.swift` (~954L), `Views/FilesModuleView.swift` (~1224L), `Views/GlobalSearchView.swift` (~509L), `Views/IPTVModuleView.swift` (~405L), `Views/RecordsView.swift` (~293L), `Views/SettingsView.swift` (~970L).
-  - **Optional UHD Module UI (`Sources/DonbyApp/Modules/UHD/`, guarded by `#if canImport(DonbyUHDModule)`)**: `UHDModuleManager.swift` (owns all UHD UI state/actions + runtime `isEnabled` / `isActive(for:)` switch), `UHDAppHooks.swift` (`donbyUHDModuleSheets()`, toolbar pills, `UHDSettingsModuleCard`), `UHDAccountDashboardView.swift`, `UHDSpeedTestPanelView.swift`, `UHDDiscoverySheets.swift`, `UHDWatchPartyAndDanmuViews.swift` (`DanmuSpriteHostView` WindowServer GPU `CATextLayer` + `CABasicAnimation` renderer).
+  - **Extension Architecture (`Sources/DonbyApp/Extensions/DonbyAppExtension.swift` + `Sources/DonbyApp/Modules/UHD/`)**: Core `DonbyApp` files contain **zero** direct `DonbyUHDModule` imports; `DonbyAppExtensionCenter.installCompiledExtensionsIfNeeded()` is the single compile-time bootstrap seam (`#if canImport(DonbyUHDModule) && !DONBY_PURE_BUILD`). `UHDAppExtensionPlugin` (`UHDAppHooks.swift`) implements `DonbyAppUIExtensionPlugin` and `UHDPlayerCompanionController` (`DonbyPlayerCompanion`) alongside `UHDModuleManager.swift`, `UHDAccountDashboardView.swift`, `UHDSpeedTestPanelView.swift`, `UHDDiscoverySheets.swift`, and `UHDWatchPartyAndDanmuViews.swift`.
 
 ## 2. Key Player UX State Machine (`PlayerView.swift`)
 - **Startup Loading Pill**: Remains visible until `DKMetalVideoView.onFirstFrameRendered` sets `hasRenderedFirstFrame = true` (prevents black-screen flicker between `dk_open` and first presented frame).
