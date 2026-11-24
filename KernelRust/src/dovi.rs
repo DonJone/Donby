@@ -2,25 +2,27 @@ use crate::abi::DKGpuColorUniforms;
 
 /// Detects HEVC NAL unit type 63 (Dolby Vision EL / FEL) in Annex-B byte streams.
 pub fn check_dovi_fel(data: &[u8]) -> bool {
+    scan_hevc_nal(data, |t| t == 63)
+}
+
+/// Detects HEVC NAL unit type 62 (RPU) or 63 (EL) in Annex-B packets.
+pub fn check_dovi_rpu_or_el(data: &[u8]) -> bool {
+    scan_hevc_nal(data, |t| t == 62 || t == 63)
+}
+
+fn scan_hevc_nal(data: &[u8], pred: impl Fn(u8) -> bool) -> bool {
     let n = data.len();
-    if n < 5 {
+    if n < 4 {
         return false;
     }
     let mut i = 0usize;
-    while i + 4 < n {
-        let hdr_idx = if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
-            Some(i + 3)
-        } else if i + 5 < n && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1 {
-            Some(i + 4)
-        } else {
-            None
-        };
-        if let Some(h) = hdr_idx {
-            let nal_type = (data[h] >> 1) & 0x3F;
-            if nal_type == 63 {
+    while i + 3 < n {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            let nal_type = (data[i + 3] >> 1) & 0x3F;
+            if pred(nal_type) {
                 return true;
             }
-            i = h + 1;
+            i += 4;
         } else {
             i += 1;
         }
@@ -48,7 +50,6 @@ pub fn pq_norm_to_nits(e: f64) -> f32 {
 impl DKGpuColorUniforms {
     /// Standard BT.709 limited-range SDR defaults matching Metal shader expectations.
     pub fn default_sdr() -> Self {
-        // SAFETY: All fields are f32/i32 arrays; zero-init then populate active matrices.
         let mut u: Self = unsafe { std::mem::zeroed() };
         u.transfer_fn = 0;
         u.primaries = 0;
@@ -57,11 +58,9 @@ impl DKGpuColorUniforms {
         u.source_peak_nits = 203.0;
         u.edr_headroom = 1.0;
         u.ycc_offset = [16.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
-        // BT.709 studio-swing YCbCr -> RGB
         u.yuv_matrix_r0 = [1.1643836, 0.0, 1.7927411, 0.0];
         u.yuv_matrix_r1 = [1.1643836, -0.2132486, -0.5329093, 0.0];
         u.yuv_matrix_r2 = [1.1643836, 2.1124018, 0.0, 0.0];
-        // Identity post-EOTF matrix
         u.lin_matrix_r0 = [1.0, 0.0, 0.0, 0.0];
         u.lin_matrix_r1 = [0.0, 1.0, 0.0, 0.0];
         u.lin_matrix_r2 = [0.0, 0.0, 1.0, 0.0];
@@ -74,24 +73,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_hevc_nal_63_dovi_el_and_ignores_regular_slices() {
-        // NAL type 1 (TRAIL_R): (1 << 1) = 0x02
+    fn detects_hevc_nal_62_and_63() {
         let normal = [0x00, 0x00, 0x00, 0x01, 0x02, 0x01, 0xAA, 0xBB];
         assert!(!check_dovi_fel(&normal));
+        assert!(!check_dovi_rpu_or_el(&normal));
 
-        // NAL type 62 (RPU = 0x7C) only -> not FEL
         let rpu_only = [0x00, 0x00, 0x01, 0x7C, 0x01, 0x55];
         assert!(!check_dovi_fel(&rpu_only));
+        assert!(check_dovi_rpu_or_el(&rpu_only));
 
-        // NAL type 63 (EL = 0x7E) -> FEL/EL present
         let with_el = [0x00, 0x00, 0x00, 0x01, 0x7E, 0x01, 0x99];
         assert!(check_dovi_fel(&with_el));
+        assert!(check_dovi_rpu_or_el(&with_el));
     }
 
     #[test]
     fn pq_eotf_reference_anchors_are_accurate() {
         assert_eq!(pq_norm_to_nits(0.0), 0.0);
-        let mid = pq_norm_to_nits(0.50807842); // ~100 nits reference white
+        let mid = pq_norm_to_nits(0.50807842);
         assert!((mid - 100.0).abs() < 0.5, "got {mid}");
         let peak = pq_norm_to_nits(1.0);
         assert!((peak - 10000.0).abs() < 1.0, "got {peak}");

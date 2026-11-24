@@ -40,15 +40,15 @@
 
 ## 6. Quick Commands
 ```bash
-# L1 Fast incremental Swift + C++20 (-O3) debug check (~1.3s incremental)
+# L1 Fast incremental KernelRust (-O3) + C11 shim + Swift debug check (~1.3s warm)
 ./scripts/dev.sh build
 
-# L2 Core unit tests (isolated DONBY_HOME, ~0.9s warm)
+# L2 Rust kernel + DonbyCore unit tests (isolated DONBY_HOME, ~1.5s warm)
 ./scripts/dev.sh test
 
 # L3 Fast incremental Release build & in-place /Applications/Donby.app install (~3-5s incremental)
 ./build_app.sh
 
-# Standalone C++ static lib (only needed for standalone C++ harnesses like tmp/test_pair_a.cpp; mtime-cached)
+# Build KernelRust staticlib only (build_kernel/libdonby_kernel.a; content-hash cached)
 ./build_kernel.sh
 ```

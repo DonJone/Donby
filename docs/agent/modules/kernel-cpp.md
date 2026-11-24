@@ -1,19 +1,22 @@
 # Module Map: Playback Kernel (`KernelRust` + `DonbyKernelC` ABI)
 
-> Last synced: `feat/rust-kernel` Phase 0 (C++20 baseline archived on branch `legacy/cpp-kernel` @ `v1.4.38`). Read [../decisions/003-rust-kernel-migration.md](../decisions/003-rust-kernel-migration.md) for the active 4-phase Rust migration plan. Load this doc for FFmpeg demuxing, VideoToolbox decoding, AudioQueue A/V sync, seek flush, rebuffer cushions, and libass/PGS subtitles.
+> Last synced: `feat/rust-kernel` Phases 0-3 Complete (C++20 baseline archived on branch `legacy/cpp-kernel` @ `v1.4.38`). Read [../decisions/003-rust-kernel-migration.md](../decisions/003-rust-kernel-migration.md) for the Rust migration architecture. Load this doc for FFmpeg demuxing, VideoToolbox decoding, AudioQueue A/V sync, seek flush, rebuffer cushions, and libass/PGS subtitles.
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyKernelC/include/donby_kernel.h` (~204L, **FROZEN C ABI**)
   - Public C ABI bridging Swift <-> Rust: `dk_player_create/destroy`, `dk_player_open_with_tracks`, `dk_player_set_custom_io`, `dk_player_play/pause/seek`, `dk_player_acquire_frame`, `dk_player_sync_subtitle_rgba`, `dk_player_should_yield_read`, subtitle/track setters, telemetry getters, plus VAD/alignment bridges (`DKSubtitleInterval`, `dk_player_copy_recent_audio_16k`, `dk_player_get_subtitle_intervals`, `dk_player_set_secondary_subtitle_time_scale`, `dk_player_get_secondary_subtitle_time_scale`).
 - `Sources/DonbyKernelC/dk_ffi_shim.c` (pure C11, zero C++)
-  - Compile-time `_Static_assert`s locking `donby_kernel.h` struct sizes to `KernelRust/src/abi.rs`, `vsnprintf` variadic `av_log` callback bridge, and field-offset-safe C accessors for non-opaque FFmpeg/`libass` structs.
+  - Compile-time `_Static_assert`s locking `donby_kernel.h` struct sizes to `KernelRust/src/abi.rs`, `vsnprintf` variadic `av_log` callback bridge, VideoToolbox + `IOSurface` `CVPixelBufferPool` (`NV12`/`P010`) + HDR10/DoVi RPU `DKGpuColorUniforms` builder, `SwrContext` + `AudioQueue` C wrappers, and field-offset-safe C accessors for non-opaque FFmpeg/`libass` structs.
 - `KernelRust/` (`donby_kernel_rs`, zero external Cargo dependencies, outputs `build_kernel/libdonby_kernel.a`)
   - `src/abi.rs` — `#[repr(C)]` structs/enums + `offset_of!` tests matching `donby_kernel.h`.
-  - `src/dovi.rs` — HEVC NAL 63 FEL detector, PQ EOTF, SDR/HDR/DoVi `DKGpuColorUniforms` builder.
+  - `src/ffi.rs` — `extern "C"` bindings for `dk_ffi_shim.c` & `libass` + RAII `Drop` wrappers (`AvPacket`, `AvFrame`, `OwnedPixelBuffer`).
+  - `src/dovi.rs` — HEVC NAL 62/63 RPU & FEL scanners, PQ EOTF, default SDR `DKGpuColorUniforms`.
   - `src/vad.rs` — `VadAudioRing` (`60s @ 16kHz` mono 3:1 center-weighted decimator).
-  - `src/lib.rs` (+ upcoming `ffi.rs`, `demux.rs`, `video.rs`, `audio.rs`, `subtitle.rs` per ADR-003) — `DKPlayer` state and all 37 `#[no_mangle] pub unsafe extern "C" fn dk_*` entrypoints.
+  - `src/clock.rs` — Monotonic nanosecond clock helpers, lock-free `ClockState`, smoothed `SpeedTracker`.
+  - `src/subtitle.rs` — `libass` primary/secondary/paired renderers, ASS-tag-preserving `CFStringTransform`, PGS HDR/orange-gold compositor, and Pair-A Cinema Semantic Bilingual Engine.
+  - `src/lib.rs` — `DKPlayer`, `LIVE_PLAYERS` + `ReaderGuard`, demux/video/audio worker threads, `AudioQueue` sync/rebuffer/seek state machine, and all 37 `#[no_mangle] pub unsafe extern "C" fn dk_*` entrypoints.
 - Legacy reference (`git show legacy/cpp-kernel:Sources/DonbyKernelC/dk_engine.cpp`, ~6498L):
-  - Core behavior specifications below MUST be preserved 1:1 during Phases 1-3 of the Rust port:
+  - Archived C++20 baseline preserved on `legacy/cpp-kernel`.
 
 ## 2. Threading, Sync & State Machine
 - **Master Clock**: Driven by `AudioQueue` hardware playback timeline (with monotonic fallback when silent/audio-EOF so video never stalls at audio EOF).
@@ -46,7 +49,7 @@
 3. **Audio EOF Clock Handoff**: When audio reaches EOF before video (common in MKV remuxes), master clock must seamlessly switch to monotonic fallback instead of freezing the final seconds.
 4. **PGS/DVD Subtitle Probe Bypass (`v1.4.2`)**: Before `avformat_find_stream_info`, temporarily set `AVDISCARD_ALL` on subtitle streams and seed `1920x1080` on `0x0` `AV_CODEC_ID_HDMV_PGS_SUBTITLE` / `AV_CODEC_ID_DVD_SUBTITLE` streams, then immediately restore original `discard` and `0x0` dimensions after `avformat_find_stream_info` so FFmpeg never stalls reading 1-2 MiB waiting for a dialogue packet while keeping PGS/DVD decoding intact.
 5. **URL Redaction**: Keep `Opening URL` log redacted (strip host/query/token).
-6. **Single-Compile Kernel (`v1.4.14`)**: SwiftPM compiles `Sources/DonbyKernelC/dk_engine.cpp` directly at `-O3` (both Debug & Release) and caches it incrementally. Only run `./build_kernel.sh` when linking standalone C++ harnesses like `tmp/test_pair_a.cpp`.
+6. **Zero-Crate Staticlib Build**: `./build_kernel.sh` builds `KernelRust` (`opt-level = 3`, `codegen-units = 1`, `panic = "abort"`) into `build_kernel/libdonby_kernel.a` (copied only when bytes change), and SwiftPM compiles `Sources/DonbyKernelC/dk_ffi_shim.c` incrementally in pure C11 without `-lc++`.
 
 ## 4. Local Subtitle Format Test Matrix
 - For real-server regression testing across `SRT+SRT` dual-track, single/external `ASS`, 4K HDR/letterbox `PGS`, mixed `PGS+Text`, `VobSub`, and `DVBSub`, see the git-ignored local catalog at `docs/agent/local/SUBTITLE_TEST_MEDIA.md` (never copy server names or item URLs into tracked docs).

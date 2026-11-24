@@ -8,7 +8,7 @@ pub struct VadAudioRing {
     samples: VecDeque<f32>,
     end_pts: f64,
     decim_accum: f32,
-    decim_count: u8,
+    decim_count: usize,
 }
 
 impl Default for VadAudioRing {
@@ -30,40 +30,51 @@ impl VadAudioRing {
         self.decim_count = 0;
     }
 
-    /// Decimates 48kHz interleaved float32 PCM (3:1 with remainder carryover) into 16kHz mono.
-    /// On >=3-channel surround (FL, FR, FC, ...), weights center channel 0.78*FC + 0.11*(FL+FR).
-    pub fn push_48k_interleaved(&mut self, pcm: &[f32], channels: usize, chunk_end_pts: f64) {
-        if channels == 0 || pcm.len() < channels {
+    /// Decimates 48kHz speech-weighted mono PCM (3:1 with remainder carryover) into 16kHz.
+    pub fn push_mono_48k(&mut self, mono_48k: &[f32], chunk_start_pts: f64, has_valid_pts: bool) {
+        if mono_48k.is_empty() {
             return;
         }
-        let frames = pcm.len() / channels;
-        let chunk_dur = frames as f64 / 48_000.0;
-        if self.end_pts >= 0.0 && (chunk_end_pts - chunk_dur - self.end_pts).abs() > 0.35 {
+        if has_valid_pts && chunk_start_pts >= 0.0 && self.end_pts >= 0.0 && (chunk_start_pts - self.end_pts).abs() > 0.35 {
             self.samples.clear();
             self.decim_accum = 0.0;
             self.decim_count = 0;
         }
-        for f in 0..frames {
-            let base = f * channels;
-            let mono = if channels >= 3 {
-                0.78 * pcm[base + 2] + 0.11 * (pcm[base] + pcm[base + 1])
-            } else if channels == 2 {
-                0.5 * (pcm[base] + pcm[base + 1])
-            } else {
-                pcm[base]
-            };
-            self.decim_accum += mono;
-            self.decim_count += 1;
-            if self.decim_count == 3 {
+        let mut accum = self.decim_accum;
+        let mut cnt = self.decim_count;
+        let mut pushed = 0usize;
+        for &s in mono_48k {
+            accum += s;
+            cnt += 1;
+            if cnt == 3 {
                 if self.samples.len() == VAD_RING_MAX_SAMPLES {
                     self.samples.pop_front();
                 }
-                self.samples.push_back(self.decim_accum * (1.0 / 3.0));
-                self.decim_accum = 0.0;
-                self.decim_count = 0;
+                self.samples.push_back(accum * (1.0 / 3.0));
+                accum = 0.0;
+                cnt = 0;
+                pushed += 1;
             }
         }
-        self.end_pts = chunk_end_pts;
+        self.decim_accum = accum;
+        self.decim_count = cnt;
+
+        if has_valid_pts && chunk_start_pts >= 0.0 {
+            let consumed_48k = mono_48k.len().saturating_sub(cnt);
+            self.end_pts = chunk_start_pts + (consumed_48k as f64) / 48_000.0;
+        } else if self.end_pts >= 0.0 && pushed > 0 {
+            self.end_pts += (pushed as f64) / (VAD_SAMPLE_RATE as f64);
+        }
+    }
+
+    pub fn available_and_start_pts(&self) -> (usize, f64) {
+        let avail = self.samples.len();
+        let start_pts = if avail > 0 && self.end_pts >= 0.0 {
+            self.end_pts - (avail as f64) / (VAD_SAMPLE_RATE as f64)
+        } else {
+            0.0
+        };
+        (avail, start_pts)
     }
 
     /// Copies up to `out.len()` most-recent 16kHz samples and returns `(copied_count, start_pts)`.
@@ -86,19 +97,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decimates_48k_5_1_to_16k_center_weighted_and_tracks_pts() {
+    fn decimates_48k_mono_to_16k_and_resets_on_discontinuity() {
         let mut ring = VadAudioRing::default();
-        // 6 frames of 6ch (5.1) @ 48kHz -> 2 samples @ 16kHz; FL=0, FR=0, FC=1.0 -> mono=0.78
-        let mut pcm = vec![0.0f32; 6 * 6];
-        for f in 0..6 {
-            pcm[f * 6 + 2] = 1.0;
-        }
-        ring.push_48k_interleaved(&pcm, 6, 10.0);
+        let mono = [0.78f32; 6]; // 6 samples @ 48kHz -> 2 samples @ 16kHz
+        ring.push_mono_48k(&mono, 10.0, true);
         let mut out = [0.0f32; 8];
         let (n, start_pts) = ring.copy_recent(&mut out);
         assert_eq!(n, 2);
         assert!((out[0] - 0.78).abs() < 1e-5);
         assert!((out[1] - 0.78).abs() < 1e-5);
-        assert!((start_pts - (10.0 - 2.0 / 16_000.0)).abs() < 1e-6);
+        assert!((start_pts - 10.0).abs() < 1e-6);
+
+        // Jump > 0.35s clears stale pre-seek samples
+        ring.push_mono_48k(&[0.30f32; 3], 25.0, true);
+        let (n2, start2) = ring.copy_recent(&mut out);
+        assert_eq!(n2, 1);
+        assert!((out[0] - 0.30).abs() < 1e-5);
+        assert!((start2 - 25.0).abs() < 1e-6);
     }
 }
