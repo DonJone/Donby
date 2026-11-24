@@ -3,14 +3,14 @@
 > Last synced: `v1.4.22`. Load this doc for CVDisplayLink presentation, Metal shaders, HDR10/Dolby Vision EDR tone mapping, GPU snapshots, first-frame callbacks, and subtitle overlay rendering.
 
 ## 1. File Inventory & Core Symbols
-- `Sources/DonbyMetalRenderer/DKMetalVideoView.swift` (~1666L)
-  - `DisplayLinkDriver` (~10) — manages `CVDisplayLink` callbacks and display refresh synchronization (60Hz/120Hz ProMotion).
-  - `DKMetalPipelineSet` (~171) — compiled Metal render pipelines:
+- `Sources/DonbyMetalRenderer/DKMetalVideoView.swift`
+  - `DisplayLinkDriver` — manages `CVDisplayLink` callbacks and display refresh synchronization (60Hz/120Hz ProMotion).
+  - `DKMetalPipelineSet` — compiled Metal render pipelines:
     - `pipelineVideoMaster` (NV12 / P010 10-bit bi-planar / YUV -> linear EDR `.rgba16Float` with PQ/HLG/Dolby Vision P5 & P8 RPU color uniforms `DKGpuColorUniformsMSL`).
     - `pipelineSubtitle` (independent linear-space alpha-blended subtitle overlay with HDR nit luminance scaling).
-  - `DKMetalLayerView` (~266) — `NSView` hosting `CAMetalLayer` (`pixelFormat = .rgba16Float`, `wantsExtendedDynamicRangeContent = true`, `colorspace = extendedLinearDisplayP3` / SDR fallback).
-  - `OffscreenMetalContext` (~1258) — GPU sRGB snapshot/thumbnail rendering for watch records and previews.
-  - `DKMetalVideoView` (~1444) + `Coordinator` (~1501) + `SubtitleSyncBox` (~1523) — SwiftUI `NSViewRepresentable` bridge.
+  - `DKMetalLayerView` — `NSView` hosting `CAMetalLayer` (`pixelFormat = .rgba16Float`, `wantsExtendedDynamicRangeContent = true`, `colorspace = extendedLinearDisplayP3` / SDR fallback).
+  - `OffscreenMetalContext` — GPU sRGB snapshot/thumbnail rendering for watch records and previews.
+  - `DKMetalVideoView` + `Coordinator` + `SubtitleSyncBox` — SwiftUI `NSViewRepresentable` bridge.
 
 ## 2. Key Rendering Behaviors
 - **HDR10 & Dolby Vision EDR Pipeline**:

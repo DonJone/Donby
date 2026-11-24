@@ -46,7 +46,7 @@
 # L1 Fast incremental KernelRust (-O3) + C11 shim + Swift debug check (~1.3s warm)
 ./scripts/dev.sh build
 
-# L2 Rust kernel + DonbyCore unit tests (isolated DONBY_HOME, ~1.5s warm)
+# L2 Rust kernel + DonbyCore unit tests + agent doc-sync gate (isolated DONBY_HOME, ~1.5s warm)
 ./scripts/dev.sh test
 
 # L3 Fast incremental Release build & in-place /Applications/Donby.app install (~3-5s incremental)

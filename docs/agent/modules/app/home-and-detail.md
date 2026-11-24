@@ -3,13 +3,13 @@
 > Parent: [app/INDEX.md](INDEX.md). Covers 7 files: `EmbyMainView.swift`, `MainCarouselView.swift`, `Views/MLibListView.swift`, and `DetailView.swift` + 3 extensions.
 
 ## 1. File Inventory & Responsibilities
-- `Sources/DonbyApp/EmbyMainView.swift` (`596L`) — Home root router (`selectedLibrary` -> `MLibListView`, unconfigured hero, error banner, inline debounced search, `NativeEmbyHomeView`), `homeShelves` builder (merges deduplicated `resumeItems` + `nextUpItems` into `继续观看`), `embyTopToolbar`, and shared `SectionHeaderView`.
-- `Sources/DonbyApp/Views/MLibListView.swift` (`281L`) — Library category grid page with sort/filter/genre popover, `DonbySearchPillField`, `NativePosterGridView`, and dual-path (`DonbyAppExtensionCenter` cursor vs `EmbyClient` offset) pagination.
-- `Sources/DonbyApp/MainCarouselView.swift` (`398L`) — Hero featured carousel (`365...540` responsive height) with `TrackpadHorizontalSwipeDetector`.
-- `Sources/DonbyApp/DetailView.swift` (`461L`) — Detail root container, `@State` properties, `body` `ZStack(alignment: .top)` with static `HeroTopEdgeBackdropView` + pinned `floatingTopNavBar` + `DetailScrollViewTopInsetFix`.
-- `Sources/DonbyApp/DetailView+HeroAndActions.swift` (`622L`) — `heroHeaderSection`, `ClearLogoHeaderView`, play/resume/download/favorite/version/audio/subtitle action controls, `effectivePlayButtonStartSeconds`.
-- `Sources/DonbyApp/DetailView+SeasonsAndEpisodes.swift` (`456L`) — Season selector strip, episode cards (`MediaArtworkView` with `kind: .thumb`), cast/credits strip, similar/recommended shelves.
-- `Sources/DonbyApp/DetailView+DataLoading.swift` (`533L`) — `loadFullDetailData`, `preferredFocusEpisodeId` (checks `item.isEpisode || initialItem.isEpisode`), `fetchMergedEpisodesForSeason` (applies `.withInheritedArtworkFallback(...)`), `runDetailPrewarmAndPreload`, async offline/Turbo status snapshots.
+- `Sources/DonbyApp/EmbyMainView.swift` — Home root router (`selectedLibrary` -> `MLibListView`, unconfigured hero, error banner, inline debounced search, `NativeEmbyHomeView`), `homeShelves` builder (merges deduplicated `resumeItems` + `nextUpItems` into `继续观看`), `embyTopToolbar`, and shared `SectionHeaderView`.
+- `Sources/DonbyApp/Views/MLibListView.swift` — Library category grid page with sort/filter/genre popover, `DonbySearchPillField`, `NativePosterGridView`, and dual-path (`DonbyAppExtensionCenter` cursor vs `EmbyClient` offset) pagination.
+- `Sources/DonbyApp/MainCarouselView.swift` — Hero featured carousel (`365...540` responsive height) with `TrackpadHorizontalSwipeDetector`.
+- `Sources/DonbyApp/DetailView.swift` — Detail root container, `@State` properties, `body` `ZStack(alignment: .top)` with static `HeroTopEdgeBackdropView` + pinned `floatingTopNavBar` + `DetailScrollViewTopInsetFix`.
+- `Sources/DonbyApp/DetailView+HeroAndActions.swift` — `heroHeaderSection`, `ClearLogoHeaderView`, play/resume/download/favorite/version/audio/subtitle action controls, `effectivePlayButtonStartSeconds`.
+- `Sources/DonbyApp/DetailView+SeasonsAndEpisodes.swift` — Season selector strip, episode cards (`MediaArtworkView` with `kind: .thumb`), cast/credits strip, similar/recommended shelves.
+- `Sources/DonbyApp/DetailView+DataLoading.swift` — `loadFullDetailData`, `preferredFocusEpisodeId` (checks `item.isEpisode || initialItem.isEpisode`), `fetchMergedEpisodesForSeason` (applies `.withInheritedArtworkFallback(...)`), `runDetailPrewarmAndPreload`, async offline/Turbo status snapshots.
 
 ## 2. Critical Invariants (DO NOT BREAK)
 1. **DetailView `#03` Static Top-Edge Strip, Zero Zoom/Blur & Scrollbar Hygiene (`v1.4.24–v1.4.31`)**:

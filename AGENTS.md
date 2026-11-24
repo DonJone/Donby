@@ -3,7 +3,7 @@
 This repository is developed primarily by AI agents (Antigravity). Follow this protocol strictly to minimize token usage, redundant codebase exploration, and regression risk.
 
 ## 1. Mandatory Read-First Routing (Progressive Disclosure)
-Before grepping or reading large source files (`KernelRust/src/*.rs`, `TurboCacheAndDownloadEngine.swift`, `PlayerView.swift`, `AppState.swift`), ALWAYS:
+Before grepping or reading large source files (`TurboCacheAndDownloadEngine.swift`, `dk_ffi_shim.c`, `DKMetalVideoView.swift`, `SubtitleAutoAligner.swift`), ALWAYS:
 1. Read [docs/agent/INDEX.md](docs/agent/INDEX.md) first (< 100 lines).
 2. Load ONLY the 1-2 relevant module maps under `docs/agent/modules/`.
 3. Check `docs/agent/decisions/` before changing streaming concurrency, caching, or kernel architecture.
@@ -30,6 +30,7 @@ Every **code commit** MUST bind **Version Bump + Structured Commit + `docs/agent
    - Start a new shard when bumping a minor version (e.g., `v1.5.md`) or when a shard exceeds ~300 lines.
 5. **Incremental Module Map Update**:
    - Update the affected `docs/agent/modules/*.md` (including its `Last synced: vX.Y.Z` header) ONLY when symbols, state machines, lock ordering, key thresholds, or invariants change. Do NOT rewrite untouched docs or copy full source code into docs.
+   - `scripts/check_agent_docs.py` and `.githooks/` enforce `1:1` file-inventory coverage, zero per-file line-count tags in module maps, and staged domain co-change checks: internal-only code edits that leave module docs 100% accurate must declare `Doc-Sync: unchanged (<reason>)` in the commit body, while file additions/deletions/renames or top-level non-private symbol/ABI changes unconditionally require updating the mapped module doc.
 6. **ADR Creation**:
    - Add a numbered file under `docs/agent/decisions/` when making a non-obvious architectural trade-off or rejecting an approach that failed in real testing (prevents future agents from retrying failed ideas).
 
@@ -41,6 +42,7 @@ Every **code commit** MUST bind **Version Bump + Structured Commit + `docs/agent
 - **Extension Isolation & Design System Firewall**:
   - Never scatter `#if canImport(DonbyUHDModule)` across core files (`PlayerView`, `ServerViews`, `AppState`, `DetailView`, `EmbyMainView`, `SettingsView`); route all optional service integrations through `DonbyMediaServiceRegistry` (`DonbyCore`) and `DonbyAppExtensionCenter` / `DonbyPlayerCompanion` (`Sources/DonbyApp/Extensions/DonbyAppExtension.swift`), keeping `DONBY_PURE=1 ./scripts/dev.sh build` green.
   - Extension UI under `Sources/DonbyApp/Modules/UHD/` MUST reuse canonical Donby components (`Components/*`, `PlayerDrawerGlassCard`, `ServerLineOptionRow`) with zero custom non-Donby badges/buttons, sanitize all remote API copy at the `DonbyUHDModule` boundary (`UHDDisplayNormalizer`), and preserve seamless standard-Emby fallback when the extension is disabled.
+- **Doc Sync & `<= 800L` Source Gate**: Never bypass `.githooks` (`--no-verify`) or raise `LEGACY_LINE_CAPS` in `scripts/check_agent_docs.py`; keep every new/refactored source file `<= 800` lines and registered `1:1` in `docs/agent/modules/`.
 - **Tiered Verification**:
   - L1 (quick edit): `./scripts/dev.sh build` (~1.3s incremental).
   - L2 (subsystem logic): `./scripts/dev.sh test` (~0.9s isolated `DonbyCoreTests`) or targeted real-server harness with `DONBY_TEST_MUTED=1`.

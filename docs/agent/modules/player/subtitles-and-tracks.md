@@ -1,8 +1,10 @@
 # Player Sub-Map: Track Selection, Subtitles & AI Auto-Alignment
 
-> Parent: [player/INDEX.md](INDEX.md). Covers `PlayerView+TrackSelection.swift` (`344L`) and `PlayerView+SubtitlesAndAlignment.swift` (`442L`).
+> Parent: [player/INDEX.md](INDEX.md). Covers `PlayerView+TrackSelection.swift` and `PlayerView+SubtitlesAndAlignment.swift`.
 
 ## 1. Deterministic Track Mapping (`PlayerView+TrackSelection.swift`)
+- `PlayerView+TrackSelection.swift` — AVStream <-> Emby track reconciliation, primary/secondary audio & subtitle switching.
+- `PlayerView+SubtitlesAndAlignment.swift` — Remote/local external subtitles, `DKSubtitleStyleConfig`, Silero VAD & dual-subtitle auto-alignment/undo (Section 2).
 - **AVStream <-> Emby Resolution**: `embyAudioStreams`, `embySubtitleStreams`, `resolvedAudioOptions`, and `resolvedSubtitleOptions` reconcile `kernelAudioTracks`/`kernelSubtitleTracks` (discovered via `queryKernelTracks(handle:)`) with Emby/UHD `MediaSource` metadata so labels, languages, and indices stay consistent across embedded and remote-external tracks.
 - **Audio & Subtitle Switching**:
   - `selectAudioOption(_:)` switches the kernel audio stream and calls `activeTurboHandle?.wakeWaitingReads()` so buffered Turbo reads resume without stalling.
@@ -10,6 +12,7 @@
   - `selectSecondarySubtitleOption(_:)`, `disableSecondarySubtitle()`, and `secondarySubtitleStatusTitle(options:)` manage dual-subtitle secondary track selection (`activeSecondarySubtitleSelection`).
 
 ## 2. External Subtitles, Style Config & AI Alignment (`PlayerView+SubtitlesAndAlignment.swift`)
+- `PlayerView+SubtitlesAndAlignment.swift` — Remote/local external subtitles, `DKSubtitleStyleConfig`, Silero VAD & dual-subtitle auto-alignment/undo:
 - **External Subtitle Loading**:
   - `loadRemoteExternalSubtitle(...)`: Downloads via `EmbyClient` / UHD direct URL, decodes BOM/GB18030 via `DonbyCore` subtitle decoder, and loads into kernel primary or secondary slot.
   - `promptLocalExternalSubtitleFile(...)` / `loadLocalExternalSubtitleURL(...)`: `NSOpenPanel` picker for local `.srt`/`.ass`/`.ssa`/`.vtt` files.

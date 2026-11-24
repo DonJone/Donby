@@ -1,8 +1,10 @@
 # Player Sub-Map: Playback Engine, Timers & Session Lifecycle
 
-> Parent: [player/INDEX.md](INDEX.md). Covers `PlayerView+PlaybackEngine.swift` (`765L`) and `PlayerView+LifecycleAndSession.swift` (`480L`).
+> Parent: [player/INDEX.md](INDEX.md). Covers `PlayerView+PlaybackEngine.swift` and `PlayerView+LifecycleAndSession.swift`.
 
 ## 1. Native Kernel & Turbo Bridge (`PlayerView+PlaybackEngine.swift`)
+- `PlayerView+PlaybackEngine.swift` — C-ABI callbacks, kernel open/stop/seek, 0.25s progress loop, health recovery.
+- `PlayerView+LifecycleAndSession.swift` — 10s Emby sync, next-episode prefetch, intro/outro skip, episode switch/exit, companion & GPU danmu gate (Section 2).
 - **C-ABI Callbacks (file-private top-level funcs)**: `dkTurboReadCB`, `dkTurboSeekCB`, `dkTurboAbortCB`, `dkTurboCloseCB` bridge `TurboStreamByteHandle` via `Unmanaged` into `dk_player_open_with_tracks`. Keep them file-private top-level functions (C function pointers cannot capture Swift context).
 - **Startup & Open Flow**:
   - `startNativeKernelPlayback(startSeconds:)` increments `activePlaybackGeneration`, aborts any prior `OpeningPlayerBox`, computes `computePreOpenTrackHints()`, installs `makeRedirectStoreHandler`, attaches `TurboStreamByteHandle` when Turbo is active, opens the Rust kernel on `Task.detached`, applies initial `DKSubtitleStyleConfig`, and queries `queryKernelTracks` + `queryKernelChapters`.
@@ -13,6 +15,7 @@
   - **Side Effects**: Calls `evaluateIntroOutroSkipWindow()`, `prefetchNextEpisodeIfNearEnd()`, companion `onProgressTick(...)`, and periodic 5s local watch-progress saves (`lastRecordedPosition`).
 
 ## 2. Session, Episode Switching & Companion (`PlayerView+LifecycleAndSession.swift`)
+- `PlayerView+LifecycleAndSession.swift` — 10s Emby sync, next-episode prefetch, intro/outro skip, episode switch/exit, companion & GPU danmu gate:
 - **Remote Progress Sync (`handleEmbySyncTimerTick()`)**: 10s timer routing progress via `DonbyMediaServiceRegistry.shared.provider(for:)` or `EmbyClient.shared.reportPlaybackProgress(...)`.
 - **Next-Episode Prefetch & Skip**:
   - `prefetchNextEpisodeIfNearEnd()`: Triggers at `>= max(duration * 0.72, duration - 120)` when next episode is not already downloaded/prefetched; caches `ResolvedPlaybackResource` in `prefetchedNextEpisodeResource`.

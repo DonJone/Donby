@@ -4,6 +4,8 @@
 - **Date**: 2026-11-24
 - **Target Release**: `v2.0.0` (`pre-release`)
 
+> Current Layout Note: In `v2.0.4–v2.0.5`, `KernelRust/src/lib.rs` and `subtitle.rs` were decomposed into focused `<700L` submodules; see [../modules/kernel/INDEX.md](../modules/kernel/INDEX.md) for the active file map.
+
 ## 1. Branch & Baseline Topology
 
 | Branch | Commit / State | Role |
@@ -15,15 +17,15 @@
 ## 2. Ponytail Architecture Principles (Smallest Complete Change)
 
 1. **Zero Swift / Metal / Network Diff**:
-   - Keep [donby_kernel.h](../../Sources/DonbyKernelC/include/donby_kernel.h) (204 lines, 7 `#[repr(C)]` structs/enums, 37 C functions) completely unchanged.
+   - Keep [donby_kernel.h](../../../Sources/DonbyKernelC/include/donby_kernel.h) (204 lines, 7 `#[repr(C)]` structs/enums, 37 C functions) completely unchanged.
    - All 8 Swift callers (`PlayerView`, `DKMetalVideoView`, `AppState`, `DetailView`, `ArtworkComponents`, `DonbyApp`, `EmbyMainView`, `PlayerControls`), Metal EDR/DoVi shaders, `TurboStreamByteHandle` custom I/O callbacks, and `scripts/bundle_dylibs.py` require **zero source changes**.
 2. **Zero External Cargo Crates (`[dependencies]` = empty)**:
    - Homebrew ships FFmpeg 8 (`libavformat 63.1.102`, `libavutil 61.1.102`) and `libass 0.17.5`; community crates (`ffmpeg-next`, `ffmpeg-sys-next`) lag SONAME bumps and require `bindgen` + `libclang` + 40+ crates.
-   - `KernelRust` uses pure Rust `std` (`staticlib`, `panic = "abort"`, `-O3`, `codegen-units = 1`, no `lto` so Homebrew `rustc` LLVM emits native Mach-O objects rather than LLVM bitcode incompatible with Apple CLT tools; offline build in ~2.7s cold / ~0.01s cached) paired with a pure-C11 accessor file ([dk_ffi_shim.c](../../Sources/DonbyKernelC/dk_ffi_shim.c), compiled by SwiftPM `clang` with zero `-lc++`).
+   - `KernelRust` uses pure Rust `std` (`staticlib`, `panic = "abort"`, `-O3`, `codegen-units = 1`, no `lto` so Homebrew `rustc` LLVM emits native Mach-O objects rather than LLVM bitcode incompatible with Apple CLT tools; offline build in ~2.7s cold / ~0.01s cached) paired with a pure-C11 accessor file ([dk_ffi_shim.c](../../../Sources/DonbyKernelC/dk_ffi_shim.c), compiled by SwiftPM `clang` with zero `-lc++`).
 3. **Why Keep a Pure-C11 Shim (`dk_ffi_shim.c`)**:
    - Stable Rust cannot implement variadic C `va_list` callbacks required by `av_log_set_callback`.
    - FFmpeg's `libavutil/dovi_meta.h` explicitly marks `sizeof(AVDOVIRpuDataHeader)`, `sizeof(AVDOVIDataMapping)`, and `sizeof(AVDOVIColorMetadata)` outside public ABI; reading non-opaque FFmpeg/`libass` struct fields in `dk_ffi_shim.c` via `clang` prevents silent struct-offset UB across `brew upgrade ffmpeg` updates.
-   - `_Static_assert` in `dk_ffi_shim.c` + `const` / `offset_of!` tests in [abi.rs](../../KernelRust/src/abi.rs) lock C<->Rust ABI layout at compile time (`DKGpuColorUniforms == 3088B`, `DKRuntimeStats == 160B`, `DKTrackInfo == 204B`, `DKChapterInfo == 152B`, `DKSubtitleStyleConfig == 64B`).
+   - `_Static_assert` in `dk_ffi_shim.c` + `const` / `offset_of!` tests in [abi.rs](../../../KernelRust/src/abi.rs) lock C<->Rust ABI layout at compile time (`DKGpuColorUniforms == 3088B`, `DKRuntimeStats == 160B`, `DKTrackInfo == 204B`, `DKChapterInfo == 152B`, `DKSubtitleStyleConfig == 64B`).
 
 ## 3. Implemented Module Map (`KernelRust/src/` + `dk_ffi_shim.c`)
 

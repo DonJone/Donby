@@ -71,6 +71,9 @@ if [ "$ALLOW_DIRTY" != "1" ] && [ -n "$(git status --porcelain)" ]; then
     exit 1
 fi
 
+echo "==> [0/4] Running agent docs & source size gate..."
+python3 ./scripts/check_agent_docs.py
+
 echo "==> [1/4] Packaging local macOS build (${TAG}, ${ARCH})..."
 DONBY_VERSION="$VERSION" SYNC_INSTALLED_APP="$SYNC_APP" ./scripts/package_dmg.sh
 

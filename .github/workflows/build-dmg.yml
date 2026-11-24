@@ -76,6 +76,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Verify agent docs & source size gate
+        run: python3 ./scripts/check_agent_docs.py
+
       - name: Install FFmpeg, libass & Rust toolchain
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"

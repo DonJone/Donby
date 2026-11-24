@@ -11,6 +11,7 @@
 - `KernelRust/src/c_api.rs`: All 37 `#[no_mangle] pub unsafe extern "C" fn dk_*` entrypoints matching `Sources/DonbyKernelC/include/donby_kernel.h`.
 - `KernelRust/src/abi.rs`: Frozen C ABI `#[repr(C)]` structs/enums, compile-time size/align assertions, `offset_of!` tests, `DKGpuColorUniforms::default_sdr()`, and C-string helpers (`cchar_array_to_string`, `write_str_to_cchar`).
 - `KernelRust/src/ffi.rs`: `extern "C"` bindings for `dk_ffi_shim.c` and `libass`, plus RAII wrappers (`AvPacket`, `AvFrame`, `OwnedPixelBuffer`).
+- `Sources/DonbyKernelC/include/donby_kernel.h`: Frozen C ABI header declaring 7 `#[repr(C)]` structs/enums and 37 `dk_*` functions.
 - `Sources/DonbyKernelC/dk_ffi_shim.c`: Pure C11 FFmpeg/VideoToolbox/AudioToolbox/`libass` shim, `_Static_assert` ABI checks, `av_log` variadic bridge, PGS/DVD subtitle probe bypass.
 
 ## 2. Mandatory Lock Partial Order

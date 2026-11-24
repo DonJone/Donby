@@ -4,18 +4,18 @@
 
 ## 1. File Inventory (Target Split: `<= 800L` per file)
 - **`Sources/DonbyUHDModule/`** (Optional SwiftPM target; excluded cleanly when `DONBY_PURE=1`):
-  - `UHDModuleConfig.swift` (`282L`) — `UHDModuleEndpoints` (`smart.uhdnow.com` -> `v1.uhdnow.com` fallback, China-optimized default line selection), `DonbyUHDServiceProvider` (`DonbyMediaServiceRegistry`), `DonbyUHDModule.install()` / `uninstall()`.
-  - `UHDAPIModels.swift` (`791L`) & `UHDDomainNormalizers.swift` (`417L`) — domain DTOs, `UHDSpeedTestMetricsEngine`, `UHDLoginCodeNormalizer`, `UHDWatchPartyInviteParser`, `UHDTmdbSearchQueryParser`, `UHDRatingNormalizer`, `UHDDisplayNormalizer`.
-  - `UHDStreamClient.swift` (`278L`) — Actor core, `DonbyNetworkSession.sharedURLSession` sharing, `APIRequestGate` integration, raw `Authorization: <token>` header construction (no `Bearer` prefix), `UHDResolvedDomainCache`, `UHDAssetResponseCache`.
-  - `UHDStreamClient+AuthAndAccount.swift` (`408L`) — password/code/token auto-fallback login, subscription/traffic snapshots.
-  - `UHDStreamClient+SpeedTestAndLines.swift` (`534L`) — `/playback/domains` listing, `/resolve` edge base resolution, `TEST_BASE` chunk speed test, exit IP probe.
-  - `UHDStreamClient+CatalogAndSearch.swift` (`550L`) — collections, `playback-states` (`resume` + `nextUp`), hot/anime/calendar, genres, persons, TMDB search, favorites.
-  - `UHDStreamClient+DetailAndMapping.swift` (`900L` range) — `fetchItemDetail` (with ambiguous-stub 404 retry across `episode`/`movie`/`tv`), `fetchSeasons`, paginated `fetchSeasonEpisodes` (`page_size=100`, auto-fetches pages `2...20` when `total > 100`), `fetchCredits`, `fetchAssetMediaSources`, `resolvePlaybackResource`, DTO mappers (`mapSummary`, `mapDetail`, `mapEpisode` with season poster / series fanart / series logo fallbacks).
-  - `UHDStreamClient+TeamAdmin.swift` (`163L`), `UHDWatchPartyClient.swift` (`~450L`), `UHDDanmuClient.swift` (`~331L`).
+  - `UHDModuleConfig.swift` — `UHDModuleEndpoints` (`smart.uhdnow.com` -> `v1.uhdnow.com` fallback, China-optimized default line selection), `DonbyUHDServiceProvider` (`DonbyMediaServiceRegistry`), `DonbyUHDModule.install()` / `uninstall()`.
+  - `UHDAPIModels.swift` & `UHDDomainNormalizers.swift` — domain DTOs, `UHDSpeedTestMetricsEngine`, `UHDLoginCodeNormalizer`, `UHDWatchPartyInviteParser`, `UHDTmdbSearchQueryParser`, `UHDRatingNormalizer`, `UHDDisplayNormalizer`.
+  - `UHDStreamClient.swift` — Actor core, `DonbyNetworkSession.sharedURLSession` sharing, `APIRequestGate` integration, raw `Authorization: <token>` header construction (no `Bearer` prefix), `UHDResolvedDomainCache`, `UHDAssetResponseCache`.
+  - `UHDStreamClient+AuthAndAccount.swift` — password/code/token auto-fallback login, subscription/traffic snapshots.
+  - `UHDStreamClient+SpeedTestAndLines.swift` — `/playback/domains` listing, `/resolve` edge base resolution, `TEST_BASE` chunk speed test, exit IP probe.
+  - `UHDStreamClient+CatalogAndSearch.swift` — collections, `playback-states` (`resume` + `nextUp`), hot/anime/calendar, genres, persons, TMDB search, favorites.
+  - `UHDStreamClient+DetailAndMapping.swift` — `fetchItemDetail` (with ambiguous-stub 404 retry across `episode`/`movie`/`tv`), `fetchSeasons`, paginated `fetchSeasonEpisodes` (`page_size=100`, auto-fetches pages `2...20` when `total > 100`), `fetchCredits`, `fetchAssetMediaSources`, `resolvePlaybackResource`, DTO mappers (`mapSummary`, `mapDetail`, `mapEpisode` with season poster / series fanart / series logo fallbacks).
+  - `UHDStreamClient+TeamAdmin.swift`, `UHDWatchPartyClient.swift`, `UHDDanmuClient.swift` — Team API v2 management, Watch Party REST + `@MainActor UHDWatchPartySession` WebSocket sync, and managed Danmu proxy (`DanmuSessionCache`).
 - **`Sources/DonbyApp/Modules/UHD/`** (UI plugin slots registered via `DonbyAppExtensionCenter`):
-  - `UHDModuleManager.swift` (`698L`) — toggle state, home loading (`resumeItems` + `nextUpItems` + `hotItems`), `resolveSeriesStartEpisode`, Watch Party creation.
-  - `UHDAppExtensionPlugin.swift` (`662L` range) — `DonbyAppUIExtensionPlugin` impl; `loadDetailPayload` resolves stub episode `seriesId` first when missing so credits/seasons/playback-state load reliably.
-  - `UHDPlayerCompanionController.swift` (`538L`), `UHDAccountDashboardView.swift` (`483L`), `UHDSpeedTestPanelView.swift` (`413L`), `UHDDiscoverySheets.swift` (`608L`), `UHDWatchPartyViews.swift` (`530L`), `UHDDanmuViews.swift` (`600L`).
+  - `UHDModuleManager.swift` — toggle state, home loading (`resumeItems` + `nextUpItems` + `hotItems`), `resolveSeriesStartEpisode`, Watch Party creation.
+  - `UHDAppExtensionPlugin.swift` — `DonbyAppUIExtensionPlugin` impl; `loadDetailPayload` resolves stub episode `seriesId` first when missing so credits/seasons/playback-state load reliably.
+  - `UHDPlayerCompanionController.swift`, `UHDAccountDashboardView.swift`, `UHDSpeedTestPanelView.swift`, `UHDDiscoverySheets.swift`, `UHDWatchPartyViews.swift`, `UHDDanmuViews.swift` — companion controller, account dashboard, speed-test panel, discovery sheets, Watch Party & GPU Danmu views.
 
 ## 2. Network & Artwork Architecture Contracts
 1. **Shared Media Data Plane**: Video streaming (`ResolvedPlaybackResource`), Range scheduling, L1/L2 chunk caching, detail preloading, and offline downloads run on the exact same `DonbyTurboCacheEngine` / `TurboStreamByteHandle` / `KernelRust` pipeline as standard Emby.

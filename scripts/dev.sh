@@ -3,6 +3,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+if [ -d ".githooks" ] && [ "$(git config --local --get core.hooksPath 2>/dev/null || true)" != ".githooks" ]; then
+    git config --local core.hooksPath .githooks 2>/dev/null || true
+fi
+
 resolve_sdk() {
     local dev_dir="$(xcode-select -p 2>/dev/null || true)"
     if [ -n "${DONBY_SDK_PATH:-}" ] && [ -d "${DONBY_SDK_PATH}" ]; then
@@ -48,6 +52,7 @@ case "$CMD" in
         exec swift build "${BUILD_SYS_ARGS[@]}" --sdk "$SDK_PATH" "${COMMON_FW_ARGS[@]}" "$@"
         ;;
     test)
+        python3 ./scripts/check_agent_docs.py
         ./build_kernel.sh
         cargo test --manifest-path KernelRust/Cargo.toml
         TMPHOME="$(mktemp -d)"

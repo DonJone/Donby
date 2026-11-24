@@ -12,30 +12,30 @@
 
 ## 2. File Inventory
 
-- `Sources/DonbyKernelC/include/donby_kernel.h` (`204L`, **FROZEN C ABI**) — 37 `dk_*` public entrypoints.
-- `Sources/DonbyKernelC/dk_ffi_shim.c` (`1,979L`, pure C11) — `_Static_assert` ABI checks, `av_log` bridge, VideoToolbox/`IOSurface` pool, `AudioQueue`/Swr wrappers, FFmpeg/`libass` accessors.
+- `Sources/DonbyKernelC/include/donby_kernel.h` (**FROZEN C ABI**) — 37 `dk_*` public entrypoints.
+- `Sources/DonbyKernelC/dk_ffi_shim.c` (pure C11) — `_Static_assert` ABI checks, `av_log` bridge, VideoToolbox/`IOSurface` pool, `AudioQueue`/Swr wrappers, FFmpeg/`libass` accessors.
 - `KernelRust/src/` (`donby_kernel_rs`, zero external Cargo deps -> `build_kernel/libdonby_kernel.a`):
-  - `lib.rs` (`142L`) — Crate root, `LOG_CALLBACK`/`LIVE_PLAYERS`, `dk_rust_forward_ffmpeg_log`, `ReaderGuard`, URL normalization/redaction.
-  - `player.rs` (`434L`) — `DKPlayer` (`#[repr(C)]`, 70 fields), sub-state structs, RAII guards, lock partial order docs.
-  - `lifecycle.rs` (`687L`) — AVIO/interrupt thunks, `create_raw`/`destroy_raw`/`request_abort_raw`, `open_with_tracks`, 9-step `close_session`.
-  - `demux.rs` (`348L`) — `demux_worker`, buffer backpressure, DoVi probe, `execute_pending_seek`.
-  - `video.rs` (`520L`) — VT callbacks, software fallback, `video_decode_worker`, `acquire_frame`, `extract_video_thumbnail`.
-  - `audio.rs` (`626L`) — AQ trampolines, `stop_reset_audio_queue`/`stop_dispose_audio_queue`, clock, `audio_decode_worker`, playback controls.
-  - `tracks.rs` (`365L`) — Auto-subtitle scoring, subtitle packet history, track/chapter getters, `select_track`.
-  - `c_api.rs` (`440L`) — 37 `#[no_mangle] extern "C" fn dk_*` thin ABI wrappers.
-  - `abi.rs` (`244L`) — `#[repr(C)]` ABI structs, `DKGpuColorUniforms::default_sdr()`, C-string helpers, `offset_of!` tests.
-  - `ffi.rs` (`483L`) — `extern "C"` bindings + RAII `Drop` wrappers (`AvPacket`, `AvFrame`, `OwnedPixelBuffer`).
-  - `clock.rs` (`124L`) — Monotonic ns clock helpers, `ClockState`, `SpeedTracker`.
-  - `dovi.rs` (`79L`) — `check_dovi_rpu_or_el` (`check_dovi_fel` & `pq_norm_to_nits` are `#[cfg(test)]`).
-  - `vad.rs` (`118L`) — `VadAudioRing` (60s @ 16kHz mono 3:1 decimator).
-  - `subtitle/` (`3,696L` across 7 submodules; see [subtitles.md](subtitles.md) for task routing):
-    - `subtitle/mod.rs` (`485L`) — `SubtitleEngine` struct/lifecycle/`Drop`/`mark_replayed` + unit tests.
-    - `subtitle/pgs.rs` (`408L`) — FFmpeg packet decode (`DecodeCtx` callbacks) & PGS bitmap cue/pixel overrides.
-    - `subtitle/ass_text.rs` (`582L`) — External SRT/VTT/ASS ingestion, `CFStringTransform`, ASS payload/tag sanitization.
-    - `subtitle/ass_style.rs` (`432L`) — Style/viewport/affine time scale setters, header/style override application.
-    - `subtitle/compositor.rs` (`615L`) — `update_subtitle_rgba`, `raster_paired_line`, dual-layer RGBA blitting.
-    - `subtitle/pair_a_render.rs` (`619L`) — Pair-A cinema bilingual layout engine & 1200px viewport anchoring.
-    - `subtitle/pair_a_parse.rs` (`555L`) — Pair-A dialogue cleaning, speaker-dash grouping, semantic turn pairing.
+  - `lib.rs` — Crate root, `LOG_CALLBACK`/`LIVE_PLAYERS`, `dk_rust_forward_ffmpeg_log`, `ReaderGuard`, URL normalization/redaction.
+  - `player.rs` — `DKPlayer` (`#[repr(C)]`, 70 fields), sub-state structs, RAII guards, lock partial order docs.
+  - `lifecycle.rs` — AVIO/interrupt thunks, `create_raw`/`destroy_raw`/`request_abort_raw`, `open_with_tracks`, 9-step `close_session`.
+  - `demux.rs` — `demux_worker`, buffer backpressure, DoVi probe, `execute_pending_seek`.
+  - `video.rs` — VT callbacks, software fallback, `video_decode_worker`, `acquire_frame`, `extract_video_thumbnail`.
+  - `audio.rs` — AQ trampolines, `stop_reset_audio_queue`/`stop_dispose_audio_queue`, clock, `audio_decode_worker`, playback controls.
+  - `tracks.rs` — Auto-subtitle scoring, subtitle packet history, track/chapter getters, `select_track`.
+  - `c_api.rs` — 37 `#[no_mangle] extern "C" fn dk_*` thin ABI wrappers.
+  - `abi.rs` — `#[repr(C)]` ABI structs, `DKGpuColorUniforms::default_sdr()`, C-string helpers, `offset_of!` tests.
+  - `ffi.rs` — `extern "C"` bindings + RAII `Drop` wrappers (`AvPacket`, `AvFrame`, `OwnedPixelBuffer`).
+  - `clock.rs` — Monotonic ns clock helpers, `ClockState`, `SpeedTracker`.
+  - `dovi.rs` — `check_dovi_rpu_or_el` (`check_dovi_fel` & `pq_norm_to_nits` are `#[cfg(test)]`).
+  - `vad.rs` — `VadAudioRing` (60s @ 16kHz mono 3:1 decimator).
+  - `subtitle/` (7 submodules; see [subtitles.md](subtitles.md) for task routing):
+    - `subtitle/mod.rs` — `SubtitleEngine` struct/lifecycle/`Drop`/`mark_replayed` + unit tests.
+    - `subtitle/pgs.rs` — FFmpeg packet decode (`DecodeCtx` callbacks) & PGS bitmap cue/pixel overrides.
+    - `subtitle/ass_text.rs` — External SRT/VTT/ASS ingestion, `CFStringTransform`, ASS payload/tag sanitization.
+    - `subtitle/ass_style.rs` — Style/viewport/affine time scale setters, header/style override application.
+    - `subtitle/compositor.rs` — `update_subtitle_rgba`, `raster_paired_line`, dual-layer RGBA blitting.
+    - `subtitle/pair_a_render.rs` — Pair-A cinema bilingual layout engine & 1200px viewport anchoring.
+    - `subtitle/pair_a_parse.rs` — Pair-A dialogue cleaning, speaker-dash grouping, semantic turn pairing.
 
 ## 3. Top Kernel Invariants (DO NOT BREAK)
 1. **CVDisplayLink Purity**: Never call `try_start_audio_queue_if_ready` or `AudioQueueStart` inside `acquire_frame`.

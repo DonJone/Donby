@@ -3,17 +3,16 @@
 > Parent: [player/INDEX.md](INDEX.md). Covers `PlayerView.swift`, `PlayerOverlays.swift`, `PlayerView+HUD.swift`, `PlayerView+Drawers.swift`, `PlayerSubtitleStyleDrawerView.swift`, `PlayerControls.swift`.
 
 ## 1. Component Responsibilities
-- **Overlays (`PlayerOverlays.swift`)**:
+- `PlayerView.swift`: Root `PlayerView` shell, `init(session:)`, gesture/`NSEvent` monitor wiring, `showControlsAndResetTimer()`, `syncVisiblePlaybackStateFromBox()`, `adjustVolume()`.
+- `PlayerControls.swift`: `PlayerDrawerTab`, `TracksDrawerSection`, `PlayerAutoHideBox`, `OpeningPlayerBox`, `MiniVolumeSlider`, `PlayerConsoleIconButton`, `PlayerCircleMenu`, `PlayerTimelineScrubberView`.
+- `PlayerOverlays.swift`: Stateless overlays:
   - `PlayerLoadingOverlayView`: Startup loading pill (`"正在加载..."` + Cancel); stays visible until `DKMetalVideoView.onFirstFrameRendered` sets `hasRenderedFirstFrame = true` (prevents black-screen flash between `dk_open` and first presented frame).
   - `PlayerBufferingOverlayView`: Delayed rebuffer pill (`"正在缓冲..."` + live MB/s); only appears after `>= 0.48s` of continuous stall so brief micro-stalls do not flash UI chrome.
   - `PlayerErrorOverlayView`: Failure card with Retry, Switch Line, Open Logs, Exit actions.
   - `PlayerSkipBannerView`: Floating intro/outro skip pill anchored above `bottomControlBar`.
-- **HUD & Menus (`PlayerView+HUD.swift`)**:
-  - `topOSDBar`: Back/title, resolution/codec/HDR spec badges (`specResolutionString` evaluates both width and height), companion top-bar slot (`DonbyPlayerCompanion.makeTopBarControls`), drawer triggers.
-  - `bottomControlBar`: `PlayerTimelineScrubberView`, play/pause, adjacent episode buttons, `MiniVolumeSlider`, and 5 `PlayerCircleMenu` popups (`audioMenuContent`, `subtitleMenuContent`, `decoderMenuContent`, `speedMenuContent`, `moreMenuContent`).
-- **Right Drawer (`PlayerView+Drawers.swift` & `PlayerSubtitleStyleDrawerView.swift`)**:
-  - `rightDrawerPanel(tab:)`: `.playlist`, `.tracks` (2-section segmented pill `轨道` | `样式与对齐` via `PlayerDrawerSegmentedPill`), `.mediaInfo`, `.watchParty`.
-  - `PlayerSubtitleStyleDrawerView`: Standalone `View` owning `@State private var showMoreSubtitleOptions`; dragging size/position sliders sets `isAdjustingSubtitleLayout = true` to fade the drawer (`0.42` opacity) and suspend control-bar lift while aligning subtitles against the live frame.
+- `PlayerView+HUD.swift`: `topOSDBar` (back/title, resolution/codec/HDR spec badges, `DonbyPlayerCompanion.makeTopBarControls`, drawer triggers) and `bottomControlBar` (`PlayerTimelineScrubberView`, play/pause, adjacent episode buttons, `MiniVolumeSlider`, and 5 `PlayerCircleMenu` popups).
+- `PlayerView+Drawers.swift`: `rightDrawerPanel(tab:)` (`.playlist`, `.tracks` 2-section segmented pill `轨道` | `样式与对齐` via `PlayerDrawerSegmentedPill`, `.mediaInfo`, `.watchParty`).
+- `PlayerSubtitleStyleDrawerView.swift`: Standalone `View` owning `@State private var showMoreSubtitleOptions`; dragging size/position sliders sets `isAdjustingSubtitleLayout = true` to fade the drawer (`0.42` opacity) and suspend control-bar lift while aligning subtitles against the live frame.
 
 ## 2. Critical UI Invariants (DO NOT BREAK)
 1. **Menu Flicker Prevention (`v1.4.7`, `v1.4.15`)**:
