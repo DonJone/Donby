@@ -252,11 +252,13 @@ extension AppState {
         let pingTimeout = TimeInterval(max(1, pingTimeoutSeconds))
         let extProvider = DonbyMediaServiceRegistry.shared.provider(for: server.type)
 
-        async let mainPing: Int? = if let extProvider {
-            await extProvider.pingLine(server: server, line: nil)
-        } else {
-            await EmbyClient.shared.pingLine(baseURL: mainURL, token: token, timeout: pingTimeout)
-        }
+        async let mainPing: Int? = { [extProvider] in
+            if let extProvider {
+                return await extProvider.pingLine(server: server, line: nil)
+            } else {
+                return await EmbyClient.shared.pingLine(baseURL: mainURL, token: token, timeout: pingTimeout)
+            }
+        }()
 
         var linePings: [UUID: Int?] = [:]
         await withTaskGroup(of: (UUID, Int?).self) { group in
