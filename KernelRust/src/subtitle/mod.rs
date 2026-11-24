@@ -153,6 +153,7 @@ impl SubtitleEngine {
         let ass_lib = unsafe { ass_library_init() };
         let mut ass_renderer = ptr::null_mut();
         if !ass_lib.is_null() {
+            unsafe { dk_shim_ass_set_quiet_logger(ass_lib) };
             ass_renderer = unsafe { ass_renderer_init(ass_lib) };
             if !ass_renderer.is_null() {
                 unsafe {
@@ -224,21 +225,44 @@ impl SubtitleEngine {
         unsafe {
             dk_shim_close_codec(&mut self.sub_codec_ctx);
             dk_shim_close_codec(&mut self.secondary_sub_codec_ctx);
+            if !self.ass_track.is_null() {
+                ass_free_track(self.ass_track);
+                self.ass_track = ptr::null_mut();
+            }
             if !self.secondary_ass_track.is_null() {
                 ass_free_track(self.secondary_ass_track);
                 self.secondary_ass_track = ptr::null_mut();
             }
         }
         self.primary_ass_events.clear();
+        self.primary_ass_events.shrink_to_fit();
         self.secondary_ass_events.clear();
+        self.secondary_ass_events.shrink_to_fit();
         self.primary_codec_private.clear();
+        self.primary_codec_private.shrink_to_fit();
         self.secondary_codec_private.clear();
+        self.secondary_codec_private.shrink_to_fit();
         self.primary_ext_raw.clear();
+        self.primary_ext_raw.shrink_to_fit();
         self.secondary_ext_raw.clear();
+        self.secondary_ext_raw.shrink_to_fit();
         self.pgs_cues.clear();
+        self.pgs_cues.shrink_to_fit();
         self.secondary_pgs_cues.clear();
+        self.secondary_pgs_cues.shrink_to_fit();
+        self.sub_rgba_buf.clear();
+        self.sub_rgba_buf.shrink_to_fit();
+        self.sub_layer_pri_buf.clear();
+        self.sub_layer_pri_buf.shrink_to_fit();
+        self.sub_layer_sec_buf.clear();
+        self.sub_layer_sec_buf.shrink_to_fit();
         self.has_bitmap_subs = false;
         self.secondary_has_bitmap_subs = false;
+        self.sub_last_non_empty = false;
+        self.paired_layout_active = false;
+        self.paired_layout_hash = 0;
+        self.sub_dirty_y0 = 0;
+        self.sub_dirty_y1 = 0;
         self.secondary_time_scale = 1.0;
     }
 

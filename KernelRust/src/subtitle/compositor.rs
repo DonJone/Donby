@@ -33,6 +33,16 @@ impl SubtitleEngine {
             canvas_h = ((canvas_h * 1920) / canvas_w).max(1);
             canvas_w = 1920;
         }
+        if !self.has_bitmap_subs
+            && !self.secondary_has_bitmap_subs
+            && self.primary_ass_events.is_empty()
+            && self.secondary_ass_events.is_empty()
+            && self.primary_ext_raw.is_empty()
+            && self.secondary_ext_raw.is_empty()
+            && !self.sub_last_non_empty
+        {
+            return (false, ptr::null(), 0, 0, self.sub_serial);
+        }
         let pri_pts = pts - self.sub_style.primary_delay_sec;
         let sec_scale = if (0.80..=1.25).contains(&self.secondary_time_scale) {
             self.secondary_time_scale
@@ -162,45 +172,65 @@ impl SubtitleEngine {
             self.sub_style_dirty = false;
             self.clear_subtitle_canvas(canvas_w, canvas_h);
 
-            let style_copy = self.sub_style;
-            let margin_l = self.sub_margin_l;
-            let margin_r = self.sub_margin_r;
-            let margin_t = self.sub_margin_t;
-
-            let pri_layer = if let Some(ref cue) = pri_pgs {
-                render_pgs_cue_to_layer(
-                    &style_copy, margin_l, margin_r, cue, false, canvas_w, canvas_h, &mut self.sub_layer_pri_buf,
-                )
-            } else if !img_pri.is_null() {
-                render_ass_images_to_layer(img_pri, canvas_w, canvas_h, &mut self.sub_layer_pri_buf)
+            // Fast single-layer direct path: avoids allocating/zeroing an extra 8.3 MB
+            // scratch layer and pixel-by-pixel alpha blit when only primary ASS is active.
+            if !has_sec && pri_pgs.is_none() && !img_pri.is_null() {
+                let mut new_y0 = canvas_h;
+                let mut new_y1 = 0;
+                composite_ass_images_to_rgba(
+                    img_pri,
+                    &mut self.sub_rgba_buf,
+                    canvas_w,
+                    canvas_h,
+                    0,
+                    &mut new_y0,
+                    &mut new_y1,
+                );
+                if new_y1 > new_y0 {
+                    self.sub_dirty_y0 = new_y0;
+                    self.sub_dirty_y1 = new_y1;
+                }
             } else {
-                RenderedSubLayer { active: false, y0: canvas_h, y1: 0 }
-            };
+                let style_copy = self.sub_style;
+                let margin_l = self.sub_margin_l;
+                let margin_r = self.sub_margin_r;
+                let margin_t = self.sub_margin_t;
 
-            let sec_layer = if let Some(ref cue) = sec_pgs {
-                render_pgs_cue_to_layer(
-                    &style_copy, margin_l, margin_r, cue, true, canvas_w, canvas_h, &mut self.sub_layer_sec_buf,
-                )
-            } else if !img_sec.is_null() {
-                render_ass_images_to_layer(img_sec, canvas_w, canvas_h, &mut self.sub_layer_sec_buf)
-            } else {
-                RenderedSubLayer { active: false, y0: canvas_h, y1: 0 }
-            };
+                let pri_layer = if let Some(ref cue) = pri_pgs {
+                    render_pgs_cue_to_layer(
+                        &style_copy, margin_l, margin_r, cue, false, canvas_w, canvas_h, &mut self.sub_layer_pri_buf,
+                    )
+                } else if !img_pri.is_null() {
+                    render_ass_images_to_layer(img_pri, canvas_w, canvas_h, &mut self.sub_layer_pri_buf)
+                } else {
+                    RenderedSubLayer { active: false, y0: canvas_h, y1: 0 }
+                };
 
-            let (new_y0, new_y1) = composite_dual_layers(
-                &style_copy,
-                margin_t,
-                &pri_layer,
-                &self.sub_layer_pri_buf,
-                &sec_layer,
-                &self.sub_layer_sec_buf,
-                &mut self.sub_rgba_buf,
-                canvas_w,
-                canvas_h,
-            );
-            if new_y1 > new_y0 {
-                self.sub_dirty_y0 = new_y0;
-                self.sub_dirty_y1 = new_y1;
+                let sec_layer = if let Some(ref cue) = sec_pgs {
+                    render_pgs_cue_to_layer(
+                        &style_copy, margin_l, margin_r, cue, true, canvas_w, canvas_h, &mut self.sub_layer_sec_buf,
+                    )
+                } else if !img_sec.is_null() {
+                    render_ass_images_to_layer(img_sec, canvas_w, canvas_h, &mut self.sub_layer_sec_buf)
+                } else {
+                    RenderedSubLayer { active: false, y0: canvas_h, y1: 0 }
+                };
+
+                let (new_y0, new_y1) = composite_dual_layers(
+                    &style_copy,
+                    margin_t,
+                    &pri_layer,
+                    &self.sub_layer_pri_buf,
+                    &sec_layer,
+                    &self.sub_layer_sec_buf,
+                    &mut self.sub_rgba_buf,
+                    canvas_w,
+                    canvas_h,
+                );
+                if new_y1 > new_y0 {
+                    self.sub_dirty_y0 = new_y0;
+                    self.sub_dirty_y1 = new_y1;
+                }
             }
             self.rendered_pgs_gen = cur_pri_pgs_id;
             self.rendered_secondary_pgs_gen = cur_sec_pgs_id;

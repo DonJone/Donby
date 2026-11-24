@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <malloc/malloc.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -224,10 +225,33 @@ int dk_shim_open_format(
         return (open_ret < 0) ? open_ret : AVERROR_EXIT;
     }
 
-    fmt->fps_probe_size = 4;
-    fmt->max_probe_packets = 200;
-
     unsigned int nb = fmt->nb_streams;
+    bool video_has_fps = false;
+    bool all_av_params_known = (fmt->duration > 0 && nb > 0);
+    for (unsigned int i = 0; i < nb; i++) {
+        AVStream* st = fmt->streams[i];
+        if (!st || !st->codecpar) continue;
+        if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
+            !(st->disposition & AV_DISPOSITION_ATTACHED_PIC)) {
+            double afps = av_q2d(st->avg_frame_rate);
+            double rfps = av_q2d(st->r_frame_rate);
+            if ((afps > 0.0 && isfinite(afps)) || (rfps > 0.0 && isfinite(rfps))) {
+                video_has_fps = true;
+            }
+            if (st->codecpar->width <= 0 || st->codecpar->height <= 0 ||
+                st->codecpar->format == AV_PIX_FMT_NONE) {
+                all_av_params_known = false;
+            }
+        } else if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            if (st->codecpar->sample_rate <= 0 || st->codecpar->ch_layout.nb_channels <= 0 ||
+                st->codecpar->format == AV_SAMPLE_FMT_NONE) {
+                all_av_params_known = false;
+            }
+        }
+    }
+    fmt->fps_probe_size = (!is_mpeg_ts && video_has_fps) ? 0 : 4;
+    fmt->max_probe_packets = (!is_mpeg_ts && all_av_params_known) ? 32 : 200;
+
     enum AVDiscard* saved_discard = nb > 0 ? (enum AVDiscard*)calloc(nb, sizeof(enum AVDiscard)) : NULL;
     bool* seeded_dims = nb > 0 ? (bool*)calloc(nb, sizeof(bool)) : NULL;
 
@@ -506,4 +530,14 @@ int dk_shim_receive_frame(void* codec_ctx, void* frame) {
 
 void dk_shim_flush_codec(void* codec_ctx) {
     if (codec_ctx) avcodec_flush_buffers((AVCodecContext*)codec_ctx);
+}
+
+void dk_shim_set_codec_skip_nonref(void* codec_ctx, bool skip_nonref) {
+    if (codec_ctx) {
+        ((AVCodecContext*)codec_ctx)->skip_frame = skip_nonref ? AVDISCARD_NONREF : AVDISCARD_DEFAULT;
+    }
+}
+
+void dk_shim_reclaim_memory(void) {
+    malloc_zone_pressure_relief(NULL, 0);
 }

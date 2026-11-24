@@ -104,6 +104,8 @@ void dk_shim_close_codec(void** codec_ctx);
 int dk_shim_send_packet(void* codec_ctx, const void* pkt);
 int dk_shim_receive_frame(void* codec_ctx, void* frame);
 void dk_shim_flush_codec(void* codec_ctx);
+void dk_shim_set_codec_skip_nonref(void* codec_ctx, bool skip_nonref);
+void dk_shim_reclaim_memory(void);
 
 // VideoToolbox, IOSurface pool, HDR/DoVi color uniforms, and thumbnails (dk_ffi_video.c)
 void* dk_shim_alloc_hw_fmt_ctx(
@@ -166,6 +168,7 @@ void dk_shim_aq_set_volume(void* aq_raw, float vol);
 bool dk_shim_aq_get_sample_time(void* aq_raw, int64_t* out_sample_time);
 
 // Subtitle decoder, CFStringTransform, and libass struct accessors (dk_ffi_subtitle.c)
+void dk_shim_ass_set_quiet_logger(void* ass_lib_raw);
 size_t dk_shim_cf_transform_utf8(
     const uint8_t* src_bytes, size_t src_len, int32_t mode, uint8_t* dst_buf, size_t dst_cap
 );

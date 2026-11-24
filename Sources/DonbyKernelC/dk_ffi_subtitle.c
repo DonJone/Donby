@@ -16,6 +16,19 @@
 // Subtitle Decoder, CFStringTransform & libass Struct Accessors
 // -----------------------------------------------------------------------------
 
+static void dk_shim_ass_msg_cb(int level, const char* fmt, va_list va, void* data) {
+    (void)level;
+    (void)fmt;
+    (void)va;
+    (void)data;
+}
+
+void dk_shim_ass_set_quiet_logger(void* ass_lib_raw) {
+    if (ass_lib_raw) {
+        ass_set_message_cb((ASS_Library*)ass_lib_raw, dk_shim_ass_msg_cb, NULL);
+    }
+}
+
 size_t dk_shim_cf_transform_utf8(
     const uint8_t* src_bytes,
     size_t src_len,

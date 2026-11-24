@@ -10,10 +10,31 @@ use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ptr;
 use std::sync::atomic::{
-    AtomicBool, AtomicI32, AtomicI64, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, Ordering,
+    AtomicBool, AtomicI32, AtomicI64, AtomicI8, AtomicPtr, AtomicU32, AtomicU64, AtomicU8,
+    AtomicUsize, Ordering,
 };
 use std::sync::{Condvar, Mutex};
 use std::thread::JoinHandle;
+
+pub(crate) const MAX_CACHED_STREAM_TYPES: usize = 64;
+
+pub(crate) struct QueuedVideoPacket {
+    pub(crate) pkt: AvPacket,
+    pub(crate) pts_sec: f64,
+    pub(crate) has_pts: bool,
+}
+
+pub(crate) struct AudioHistPacket {
+    pub(crate) stream_idx: i32,
+    pub(crate) pts_sec: f64,
+    pub(crate) pkt: AvPacket,
+}
+
+#[derive(Default)]
+pub(crate) struct AudioHistoryState {
+    pub(crate) pkts: VecDeque<AudioHistPacket>,
+    pub(crate) bytes: usize,
+}
 
 pub(crate) struct VideoFrameEntry {
     pub(crate) pixbuf: OwnedPixelBuffer,
@@ -153,6 +174,14 @@ pub struct DKPlayer {
     pub(crate) volume_bits: AtomicU32,
     pub(crate) is_muted: AtomicBool,
     pub(crate) hw_decode_enabled: AtomicBool,
+    pub(crate) is_local_file: AtomicBool,
+    pub(crate) has_custom_io: AtomicBool,
+    pub(crate) video_is_hevc: AtomicBool,
+    pub(crate) video_width: AtomicI32,
+    pub(crate) video_height: AtomicI32,
+    pub(crate) atomic_video_fps_bits: AtomicU64,
+    pub(crate) last_decoded_pts_bits: AtomicU64,
+    pub(crate) stream_types: [AtomicI8; MAX_CACHED_STREAM_TYPES],
 
     pub(crate) format_ctx: AtomicPtr<c_void>,
     pub(crate) custom_avio_ctx: AtomicPtr<c_void>,
@@ -168,7 +197,7 @@ pub struct DKPlayer {
     /// Lock partial order: `video_codec_mtx` -> `stats_mtx`.
     pub(crate) video_codec_mtx: Mutex<(usize, usize)>, // (video_codec_ctx, hw_device_ctx)
     pub(crate) sw_video_mtx: Mutex<SwVideoState>,
-    /// Lock partial order: `audio_codec_mtx` -> `{vad_mtx, audio_chunks_mtx, video_queue_mtx, audio_buffers, audio_pkt_mtx, stats_mtx, workers_mtx}`.
+    /// Lock partial order: `audio_codec_mtx` -> `{vad_mtx, audio_chunks_mtx, video_queue_mtx, audio_buffers, audio_pkt_mtx, audio_hist_mtx, stats_mtx, workers_mtx}`.
     pub(crate) audio_codec_mtx: Mutex<AudioCodecState>,
 
     pub(crate) vt_failed: AtomicBool,
@@ -183,21 +212,27 @@ pub struct DKPlayer {
     pub(crate) seek_accurate: AtomicBool,
     pub(crate) video_seek_drop_bits: AtomicU64,
     pub(crate) audio_seek_drop_bits: AtomicU64,
+    pub(crate) video_skip_nonref_active: AtomicBool,
     pub(crate) seek_preview_pending: AtomicBool,
     pub(crate) force_present_next_frame: AtomicBool,
     pub(crate) demux_eof: AtomicBool,
     pub(crate) video_eof: AtomicBool,
     pub(crate) audio_eof: AtomicBool,
 
-    /// Lock partial order: `demux_mtx` -> `{video_pkt_mtx, audio_pkt_mtx, video_codec_mtx, audio_codec_mtx, sub_mtx, sub_hist_mtx, video_queue_mtx, audio_chunks_mtx, vad_mtx, speed_mtx}`.
+    /// Lock partial order: `demux_mtx` -> `{video_pkt_mtx, audio_pkt_mtx, video_codec_mtx, audio_codec_mtx, sub_mtx, sub_hist_mtx, audio_hist_mtx, video_queue_mtx, audio_chunks_mtx, vad_mtx, speed_mtx}`.
     pub(crate) demux_mtx: Mutex<()>,
     pub(crate) demux_cv: Condvar,
 
-    pub(crate) video_pkt_mtx: Mutex<VecDeque<Option<AvPacket>>>,
+    pub(crate) video_pkt_mtx: Mutex<VecDeque<Option<QueuedVideoPacket>>>,
+    pub(crate) video_pkt_count: AtomicUsize,
     pub(crate) video_decode_cv: Condvar,
 
     pub(crate) audio_pkt_mtx: Mutex<VecDeque<Option<AvPacket>>>,
+    pub(crate) audio_pkt_count: AtomicUsize,
     pub(crate) audio_decode_cv: Condvar,
+
+    pub(crate) audio_hist_mtx: Mutex<AudioHistoryState>,
+    pub(crate) audio_hist_trimmed: AtomicBool,
 
     pub(crate) queued_pkt_bytes: AtomicI64,
     pub(crate) max_buffer_bytes: AtomicI64,
@@ -250,6 +285,14 @@ impl DKPlayer {
             volume_bits: AtomicU32::new(1.0f32.to_bits()),
             is_muted: AtomicBool::new(false),
             hw_decode_enabled: AtomicBool::new(true),
+            is_local_file: AtomicBool::new(false),
+            has_custom_io: AtomicBool::new(false),
+            video_is_hevc: AtomicBool::new(false),
+            video_width: AtomicI32::new(0),
+            video_height: AtomicI32::new(0),
+            atomic_video_fps_bits: AtomicU64::new(24.0f64.to_bits()),
+            last_decoded_pts_bits: AtomicU64::new((-1.0f64).to_bits()),
+            stream_types: std::array::from_fn(|_| AtomicI8::new(-1)),
             format_ctx: AtomicPtr::new(ptr::null_mut()),
             custom_avio_ctx: AtomicPtr::new(ptr::null_mut()),
             hw_fmt_ctx_opaque: AtomicPtr::new(ptr::null_mut()),
@@ -272,6 +315,7 @@ impl DKPlayer {
             seek_accurate: AtomicBool::new(false),
             video_seek_drop_bits: AtomicU64::new((-1.0f64).to_bits()),
             audio_seek_drop_bits: AtomicU64::new((-1.0f64).to_bits()),
+            video_skip_nonref_active: AtomicBool::new(false),
             seek_preview_pending: AtomicBool::new(false),
             force_present_next_frame: AtomicBool::new(false),
             demux_eof: AtomicBool::new(false),
@@ -280,9 +324,13 @@ impl DKPlayer {
             demux_mtx: Mutex::new(()),
             demux_cv: Condvar::new(),
             video_pkt_mtx: Mutex::new(VecDeque::new()),
+            video_pkt_count: AtomicUsize::new(0),
             video_decode_cv: Condvar::new(),
             audio_pkt_mtx: Mutex::new(VecDeque::new()),
+            audio_pkt_count: AtomicUsize::new(0),
             audio_decode_cv: Condvar::new(),
+            audio_hist_mtx: Mutex::new(AudioHistoryState::default()),
+            audio_hist_trimmed: AtomicBool::new(false),
             queued_pkt_bytes: AtomicI64::new(0),
             max_buffer_bytes: AtomicI64::new(256 * 1024 * 1024),
             last_demuxed_pts_bits: AtomicU64::new(0.0f64.to_bits()),
@@ -339,6 +387,22 @@ impl DKPlayer {
     #[inline]
     pub(crate) fn is_seeking(&self) -> bool {
         self.seek_requested.load(Ordering::Acquire) || self.seek_executing.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub(crate) fn max_video_frames(&self) -> usize {
+        let w = self.video_width.load(Ordering::Relaxed);
+        let h = self.video_height.load(Ordering::Relaxed);
+        if w >= 2560 || h >= 1440 { 3 } else { 5 }
+    }
+
+    pub(crate) fn clear_audio_pkt_history(&self) {
+        if let Ok(mut hist) = self.audio_hist_mtx.lock() {
+            hist.pkts.clear();
+            hist.pkts.shrink_to_fit();
+            hist.bytes = 0;
+        }
+        self.audio_hist_trimmed.store(false, Ordering::Relaxed);
     }
 
     #[inline]

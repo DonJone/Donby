@@ -1,5 +1,6 @@
 #include "dk_ffi_shim_internal.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -269,9 +270,11 @@ bool dk_shim_aq_create(
         return false;
     }
 
-    UInt32 timePitch = 1;
-    AudioQueueSetProperty(aq, kAudioQueueProperty_EnableTimePitch, &timePitch, sizeof(timePitch));
-    AudioQueueSetParameter(aq, kAudioQueueParam_PlayRate, rate);
+    if (fabsf(rate - 1.0f) > 0.001f) {
+        UInt32 timePitch = 1;
+        AudioQueueSetProperty(aq, kAudioQueueProperty_EnableTimePitch, &timePitch, sizeof(timePitch));
+        AudioQueueSetParameter(aq, kAudioQueueParam_PlayRate, rate);
+    }
     AudioQueueSetParameter(aq, kAudioQueueParam_Volume, effective_vol);
 
     for (int i = 0; i < 4; i++) {
@@ -310,7 +313,11 @@ void dk_shim_aq_commit_and_enqueue(void* aq_raw, void* buf_raw) {
 int32_t dk_shim_aq_prime_and_start(void* aq_raw) {
     AudioQueueRef aq = (AudioQueueRef)aq_raw;
     if (!aq) return -1;
-    AudioQueuePrime(aq, 0, NULL);
+    UInt32 timePitch = 0;
+    UInt32 sz = sizeof(timePitch);
+    if (AudioQueueGetProperty(aq, kAudioQueueProperty_EnableTimePitch, &timePitch, &sz) == noErr && timePitch != 0) {
+        AudioQueuePrime(aq, 0, NULL);
+    }
     return (int32_t)AudioQueueStart(aq, NULL);
 }
 
@@ -348,7 +355,13 @@ void dk_shim_aq_stop_dispose(void** aq_ptr, void** trampoline_ptr) {
 }
 
 void dk_shim_aq_set_rate(void* aq_raw, float rate) {
-    if (aq_raw) AudioQueueSetParameter((AudioQueueRef)aq_raw, kAudioQueueParam_PlayRate, rate);
+    if (!aq_raw) return;
+    AudioQueueRef aq = (AudioQueueRef)aq_raw;
+    if (fabsf(rate - 1.0f) > 0.001f) {
+        UInt32 timePitch = 1;
+        AudioQueueSetProperty(aq, kAudioQueueProperty_EnableTimePitch, &timePitch, sizeof(timePitch));
+    }
+    AudioQueueSetParameter(aq, kAudioQueueParam_PlayRate, rate);
 }
 
 void dk_shim_aq_set_volume(void* aq_raw, float vol) {

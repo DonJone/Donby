@@ -1,6 +1,6 @@
 # Module Map: Turbo Cache, Streaming & Network (`DonbyNetwork`)
 
-> Last synced: `v2.0.6`. Load this doc for `DonbyNetwork` streaming, seek latency, HTTP/2 Range, L1/L2 caching, detail-page preloading, Emby API (including standard Emby fallback when UHD extension is disabled), offline downloads, and channel-aware auto-updates. For optional `DonbyUHDModule` & `Modules/UHD`, load [uhd-module.md](uhd-module.md).
+> Last synced: `v2.0.9`. Load this doc for `DonbyNetwork` streaming, seek latency, HTTP/2 Range, L1/L2 caching, detail-page preloading, Emby API (including standard Emby fallback when UHD extension is disabled), offline downloads, and channel-aware auto-updates. For optional `DonbyUHDModule` & `Modules/UHD`, load [uhd-module.md](uhd-module.md).
 
 | If your task involves... | File | Entry Symbols |
 | :--- | :--- | :--- |
@@ -37,7 +37,7 @@
 - **Two-Tier Storage (`TieredAssetChunkStore`)**:
   - **L1 Memory**: Fast dictionary cache with smart retention:
     - Pins **Chunks 0..3** (`2 MiB` head runway) and **final 2 EOF chunks** (MKV Cues / MP4 `moov`) so warm reopens start in `<20ms` without running dry on high-TTFB edges.
-    - Skips behind-cursor eviction while `memoryBytes <= 75%` of `maxMemoryBytes` for instant `-5s/-10s` rewinds.
+    - When L2 disk persistence is active, `evictBehindCursor()` trims behind-cursor chunks once L1 exceeds `min(75% of maxMemoryBytes, 96 MiB)`, `evictDistantChunks()` trims far-away chunks on large jumps (`>48` chunks), and `trimIdleMemoryKeepingPinned()` releases all non-pinned L1 chunks when the last reader closes (`remainingReaders == 0`) with `malloc_zone_pressure_relief`.
   - **L2 Disk (Async)**:
     - `storeChunk()` inserts into L1 + `pendingDiskChunks` and dispatches writes to serial `diskQueue` (`com.donby.chunkstore.disk`, `.utility`), avoiding `URLSession` callback stalls.
     - Backpressure cap: `64` pending chunks; no `.atomic` overhead on spill chunks.

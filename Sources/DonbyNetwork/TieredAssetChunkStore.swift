@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import DonbyCore
 
 // MARK: - Task C: ChunkStore Metadata & Disk/Memory Tiered Storage
@@ -456,23 +457,57 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
         return slice
     }
 
-    /// Sliding window eviction behind playhead cursor (keeps Chunk 0..3 + EOF Cues pinned and retains recent rewind window while under 75% RAM cap).
+    /// Sliding window eviction behind playhead cursor (keeps Chunk 0..3 + EOF Cues pinned and retains recent rewind window while under RAM cap).
     public func evictBehindCursor(cursorChunk: Int, keepBackChunks: Int = 8) {
         let threshold = cursorChunk - max(2, keepBackChunks)
         guard threshold > 0 else { return }
 
         lock.lock()
         let totalChunks = meta.totalChunks
+        let backedByDisk = persistDisk || meta.pinned
         lock.unlock()
         let protectedTailStart = totalChunks > 4 ? (totalChunks - 2) : Int.max
 
         memoryLock.lock()
-        // Keep recently played chunks warm in RAM for instant -10s / backward skips until >75% of RAM budget is used.
-        guard memoryBytes > (maxMemoryBytes * 3) / 4 else {
+        // When backed by L2 disk, trim stale chunks behind the rewind window once L1 exceeds 96 MiB
+        // (or 75% of maxMemoryBytes when lower) to keep active footprint compact across multi-seek sessions.
+        let softCap = backedByDisk ? min((maxMemoryBytes * 3) / 4, 96 * 1024 * 1024) : (maxMemoryBytes * 3) / 4
+        guard memoryBytes > softCap else {
             memoryLock.unlock()
             return
         }
         let keysToRemove = memoryOrder.filter { $0 >= 4 && $0 < threshold && $0 < protectedTailStart }
+        for k in keysToRemove {
+            if let removed = memoryChunks.removeValue(forKey: k) {
+                memoryBytes = max(0, memoryBytes - removed.count)
+            }
+        }
+        if !keysToRemove.isEmpty {
+            let removedSet = Set(keysToRemove)
+            memoryOrder.removeAll { removedSet.contains($0) }
+        }
+        memoryLock.unlock()
+    }
+
+    /// Evicts distant L1 chunks outside `[center - keepBack, center + keepAhead]` on large jumps when backed by L2 disk.
+    public func evictDistantChunks(aroundChunk centerChunk: Int, keepBackChunks: Int = 16, keepAheadChunks: Int = 48) {
+        lock.lock()
+        let totalChunks = meta.totalChunks
+        let backedByDisk = persistDisk || meta.pinned
+        lock.unlock()
+        guard backedByDisk else { return }
+
+        let protectedTailStart = totalChunks > 4 ? (totalChunks - 2) : Int.max
+        let keepLo = max(4, centerChunk - keepBackChunks)
+        let keepHi = centerChunk + keepAheadChunks
+
+        memoryLock.lock()
+        let softCap = min((maxMemoryBytes * 3) / 4, 96 * 1024 * 1024)
+        guard memoryBytes > softCap else {
+            memoryLock.unlock()
+            return
+        }
+        let keysToRemove = memoryOrder.filter { $0 >= 4 && $0 < protectedTailStart && ($0 < keepLo || $0 > keepHi) }
         for k in keysToRemove {
             if let removed = memoryChunks.removeValue(forKey: k) {
                 memoryBytes = max(0, memoryBytes - removed.count)
@@ -493,6 +528,34 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
         lock.unlock()
         if shouldPersist {
             writeMetaSnapshotToDisk(snapshot)
+        }
+    }
+
+    /// Trims idle L1 RAM chunks once no active readers remain (preserving only Chunks 0..3 + final 2 EOF
+    /// chunks for <20ms warm reopens while all remaining chunks stay persisted in L2 disk cache).
+    public func trimIdleMemoryKeepingPinned() {
+        lock.lock()
+        let hasReaders = activeReaders > 0
+        let backedByDisk = persistDisk || meta.pinned
+        let totalChunks = meta.totalChunks
+        lock.unlock()
+        guard !hasReaders && backedByDisk else { return }
+
+        let protectedTailStart = totalChunks > 4 ? (totalChunks - 2) : Int.max
+        memoryLock.lock()
+        let keysToDrop = memoryOrder.filter { $0 >= 4 && $0 < protectedTailStart }
+        for k in keysToDrop {
+            if let removed = memoryChunks.removeValue(forKey: k) {
+                memoryBytes = max(0, memoryBytes - removed.count)
+            }
+        }
+        if !keysToDrop.isEmpty {
+            let dropSet = Set(keysToDrop)
+            memoryOrder.removeAll { dropSet.contains($0) }
+        }
+        memoryLock.unlock()
+        if !keysToDrop.isEmpty {
+            malloc_zone_pressure_relief(nil, 0)
         }
     }
 

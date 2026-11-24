@@ -1,5 +1,5 @@
 use crate::abi::{cchar_array_to_string, DKChapterInfo, DKTrackInfo};
-use crate::clock::load_f64;
+use crate::clock::{load_f64, store_f64};
 use crate::emit_log;
 use crate::ffi::{
     dk_shim_close_codec, dk_shim_close_swr, dk_shim_format_summary, dk_shim_get_chapter_info,
@@ -64,6 +64,7 @@ impl DKPlayer {
     pub(crate) fn clear_sub_pkt_history(&self) {
         if let Ok(mut hist) = self.sub_hist_mtx.lock() {
             hist.pkts.clear();
+            hist.pkts.shrink_to_fit();
             hist.bytes = 0;
         }
         self.sub_hist_trimmed.store(false, Ordering::Relaxed);
@@ -222,19 +223,80 @@ impl DKPlayer {
             let cur_pts = self.get_master_clock().max(0.0);
             let Ok(mut ac) = self.audio_codec_mtx.lock() else { return };
 
-            self.stop_reset_audio_queue();
+            // Determine exact next sample PTS already queued ahead of the running AudioQueue
+            // so a seamless zero-seek switch aligns sample-accurately without resetting CoreAudio.
+            let aq_running = self.audio_queue_started.load(Ordering::Acquire);
+            let next_aq_pts = if aq_running {
+                self.audio_chunks_mtx
+                    .lock()
+                    .ok()
+                    .and_then(|ach| {
+                        ach.front()
+                            .map(|c| c.pts + ((c.read_offset / 2) as f64) / 48_000.0)
+                    })
+                    .unwrap_or(cur_pts + 0.085)
+            } else {
+                cur_pts
+            };
+
+            // Extract cached packets for `stream_index` from the sliding unselected-audio ring buffer
+            let mut extracted: Vec<AvPacket> = Vec::new();
+            let mut extracted_first_pts = f64::INFINITY;
+            let mut extracted_last_pts = -1.0f64;
+            if let Ok(mut hist) = self.audio_hist_mtx.lock() {
+                let mut keep = VecDeque::with_capacity(hist.pkts.len());
+                while let Some(item) = hist.pkts.pop_front() {
+                    if item.stream_idx == stream_index {
+                        let sz = item.pkt.size().max(0) as usize;
+                        hist.bytes = hist.bytes.saturating_sub(sz);
+                        if item.pts_sec >= next_aq_pts - 0.5 {
+                            if item.pts_sec < extracted_first_pts {
+                                extracted_first_pts = item.pts_sec;
+                            }
+                            if item.pts_sec > extracted_last_pts {
+                                extracted_last_pts = item.pts_sec;
+                            }
+                            extracted.push(item.pkt);
+                        }
+                    } else {
+                        keep.push_back(item);
+                    }
+                }
+                hist.pkts = keep;
+            }
+
+            let demux_pts = load_f64(&self.last_demuxed_pts_bits);
+            let hist_trimmed = self.audio_hist_trimmed.load(Ordering::Relaxed);
+            let can_seamless_switch = !self.is_seeking()
+                && !self.demux_eof.load(Ordering::Relaxed)
+                && ((!extracted.is_empty() && extracted_first_pts <= next_aq_pts + 0.25)
+                    || (!hist_trimmed && demux_pts <= next_aq_pts + 0.15));
+
+            if !can_seamless_switch {
+                self.stop_reset_audio_queue();
+            }
             if let Ok(mut apkts) = self.audio_pkt_mtx.lock() {
                 for item in VecDeque::drain(&mut *apkts, ..) {
                     if let Some(pkt) = item {
                         self.queued_pkt_bytes.fetch_sub(pkt.size() as i64, Ordering::Relaxed);
                     }
                 }
+                if can_seamless_switch {
+                    for pkt in extracted {
+                        let sz = pkt.size() as i64;
+                        apkts.push_back(Some(pkt));
+                        self.queued_pkt_bytes.fetch_add(sz, Ordering::Relaxed);
+                    }
+                }
+                self.audio_pkt_count.store(apkts.len(), Ordering::Relaxed);
             }
             if let Ok(mut ach) = self.audio_chunks_mtx.lock() {
                 ach.clear();
             }
             self.buffered_audio_samples.store(0, Ordering::Release);
-            self.clock.reset_to(cur_pts);
+            if !can_seamless_switch {
+                self.clock.reset_to(cur_pts);
+            }
             if let Ok(mut vad) = self.vad_mtx.lock() {
                 vad.clear();
             }
@@ -284,11 +346,26 @@ impl DKPlayer {
                         }));
                     }
                 }
+                if can_seamless_switch {
+                    store_f64(&self.audio_seek_drop_bits, next_aq_pts);
+                }
             } else {
                 self.audio_stream_idx.store(-1, Ordering::Release);
             }
             drop(ac);
-            self.signal_seek_request(cur_pts, true);
+            if can_seamless_switch {
+                self.audio_decode_cv.notify_all();
+                self.demux_cv.notify_one();
+                emit_log(
+                    0,
+                    &format!(
+                        "DKEngine: Audio track switched seamlessly to stream #{} at {:.2}s (zero-seek)",
+                        stream_index, next_aq_pts
+                    ),
+                );
+            } else {
+                self.signal_seek_request(cur_pts, true);
+            }
         } else if track_type == 2 {
             if stream_index < 0 {
                 stream_index = -1;

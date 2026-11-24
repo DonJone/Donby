@@ -166,6 +166,8 @@ extern "C" {
     pub fn dk_shim_send_packet(codec_ctx: *mut c_void, pkt: *const c_void) -> c_int;
     pub fn dk_shim_receive_frame(codec_ctx: *mut c_void, frame: *mut c_void) -> c_int;
     pub fn dk_shim_flush_codec(codec_ctx: *mut c_void);
+    pub fn dk_shim_set_codec_skip_nonref(codec_ctx: *mut c_void, skip_nonref: bool);
+    pub fn dk_shim_reclaim_memory();
 
     pub fn dk_shim_process_video_frame(
         frame: *const c_void,
@@ -252,6 +254,7 @@ extern "C" {
     pub fn dk_shim_aq_set_volume(aq: *mut c_void, vol: f32);
     pub fn dk_shim_aq_get_sample_time(aq: *mut c_void, out_sample_time: *mut i64) -> bool;
 
+    pub fn dk_shim_ass_set_quiet_logger(ass_lib: *mut c_void);
     pub fn dk_shim_cf_transform_utf8(
         src_bytes: *const u8,
         src_len: usize,

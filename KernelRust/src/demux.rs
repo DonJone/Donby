@@ -5,10 +5,12 @@ use crate::emit_log;
 use crate::ffi::{
     dk_shim_avio_bytes_read, dk_shim_avio_retry_reseek, dk_shim_clear_avio_error,
     dk_shim_flush_codec, dk_shim_get_stream_meta, dk_shim_is_eagain, dk_shim_is_eof,
-    dk_shim_is_hevc_stream, dk_shim_read_frame, dk_shim_seek_format, ffmpeg_err_string,
+    dk_shim_read_frame, dk_shim_seek_format, dk_shim_set_codec_skip_nonref, ffmpeg_err_string,
     AvPacket, DKShimStreamMeta,
 };
-use crate::player::{DKPlayer, SeekScopeGuard};
+use crate::player::{
+    AudioHistPacket, DKPlayer, QueuedVideoPacket, SeekScopeGuard, MAX_CACHED_STREAM_TYPES,
+};
 use std::ffi::c_void;
 use std::ptr;
 use std::sync::atomic::Ordering;
@@ -68,15 +70,19 @@ impl DKPlayer {
         if let Ok(mut vq) = self.video_pkt_mtx.lock() {
             vq.clear();
         }
+        self.video_pkt_count.store(0, Ordering::Relaxed);
         if let Ok(mut aq_pkts) = self.audio_pkt_mtx.lock() {
             aq_pkts.clear();
         }
+        self.audio_pkt_count.store(0, Ordering::Relaxed);
         self.queued_pkt_bytes.store(0, Ordering::Relaxed);
         store_f64(&self.last_demuxed_pts_bits, target_sec);
 
         if let Ok(vc) = self.video_codec_mtx.lock() {
             if vc.0 != 0 {
                 dk_shim_flush_codec(vc.0 as *mut c_void);
+                dk_shim_set_codec_skip_nonref(vc.0 as *mut c_void, accurate);
+                self.video_skip_nonref_active.store(accurate, Ordering::Release);
             }
         }
         if let Ok(ac) = self.audio_codec_mtx.lock() {
@@ -91,7 +97,9 @@ impl DKPlayer {
             );
         }
         self.clear_sub_pkt_history();
+        self.clear_audio_pkt_history();
 
+        store_f64(&self.last_decoded_pts_bits, target_sec);
         if let Ok(mut vf) = self.video_queue_mtx.lock() {
             vf.frames.clear();
             vf.last_decoded_pts = target_sec;
@@ -107,8 +115,6 @@ impl DKPlayer {
         self.audio_rebuffer_count.store(0, Ordering::Relaxed);
         self.audio_start_fail_count.store(0, Ordering::Relaxed);
         self.audio_hal_disabled.store(false, Ordering::Relaxed);
-
-        self.stop_reset_audio_queue();
 
         if let Ok(mut spd) = self.speed_mtx.lock() {
             spd.reset(self.get_total_bytes_read());
@@ -158,19 +164,32 @@ impl DKPlayer {
                 }
             }
 
-            let v_pkts = self.video_pkt_mtx.lock().map(|q| q.len()).unwrap_or(0);
-            let a_pkts = self.audio_pkt_mtx.lock().map(|q| q.len()).unwrap_or(0);
-            let cur_pts = self.get_master_clock().max(0.0);
-            let ahead_sec = (load_f64(&self.last_demuxed_pts_bits) - cur_pts).max(0.0);
+            let v_pkts = self.video_pkt_count.load(Ordering::Relaxed);
+            let a_pkts = self.audio_pkt_count.load(Ordering::Relaxed);
+            let drop_target = load_f64(&self.video_seek_drop_bits);
+            let cur_pts = load_f64(&self.clock.current_pos_bits).max(0.0);
+            let ref_pts = if drop_target > 0.0 { drop_target } else { cur_pts };
+            let ahead_sec = (load_f64(&self.last_demuxed_pts_bits) - ref_pts).max(0.0);
             let total_pkt_bytes = self.queued_pkt_bytes.load(Ordering::Relaxed);
 
-            let time_enough = if self.video_stream_idx.load(Ordering::Relaxed) < 0 {
-                a_pkts >= 1500
+            let is_custom = self.has_custom_io.load(Ordering::Relaxed);
+            let is_local = self.is_local_file.load(Ordering::Relaxed) && !is_custom;
+            let user_cap = self.max_buffer_bytes.load(Ordering::Relaxed);
+            let (max_ahead_sec, min_v_pkts, max_v_pkts, max_a_pkts, eff_mem_cap) = if is_local {
+                (2.5, 16usize, 64usize, 300usize, user_cap.min(12 * 1024 * 1024))
+            } else if is_custom {
+                (16.0, 48usize, 480usize, 1200usize, user_cap.min(64 * 1024 * 1024))
             } else {
-                ahead_sec >= 90.0 && v_pkts >= 60
+                (30.0, 60usize, 900usize, 1500usize, user_cap.min(96 * 1024 * 1024))
             };
-            let pkts_enough = v_pkts >= 2500;
-            let mem_enough = total_pkt_bytes >= self.max_buffer_bytes.load(Ordering::Relaxed);
+
+            let time_enough = if self.video_stream_idx.load(Ordering::Relaxed) < 0 {
+                a_pkts >= max_a_pkts
+            } else {
+                ahead_sec >= max_ahead_sec && v_pkts >= min_v_pkts
+            };
+            let pkts_enough = v_pkts >= max_v_pkts;
+            let mem_enough = total_pkt_bytes >= eff_mem_cap;
 
             if time_enough || pkts_enough || mem_enough {
                 if let Ok(lk) = self.demux_mtx.lock() {
@@ -213,10 +232,12 @@ impl DKPlayer {
                     if !self.demux_eof.swap(true, Ordering::AcqRel) {
                         if let Ok(mut vq) = self.video_pkt_mtx.lock() {
                             vq.push_back(None);
+                            self.video_pkt_count.fetch_add(1, Ordering::Relaxed);
                         }
                         self.video_decode_cv.notify_one();
                         if let Ok(mut aq_pkts) = self.audio_pkt_mtx.lock() {
                             aq_pkts.push_back(None);
+                            self.audio_pkt_count.fetch_add(1, Ordering::Relaxed);
                         }
                         self.audio_decode_cv.notify_one();
                     }
@@ -270,7 +291,7 @@ impl DKPlayer {
             }
 
             let pb_bytes = unsafe { dk_shim_avio_bytes_read(fmt) };
-            let has_custom_read = self.custom_io.lock().map(|io| io.read_cb.is_some()).unwrap_or(false);
+            let has_custom_read = self.has_custom_io.load(Ordering::Relaxed);
             if pb_bytes > 0 && pb_bytes > self.total_bytes_read.load(Ordering::Relaxed) {
                 self.total_bytes_read.store(pb_bytes, Ordering::Relaxed);
             } else if !has_custom_read && pkt_size > 0 && pb_bytes <= 0 {
@@ -289,7 +310,7 @@ impl DKPlayer {
                     && dovi_probe_packets < 120
                     && !data_ptr.is_null()
                     && pkt_size > 0
-                    && unsafe { dk_shim_is_hevc_stream(fmt, stream_idx) }
+                    && self.video_is_hevc.load(Ordering::Relaxed)
                 {
                     dovi_probe_packets += 1;
                     let slice = unsafe { std::slice::from_raw_parts(data_ptr, pkt_size as usize) };
@@ -303,7 +324,12 @@ impl DKPlayer {
                 if let Some(moved) = pkt.move_out() {
                     let sz = moved.size() as i64;
                     if let Ok(mut vq) = self.video_pkt_mtx.lock() {
-                        vq.push_back(Some(moved));
+                        vq.push_back(Some(QueuedVideoPacket {
+                            pkt: moved,
+                            pts_sec: pkt_sec,
+                            has_pts,
+                        }));
+                        self.video_pkt_count.fetch_add(1, Ordering::Relaxed);
                         self.queued_pkt_bytes.fetch_add(sz, Ordering::Relaxed);
                     }
                     self.video_decode_cv.notify_one();
@@ -315,6 +341,7 @@ impl DKPlayer {
                     let sz = moved.size() as i64;
                     if let Ok(mut aq_pkts) = self.audio_pkt_mtx.lock() {
                         aq_pkts.push_back(Some(moved));
+                        self.audio_pkt_count.fetch_add(1, Ordering::Relaxed);
                         self.queued_pkt_bytes.fetch_add(sz, Ordering::Relaxed);
                     }
                     self.audio_decode_cv.notify_one();
@@ -322,11 +349,57 @@ impl DKPlayer {
                     pkt.unref();
                 }
             } else {
-                let mut smeta = DKShimStreamMeta::default();
-                if stream_idx >= 0
-                    && unsafe { dk_shim_get_stream_meta(fmt, stream_idx as u32, &mut smeta) }
-                    && smeta.codec_type == 2
-                {
+                let stype = if stream_idx >= 0 && (stream_idx as usize) < MAX_CACHED_STREAM_TYPES {
+                    self.stream_types[stream_idx as usize].load(Ordering::Relaxed)
+                } else if stream_idx >= 0 {
+                    let mut smeta = DKShimStreamMeta::default();
+                    if unsafe { dk_shim_get_stream_meta(fmt, stream_idx as u32, &mut smeta) } {
+                        smeta.codec_type as i8
+                    } else {
+                        -1
+                    }
+                } else {
+                    -1
+                };
+
+                if stype == 1 {
+                    // Sliding ring buffer of unselected audio track packets for zero-seek instant switching
+                    let keep_floor = cur_pts - 0.6;
+                    if (!has_pts || pkt_sec >= keep_floor) && pkt_size > 0 {
+                        const MAX_AUDIO_HIST_BYTES: usize = 4 * 1024 * 1024;
+                        if let Some(moved) = pkt.move_out() {
+                            let sz = moved.size().max(0) as usize;
+                            if let Ok(mut hist) = self.audio_hist_mtx.lock() {
+                                while let Some(front) = hist.pkts.front() {
+                                    if front.pts_sec < keep_floor {
+                                        let old = hist.pkts.pop_front().unwrap();
+                                        hist.bytes = hist.bytes.saturating_sub(old.pkt.size().max(0) as usize);
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                hist.bytes += sz;
+                                hist.pkts.push_back(AudioHistPacket {
+                                    stream_idx,
+                                    pts_sec: pkt_sec,
+                                    pkt: moved,
+                                });
+                                while hist.bytes > MAX_AUDIO_HIST_BYTES {
+                                    if let Some(old) = hist.pkts.pop_front() {
+                                        hist.bytes = hist.bytes.saturating_sub(old.pkt.size().max(0) as usize);
+                                        self.audio_hist_trimmed.store(true, Ordering::Relaxed);
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+                        } else {
+                            pkt.unref();
+                        }
+                    } else {
+                        pkt.unref();
+                    }
+                } else if stype == 2 {
                     self.record_sub_pkt_history(&pkt);
                     let pri_sub = self.sub_stream_idx.load(Ordering::Relaxed);
                     let sec_sub = self.secondary_sub_stream_idx.load(Ordering::Relaxed);
@@ -340,8 +413,10 @@ impl DKPlayer {
                             }
                         }
                     }
+                    pkt.unref();
+                } else {
+                    pkt.unref();
                 }
-                pkt.unref();
             }
         }
     }

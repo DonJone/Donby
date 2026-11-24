@@ -611,6 +611,9 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         for task in tasksToCancel {
             TurboStreamingSessionHub.shared.cancelTask(task, intentional: true)
         }
+        if abs(newChunk - oldChunk) > 48 && !isNearTailProbe {
+            store.evictDistantChunks(aroundChunk: newChunk)
+        }
         return resultPos
     }
 
@@ -669,6 +672,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         store.flushMeta()
         let remainingReaders = store.releaseReader()
         if remainingReaders == 0 {
+            store.trimIdleMemoryKeepingPinned()
             let key = assetKey
             Task { @MainActor in
                 DonbyDownloadManager.shared.cleanupRedundantCacheIfMaterialized(assetKey: key)

@@ -7,11 +7,12 @@ use crate::ffi::{
     dk_shim_alloc_hw_fmt_ctx, dk_shim_averror_eio, dk_shim_averror_enosys, dk_shim_averror_eof,
     dk_shim_averror_exit, dk_shim_close_codec, dk_shim_close_format, dk_shim_close_swr,
     dk_shim_format_summary, dk_shim_free_hw_fmt_ctx, dk_shim_get_stream_meta,
-    dk_shim_install_ffmpeg_log_bridge, dk_shim_open_audio_decoder, dk_shim_open_format,
-    dk_shim_open_video_decoder, dk_shim_release_sw_video_res, dk_shim_seek_format,
-    dk_shim_unref_hw_ctx, ffmpeg_err_string, DKShimStreamMeta,
+    dk_shim_install_ffmpeg_log_bridge, dk_shim_is_hevc_stream, dk_shim_open_audio_decoder,
+    dk_shim_open_format, dk_shim_open_video_decoder, dk_shim_reclaim_memory,
+    dk_shim_release_sw_video_res, dk_shim_seek_format, dk_shim_unref_hw_ctx, ffmpeg_err_string,
+    DKShimStreamMeta,
 };
-use crate::player::{AudioCodecState, CustomIoSlot, DKPlayer, SwVideoState};
+use crate::player::{AudioCodecState, CustomIoSlot, DKPlayer, SwVideoState, MAX_CACHED_STREAM_TYPES};
 use crate::tracks::score_auto_subtitle_stream;
 use crate::video::{is_vt_failed_thunk, on_sw_format_selected_thunk};
 use crate::{emit_log, live_players, normalize_path_or_url, redact_url_for_log};
@@ -116,6 +117,7 @@ pub(crate) unsafe fn destroy_raw(player: *mut DKPlayer) {
     dk_shim_free_hw_fmt_ctx(&mut hw_opaque);
 
     drop(Box::from_raw(player));
+    dk_shim_reclaim_memory();
 }
 
 pub(crate) unsafe fn request_abort_raw(player: *mut DKPlayer) {
@@ -232,6 +234,15 @@ impl DKPlayer {
         self.state.store(DKPlayerState::Opening as i32, Ordering::Release);
         self.is_closing.store(false, Ordering::Release);
         self.hw_decode_enabled.store(hw_decode, Ordering::Release);
+        self.is_local_file.store(is_local_file, Ordering::Release);
+        self.has_custom_io.store(use_custom_io, Ordering::Release);
+        self.video_is_hevc.store(false, Ordering::Release);
+        self.video_width.store(0, Ordering::Release);
+        self.video_height.store(0, Ordering::Release);
+        store_f64(&self.atomic_video_fps_bits, 24.0);
+        for slot in &self.stream_types {
+            slot.store(-1, Ordering::Relaxed);
+        }
         self.vt_failed.store(false, Ordering::Release);
         self.dovi_detected.store(false, Ordering::Release);
         self.stream_dovi_profile.store(0, Ordering::Release);
@@ -240,15 +251,20 @@ impl DKPlayer {
         self.audio_eof.store(false, Ordering::Release);
         store_f64(&self.video_seek_drop_bits, -1.0);
         store_f64(&self.audio_seek_drop_bits, -1.0);
+        self.video_skip_nonref_active.store(false, Ordering::Release);
         self.queued_pkt_bytes.store(0, Ordering::Release);
+        self.video_pkt_count.store(0, Ordering::Release);
+        self.audio_pkt_count.store(0, Ordering::Release);
         self.total_bytes_read.store(0, Ordering::Release);
         self.clear_sub_pkt_history();
+        self.clear_audio_pkt_history();
         self.audio_rebuffer_count.store(0, Ordering::Release);
         self.audio_start_fail_count.store(0, Ordering::Release);
         self.last_audio_start_attempt_ns.store(0, Ordering::Release);
         self.audio_steady_start_ns.store(0, Ordering::Release);
         self.audio_hal_disabled.store(false, Ordering::Release);
         store_f64(&self.last_demuxed_pts_bits, start_sec.max(0.0));
+        store_f64(&self.last_decoded_pts_bits, -1.0);
         if let Ok(mut vq) = self.video_queue_mtx.lock() {
             vq.last_decoded_pts = -1.0;
         }
@@ -327,6 +343,9 @@ impl DKPlayer {
         for i in 0..nb_streams {
             let mut m = DKShimStreamMeta::default();
             dk_shim_get_stream_meta(fmt_ctx, i, &mut m);
+            if (i as usize) < MAX_CACHED_STREAM_TYPES {
+                self.stream_types[i as usize].store(m.codec_type as i8, Ordering::Relaxed);
+            }
             stream_metas.push(m);
         }
 
@@ -420,6 +439,10 @@ impl DKPlayer {
                     }
                     opened_video_w = m.width;
                     opened_video_h = m.height;
+                    self.video_width.store(m.width, Ordering::Release);
+                    self.video_height.store(m.height, Ordering::Release);
+                    store_f64(&self.atomic_video_fps_bits, if m.fps > 1.0 { m.fps } else { 24.0 });
+                    self.video_is_hevc.store(dk_shim_is_hevc_stream(fmt_ctx, idx), Ordering::Release);
                     let br_mbps = if m.bit_rate > 0 {
                         (m.bit_rate as f64) / 1_000_000.0
                     } else if fmt_bitrate > 0 {
@@ -523,15 +546,8 @@ impl DKPlayer {
             }
         }
 
-        let has_audio_swr = self
-            .audio_codec_mtx
-            .lock()
-            .map(|ac| ac.codec_ctx != 0 && ac.swr_ctx != 0)
-            .unwrap_or(false);
-        if has_audio_swr {
-            self.init_audio_queue();
-        }
-
+        // AudioQueue initialization (CoreAudio HAL IPC, ~60-90ms cold) runs asynchronously
+        // at the top of `audio_decode_worker` in parallel with demux & VideoToolbox cold init.
         if let Ok(mut sub) = self.sub_mtx.lock() {
             let sub_idx = self.sub_stream_idx.load(Ordering::Relaxed);
             if sub_idx >= 0 {
@@ -622,22 +638,29 @@ impl DKPlayer {
         // 5. Stop/dispose AudioQueue (after audio_queue_starting clears)
         self.stop_dispose_audio_queue();
 
-        // 6. Clear packet/frame/audio/vad queues
+        // 6. Clear packet/frame/audio/vad queues and release backing capacities
         if let Ok(mut vpkts) = self.video_pkt_mtx.lock() {
             vpkts.clear();
+            vpkts.shrink_to_fit();
         }
+        self.video_pkt_count.store(0, Ordering::Relaxed);
         if let Ok(mut apkts) = self.audio_pkt_mtx.lock() {
             apkts.clear();
+            apkts.shrink_to_fit();
         }
+        self.audio_pkt_count.store(0, Ordering::Relaxed);
         self.queued_pkt_bytes.store(0, Ordering::Relaxed);
         self.clear_sub_pkt_history();
+        self.clear_audio_pkt_history();
 
         if let Ok(mut vq) = self.video_queue_mtx.lock() {
             vq.frames.clear();
+            vq.frames.shrink_to_fit();
             vq.last_frame = None;
         }
         if let Ok(mut ach) = self.audio_chunks_mtx.lock() {
             ach.clear();
+            ach.shrink_to_fit();
         }
         self.buffered_audio_samples.store(0, Ordering::Relaxed);
         if let Ok(mut vad) = self.vad_mtx.lock() {
@@ -675,13 +698,16 @@ impl DKPlayer {
         dk_shim_close_format(&mut fmt, &mut custom_avio);
         self.close_custom_io();
 
-        // 9. Reset stream indices and state to Idle
+        // 9. Reset stream indices, reclaim freed malloc pages, and set state to Idle
         self.video_stream_idx.store(-1, Ordering::Release);
         self.audio_stream_idx.store(-1, Ordering::Release);
         self.sub_stream_idx.store(-1, Ordering::Release);
         self.secondary_sub_stream_idx.store(-1, Ordering::Release);
+        self.video_width.store(0, Ordering::Relaxed);
+        self.video_height.store(0, Ordering::Relaxed);
         store_f64(&self.atomic_video_bitrate_bits, 0.0);
         self.audio_queue_started.store(false, Ordering::Release);
         self.state.store(DKPlayerState::Idle as i32, Ordering::Release);
+        dk_shim_reclaim_memory();
     }
 }

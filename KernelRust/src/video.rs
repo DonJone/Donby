@@ -3,7 +3,8 @@ use crate::clock::{elapsed_since_ns, load_f64, steady_now_ns, store_f64};
 use crate::ffi::{
     dk_shim_aq_stop_reset, dk_shim_close_codec, dk_shim_extract_thumbnail, dk_shim_is_eagain,
     dk_shim_is_eof, dk_shim_open_video_decoder, dk_shim_process_video_frame,
-    dk_shim_receive_frame, dk_shim_send_packet, dk_shim_unref_hw_ctx, AvFrame, OwnedPixelBuffer,
+    dk_shim_receive_frame, dk_shim_send_packet, dk_shim_set_codec_skip_nonref,
+    dk_shim_unref_hw_ctx, AvFrame, OwnedPixelBuffer,
 };
 use crate::player::{DKPlayer, VideoFrameEntry};
 use crate::{emit_log, normalize_path_or_url};
@@ -78,6 +79,7 @@ impl DKPlayer {
         }
         vc.0 = new_ctx as usize;
         vc.1 = new_hw as usize;
+        self.video_skip_nonref_active.store(false, Ordering::Release);
         if let Ok(mut st) = self.stats_mtx.lock() {
             st.is_hw_accelerated = false;
         }
@@ -91,6 +93,10 @@ impl DKPlayer {
     pub(crate) fn video_decode_worker(&self) {
         let Some(mut frame) = AvFrame::alloc() else { return };
         let mut got_any_frame = false;
+        let mut reported_stats_init = false;
+        let mut last_reported_hw = false;
+        let mut last_reported_hdr = false;
+        let mut last_reported_dovi = false;
 
         while !self.abort_requested.load(Ordering::Acquire) {
             if self.is_seeking() {
@@ -114,9 +120,10 @@ impl DKPlayer {
                 continue;
             }
 
+            let max_frames = self.max_video_frames();
             {
                 let Ok(mut vq) = self.video_queue_mtx.lock() else { continue };
-                while vq.frames.len() >= 12 && !self.abort_requested.load(Ordering::Acquire) && !self.is_seeking() {
+                while vq.frames.len() >= max_frames && !self.abort_requested.load(Ordering::Acquire) && !self.is_seeking() {
                     let (next_guard, _) = match self.video_frame_cv.wait_timeout(vq, Duration::from_millis(10)) {
                         Ok(res) => res,
                         Err(e) => e.into_inner(),
@@ -144,76 +151,91 @@ impl DKPlayer {
                     continue;
                 }
                 let item = lk.pop_front().unwrap();
-                if let Some(ref p) = item {
-                    self.queued_pkt_bytes.fetch_sub(p.size() as i64, Ordering::Relaxed);
+                self.video_pkt_count.store(lk.len(), Ordering::Relaxed);
+                if let Some(ref qp) = item {
+                    self.queued_pkt_bytes.fetch_sub(qp.pkt.size() as i64, Ordering::Relaxed);
                 }
                 item
             };
             self.demux_cv.notify_one();
 
             let is_flush = dequeued.is_none();
-            let mut cur_pkt = dequeued;
-
-            let Ok(vc_guard) = self.video_codec_mtx.lock() else { continue };
-            let mut codec_ctx = vc_guard.0 as *mut c_void;
-            drop(vc_guard);
-            if codec_ctx.is_null() {
-                continue;
-            }
+            let cur_pts_sec = dequeued.as_ref().map(|q| q.pts_sec).unwrap_or(0.0);
+            let cur_has_pts = dequeued.as_ref().map(|q| q.has_pts).unwrap_or(false);
+            let mut cur_pkt = dequeued.map(|q| q.pkt);
 
             let mut pkt_consumed = is_flush;
             if is_flush {
-                let _vc = self.video_codec_mtx.lock();
-                if let Ok(ref g) = _vc {
-                    if g.0 != 0 {
-                        unsafe { dk_shim_send_packet(g.0 as *mut c_void, ptr::null()) };
+                if let Ok(vc) = self.video_codec_mtx.lock() {
+                    if vc.0 != 0 {
+                        if self.video_skip_nonref_active.swap(false, Ordering::AcqRel) {
+                            unsafe { dk_shim_set_codec_skip_nonref(vc.0 as *mut c_void, false) };
+                        }
+                        unsafe { dk_shim_send_packet(vc.0 as *mut c_void, ptr::null()) };
                     }
                 }
             }
 
             while !self.abort_requested.load(Ordering::Acquire) && !self.is_seeking() {
-                if !pkt_consumed {
-                    if let Some(ref p) = cur_pkt {
-                        let sret = {
-                            let Ok(vc) = self.video_codec_mtx.lock() else { break };
-                            codec_ctx = vc.0 as *mut c_void;
-                            if codec_ctx.is_null() {
-                                break;
-                            }
-                            unsafe { dk_shim_send_packet(codec_ctx, p.0) }
-                        };
-                        if !unsafe { dk_shim_is_eagain(sret) } {
-                            let mut final_sret = sret;
-                            if sret < 0
-                                && !got_any_frame
-                                && !self.vt_failed.load(Ordering::Acquire)
-                                && self.hw_decode_enabled.load(Ordering::Acquire)
-                                && self.fallback_video_to_software()
-                            {
-                                if let Ok(vc) = self.video_codec_mtx.lock() {
-                                    codec_ctx = vc.0 as *mut c_void;
-                                    if !codec_ctx.is_null() {
-                                        final_sret = unsafe { dk_shim_send_packet(codec_ctx, p.0) };
-                                    }
-                                }
-                            }
-                            cur_pkt = None;
-                            pkt_consumed = true;
-                            if final_sret < 0 {
-                                break;
-                            }
-                        }
-                    }
-                }
-
+                let mut need_sw_fallback = false;
                 let rret = {
                     let Ok(vc) = self.video_codec_mtx.lock() else { break };
-                    codec_ctx = vc.0 as *mut c_void;
+                    let codec_ctx = vc.0 as *mut c_void;
                     if codec_ctx.is_null() {
                         break;
                     }
-                    unsafe { dk_shim_receive_frame(codec_ctx, frame.0) }
+                    if !pkt_consumed {
+                        if let Some(ref p) = cur_pkt {
+                            let drop_target = load_f64(&self.video_seek_drop_bits);
+                            let want_skip = drop_target > 0.0 && cur_has_pts && cur_pts_sec < drop_target - 0.18;
+                            if want_skip != self.video_skip_nonref_active.load(Ordering::Relaxed) {
+                                unsafe { dk_shim_set_codec_skip_nonref(codec_ctx, want_skip) };
+                                self.video_skip_nonref_active.store(want_skip, Ordering::Release);
+                            }
+                            let sret = unsafe { dk_shim_send_packet(codec_ctx, p.0) };
+                            if !unsafe { dk_shim_is_eagain(sret) } {
+                                if sret < 0
+                                    && !got_any_frame
+                                    && !self.vt_failed.load(Ordering::Acquire)
+                                    && self.hw_decode_enabled.load(Ordering::Acquire)
+                                {
+                                    need_sw_fallback = true;
+                                } else {
+                                    cur_pkt = None;
+                                    pkt_consumed = true;
+                                    if sret < 0 {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if need_sw_fallback {
+                        0
+                    } else {
+                        unsafe { dk_shim_receive_frame(codec_ctx, frame.0) }
+                    }
                 };
+
+                if need_sw_fallback {
+                    let mut final_sret = -1;
+                    if self.fallback_video_to_software() {
+                        if let Some(ref p) = cur_pkt {
+                            if let Ok(vc) = self.video_codec_mtx.lock() {
+                                if vc.0 != 0 {
+                                    final_sret = unsafe { dk_shim_send_packet(vc.0 as *mut c_void, p.0) };
+                                }
+                            }
+                        }
+                    }
+                    cur_pkt = None;
+                    pkt_consumed = true;
+                    if final_sret < 0 {
+                        break;
+                    }
+                    continue;
+                }
+
                 if unsafe { dk_shim_is_eagain(rret) } {
                     if !pkt_consumed && cur_pkt.is_some() {
                         continue;
@@ -230,8 +252,8 @@ impl DKPlayer {
                 }
 
                 got_any_frame = true;
-                let fallback_fps = self.stats_mtx.lock().map(|s| s.fps).unwrap_or(24.0);
-                let prev_pts = self.video_queue_mtx.lock().map(|vq| vq.last_decoded_pts).unwrap_or(-1.0);
+                let fallback_fps = load_f64(&self.atomic_video_fps_bits);
+                let prev_pts = load_f64(&self.last_decoded_pts_bits);
                 let drop_target = load_f64(&self.video_seek_drop_bits);
 
                 let mut dropped = false;
@@ -241,6 +263,13 @@ impl DKPlayer {
                 let mut is_hdr = false;
                 let mut is_dovi = false;
                 let mut cs_label = [0 as c_char; 32];
+                let cs_label_ptr = if !reported_stats_init
+                    || (!last_reported_dovi && self.dovi_detected.load(Ordering::Relaxed))
+                {
+                    cs_label.as_mut_ptr()
+                } else {
+                    ptr::null_mut()
+                };
 
                 let raw_pb = {
                     let Ok(mut sw) = self.sw_video_mtx.lock() else {
@@ -269,7 +298,7 @@ impl DKPlayer {
                             &mut is_hw,
                             &mut is_hdr,
                             &mut is_dovi,
-                            cs_label.as_mut_ptr(),
+                            cs_label_ptr,
                         )
                     };
                     sw.sws = sws_p as usize;
@@ -277,28 +306,47 @@ impl DKPlayer {
                     pb
                 };
 
-                if let Ok(mut vq) = self.video_queue_mtx.lock() {
-                    vq.last_decoded_pts = pts;
-                }
+                store_f64(&self.last_decoded_pts_bits, pts);
                 if dropped {
                     frame.unref();
                     continue;
                 }
                 if drop_target > 0.0 {
                     store_f64(&self.video_seek_drop_bits, -1.0);
+                    if self.video_skip_nonref_active.swap(false, Ordering::AcqRel) {
+                        if let Ok(vc) = self.video_codec_mtx.lock() {
+                            if vc.0 != 0 {
+                                unsafe { dk_shim_set_codec_skip_nonref(vc.0 as *mut c_void, false) };
+                            }
+                        }
+                    }
                 }
 
                 if !raw_pb.is_null() {
-                    if let Ok(mut st) = self.stats_mtx.lock() {
-                        st.is_hw_accelerated = is_hw;
+                    if !reported_stats_init
+                        || is_hw != last_reported_hw
+                        || (is_hdr && !last_reported_hdr)
+                        || (is_dovi && !last_reported_dovi)
+                    {
+                        reported_stats_init = true;
+                        last_reported_hw = is_hw;
                         if is_hdr {
-                            st.is_hdr = true;
+                            last_reported_hdr = true;
                         }
                         if is_dovi {
-                            st.is_dolby_vision = true;
+                            last_reported_dovi = true;
                         }
-                        if cs_label[0] != 0 {
-                            st.color_space = cs_label;
+                        if let Ok(mut st) = self.stats_mtx.lock() {
+                            st.is_hw_accelerated = is_hw;
+                            if is_hdr {
+                                st.is_hdr = true;
+                            }
+                            if is_dovi {
+                                st.is_dolby_vision = true;
+                            }
+                            if cs_label[0] != 0 {
+                                st.color_space = cs_label;
+                            }
                         }
                     }
                     if let Ok(mut vq) = self.video_queue_mtx.lock() {
@@ -310,7 +358,9 @@ impl DKPlayer {
                     }
                     self.seek_preview_pending.store(false, Ordering::Release);
                     self.video_frame_cv.notify_one();
-                    self.try_start_audio_queue_if_ready();
+                    if !self.audio_queue_started.load(Ordering::Relaxed) {
+                        self.try_start_audio_queue_if_ready();
+                    }
                     if self.get_state() == DKPlayerState::Paused {
                         frame.unref();
                         break;
@@ -404,7 +454,8 @@ impl DKPlayer {
                 && !self.audio_queue_started.load(Ordering::Acquire)
                 && !self.audio_eof.load(Ordering::Relaxed)
                 && !self.demux_eof.load(Ordering::Relaxed);
-            let silent_fallback = vq.frames.len() >= 10 && self.buffered_audio_samples.load(Ordering::Relaxed) <= 0;
+            let silent_fallback = vq.frames.len() >= self.max_video_frames()
+                && self.buffered_audio_samples.load(Ordering::Relaxed) <= 0;
             if audio_expected && !silent_fallback {
                 return ptr::null_mut();
             }
@@ -414,7 +465,10 @@ impl DKPlayer {
             vq.last_pts = front.pts;
             vq.last_color = front.color;
             vq.last_frame = Some(front.pixbuf);
+            let now_ns = steady_now_ns();
             store_f64(&self.clock.current_pos_bits, vq.last_pts);
+            store_f64(&self.clock.ext_clock_base_pts_bits, vq.last_pts);
+            self.clock.ext_clock_start_ns.store(now_ns, Ordering::Relaxed);
             self.video_frame_cv.notify_one();
 
             if !out_pts.is_null() {
