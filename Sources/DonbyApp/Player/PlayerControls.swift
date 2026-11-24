@@ -382,3 +382,17 @@ final class OpeningPlayerBox: @unchecked Sendable {
         lock.unlock()
     }
 }
+
+enum TracksDrawerSection: String, CaseIterable, Identifiable {
+    case tracks = "轨道"
+    case style = "样式与对齐"
+    var id: String { rawValue }
+}
+
+struct SubtitleAlignUndoState {
+    let primaryDelay: Double
+    let secondaryDelay: Double
+    let secondaryTimeScale: Double
+    let wasSecondaryAligned: Bool
+    let label: String
+}

@@ -77,7 +77,7 @@ if [ -f "Resources/silero_vad_16k.safetensors" ]; then
     cp "Resources/silero_vad_16k.safetensors" "$APP_DIR/Contents/Resources/silero_vad_16k.safetensors"
 fi
 
-APP_VERSION="${DONBY_VERSION:-2.0.2}"
+APP_VERSION="${DONBY_VERSION:-2.0.3}"
 BUILD_NUMBER="${DONBY_BUILD_NUMBER:-$(date -u +%Y%m%d%H%M)}"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST

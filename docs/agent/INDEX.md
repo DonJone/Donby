@@ -6,7 +6,7 @@
 ## 1. Repository Overview
 - **Product**: Donby — native macOS media player (macOS 14+, Apple Silicon) for Emby / Jellyfin / UHDNow / local media.
 - **Stack**: SwiftUI + AppKit (`DonbyApp`, `DonbyCore`, `DonbyNetwork`, optional `DonbyUHDModule`), Metal EDR renderer (`DonbyMetalRenderer`), Rust + FFmpeg/VideoToolbox/AudioToolbox/libass playback kernel (`KernelRust` + C11 header shim `DonbyKernelC`; legacy C++20 baseline archived on `legacy/cpp-kernel`).
-- **Current Version**: `2.0.2` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
+- **Current Version**: `2.0.3` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
 
 ## 2. Task-to-Module Routing Table
 
@@ -16,7 +16,8 @@
 | Optional UHDNow Streaming API, dual-mode artwork, single-episode detail, lines/speedtest, Watch Party, Danmu | [modules/uhd-module.md](modules/uhd-module.md) | `Sources/DonbyUHDModule/*`, `Sources/DonbyApp/Modules/UHD/*` |
 | Demuxing, decoding, A/V sync, AudioQueue, rebuffer, seek flush, libass/PGS subtitles, FFmpeg AVIO | [modules/kernel-cpp.md](modules/kernel-cpp.md) | `KernelRust/src/*`, `Sources/DonbyKernelC/dk_ffi_shim.c`, `include/donby_kernel.h` |
 | Video presentation, CVDisplayLink, HDR10/DoVi EDR, Metal shaders, first-frame callback, subtitle lift | [modules/metal-renderer.md](modules/metal-renderer.md) | `Sources/DonbyMetalRenderer/DKMetalVideoView.swift` |
-| Player HUD, scrubber, seek debounce, AppState, Liquid Glass UI, 120Hz home/grid, artwork cache, views | [modules/app-player-ui.md](modules/app-player-ui.md) | `Sources/DonbyApp/PlayerView.swift`, `AppState.swift`, `DetailView.swift`, `Components/*`, `Views/*`, `Modules/UHD/*` |
+| Player surface, HUD, overlays, drawers, playback engine, track/subtitle alignment, controls | [modules/player/INDEX.md](modules/player/INDEX.md) | `Sources/DonbyApp/Player/*` |
+| AppState, DetailView, 120Hz home/grid, artwork cache, Liquid Glass UI, server/files/settings/downloads views | [modules/app/INDEX.md](modules/app/INDEX.md) | `Sources/DonbyApp/AppState*.swift`, `DetailView*.swift`, `Components/*`, `Views/*`, `Server*.swift` |
 | Core models, storage paths (`DONBY_HOME`), logger, AES-256-GCM credential vault, subtitle encoding/policies, version info, core tests | [modules/storage-core.md](modules/storage-core.md) | `Sources/DonbyCore/*`, `Tests/DonbyCoreTests/DonbyCoreTests.swift` |
 | Building, CMake, `.app` signing, Dock inode preservation, DMG/ZIP packaging, local release, CI | [modules/build-release.md](modules/build-release.md) | `build_app.sh`, `build_kernel.sh`, `scripts/*`, `.github/workflows/build-dmg.yml` |
 

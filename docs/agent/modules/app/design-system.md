@@ -1,0 +1,15 @@
+# App Sub-Map: Liquid Glass Design System, Theme Controls & Icons
+
+> Parent: [app/INDEX.md](INDEX.md). Covers 4 files under `Sources/DonbyApp/Components/`.
+
+## 1. File Inventory & Responsibilities
+- `Components/DonbyThemeControls.swift` (`318L`) — `DonbyGlassPalette` color tokens + 5 non-blue theme-faithful form controls replacing macOS system-blue controls: `DonbySegmentedControl`, `DonbyCheckboxToggleStyle`, `DonbySwitchToggleStyle`, `DonbySlider`, and `View.donbyFlatTextField(isLight:)`.
+- `Components/LiquidGlassSystem.swift` (`657L`) — `DonbyVisualEffectView`, `DonbyGlassContainer`, `View.donbyLiquidGlassCapsule` / `donbyLiquidGlassRect`, `DonbyLiquidGlassCapsuleSurface`, sculpted buttons (`LiquidGlassCapsuleButton`, `LiquidGlassCircleButton`, `LiquidGlassVectorCircleButton`), `DonbyMenuHoverBox`, detached-hover menus (`LiquidGlassCircleMenu`, `LiquidGlassSelectorCard`), and badges (`DonbyWatchedBadgeView`, `DonbyDownloadedBadgePill`).
+- `Components/BrandMarks.swift` (`580L`) — `ServerIconView` dispatcher, vector server marks (`EmbyVectorMark`, `JellyfinVectorMark`, `PlexVectorMark`, `FeiniuVectorMark`, `StorageVectorMark`), `DonbyAppLogoView`, and `UHDNowVectorLogo` (reads `AppState.sharedInstance?.appearanceMode` and bundled `uhdnow_day`/`uhdnow_night` PNGs).
+- `Components/ToolbarIconsAndControls.swift` (`641L`) — 13 `Canvas`-drawn vector action glyphs (`RouteSwitch`, `Refresh`, `MoreDots`, `Plus`, `Download` with nested `State`, `GridWall`, `Folder`, `FinderReveal`, `SortArrows`, `Play`, `Pause`, `Trash`, `Bookmark`) + `ToolbarVectorButton`, `DonbyToolbarCircleView`, `DonbySearchPillField`.
+
+## 2. Critical Invariants (DO NOT BREAK)
+1. **Zero Native macOS System-Blue Controls (`v1.4.35–v1.4.36`)**: Never use native `.toggleStyle(.checkbox)`, `.toggleStyle(.switch)`, `.pickerStyle(.segmented)`, `.pickerStyle(.radioGroup)`, `.buttonStyle(.borderedProminent)`, `.textFieldStyle(.roundedBorder)`, bare `Slider`, `NSColor.controlAccentColor`, or raw `.blue`.
+2. **Detached-Hover Menu Pattern (`v1.4.22`)**: Preserve `DonbyMenuHoverBox` + `allowsHitTesting(false)` visual chrome + transparent `Menu` overlay with `.menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)` and explicit `.frame` + `.contentShape(...)` (NEVER `.menuStyle(.borderlessButton)`). Every `.buttonStyle(.plain)` button must declare an explicit `.contentShape(...)`.
+3. **Dark Cinema Glass Hygiene (`v1.4.37`)**: Never introduce `.ultraThinMaterial` into dark Liquid Glass modifiers (`NSVisualEffectView` leaks `.aqua` white frost in Light Mode).
+4. **Extension Reuse**: `Modules/UHD/` views MUST reuse canonical components from these 4 files (zero custom non-Donby badges or buttons).

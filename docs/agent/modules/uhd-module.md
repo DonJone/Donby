@@ -1,6 +1,6 @@
 # Module Map: Optional UHDNow Streaming Integration (`DonbyUHDModule` & `Modules/UHD`)
 
-> Last synced: `v2.0.2`. Load this doc for UHDNow REST/WebSocket protocol behavior, dual-mode artwork resolution, single-episode detail hydration, CDN line selection/speed test, Watch Party, and GPU Danmu.
+> Last synced: `v2.0.3`. Load this doc for UHDNow REST/WebSocket protocol behavior, dual-mode artwork resolution, single-episode detail hydration, CDN line selection/speed test, Watch Party, and GPU Danmu.
 
 ## 1. File Inventory (Target Split: `<= 800L` per file)
 - **`Sources/DonbyUHDModule/`** (Optional SwiftPM target; excluded cleanly when `DONBY_PURE=1`):
@@ -15,7 +15,7 @@
 - **`Sources/DonbyApp/Modules/UHD/`** (UI plugin slots registered via `DonbyAppExtensionCenter`):
   - `UHDModuleManager.swift` (`698L`) — toggle state, home loading (`resumeItems` + `nextUpItems` + `hotItems`), `resolveSeriesStartEpisode`, Watch Party creation.
   - `UHDAppExtensionPlugin.swift` (`662L` range) — `DonbyAppUIExtensionPlugin` impl; `loadDetailPayload` resolves stub episode `seriesId` first when missing so credits/seasons/playback-state load reliably.
-  - `UHDPlayerCompanionController.swift` (`538L`), `UHDAccountDashboardView.swift`, `UHDSpeedTestPanelView.swift`, `UHDDiscoverySheets.swift`, `UHDWatchPartyAndDanmuViews.swift`.
+  - `UHDPlayerCompanionController.swift` (`538L`), `UHDAccountDashboardView.swift` (`483L`), `UHDSpeedTestPanelView.swift` (`413L`), `UHDDiscoverySheets.swift` (`608L`), `UHDWatchPartyViews.swift` (`530L`), `UHDDanmuViews.swift` (`600L`).
 
 ## 2. Network & Artwork Architecture Contracts
 1. **Shared Media Data Plane**: Video streaming (`ResolvedPlaybackResource`), Range scheduling, L1/L2 chunk caching, detail preloading, and offline downloads run on the exact same `DonbyTurboCacheEngine` / `TurboStreamByteHandle` / `KernelRust` pipeline as standard Emby.
