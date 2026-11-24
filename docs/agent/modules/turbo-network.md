@@ -1,27 +1,31 @@
 # Module Map: Turbo Cache, Streaming & Network (`DonbyNetwork`)
 
-> Last synced: `v2.0.5`. Load this doc for `DonbyNetwork` streaming, seek latency, HTTP/2 Range, L1/L2 caching, detail-page preloading, Emby API (including standard Emby fallback when UHD extension is disabled), offline downloads, and channel-aware auto-updates. For optional `DonbyUHDModule` & `Modules/UHD`, load [uhd-module.md](uhd-module.md).
+> Last synced: `v2.0.6`. Load this doc for `DonbyNetwork` streaming, seek latency, HTTP/2 Range, L1/L2 caching, detail-page preloading, Emby API (including standard Emby fallback when UHD extension is disabled), offline downloads, and channel-aware auto-updates. For optional `DonbyUHDModule` & `Modules/UHD`, load [uhd-module.md](uhd-module.md).
 
 | If your task involves... | File | Entry Symbols |
 | :--- | :--- | :--- |
-| AVIO Range reads, H2 concurrency, cold/crawl rescue | `Sources/DonbyNetwork/TurboCacheAndDownloadEngine.swift` | `TurboStreamByteHandle`, `TurboStreamingSessionHub` |
-| L1/L2 chunk store, spill compaction & disk flush | `Sources/DonbyNetwork/TurboCacheAndDownloadEngine.swift` | `TieredAssetChunkStore`, `ChunkStoreMeta` |
-| Asset lifecycle, download queue, detail preload | `Sources/DonbyNetwork/TurboCacheAndDownloadEngine.swift` | `DonbyTurboCacheEngine`, `APIRequestGate`, `ServerDeliveryCapabilities` |
-| Emby REST, RedirectCache, PlaybackInfo cache | `Sources/DonbyNetwork/EmbyClient.swift` | `EmbyClient`, `RedirectCacheStore`, `EmbyPlaybackInfoCache` |
+| API gate, delivery caps, H2 session hub | `Sources/DonbyNetwork/TurboStreamingSessionHub.swift` | `APIRequestGate`, `ServerDeliveryCapabilities`, `TurboStreamingSessionHub`, `DonbyNetworkSession` |
+| L1/L2 chunk store, spill compaction & disk flush | `Sources/DonbyNetwork/TieredAssetChunkStore.swift` | `TieredAssetChunkStore`, `ChunkStoreMeta` |
+| AVIO byte-stream handle, read/seek, Range scheduler | `Sources/DonbyNetwork/TurboStreamByteHandle.swift`, `TurboStreamByteHandle+Scheduler.swift` | `TurboStreamByteHandle` |
+| Asset lifecycle, disk LRU, detail preload | `Sources/DonbyNetwork/TurboCacheAndDownloadEngine.swift` | `DonbyTurboCacheEngine`, `CachedMediaSummary` |
+| Offline download queue, workers & migration | `Sources/DonbyNetwork/DonbyDownloadManager.swift`, `DonbyDownloadManager+WorkerAndMigration.swift` | `DonbyDownloadManager`, `DownloadEntry` |
+| Emby auth, server discovery & request core | `Sources/DonbyNetwork/EmbyClient.swift` | `EmbyClient`, `RedirectCacheStore` |
+| Emby catalog browse, PlaybackInfo & session report | `Sources/DonbyNetwork/EmbyClient+CatalogAndPlayback.swift` | `EmbyClient`, `EmbyPlaybackInfoCache` |
 | Standard Emby fallback, ULID normalization, image URLs | `Sources/DonbyNetwork/EmbyClient+ArtworkAndFallback.swift` | `isUHDNativeExtensionActive`, `normalizeEmbyItemId`, `resolveRelativeOrAbsoluteURL` |
 | PlaybackInfo DTO, starter server slot factory | `Sources/DonbyNetwork/EmbyPlaybackInfoResponse.swift`, `DemoServerData.swift` | `EmbyPlaybackInfoResponse`, `DemoServerData` |
 | Offline library sidecars & chunk pinning | `Sources/DonbyNetwork/OfflineMediaLibrary.swift` | `DonbyOfflineLibraryStorage`, `OfflineSeriesSidecar` |
 | Channel-aware auto-updater & hot-replace | `Sources/DonbyNetwork/AppUpdateManager.swift` | `AppUpdateManager` |
 
 ## 1. File Inventory & Core Symbols
-- `Sources/DonbyNetwork/TurboCacheAndDownloadEngine.swift`
-  - `APIRequestGate` (`Priority`: `.playback` vs `.normal`) — isolates playback API calls from artwork/browse traffic.
-  - `ServerDeliveryCapabilities` — server-advertised `active_video_delivery_limit` & `allow_download`.
-  - `ChunkStoreMeta` + `TieredAssetChunkStore` — L1 in-memory chunk pool + L2 disk persistence (`media.bin` + `chunks/<idx>.chk` + `meta.json`).
-  - `TurboStreamingSessionHub` — shared `URLSession` hub, `URLSessionTaskMetrics` protocol detection (`hostProtocolMultiplexed` for `h2`/`h3` vs `http/1.1`), redirect caching.
-  - `TurboStreamByteHandle` — custom `AVIOContext` byte-stream provider (`read(at:length:)`, `seek`, `wakeWaitingReads()`, `directSlices`, `ActiveAttemptRecord`).
-  - `DonbyTurboCacheEngine` — asset lifecycle, download queue, cache eviction, offline materialization, auto-archive, and single-slot background detail-page preloader (`startDetailPreload` / `cancelDetailPreload`).
-- `Sources/DonbyNetwork/EmbyClient.swift` — `RedirectCacheStore`, `EmbyPlaybackInfoCache` (TTL `300s`), `EmbyHostWarmCache`, `NoRedirectDelegate`, `EmbyClient`.
+- `Sources/DonbyNetwork/TurboStreamingSessionHub.swift` — `APIRequestGate` (`Priority`: `.playback` vs `.normal`), `ServerDeliveryCapabilities`, `DonbyNetworkSession`, `StreamingChunkContext`, `TurboStreamingSessionHub` (shared `URLSession` hub, `makeRangeRequest`, `URLSessionTaskMetrics` protocol detection for `h2`/`h3` vs `http/1.1`), and `DownloadRangeStreamDelegate`.
+- `Sources/DonbyNetwork/TieredAssetChunkStore.swift` — `ChunkStoreMeta` and `TieredAssetChunkStore` (L1 in-memory chunk pool + async L2 disk persistence: `media.bin` + `chunks/<idx>.chk` + `meta.json`).
+- `Sources/DonbyNetwork/TurboStreamByteHandle.swift` — `TurboStreamByteHandle` core (`AVIOContext` `read(into:count:)`, `seek(offset:whence:)`, `wakeWaitingReads()`, `directSlices`, `ActiveAttemptRecord`, `finishDirectRangeAttempt`, `abort()`, `close()`, `parseTotalSize`).
+- `Sources/DonbyNetwork/TurboStreamByteHandle+Scheduler.swift` — `TurboStreamByteHandle` Range scheduling, `0.55s` seek-burst gate, H2 adaptive concurrency, EWMA TTFB cold/crawl rescue, `429` backoff/recovery, and `TurboStreamingSessionHub` delegate callbacks.
+- `Sources/DonbyNetwork/TurboCacheAndDownloadEngine.swift` — `CachedMediaSummary`, `DonbyTurboCacheEngine` (asset lifecycle, disk usage, LRU budget enforcement, unpinned asset listing, single-slot background `startDetailPreload` / `cancelDetailPreload`), and offline download models (`DownloadTaskStatus`, `OfflineSubtitleAsset`, `DownloadOrigin`, `DownloadEntry`).
+- `Sources/DonbyNetwork/DonbyDownloadManager.swift` — `DonbyDownloadManager` core (offline download queue, `~/Movies/Donby` materialization, `statusIndex`, playback progress sync, artwork/subtitle/sidecar persistence).
+- `Sources/DonbyNetwork/DonbyDownloadManager+WorkerAndMigration.swift` — `DownloadBatchCoordinator`, `startDownloadWorker`, and `migrateLegacyCompletedDownloads`.
+- `Sources/DonbyNetwork/EmbyClient.swift` — `RedirectCacheStore`, `EmbyHostWarmCache`, `EmbyClient` core (`buildAuthorizationHeader`, `makeRequest`, `requestJSON`, `validateResponse`), auth, server domain discovery, `pingLine`, `fetchSystemInfo`, and `prewarmConnection`.
+- `Sources/DonbyNetwork/EmbyClient+CatalogAndPlayback.swift` — `EmbyPlaybackInfoCache` (TTL `300s`), Emby library browsing (`fetchViews`, `fetchResumeItems`, `fetchNextUp`, `fetchLatestItems`, `fetchItems`), `fetchPlaybackInfo`, `resolvePlaybackResource`, `probe302Redirect`, playback session reporting, and favorite/played state updates.
 - `Sources/DonbyNetwork/EmbyClient+ArtworkAndFallback.swift` — standard Emby fallback helpers (`v1.4.37`): `isUHDNativeExtensionActive(for:)` (checks both `server.type == .uhdNative` and `DonbyMediaServiceRegistry.shared.isRegistered(.uhdNative)`), `resolveRelativeOrAbsoluteURL` (preserves root `/emby/`, `/play/`, `/api/`, `/stream/` direct paths without prepending `/emby`), and `normalizeEmbyItemId` (applies `m`/`s` prefix to bare 26-char `01...` ULIDs when falling back to Emby, plus `e`/`s`/`m` 404 retry in `fetchItemDetail`).
 - `Sources/DonbyNetwork/DemoServerData.swift` — `DemoServerData.makeDefaultUHDServer()` starter server config slot factory decoupled via `DonbyMediaServiceRegistry`.
 - `Sources/DonbyNetwork/EmbyPlaybackInfoResponse.swift` — `EmbyPlaybackInfoResponse` DTO (`MediaSources`, `PlaySessionId`).

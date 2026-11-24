@@ -13,18 +13,7 @@ from pathlib import Path
 
 DEFAULT_MAX_LINES = 800
 
-LEGACY_LINE_CAPS: dict[str, int] = {
-    "Sources/DonbyApp/Components/ArtworkCacheEngine.swift": 878,
-    "Sources/DonbyCore/EmbyModels.swift": 930,
-    "Sources/DonbyCore/SubtitleAndPlaybackPolicies.swift": 951,
-    "Sources/DonbyCore/SubtitleAutoAligner.swift": 1542,
-    "Sources/DonbyKernelC/dk_ffi_shim.c": 1979,
-    "Sources/DonbyMetalRenderer/DKMetalVideoView.swift": 1725,
-    "Sources/DonbyNetwork/EmbyClient.swift": 913,
-    "Sources/DonbyNetwork/TurboCacheAndDownloadEngine.swift": 4983,
-    "Sources/DonbyUHDModule/UHDStreamClient+DetailAndMapping.swift": 938,
-    "Tests/DonbyCoreTests/DonbyCoreTests.swift": 933,
-}
+LEGACY_LINE_CAPS: dict[str, int] = {}
 
 @dataclasses.dataclass(frozen=True)
 class DomainSpec:

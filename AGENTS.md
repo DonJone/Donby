@@ -3,7 +3,7 @@
 This repository is developed primarily by AI agents (Antigravity). Follow this protocol strictly to minimize token usage, redundant codebase exploration, and regression risk.
 
 ## 1. Mandatory Read-First Routing (Progressive Disclosure)
-Before grepping or reading large source files (`TurboCacheAndDownloadEngine.swift`, `dk_ffi_shim.c`, `DKMetalVideoView.swift`, `SubtitleAutoAligner.swift`), ALWAYS:
+Before grepping or reading multi-file subsystems across `Sources/` or `KernelRust/src/`, ALWAYS:
 1. Read [docs/agent/INDEX.md](docs/agent/INDEX.md) first (< 100 lines).
 2. Load ONLY the 1-2 relevant module maps under `docs/agent/modules/`.
 3. Check `docs/agent/decisions/` before changing streaming concurrency, caching, or kernel architecture.
@@ -38,7 +38,7 @@ Every **code commit** MUST bind **Version Bump + Structured Commit + `docs/agent
 - **Zero Secrets in Tracked Files**: Never write real server hostnames, URLs, API tokens, or user credentials into `AGENTS.md` or tracked files under `docs/agent/`. Keep environment-specific notes in `docs/agent/local/` (git-ignored).
 - **Zero Emojis**: Do not use Unicode emojis in code, comments, commit messages, or docs.
 - **Audio & Storage Isolation in Tests**: Always run CLI/automated playback tests with `DONBY_TEST_MUTED=1` and an isolated `DONBY_HOME=$(mktemp -d)` so user audio and production caches/settings are never touched.
-- **macOS CLT SDK & Fast Build**: Use `./scripts/dev.sh build` / `./scripts/dev.sh test` (or pass `--build-system native --sdk /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk` to `swift build`) to avoid Swift 6.4 `swiftbuild` explicit-module cache invalidation on CLT. `./build_kernel.sh` builds `KernelRust` into `build_kernel/libdonby_kernel.a` and SwiftPM compiles `DonbyKernelC/dk_ffi_shim.c` in pure C11.
+- **macOS CLT SDK & Fast Build**: Use `./scripts/dev.sh build` / `./scripts/dev.sh test` (or pass `--build-system native --sdk /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk` to `swift build`) to avoid Swift 6.4 `swiftbuild` explicit-module cache invalidation on CLT. `./build_kernel.sh` builds `KernelRust` into `build_kernel/libdonby_kernel.a` and SwiftPM compiles `DonbyKernelC/*.c` in pure C11.
 - **Extension Isolation & Design System Firewall**:
   - Never scatter `#if canImport(DonbyUHDModule)` across core files (`PlayerView`, `ServerViews`, `AppState`, `DetailView`, `EmbyMainView`, `SettingsView`); route all optional service integrations through `DonbyMediaServiceRegistry` (`DonbyCore`) and `DonbyAppExtensionCenter` / `DonbyPlayerCompanion` (`Sources/DonbyApp/Extensions/DonbyAppExtension.swift`), keeping `DONBY_PURE=1 ./scripts/dev.sh build` green.
   - Extension UI under `Sources/DonbyApp/Modules/UHD/` MUST reuse canonical Donby components (`Components/*`, `PlayerDrawerGlassCard`, `ServerLineOptionRow`) with zero custom non-Donby badges/buttons, sanitize all remote API copy at the `DonbyUHDModule` boundary (`UHDDisplayNormalizer`), and preserve seamless standard-Emby fallback when the extension is disabled.

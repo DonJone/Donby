@@ -1,6 +1,6 @@
 # App Sub-Map: 120Hz Native Collection Views & Artwork Pipeline
 
-> Parent: [app/INDEX.md](INDEX.md). Covers 10 files under `Sources/DonbyApp/Components/`.
+> Parent: [app/INDEX.md](INDEX.md). Covers 11 files under `Sources/DonbyApp/Components/`.
 
 ## 1. File Inventory & Responsibilities
 - **AppKit 120Hz `NSCollectionView` / `CALayer` Stack**:
@@ -11,7 +11,8 @@
   - `Components/NativeEmbyHomeView.swift` — 120Hz ProMotion vertical stack of horizontal shelves backed by `HorizontalShelfScrollView` + `InteractiveCollectionView`.
   - `Components/NativePosterGridView.swift` — 120Hz ProMotion adaptive poster wall backed by `InteractiveCollectionView`.
 - **Artwork Cache & SwiftUI Media Views**:
-  - `Components/ArtworkCacheEngine.swift` — `ScrollActivityTracker` (`NSLock`), `ArtworkImageCache` (3 `NSCache` tiers, `colorSpaceLock`, `diskQueue`, `decodeOperationQueue` max 4, 512 MiB disk cache / 410 MiB LRU prune target / 30d TTL, ImageIO hardware downsampling), `DownloadConcurrencyGate`, `ArtworkDownloadCoordinator`, `ArtworkDownloadManager`, `CGImageLoadCoordinator`.
+  - `Components/ArtworkCacheEngine.swift` — `ScrollActivityTracker` (`NSLock`), `ArtworkImageCache` (3 `NSCache` tiers, `colorSpaceLock`, `diskQueue`, `decodeOperationQueue` max 4, 512 MiB disk cache / 410 MiB LRU prune target / 30d TTL, ImageIO hardware downsampling).
+  - `Components/ArtworkDownloadManager.swift` — `DownloadConcurrencyGate`, `ArtworkDownloadCoordinator`, `ArtworkDownloadManager`, `CGImageLoadCoordinator` (concurrency-gated artwork downloads and deduplicated `CGImage` load coordination).
   - `Components/MediaArtworkViews.swift` — `MediaArtworkView` (direct UHD fallback across `.primary`/`.backdrop`/`.thumb` + `Color.clear.overlay(alignment:) { Image.resizable().scaledToFill() }.clipped()`), `PersonAvatarView`, `RecordArtworkThumbnailView`, `ClearLogoHeaderView`.
   - `Components/HeroTopEdgeBackdrop.swift` — `HeroTopEdgeBackdropView` (`#03` weighted top-edge strip synthesized via `HeroTopEdgeSynthesizer`, matching hero Display P3/sRGB gamut with zero zoom/blur).
   - `Components/MediaCards.swift` — SwiftUI card equivalents (`PosterCardView`, `LandscapeCardView`) used in inline search and secondary surfaces.

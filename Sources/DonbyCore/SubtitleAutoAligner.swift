@@ -87,300 +87,9 @@ public enum UnifiedSubtitleAlignmentOutcome: Equatable, Sendable {
     case failed(userMessage: String, diagnosticLog: String)
 }
 
-public enum SileroVADError: LocalizedError, Sendable {
-    case modelNotFound
-    case invalidSafetensors(String)
-
-    public var errorDescription: String? {
-        switch self {
-        case .modelNotFound:
-            return "未找到内置 Silero VAD 语音模型文件 (silero_vad_16k.safetensors)"
-        case .invalidSafetensors(let detail):
-            return "Silero VAD 模型加载失败: \(detail)"
-        }
-    }
-}
-
-// MARK: - Native Accelerate Silero VAD (16kHz, v5/v6)
-
-/// Zero-dependency native Apple Accelerate forward pass for official Silero VAD 16kHz weights (`safetensors`).
-/// Verified to match official `silero_vad.jit` / `silero_vad_16k_op15.onnx` within ~1e-7 max abs diff.
-public final class SileroVAD: @unchecked Sendable {
-    public static let sampleRate: Int = 16_000
-    public static let frameSize: Int = 512
-    public static let contextSize: Int = 64
-    public static let frameDurationSeconds: Double = Double(frameSize) / Double(sampleRate) // 0.032s
-
-    private struct Weights {
-        let stftW: [Float]      // [258, 256]
-        let conv1W: [Float]     // [128, 129 * 3]
-        let conv1B: [Float]     // [128]
-        let conv2W: [Float]     // [64, 128 * 3]
-        let conv2B: [Float]     // [64]
-        let conv3W: [Float]     // [64, 64 * 3]
-        let conv3B: [Float]     // [64]
-        let conv4W: [Float]     // [128, 64 * 3]
-        let conv4B: [Float]     // [128]
-        let lstmWih: [Float]    // [512, 128]
-        let lstmWhh: [Float]    // [512, 128]
-        let lstmBias: [Float]   // [512] = bias_ih + bias_hh
-        let finalW: [Float]     // [128]
-        let finalB: Float
-    }
-
-    private let w: Weights
-    private static let sharedLock = NSLock()
-    private static var cachedShared: SileroVAD?
-
-    public init(modelURL: URL) throws {
-        self.w = try Self.loadWeights(from: modelURL)
-    }
-
-    public static func locateDefaultModelURL() -> URL? {
-        let filename = "silero_vad_16k"
-        let ext = "safetensors"
-        if let bundled = Bundle.main.url(forResource: filename, withExtension: ext),
-           FileManager.default.fileExists(atPath: bundled.path) {
-            return bundled
-        }
-        if let resURL = Bundle.main.resourceURL?.appendingPathComponent("\(filename).\(ext)"),
-           FileManager.default.fileExists(atPath: resURL.path) {
-            return resURL
-        }
-        let repoRelative = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Resources/\(filename).\(ext)")
-        if FileManager.default.fileExists(atPath: repoRelative.path) {
-            return repoRelative
-        }
-        let cwdRelative = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent("Resources/\(filename).\(ext)")
-        if FileManager.default.fileExists(atPath: cwdRelative.path) {
-            return cwdRelative
-        }
-        return nil
-    }
-
-    public static func shared() throws -> SileroVAD {
-        sharedLock.lock()
-        defer { sharedLock.unlock() }
-        if let existing = cachedShared {
-            return existing
-        }
-        guard let url = locateDefaultModelURL() else {
-            throw SileroVADError.modelNotFound
-        }
-        let instance = try SileroVAD(modelURL: url)
-        cachedShared = instance
-        return instance
-    }
-
-    /// Runs Silero VAD across contiguous 16kHz mono float PCM, returning one speech probability per 512-sample (32ms) frame.
-    public func predictFrameProbabilities(pcm16k: [Float]) -> [Float] {
-        let frameCount = pcm16k.count / Self.frameSize
-        guard frameCount > 0 else { return [] }
-
-        var probs = [Float](repeating: 0, count: frameCount)
-        var context = [Float](repeating: 0, count: Self.contextSize)
-        var h = [Float](repeating: 0, count: 128)
-        var c = [Float](repeating: 0, count: 128)
-
-        var x = [Float](repeating: 0, count: 576)
-        var xp = [Float](repeating: 0, count: 640)
-        var stftCol = [Float](repeating: 0, count: 256 * 4)
-        var stftOut = [Float](repeating: 0, count: 258 * 4)
-        var mag = [Float](repeating: 0, count: 129 * 4)
-        var colBuf = [Float](repeating: 0, count: 129 * 3 * 4)
-        var b1 = [Float](repeating: 0, count: 128 * 4)
-        var b2 = [Float](repeating: 0, count: 64 * 2)
-        var b3 = [Float](repeating: 0, count: 64 * 1)
-        var b4 = [Float](repeating: 0, count: 128 * 1)
-        var gatesIh = [Float](repeating: 0, count: 512)
-        var gatesHh = [Float](repeating: 0, count: 512)
-
-        pcm16k.withUnsafeBufferPointer { pcmPtr in
-            guard let pcmBase = pcmPtr.baseAddress else { return }
-            for frameIdx in 0..<frameCount {
-                for i in 0..<64 { x[i] = context[i] }
-                let chunkBase = pcmBase.advanced(by: frameIdx * Self.frameSize)
-                for i in 0..<512 { x[64 + i] = chunkBase[i] }
-                for i in 0..<64 { context[i] = x[512 + i] }
-
-                for i in 0..<576 { xp[i] = x[i] }
-                for k in 0..<64 { xp[576 + k] = x[574 - k] }
-
-                for k in 0..<256 {
-                    let row = k * 4
-                    stftCol[row]     = xp[k]
-                    stftCol[row + 1] = xp[128 + k]
-                    stftCol[row + 2] = xp[256 + k]
-                    stftCol[row + 3] = xp[384 + k]
-                }
-                vDSP_mmul(w.stftW, 1, stftCol, 1, &stftOut, 1, 258, 4, 256)
-                for f in 0..<129 {
-                    let rOff = f * 4
-                    let iOff = (f + 129) * 4
-                    for t in 0..<4 {
-                        let re = stftOut[rOff + t]
-                        let im = stftOut[iOff + t]
-                        mag[rOff + t] = sqrtf(re * re + im * im)
-                    }
-                }
-
-                Self.conv1dReLU(input: mag, inC: 129, inT: 4, weight: w.conv1W, bias: w.conv1B, outC: 128, stride: 1, colBuf: &colBuf, output: &b1)
-                Self.conv1dReLU(input: b1,  inC: 128, inT: 4, weight: w.conv2W, bias: w.conv2B, outC: 64,  stride: 2, colBuf: &colBuf, output: &b2)
-                Self.conv1dReLU(input: b2,  inC: 64,  inT: 2, weight: w.conv3W, bias: w.conv3B, outC: 64,  stride: 2, colBuf: &colBuf, output: &b3)
-                Self.conv1dReLU(input: b3,  inC: 64,  inT: 1, weight: w.conv4W, bias: w.conv4B, outC: 128, stride: 1, colBuf: &colBuf, output: &b4)
-
-                vDSP_mmul(w.lstmWih, 1, b4, 1, &gatesIh, 1, 512, 1, 128)
-                vDSP_mmul(w.lstmWhh, 1, h,  1, &gatesHh, 1, 512, 1, 128)
-
-                var logit = w.finalB
-                for j in 0..<128 {
-                    let gi = w.lstmBias[j] + gatesIh[j] + gatesHh[j]
-                    let gf = w.lstmBias[128 + j] + gatesIh[128 + j] + gatesHh[128 + j]
-                    let ggRaw = w.lstmBias[256 + j] + gatesIh[256 + j] + gatesHh[256 + j]
-                    let go = w.lstmBias[384 + j] + gatesIh[384 + j] + gatesHh[384 + j]
-                    let ig = 1.0 / (1.0 + expf(-gi))
-                    let fg = 1.0 / (1.0 + expf(-gf))
-                    let gg = tanhf(ggRaw)
-                    let og = 1.0 / (1.0 + expf(-go))
-                    let cNew = fg * c[j] + ig * gg
-                    let hNew = og * tanhf(cNew)
-                    c[j] = cNew
-                    h[j] = hNew
-                    if hNew > 0 {
-                        logit += w.finalW[j] * hNew
-                    }
-                }
-                probs[frameIdx] = 1.0 / (1.0 + expf(-logit))
-            }
-        }
-        return probs
-    }
-
-    @inline(__always)
-    private static func conv1dReLU(
-        input: [Float],
-        inC: Int,
-        inT: Int,
-        weight: [Float],
-        bias: [Float],
-        outC: Int,
-        stride: Int,
-        colBuf: inout [Float],
-        output: inout [Float]
-    ) {
-        let outT = (inT + 2 - 3) / stride + 1
-        let kRows = inC * 3
-        for ic in 0..<inC {
-            let inRow = ic * inT
-            for k in 0..<3 {
-                let colRow = (ic * 3 + k) * outT
-                for ot in 0..<outT {
-                    let it = ot * stride - 1 + k
-                    colBuf[colRow + ot] = (it >= 0 && it < inT) ? input[inRow + it] : 0
-                }
-            }
-        }
-        vDSP_mmul(weight, 1, colBuf, 1, &output, 1, vDSP_Length(outC), vDSP_Length(outT), vDSP_Length(kRows))
-        for oc in 0..<outC {
-            let b = bias[oc]
-            let row = oc * outT
-            for ot in 0..<outT {
-                let v = output[row + ot] + b
-                output[row + ot] = v > 0 ? v : 0
-            }
-        }
-    }
-
-    private static func loadWeights(from url: URL) throws -> Weights {
-        let data = try Data(contentsOf: url, options: .mappedIfSafe)
-        guard data.count > 16 else {
-            throw SileroVADError.invalidSafetensors("file too small")
-        }
-        var headerLenLE: UInt64 = 0
-        _ = withUnsafeMutableBytes(of: &headerLenLE) { dst in
-            data.copyBytes(to: dst, from: 0..<8)
-        }
-        let headerLen = Int(UInt64(littleEndian: headerLenLE))
-        guard headerLen > 2, 8 + headerLen <= data.count else {
-            throw SileroVADError.invalidSafetensors("invalid header length \(headerLen)")
-        }
-        let headerData = data.subdata(in: 8..<(8 + headerLen))
-        let rawObj = try JSONSerialization.jsonObject(with: headerData)
-        guard let dict = rawObj as? [String: Any] else {
-            throw SileroVADError.invalidSafetensors("header is not a JSON object")
-        }
-        let dataBaseOffset = 8 + headerLen
-
-        func extractF32(_ name: String, expectedCount: Int) throws -> [Float] {
-            guard let entry = dict[name] as? [String: Any],
-                  let dtype = entry["dtype"] as? String,
-                  dtype == "F32",
-                  let offsets = entry["data_offsets"] as? [Int],
-                  offsets.count == 2 else {
-                throw SileroVADError.invalidSafetensors("missing or invalid tensor \(name)")
-            }
-            let start = dataBaseOffset + offsets[0]
-            let end = dataBaseOffset + offsets[1]
-            let byteCount = end - start
-            guard start >= dataBaseOffset, end <= data.count, byteCount == expectedCount * MemoryLayout<Float>.size else {
-                throw SileroVADError.invalidSafetensors("unexpected byte size for \(name): \(byteCount)")
-            }
-            var arr = [Float](repeating: 0, count: expectedCount)
-            arr.withUnsafeMutableBytes { dst in
-                _ = data.copyBytes(to: dst, from: start..<end)
-            }
-            return arr
-        }
-
-        let stftW   = try extractF32("stft_conv.weight", expectedCount: 258 * 256)
-        let conv1W  = try extractF32("conv1.weight", expectedCount: 128 * 129 * 3)
-        let conv1B  = try extractF32("conv1.bias", expectedCount: 128)
-        let conv2W  = try extractF32("conv2.weight", expectedCount: 64 * 128 * 3)
-        let conv2B  = try extractF32("conv2.bias", expectedCount: 64)
-        let conv3W  = try extractF32("conv3.weight", expectedCount: 64 * 64 * 3)
-        let conv3B  = try extractF32("conv3.bias", expectedCount: 64)
-        let conv4W  = try extractF32("conv4.weight", expectedCount: 128 * 64 * 3)
-        let conv4B  = try extractF32("conv4.bias", expectedCount: 128)
-        let lstmWih = try extractF32("lstm_cell.weight_ih", expectedCount: 512 * 128)
-        let lstmBih = try extractF32("lstm_cell.bias_ih", expectedCount: 512)
-        let lstmWhh = try extractF32("lstm_cell.weight_hh", expectedCount: 512 * 128)
-        let lstmBhh = try extractF32("lstm_cell.bias_hh", expectedCount: 512)
-        let finalW  = try extractF32("final_conv.weight", expectedCount: 128)
-        let finalBArr = try extractF32("final_conv.bias", expectedCount: 1)
-
-        var lstmBias = [Float](repeating: 0, count: 512)
-        vDSP_vadd(lstmBih, 1, lstmBhh, 1, &lstmBias, 1, 512)
-
-        return Weights(
-            stftW: stftW,
-            conv1W: conv1W, conv1B: conv1B,
-            conv2W: conv2W, conv2B: conv2B,
-            conv3W: conv3W, conv3B: conv3B,
-            conv4W: conv4W, conv4B: conv4B,
-            lstmWih: lstmWih, lstmWhh: lstmWhh, lstmBias: lstmBias,
-            finalW: finalW, finalB: finalBArr[0]
-        )
-    }
-}
-
 // MARK: - Subtitle Auto-Aligner (Audio-First Ground Truth + Dual-Subtitle Shift & FPS Drift)
 
 public enum SubtitleAutoAligner {
-    private static let cinemaScaleCandidates: [Double] = [
-        1.0,
-        25.0 / (24_000.0 / 1001.0),   // 23.976 -> 25.000 PAL speedup (~1.042708)
-        (24_000.0 / 1001.0) / 25.0,   // 25.000 -> 23.976 (~0.959041)
-        24.0 / (24_000.0 / 1001.0),   // 23.976 -> 24.000 (~1.001000)
-        (24_000.0 / 1001.0) / 24.0,   // 24.000 -> 23.976 (~0.999001)
-        25.0 / 24.0,                  // 24.000 -> 25.000 (~1.041667)
-        24.0 / 25.0                   // 25.000 -> 24.000 (~0.960000)
-    ]
-
     // MARK: 0. High-Level Audio-First Orchestrators (Audio Track Is Always Ground Truth)
 
     /// Button 1 ("字音对齐"): aligns active subtitle(s) to the audio track via Silero VAD.
@@ -782,16 +491,8 @@ public enum SubtitleAutoAligner {
         let ovN = i1 - i0
         guard Double(ovN) * dt >= max(7.0, 0.55 * audioDur) else { return 0 }
 
-        var sVec = [Float](repeating: 0, count: ovN)
         let subOrigin = audioStartPTS + Double(i0) * dt - delaySeconds
-        for cue in filtered {
-            let c0 = max(0, Int(floor((cue.startSeconds - subOrigin) / dt)))
-            let c1 = min(ovN - 1, Int(ceil((cue.endSeconds - subOrigin) / dt)))
-            guard c1 >= c0 else { continue }
-            for idx in c0...c1 where sVec[idx] < 1.0 { sVec[idx] = 1.0 }
-            let onsetEnd = min(ovN - 1, c0 + 2)
-            for idx in c0...onsetEnd { sVec[idx] = max(sVec[idx], 1.45) }
-        }
+        let sVec = rasterizeCueEnvelope(cues: filtered, origin: subOrigin, count: ovN, dt: dt, onsetPeak: 1.45, onsetExtraBins: 2)
 
         var sumA = 0.0, sumA2 = 0.0, sumS = 0.0, sumS2 = 0.0, dot = 0.0
         for idx in 0..<ovN {
@@ -822,13 +523,7 @@ public enum SubtitleAutoAligner {
             return .insufficientData("已捕获音频不足 10 秒，请播放一小段对白后再点字音对齐")
         }
 
-        var smooth = [Float](repeating: 0, count: n)
-        for i in 0..<n {
-            let prev = i > 0 ? vadProbabilities[i - 1] : vadProbabilities[i]
-            let next = i + 1 < n ? vadProbabilities[i + 1] : vadProbabilities[i]
-            smooth[i] = 0.25 * prev + 0.5 * vadProbabilities[i] + 0.25 * next
-        }
-
+        let smooth = smoothVAD(vadProbabilities)
         var speechFrames = 0
         var silenceFrames = 0
         for p in smooth {
@@ -857,14 +552,8 @@ public enum SubtitleAutoAligner {
         }
 
         let aVec = buildAudioActivityVector(smoothedVAD: smooth)
-        var prefA = [Double](repeating: 0, count: n + 1)
-        var prefA2 = [Double](repeating: 0, count: n + 1)
-        for i in 0..<n {
-            let v = Double(aVec[i])
-            prefA[i + 1] = prefA[i] + v
-            prefA2[i + 1] = prefA2[i] + v * v
-        }
-        let totalVarA = prefA2[n] - (prefA[n] * prefA[n]) / Double(n)
+        let prefA = buildPrefixSums(aVec)
+        let totalVarA = prefA.sum2[n] - (prefA.sum[n] * prefA.sum[n]) / Double(n)
         guard totalVarA > 1e-4 else {
             return .insufficientData("音频语音能量变化不足，请在对白段落重试")
         }
@@ -878,23 +567,8 @@ public enum SubtitleAutoAligner {
 
         let sOrigin = audioStartPTS - Double(kMax) * dt
         let sLen = n + (kMax - kMin) + 2
-        var sVec = [Float](repeating: 0, count: sLen)
-        for cue in filteredCues {
-            let i0 = max(0, Int(floor((cue.startSeconds - sOrigin) / dt)))
-            let i1 = min(sLen - 1, Int(ceil((cue.endSeconds - sOrigin) / dt)))
-            guard i1 >= i0 else { continue }
-            for idx in i0...i1 where sVec[idx] < 1.0 { sVec[idx] = 1.0 }
-            let onsetEnd = min(sLen - 1, i0 + 2)
-            for idx in i0...onsetEnd { sVec[idx] = max(sVec[idx], 1.45) }
-        }
-
-        var prefS = [Double](repeating: 0, count: sLen + 1)
-        var prefS2 = [Double](repeating: 0, count: sLen + 1)
-        for i in 0..<sLen {
-            let v = Double(sVec[i])
-            prefS[i + 1] = prefS[i] + v
-            prefS2[i + 1] = prefS2[i] + v * v
-        }
+        let sVec = rasterizeCueEnvelope(cues: filteredCues, origin: sOrigin, count: sLen, dt: dt, onsetPeak: 1.45, onsetExtraBins: 2)
+        let prefS = buildPrefixSums(sVec)
 
         let minOverlapSamples = max(Int(ceil(8.0 / dt)), Int(ceil(0.65 * Double(n))))
 
@@ -907,25 +581,6 @@ public enum SubtitleAutoAligner {
         sVec.withUnsafeBufferPointer { sPtr in
             aVec.withUnsafeBufferPointer { aPtr in
                 guard let sBase = sPtr.baseAddress, let aBase = aPtr.baseAddress else { return }
-
-                @inline(__always)
-                func localPearson(aStart: Int, aEnd: Int, sStart: Int) -> Double {
-                    let len = aEnd - aStart
-                    guard len >= 32 else { return 0 }
-                    let invLen = 1.0 / Double(len)
-                    let sumA = prefA[aEnd] - prefA[aStart]
-                    let sumA2 = prefA2[aEnd] - prefA2[aStart]
-                    let varA = sumA2 - sumA * sumA * invLen
-                    if varA < 1e-5 { return 0 }
-                    let sumS = prefS[sStart + len] - prefS[sStart]
-                    let sumS2 = prefS2[sStart + len] - prefS2[sStart]
-                    let varS = sumS2 - sumS * sumS * invLen
-                    if varS < 1e-5 { return 0 }
-                    var dot: Float = 0
-                    vDSP_dotpr(aBase.advanced(by: aStart), 1, sBase.advanced(by: sStart), 1, &dot, vDSP_Length(len))
-                    let cov = Double(dot) - (sumA * sumS) * invLen
-                    return cov / sqrt(varA * varS)
-                }
 
                 for li in 0..<lagCount {
                     let k = kMin + li
@@ -940,7 +595,11 @@ public enum SubtitleAutoAligner {
                     guard ovN >= minOverlapSamples else { continue }
 
                     let sStart = (kMax - k) + i0
-                    let r = localPearson(aStart: i0, aEnd: i1, sStart: sStart)
+                    let r = pearsonCorrelation(
+                        aBase: aBase, aStart: i0, prefA: prefA,
+                        bBase: sBase, bStart: sStart, prefB: prefS,
+                        count: ovN, minSamples: 32, minVariance: 1e-5
+                    ) ?? 0.0
                     let weight = sqrt(Double(ovN) / Double(n))
                     rawR[li] = r
                     weightedScores[li] = r * weight
@@ -983,22 +642,16 @@ public enum SubtitleAutoAligner {
             sVec.withUnsafeBufferPointer { sPtr in
                 aVec.withUnsafeBufferPointer { aPtr in
                     guard let sBase = sPtr.baseAddress, let aBase = aPtr.baseAddress else { return }
-                    func halfR(_ aStart: Int, _ aEnd: Int, _ sStart: Int) -> Double {
-                        let len = aEnd - aStart
-                        let invLen = 1.0 / Double(len)
-                        let sumA = prefA[aEnd] - prefA[aStart]
-                        let sumA2 = prefA2[aEnd] - prefA2[aStart]
-                        let varA = sumA2 - sumA * sumA * invLen
-                        let sumS = prefS[sStart + len] - prefS[sStart]
-                        let sumS2 = prefS2[sStart + len] - prefS2[sStart]
-                        let varS = sumS2 - sumS * sumS * invLen
-                        guard varA > 1e-5, varS > 1e-5 else { return 0 }
-                        var dot: Float = 0
-                        vDSP_dotpr(aBase.advanced(by: aStart), 1, sBase.advanced(by: sStart), 1, &dot, vDSP_Length(len))
-                        return (Double(dot) - sumA * sumS * invLen) / sqrt(varA * varS)
-                    }
-                    h1 = halfR(i0, mid, sBase0)
-                    h2 = halfR(mid, i1, sBase1)
+                    h1 = pearsonCorrelation(
+                        aBase: aBase, aStart: i0, prefA: prefA,
+                        bBase: sBase, bStart: sBase0, prefB: prefS,
+                        count: mid - i0, minSamples: 1, minVariance: 1e-5
+                    ) ?? 0.0
+                    h2 = pearsonCorrelation(
+                        aBase: aBase, aStart: mid, prefA: prefA,
+                        bBase: sBase, bStart: sBase1, prefB: prefS,
+                        count: i1 - mid, minSamples: 1, minVariance: 1e-5
+                    ) ?? 0.0
                 }
             }
             return (h1, h2)
@@ -1133,410 +786,5 @@ public enum SubtitleAutoAligner {
             matchedCueCount: max(alignedCueCount, 1),
             alreadyAligned: alreadyAligned
         ))
-    }
-
-    // MARK: 2. Dual-Subtitle Auto-Alignment (Constant Shift + Cinema FPS Drift)
-
-    public static func alignDualSubtitles(
-        primaryCues: [SubtitleCueInterval],
-        secondaryCues: [SubtitleCueInterval],
-        currentPrimaryDelay: Double = 0.0,
-        maxShiftSeconds: Double = 120.0
-    ) -> DualSubtitleAlignmentOutcome {
-        let pri = filterDialogueCues(primaryCues)
-        let sec = filterDialogueCues(secondaryCues)
-        guard pri.count >= 5, sec.count >= 5 else {
-            return .insufficientData("可用主/副字幕条数不足 (主 \(pri.count) / 副 \(sec.count))，请稍候重试")
-        }
-
-        let priSpan = (pri.last?.endSeconds ?? 0) - (pri.first?.startSeconds ?? 0)
-        let secSpan = (sec.last?.endSeconds ?? 0) - (sec.first?.startSeconds ?? 0)
-        let allowScaleSearch = (pri.count >= 14 && sec.count >= 14 && min(priSpan, secSpan) >= 180.0)
-
-        struct ScaleEval {
-            let scale: Double
-            let offset: Double
-            let mad: Double
-            let inliers: Int
-            let inlierRatio: Double
-            let corr: Double
-            let score: Double
-        }
-
-        func evaluateCandidate(scale: Double) -> ScaleEval? {
-            let scaledSec = (abs(scale - 1.0) < 1e-9)
-                ? sec
-                : sec.map { SubtitleCueInterval(startSeconds: $0.startSeconds * scale, endSeconds: $0.endSeconds * scale) }
-
-            let candidateShifts = coarseAndFineEnvelopeShiftCandidates(
-                primary: pri,
-                secondary: scaledSec,
-                maxShiftSeconds: maxShiftSeconds
-            )
-            guard !candidateShifts.isEmpty else { return nil }
-
-            var bestForScale: ScaleEval? = nil
-            for candShift in candidateShifts {
-                var deltas: [Double] = []
-                deltas.reserveCapacity(scaledSec.count)
-                var j = 0
-                for idx in 0..<scaledSec.count {
-                    let sc = scaledSec[idx]
-                    let predStart = sc.startSeconds + candShift.shift
-                    let predMid = sc.midpoint + candShift.shift
-                    while j + 1 < pri.count && pri[j + 1].startSeconds < predStart - 1.6 {
-                        j += 1
-                    }
-                    var bestDist = Double.greatestFiniteMagnitude
-                    var bestPriIdx = -1
-                    var scan = j
-                    while scan < pri.count && pri[scan].startSeconds <= predStart + 1.6 {
-                        let pc = pri[scan]
-                        let durRatio = max(pc.duration, 0.05) / max(sc.duration, 0.05)
-                        if durRatio >= 0.22 && durRatio <= 4.5 {
-                            let dStart = abs(pc.startSeconds - predStart)
-                            let dMid = abs(pc.midpoint - predMid)
-                            let dist = 0.7 * dStart + 0.3 * dMid
-                            if dist < bestDist {
-                                bestDist = dist
-                                bestPriIdx = scan
-                            }
-                        }
-                        scan += 1
-                    }
-                    if bestPriIdx >= 0 && bestDist <= 1.6 {
-                        let pc = pri[bestPriIdx]
-                        let res = 0.7 * (pc.startSeconds - predStart) + 0.3 * (pc.midpoint - predMid)
-                        deltas.append(res)
-                    }
-                }
-
-                guard deltas.count >= 4 else { continue }
-                let medDelta = median(of: deltas)
-                let refinedOffset = candShift.shift + medDelta
-
-                var absRes: [Double] = []
-                absRes.reserveCapacity(deltas.count)
-                var inliers = 0
-                for d in deltas {
-                    let err = abs(d - medDelta)
-                    if err <= 0.65 {
-                        inliers += 1
-                        absRes.append(err)
-                    }
-                }
-                guard inliers >= 4 else { continue }
-                let mad = median(of: absRes)
-                let denom = Double(min(pri.count, sec.count))
-                let ratio = min(1.0, Double(inliers) / max(1.0, denom))
-                // Small near-zero tie-breaker prevents sparse far-away edge flukes from beating a dense near-zero match
-                let shiftPenalty = 0.02 * min(1.0, abs(refinedOffset) / 60.0)
-                let quality = ratio * 0.58 + max(0.0, 1.0 - mad / 0.55) * 0.27 + min(1.0, max(0.0, candShift.corr)) * 0.15 - shiftPenalty
-                let eval = ScaleEval(
-                    scale: scale,
-                    offset: refinedOffset,
-                    mad: mad,
-                    inliers: inliers,
-                    inlierRatio: ratio,
-                    corr: candShift.corr,
-                    score: quality
-                )
-                if bestForScale == nil || eval.score > bestForScale!.score {
-                    bestForScale = eval
-                }
-            }
-            return bestForScale
-        }
-
-        let unityEval = evaluateCandidate(scale: 1.0)
-        var bestEval = unityEval
-
-        let needsScaleCheck = allowScaleSearch && (
-            unityEval == nil ||
-            (unityEval!.mad > 0.14 || unityEval!.inlierRatio < 0.72)
-        )
-        if needsScaleCheck {
-            for candidateScale in cinemaScaleCandidates where abs(candidateScale - 1.0) > 1e-6 {
-                guard let cand = evaluateCandidate(scale: candidateScale) else { continue }
-                let beatsUnity: Bool
-                if let u = unityEval {
-                    let madImproved = cand.mad <= u.mad * 0.60 && cand.mad <= 0.25
-                    let inliersImproved = Double(cand.inliers) >= Double(u.inliers) * 1.18 && cand.mad <= 0.25
-                    beatsUnity = (madImproved || inliersImproved) && cand.score > u.score + 0.06
-                } else {
-                    beatsUnity = cand.mad <= 0.28 && cand.inliers >= 10
-                }
-                if beatsUnity {
-                    if bestEval == nil || cand.score > bestEval!.score {
-                        bestEval = cand
-                    }
-                }
-            }
-        }
-
-        guard let chosen = bestEval else {
-            return .lowConfidence(reason: "主副字幕时间轴重叠度过低，无法可靠对齐")
-        }
-
-        let isValid = (chosen.inliers >= 5 && chosen.inlierRatio >= 0.30 && chosen.mad <= 0.45) ||
-                      (chosen.inliers >= 16 && chosen.inlierRatio >= 0.25 && chosen.mad <= 0.35)
-        guard isValid else {
-            return .lowConfidence(reason: "主副字幕匹配比例过低 (\(chosen.inliers) 条 / \(Int((chosen.inlierRatio * 100).rounded()))%)，请播放更多对白后重试")
-        }
-
-        let roundedOffset = roundCenti(chosen.offset)
-        let targetSecondaryDelay = roundCenti(roundedOffset + currentPrimaryDelay)
-        let drifted = abs(chosen.scale - 1.0) > 5e-4
-        let confidence = min(0.99, max(0.0, chosen.score))
-
-        return .aligned(DualSubtitleAlignmentResult(
-            rawOffsetSeconds: roundedOffset,
-            suggestedSecondaryDelaySeconds: targetSecondaryDelay,
-            secondaryTimeScale: drifted ? chosen.scale : 1.0,
-            detectedFrameRateDrift: drifted,
-            confidence: confidence,
-            residualMADSeconds: chosen.mad,
-            matchedPairCount: chosen.inliers
-        ))
-    }
-
-    // MARK: - Internal DSP & Geometry Helpers
-
-    private static func roundCenti(_ value: Double) -> Double {
-        (value * 100.0).rounded() / 100.0
-    }
-
-    private static func buildAudioActivityVector(vadProbabilities: [Float]) -> [Float] {
-        let n = vadProbabilities.count
-        var smooth = [Float](repeating: 0, count: n)
-        for i in 0..<n {
-            let prev = i > 0 ? vadProbabilities[i - 1] : vadProbabilities[i]
-            let next = i + 1 < n ? vadProbabilities[i + 1] : vadProbabilities[i]
-            smooth[i] = 0.25 * prev + 0.5 * vadProbabilities[i] + 0.25 * next
-        }
-        return buildAudioActivityVector(smoothedVAD: smooth)
-    }
-
-    private static func buildAudioActivityVector(smoothedVAD smooth: [Float]) -> [Float] {
-        let n = smooth.count
-        var aVec = [Float](repeating: 0, count: n)
-        for i in 0..<n {
-            let base = max(0, (smooth[i] - 0.15) / 0.85)
-            let prev2 = i >= 2 ? smooth[i - 2] : smooth[0]
-            let onset = max(0, smooth[i] - prev2)
-            aVec[i] = base + 0.45 * onset
-        }
-        return aVec
-    }
-
-    private static func filterDialogueCues(_ cues: [SubtitleCueInterval]) -> [SubtitleCueInterval] {
-        let valid = cues
-            .filter { $0.duration >= 0.12 && $0.duration <= 14.0 && $0.startSeconds >= 0 }
-            .sorted { $0.startSeconds < $1.startSeconds }
-        guard !valid.isEmpty else { return [] }
-
-        var merged: [SubtitleCueInterval] = []
-        merged.reserveCapacity(valid.count)
-        for cue in valid {
-            if let last = merged.last, abs(cue.startSeconds - last.startSeconds) <= 0.05 {
-                if cue.endSeconds > last.endSeconds {
-                    merged[merged.count - 1] = SubtitleCueInterval(startSeconds: last.startSeconds, endSeconds: cue.endSeconds)
-                }
-            } else {
-                merged.append(cue)
-            }
-        }
-        return merged
-    }
-
-    /// Overlap-clipped 2-stage coarse (`0.25s`) -> fine (`0.04s`) envelope cross-correlation returning top distinct candidate shifts
-    /// (plus `0.0s` baseline), preventing empty-void edge inflation on freshly demuxed embedded subtitle windows.
-    private static func coarseAndFineEnvelopeShiftCandidates(
-        primary: [SubtitleCueInterval],
-        secondary: [SubtitleCueInterval],
-        maxShiftSeconds: Double
-    ) -> [(shift: Double, corr: Double)] {
-        guard let priFirst = primary.first, let priLast = primary.last,
-              let secFirst = secondary.first, let secLast = secondary.last else {
-            return []
-        }
-
-        let priSpan = max(0.0, priLast.endSeconds - priFirst.startSeconds)
-        let secSpan = max(0.0, secLast.endSeconds - secFirst.startSeconds)
-        let minTrackSpan = min(priSpan, secSpan)
-        guard minTrackSpan >= 2.0 else { return [] }
-
-        // Never search lags larger than ~45% of the buffered embedded subtitle span (prevents ±70s void jumps on 80s clips)
-        let effectiveMaxShift = (minTrackSpan < 260.0)
-            ? min(maxShiftSeconds, max(12.0, minTrackSpan * 0.45))
-            : maxShiftSeconds
-
-        let spanStart = max(0.0, priFirst.startSeconds)
-        let spanEnd = priLast.endSeconds
-        let totalSpan = spanEnd - spanStart
-        guard totalSpan >= 2.0 else { return [] }
-
-        var windows: [(Double, Double)] = []
-        if totalSpan <= 1500.0 {
-            windows.append((spanStart, spanEnd))
-        } else {
-            let winLen = 480.0
-            windows.append((spanStart, spanStart + winLen))
-            let mid = spanStart + 0.5 * totalSpan
-            windows.append((mid - 0.5 * winLen, mid + 0.5 * winLen))
-            windows.append((spanEnd - winLen, spanEnd))
-        }
-
-        func correlateTopPeaks(dt: Double, lagMinSec: Double, lagMaxSec: Double, maxPeaks: Int, minSepSec: Double) -> [(shift: Double, corr: Double)] {
-            let kMin = Int(floor(lagMinSec / dt))
-            let kMax = Int(ceil(lagMaxSec / dt))
-            let lagCount = kMax - kMin + 1
-            guard lagCount >= 1 else { return [] }
-
-            var scoreSum = [Double](repeating: 0, count: lagCount)
-            var weightSum = [Double](repeating: 0, count: lagCount)
-
-            for (wStart, wEnd) in windows {
-                let wDur = wEnd - wStart
-                let n = max(16, Int(ceil(wDur / dt)))
-                var pVec = [Float](repeating: 0, count: n)
-                for cue in primary where cue.endSeconds >= wStart && cue.startSeconds <= wEnd {
-                    let i0 = max(0, Int(floor((cue.startSeconds - wStart) / dt)))
-                    let i1 = min(n - 1, Int(ceil((cue.endSeconds - wStart) / dt)))
-                    if i1 >= i0 {
-                        for idx in i0...i1 { pVec[idx] = max(pVec[idx], 1.0) }
-                        pVec[i0] = 1.5
-                    }
-                }
-
-                var prefP = [Double](repeating: 0, count: n + 1)
-                var prefP2 = [Double](repeating: 0, count: n + 1)
-                for i in 0..<n {
-                    let v = Double(pVec[i])
-                    prefP[i + 1] = prefP[i] + v
-                    prefP2[i + 1] = prefP2[i] + v * v
-                }
-
-                let sOrigin = wStart - Double(kMax) * dt
-                let sLen = n + (kMax - kMin) + 2
-                var sVec = [Float](repeating: 0, count: sLen)
-                let sWinEnd = sOrigin + Double(sLen) * dt
-                for cue in secondary where cue.endSeconds >= sOrigin && cue.startSeconds <= sWinEnd {
-                    let i0 = max(0, Int(floor((cue.startSeconds - sOrigin) / dt)))
-                    let i1 = min(sLen - 1, Int(ceil((cue.endSeconds - sOrigin) / dt)))
-                    if i1 >= i0 {
-                        for idx in i0...i1 { sVec[idx] = max(sVec[idx], 1.0) }
-                        sVec[i0] = 1.5
-                    }
-                }
-
-                var prefS = [Double](repeating: 0, count: sLen + 1)
-                var prefS2 = [Double](repeating: 0, count: sLen + 1)
-                for i in 0..<sLen {
-                    let v = Double(sVec[i])
-                    prefS[i + 1] = prefS[i] + v
-                    prefS2[i + 1] = prefS2[i] + v * v
-                }
-
-                let minOvSamples = max(12, Int(ceil(0.50 * Double(n))))
-
-                sVec.withUnsafeBufferPointer { sPtr in
-                    pVec.withUnsafeBufferPointer { pPtr in
-                        guard let sBase = sPtr.baseAddress, let pBase = pPtr.baseAddress else { return }
-                        for li in 0..<lagCount {
-                            let k = kMin + li
-                            let lagSec = Double(k) * dt
-                            // Clip strictly to the valid overlap where secondary actually has demuxed cues
-                            let ovStart = max(wStart, secFirst.startSeconds + lagSec - 2.0)
-                            let ovEnd = min(wEnd, secLast.endSeconds + lagSec + 2.0)
-                            let i0 = max(0, Int(ceil((ovStart - wStart) / dt)))
-                            let i1 = min(n, Int(floor((ovEnd - wStart) / dt)))
-                            let ovN = i1 - i0
-                            guard ovN >= minOvSamples else { continue }
-
-                            let sIdx = (kMax - k) + i0
-                            let invOv = 1.0 / Double(ovN)
-                            let sumP = prefP[i1] - prefP[i0]
-                            let sumP2 = prefP2[i1] - prefP2[i0]
-                            let varP = sumP2 - sumP * sumP * invOv
-                            guard varP > 1e-4 else { continue }
-
-                            let sumS = prefS[sIdx + ovN] - prefS[sIdx]
-                            let sumS2 = prefS2[sIdx + ovN] - prefS2[sIdx]
-                            let varS = sumS2 - sumS * sumS * invOv
-                            guard varS > 1e-4 else { continue }
-
-                            var dot: Float = 0
-                            vDSP_dotpr(pBase.advanced(by: i0), 1, sBase.advanced(by: sIdx), 1, &dot, vDSP_Length(ovN))
-                            let r = (Double(dot) - sumP * sumS * invOv) / sqrt(varP * varS)
-                            let ovFrac = Double(ovN) / Double(n)
-                            // Weight by overlap fraction so sparse partial overlaps never outrank dense full overlaps
-                            let w = ovFrac * Double(ovN)
-                            scoreSum[li] += (r * sqrt(ovFrac)) * w
-                            weightSum[li] += w
-                        }
-                    }
-                }
-            }
-
-            var scored: [(li: Int, score: Double)] = []
-            scored.reserveCapacity(lagCount)
-            for li in 0..<lagCount where weightSum[li] > 0 {
-                scored.append((li, scoreSum[li] / weightSum[li]))
-            }
-            scored.sort { $0.score > $1.score }
-
-            let sepBins = max(1, Int(ceil(minSepSec / dt)))
-            var peaks: [(shift: Double, corr: Double)] = []
-            var pickedLi: [Int] = []
-            for item in scored {
-                if pickedLi.allSatisfy({ abs($0 - item.li) >= sepBins }) {
-                    pickedLi.append(item.li)
-                    peaks.append((Double(kMin + item.li) * dt, item.score))
-                    if peaks.count >= maxPeaks { break }
-                }
-            }
-            return peaks
-        }
-
-        var coarseSeeds = correlateTopPeaks(
-            dt: 0.25,
-            lagMinSec: -effectiveMaxShift,
-            lagMaxSec: effectiveMaxShift,
-            maxPeaks: 4,
-            minSepSec: 2.0
-        )
-        // Always include near-zero baseline candidate so closely aligned tracks are guaranteed evaluation
-        if coarseSeeds.allSatisfy({ abs($0.shift) > 1.5 }) {
-            coarseSeeds.append((0.0, 0.0))
-        }
-
-        var refined: [(shift: Double, corr: Double)] = []
-        for seed in coarseSeeds {
-            if let fine = correlateTopPeaks(
-                dt: 0.04,
-                lagMinSec: seed.shift - 1.5,
-                lagMaxSec: seed.shift + 1.5,
-                maxPeaks: 1,
-                minSepSec: 0.5
-            ).first {
-                if refined.allSatisfy({ abs($0.shift - fine.shift) > 0.35 }) {
-                    refined.append(fine)
-                }
-            } else if refined.allSatisfy({ abs($0.shift - seed.shift) > 0.35 }) {
-                refined.append(seed)
-            }
-        }
-        return refined
-    }
-
-    private static func median(of values: [Double]) -> Double {
-        guard !values.isEmpty else { return 0 }
-        let sorted = values.sorted()
-        let mid = sorted.count / 2
-        if sorted.count % 2 == 1 {
-            return sorted[mid]
-        }
-        return 0.5 * (sorted[mid - 1] + sorted[mid])
     }
 }

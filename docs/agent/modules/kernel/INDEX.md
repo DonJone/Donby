@@ -1,6 +1,6 @@
 # Module Map: Playback Kernel (`KernelRust` + `DonbyKernelC` ABI)
 
-> Last synced: `v2.0.5` (C++20 baseline archived on `legacy/cpp-kernel`). Read [../../decisions/003-rust-kernel-migration.md](../../decisions/003-rust-kernel-migration.md) for migration rationale.
+> Last synced: `v2.0.6` (C++20 baseline archived on `legacy/cpp-kernel`). Read [../../decisions/003-rust-kernel-migration.md](../../decisions/003-rust-kernel-migration.md) for migration rationale.
 
 ## 1. Sub-Document Routing
 
@@ -13,7 +13,11 @@
 ## 2. File Inventory
 
 - `Sources/DonbyKernelC/include/donby_kernel.h` (**FROZEN C ABI**) — 37 `dk_*` public entrypoints.
-- `Sources/DonbyKernelC/dk_ffi_shim.c` (pure C11) — `_Static_assert` ABI checks, `av_log` bridge, VideoToolbox/`IOSurface` pool, `AudioQueue`/Swr wrappers, FFmpeg/`libass` accessors.
+- `Sources/DonbyKernelC/dk_ffi_shim_internal.h` (pure C11 internal header) — shared `DKShimStreamMeta`, callback typedefs, and cross-unit `dk_shim_*` prototypes.
+- `Sources/DonbyKernelC/dk_ffi_shim.c` (pure C11) — `_Static_assert` ABI checks, `av_log` bridge, packet/frame alloc, format open with PGS/DVD fast-probe bypass, custom AVIO, stream/chapter metadata, seek/read, shared codec helpers.
+- `Sources/DonbyKernelC/dk_ffi_video.c` (pure C11) — VideoToolbox hwaccel, `IOSurface`-backed `CVPixelBufferPool` + `SwsContext` fallback, HDR10/DoVi RPU `DKGpuColorUniforms` builder, thumbnail extraction.
+- `Sources/DonbyKernelC/dk_ffi_audio.c` (pure C11) — audio decoder, `SwrContext` 48kHz stereo resampler + 5.1 downmix + VAD tap, `AudioQueue` C trampoline & playback/clock wrappers.
+- `Sources/DonbyKernelC/dk_ffi_subtitle.c` (pure C11) — `CFStringTransform`, FFmpeg ASS/PGS/DVD subtitle packet decode, and `libass` struct accessors.
 - `KernelRust/src/` (`donby_kernel_rs`, zero external Cargo deps -> `build_kernel/libdonby_kernel.a`):
   - `lib.rs` — Crate root, `LOG_CALLBACK`/`LIVE_PLAYERS`, `dk_rust_forward_ffmpeg_log`, `ReaderGuard`, URL normalization/redaction.
   - `player.rs` — `DKPlayer` (`#[repr(C)]`, 70 fields), sub-state structs, RAII guards, lock partial order docs.

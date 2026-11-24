@@ -1,15 +1,18 @@
 # Module Map: Metal EDR Video Renderer (`DonbyMetalRenderer`)
 
-> Last synced: `v1.4.22`. Load this doc for CVDisplayLink presentation, Metal shaders, HDR10/Dolby Vision EDR tone mapping, GPU snapshots, first-frame callbacks, and subtitle overlay rendering.
+> Last synced: `v2.0.6`. Load this doc for CVDisplayLink presentation, Metal shaders, HDR10/Dolby Vision EDR tone mapping, GPU snapshots, first-frame callbacks, and subtitle overlay rendering.
 
 ## 1. File Inventory & Core Symbols
+- `Sources/DonbyMetalRenderer/DKMetalShadersAndPipeline.swift`
+  - `DKVertexUniforms` — vertex scale, subtitle lift/nit parameters, and UV crop uniforms.
+  - `DKMetalPipelineSet` — compiled & cached Metal render pipelines (`videoPipeline` for NV12/P010/DoVi -> linear EDR `.rgba16Float`, `bgraPipeline` fallback, and `subPipeline` for linear-space alpha-blended subtitles).
+  - `DKMetalLayerView.metalShaderSource` & `prewarmPipelines()` — embedded MSL shaders (`vertex_main`, `fragment_video_master`, `fragment_bgra`, `fragment_subtitle`) and startup pipeline prewarming.
+- `Sources/DonbyMetalRenderer/DKMetalLayerView.swift`
+  - `DKMetalLayerView` — `NSView` hosting `CAMetalLayer` (`pixelFormat = .rgba16Float`, `wantsExtendedDynamicRangeContent = true`, `colorspace = extendedLinearDisplayP3` / SDR fallback), stored state, EDR headroom observer, layout/drawable sizing, subtitle lift/occlusion controls, and `setupMetal()`.
+- `Sources/DonbyMetalRenderer/DKMetalLayerView+Rendering.swift`
+  - `DKMetalLayerView` rendering extension — `CVMetalTextureCache` frame upload (`renderLocked`, `renderBiPlanar`, `renderBGRA`), 3-slot subtitle `MTLTexture` ring (`updateSubtitleOverlay`), `subtitleViewportMetrics`, and `OffscreenMetalContext` / `renderOffscreenCGImage` for GPU sRGB snapshot/thumbnail rendering.
 - `Sources/DonbyMetalRenderer/DKMetalVideoView.swift`
-  - `DisplayLinkDriver` — manages `CVDisplayLink` callbacks and display refresh synchronization (60Hz/120Hz ProMotion).
-  - `DKMetalPipelineSet` — compiled Metal render pipelines:
-    - `pipelineVideoMaster` (NV12 / P010 10-bit bi-planar / YUV -> linear EDR `.rgba16Float` with PQ/HLG/Dolby Vision P5 & P8 RPU color uniforms `DKGpuColorUniformsMSL`).
-    - `pipelineSubtitle` (independent linear-space alpha-blended subtitle overlay with HDR nit luminance scaling).
-  - `DKMetalLayerView` — `NSView` hosting `CAMetalLayer` (`pixelFormat = .rgba16Float`, `wantsExtendedDynamicRangeContent = true`, `colorspace = extendedLinearDisplayP3` / SDR fallback).
-  - `OffscreenMetalContext` — GPU sRGB snapshot/thumbnail rendering for watch records and previews.
+  - `DisplayLinkDriver` — manages `CVDisplayLink` callbacks and `.common`-mode 60Hz timer fallback.
   - `DKMetalVideoView` + `Coordinator` + `SubtitleSyncBox` — SwiftUI `NSViewRepresentable` bridge.
 
 ## 2. Key Rendering Behaviors

@@ -1,6 +1,6 @@
 # Module Map: Optional UHDNow Streaming Integration (`DonbyUHDModule` & `Modules/UHD`)
 
-> Last synced: `v2.0.3`. Load this doc for UHDNow REST/WebSocket protocol behavior, dual-mode artwork resolution, single-episode detail hydration, CDN line selection/speed test, Watch Party, and GPU Danmu.
+> Last synced: `v2.0.6`. Load this doc for UHDNow REST/WebSocket protocol behavior, dual-mode artwork resolution, single-episode detail hydration, CDN line selection/speed test, Watch Party, and GPU Danmu.
 
 ## 1. File Inventory (Target Split: `<= 800L` per file)
 - **`Sources/DonbyUHDModule/`** (Optional SwiftPM target; excluded cleanly when `DONBY_PURE=1`):
@@ -10,7 +10,8 @@
   - `UHDStreamClient+AuthAndAccount.swift` — password/code/token auto-fallback login, subscription/traffic snapshots.
   - `UHDStreamClient+SpeedTestAndLines.swift` — `/playback/domains` listing, `/resolve` edge base resolution, `TEST_BASE` chunk speed test, exit IP probe.
   - `UHDStreamClient+CatalogAndSearch.swift` — collections, `playback-states` (`resume` + `nextUp`), hot/anime/calendar, genres, persons, TMDB search, favorites.
-  - `UHDStreamClient+DetailAndMapping.swift` — `fetchItemDetail` (with ambiguous-stub 404 retry across `episode`/`movie`/`tv`), `fetchSeasons`, paginated `fetchSeasonEpisodes` (`page_size=100`, auto-fetches pages `2...20` when `total > 100`), `fetchCredits`, `fetchAssetMediaSources`, `resolvePlaybackResource`, DTO mappers (`mapSummary`, `mapDetail`, `mapEpisode` with season poster / series fanart / series logo fallbacks).
+  - `UHDStreamClient+DetailAndMapping.swift` — `fetchItemDetail` (with ambiguous-stub 404 retry across `episode`/`movie`/`tv`), `fetchSeasons`, paginated `fetchSeasonEpisodes` (`page_size=100`, auto-fetches pages `2...20` when `total > 100`), `fetchCredits`, `fetchAssetMediaSources`, `resolvePlaybackResource`, `reportPlayback`.
+  - `UHDStreamClient+DTOMapping.swift` — DTO-to-domain mappers (`resolveItemType`, `resolveStateType`, `mapSummary`, `mapDetail`, `mapEpisode` with season poster / series fanart / series logo fallbacks, `mapPlaybackItem`, `mapVideoAsset`).
   - `UHDStreamClient+TeamAdmin.swift`, `UHDWatchPartyClient.swift`, `UHDDanmuClient.swift` — Team API v2 management, Watch Party REST + `@MainActor UHDWatchPartySession` WebSocket sync, and managed Danmu proxy (`DanmuSessionCache`).
 - **`Sources/DonbyApp/Modules/UHD/`** (UI plugin slots registered via `DonbyAppExtensionCenter`):
   - `UHDModuleManager.swift` — toggle state, home loading (`resumeItems` + `nextUpItems` + `hotItems`), `resolveSeriesStartEpisode`, Watch Party creation.

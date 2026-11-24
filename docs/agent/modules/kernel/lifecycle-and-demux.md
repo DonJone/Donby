@@ -1,6 +1,6 @@
 # Kernel Sub-Module: Lifecycle, Demux, Tracks & C ABI
 
-> Last synced: `v2.0.4`
+> Last synced: `v2.0.6`
 
 ## 1. Module Responsibilities
 - `KernelRust/src/lib.rs`: Crate root, module declarations, `LOG_CALLBACK` / `LIVE_PLAYERS` registry, `dk_rust_forward_ffmpeg_log`, `ReaderGuard`, URL normalization/redaction (`normalize_path_or_url`, `redact_url_for_log`).
@@ -12,7 +12,8 @@
 - `KernelRust/src/abi.rs`: Frozen C ABI `#[repr(C)]` structs/enums, compile-time size/align assertions, `offset_of!` tests, `DKGpuColorUniforms::default_sdr()`, and C-string helpers (`cchar_array_to_string`, `write_str_to_cchar`).
 - `KernelRust/src/ffi.rs`: `extern "C"` bindings for `dk_ffi_shim.c` and `libass`, plus RAII wrappers (`AvPacket`, `AvFrame`, `OwnedPixelBuffer`).
 - `Sources/DonbyKernelC/include/donby_kernel.h`: Frozen C ABI header declaring 7 `#[repr(C)]` structs/enums and 37 `dk_*` functions.
-- `Sources/DonbyKernelC/dk_ffi_shim.c`: Pure C11 FFmpeg/VideoToolbox/AudioToolbox/`libass` shim, `_Static_assert` ABI checks, `av_log` variadic bridge, PGS/DVD subtitle probe bypass.
+- `Sources/DonbyKernelC/dk_ffi_shim_internal.h`: Internal pure C11 header declaring `DKShimStreamMeta`, callback typedefs, and prototypes for all `dk_shim_*` entrypoints across the 4 C11 units.
+- `Sources/DonbyKernelC/dk_ffi_shim.c`: Core pure C11 shim (`_Static_assert` ABI checks, `av_log` variadic bridge, packet/frame alloc, format open with PGS/DVD fast-probe bypass, custom AVIO, stream/chapter metadata, seek/read, shared `AVCodecContext` helpers).
 
 ## 2. Mandatory Lock Partial Order
 1. `LIVE_PLAYERS` -> `custom_io` (never acquire `LIVE_PLAYERS` while holding `custom_io`).
