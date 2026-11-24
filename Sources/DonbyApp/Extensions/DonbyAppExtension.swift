@@ -120,13 +120,16 @@ public final class DonbyPlayerCompanionBox: ObservableObject {
 
     public func configureIfNeeded(server: EmbyServerConfig, appState: AppState) {
         guard companion == nil else { return }
-        companion = DonbyAppExtensionCenter.shared.plugin?.makePlayerCompanion(
+        if let created = DonbyAppExtensionCenter.shared.plugin?.makePlayerCompanion(
             server: server,
             appState: appState,
             notifyHost: { [weak self] in
                 self?.objectWillChange.send()
             }
-        )
+        ) {
+            companion = created
+            objectWillChange.send()
+        }
     }
 }
 
@@ -257,11 +260,14 @@ private struct DonbyExtensionSheetsModifier: ViewModifier {
     @ObservedObject private var extCenter = DonbyAppExtensionCenter.shared
 
     func body(content: Content) -> some View {
-        if let plugin = extCenter.plugin {
-            plugin.wrapRootSheets(AnyView(content))
-        } else {
-            content
-        }
+        // Attach extension sheets on a zero-impact background host so plugin registration
+        // never flips conditional identity around `content` or tears down its view subtree.
+        content
+            .background {
+                if let plugin = extCenter.plugin {
+                    plugin.wrapRootSheets(AnyView(Color.clear.allowsHitTesting(false)))
+                }
+            }
     }
 }
 
@@ -283,11 +289,18 @@ public struct PlayerCompanionSheetsModifier: ViewModifier {
     }
 
     public func body(content: Content) -> some View {
-        if let companion = box.companion {
-            companion.wrapPlayerSheets(AnyView(content), currentItem: currentItem, currentMediaSource: currentMediaSource)
-        } else {
-            content
-        }
+        // Keep `content` (PlayerView's ZStack + onAppear/onDisappear) structurally stable;
+        // wrapping `content` in `if/else` would tear down and re-mount playback on first companion update.
+        content
+            .background {
+                if let companion = box.companion {
+                    companion.wrapPlayerSheets(
+                        AnyView(Color.clear.allowsHitTesting(false)),
+                        currentItem: currentItem,
+                        currentMediaSource: currentMediaSource
+                    )
+                }
+            }
     }
 }
 
