@@ -1,4 +1,4 @@
-use std::ffi::{c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_void, CStr};
 
 pub type CVPixelBufferRef = *mut c_void;
 pub type CGImageRef = *mut c_void;
@@ -140,6 +140,40 @@ pub struct DKGpuColorUniforms {
     pub reshape_coeffs: [f32; 96],
     pub reshape_mmr_meta: [i32; 24],
     pub reshape_mmr_coeffs: [f32; 576],
+}
+
+impl DKGpuColorUniforms {
+    /// Standard BT.709 limited-range SDR defaults matching Metal shader expectations.
+    pub fn default_sdr() -> Self {
+        let mut u: Self = unsafe { std::mem::zeroed() };
+        u.transfer_fn = 0;
+        u.primaries = 0;
+        u.is_full_range = 0;
+        u.bit_depth = 8;
+        u.source_peak_nits = 203.0;
+        u.edr_headroom = 1.0;
+        u.ycc_offset = [16.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
+        u.yuv_matrix_r0 = [1.1643836, 0.0, 1.7927411, 0.0];
+        u.yuv_matrix_r1 = [1.1643836, -0.2132486, -0.5329093, 0.0];
+        u.yuv_matrix_r2 = [1.1643836, 2.1124018, 0.0, 0.0];
+        u.lin_matrix_r0 = [1.0, 0.0, 0.0, 0.0];
+        u.lin_matrix_r1 = [0.0, 1.0, 0.0, 0.0];
+        u.lin_matrix_r2 = [0.0, 0.0, 1.0, 0.0];
+        u
+    }
+}
+
+pub(crate) fn cchar_array_to_string(arr: &[c_char]) -> String {
+    unsafe { CStr::from_ptr(arr.as_ptr()) }.to_string_lossy().into_owned()
+}
+
+pub(crate) fn write_str_to_cchar<const N: usize>(dst: &mut [c_char; N], s: &str) {
+    *dst = [0 as c_char; N];
+    let bytes = s.as_bytes();
+    let n = bytes.len().min(N.saturating_sub(1));
+    for i in 0..n {
+        dst[i] = bytes[i] as c_char;
+    }
 }
 
 pub type DKCustomIOReadCallback =

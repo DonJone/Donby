@@ -16,4 +16,4 @@ Keep and evolve Donby's custom playback stack:
 - Avoids `libmpv` black-box cache/demux heuristics and dylib bloat while still adopting proven UX/state-machine patterns (chapter skip, bounded health recovery, subtitle encoding detection, pinned offline chunk reuse).
 
 ## Consequences
-- Every A/V sync, seek-flush, and AudioQueue lifecycle edge case is owned directly in `Sources/DonbyKernelC/dk_engine.cpp`. Always verify thread ownership and lock ordering in [../modules/kernel-cpp.md](../modules/kernel-cpp.md).
+- Every A/V sync, seek-flush, and AudioQueue lifecycle edge case is owned directly in `Sources/DonbyKernelC/dk_engine.cpp`. Always verify thread ownership and lock ordering in [../modules/kernel/INDEX.md](../modules/kernel/INDEX.md).

@@ -6,7 +6,7 @@
 ## 1. Repository Overview
 - **Product**: Donby — native macOS media player (macOS 14+, Apple Silicon) for Emby / Jellyfin / UHDNow / local media.
 - **Stack**: SwiftUI + AppKit (`DonbyApp`, `DonbyCore`, `DonbyNetwork`, optional `DonbyUHDModule`), Metal EDR renderer (`DonbyMetalRenderer`), Rust + FFmpeg/VideoToolbox/AudioToolbox/libass playback kernel (`KernelRust` + C11 header shim `DonbyKernelC`; legacy C++20 baseline archived on `legacy/cpp-kernel`).
-- **Current Version**: `2.0.3` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
+- **Current Version**: `2.0.4` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
 
 ## 2. Task-to-Module Routing Table
 
@@ -14,7 +14,7 @@
 | :--- | :--- | :--- |
 | Streaming, seek latency, HTTP/2, Range, L1/L2 cache, offline downloads, Emby API, auto-updater | [modules/turbo-network.md](modules/turbo-network.md) | `Sources/DonbyNetwork/*` |
 | Optional UHDNow Streaming API, dual-mode artwork, single-episode detail, lines/speedtest, Watch Party, Danmu | [modules/uhd-module.md](modules/uhd-module.md) | `Sources/DonbyUHDModule/*`, `Sources/DonbyApp/Modules/UHD/*` |
-| Demuxing, decoding, A/V sync, AudioQueue, rebuffer, seek flush, libass/PGS subtitles, FFmpeg AVIO | [modules/kernel-cpp.md](modules/kernel-cpp.md) | `KernelRust/src/*`, `Sources/DonbyKernelC/dk_ffi_shim.c`, `include/donby_kernel.h` |
+| Demuxing, decoding, A/V sync, AudioQueue, rebuffer, seek flush, libass/PGS subtitles, FFmpeg AVIO | [modules/kernel/INDEX.md](modules/kernel/INDEX.md) | `KernelRust/src/*`, `Sources/DonbyKernelC/dk_ffi_shim.c`, `Sources/DonbyKernelC/include/donby_kernel.h` |
 | Video presentation, CVDisplayLink, HDR10/DoVi EDR, Metal shaders, first-frame callback, subtitle lift | [modules/metal-renderer.md](modules/metal-renderer.md) | `Sources/DonbyMetalRenderer/DKMetalVideoView.swift` |
 | Player surface, HUD, overlays, drawers, playback engine, track/subtitle alignment, controls | [modules/player/INDEX.md](modules/player/INDEX.md) | `Sources/DonbyApp/Player/*` |
 | AppState, DetailView, 120Hz home/grid, artwork cache, Liquid Glass UI, server/files/settings/downloads views | [modules/app/INDEX.md](modules/app/INDEX.md) | `Sources/DonbyApp/AppState*.swift`, `DetailView*.swift`, `Components/*`, `Views/*`, `Server*.swift` |

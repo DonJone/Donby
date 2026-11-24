@@ -34,16 +34,16 @@ pub fn store_f64(atom: &AtomicU64, val: f64) {
 
 /// Lock-free master A/V clock state shared between AudioQueue, CVDisplayLink, and demux/seek threads.
 pub struct ClockState {
-    pub current_pos_bits: AtomicU64,
-    pub audio_clock_base_pts_bits: AtomicU64,
-    pub audio_clock_base_sample_time: AtomicI64,
-    pub audio_underrun_samples: AtomicI64,
-    pub audio_consecutive_underrun_samples: AtomicI64,
-    pub audio_clock_calibrated: AtomicBool,
-    pub fallback_audio_clock_bits: AtomicU64,
-    pub fallback_clock_ns: AtomicI64,
-    pub ext_clock_base_pts_bits: AtomicU64,
-    pub ext_clock_start_ns: AtomicI64,
+    pub(crate) current_pos_bits: AtomicU64,
+    pub(crate) audio_clock_base_pts_bits: AtomicU64,
+    pub(crate) audio_clock_base_sample_time: AtomicI64,
+    pub(crate) audio_underrun_samples: AtomicI64,
+    pub(crate) audio_consecutive_underrun_samples: AtomicI64,
+    pub(crate) audio_clock_calibrated: AtomicBool,
+    pub(crate) fallback_audio_clock_bits: AtomicU64,
+    pub(crate) fallback_clock_ns: AtomicI64,
+    pub(crate) ext_clock_base_pts_bits: AtomicU64,
+    pub(crate) ext_clock_start_ns: AtomicI64,
 }
 
 impl Default for ClockState {

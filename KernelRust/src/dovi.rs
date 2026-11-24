@@ -1,6 +1,7 @@
-use crate::abi::DKGpuColorUniforms;
+// Note: Runtime DoVi RPU parsing and PQ EOTF run inside Sources/DonbyKernelC/dk_ffi_shim.c.
 
 /// Detects HEVC NAL unit type 63 (Dolby Vision EL / FEL) in Annex-B byte streams.
+#[cfg(test)]
 pub fn check_dovi_fel(data: &[u8]) -> bool {
     scan_hevc_nal(data, |t| t == 63)
 }
@@ -31,6 +32,7 @@ fn scan_hevc_nal(data: &[u8], pred: impl Fn(u8) -> bool) -> bool {
 }
 
 /// SMPTE ST 2084 (PQ) normalized code value [0, 1] -> linear luminance in nits [0, 10000].
+#[cfg(test)]
 pub fn pq_norm_to_nits(e: f64) -> f32 {
     let e = e.clamp(0.0, 1.0);
     if e <= 0.0 {
@@ -45,27 +47,6 @@ pub fn pq_norm_to_nits(e: f64) -> f32 {
     let num = (ep - C1).max(0.0);
     let den = (C2 - C3 * ep).max(1e-6);
     (10000.0 * (num / den).powf(1.0 / M1)) as f32
-}
-
-impl DKGpuColorUniforms {
-    /// Standard BT.709 limited-range SDR defaults matching Metal shader expectations.
-    pub fn default_sdr() -> Self {
-        let mut u: Self = unsafe { std::mem::zeroed() };
-        u.transfer_fn = 0;
-        u.primaries = 0;
-        u.is_full_range = 0;
-        u.bit_depth = 8;
-        u.source_peak_nits = 203.0;
-        u.edr_headroom = 1.0;
-        u.ycc_offset = [16.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
-        u.yuv_matrix_r0 = [1.1643836, 0.0, 1.7927411, 0.0];
-        u.yuv_matrix_r1 = [1.1643836, -0.2132486, -0.5329093, 0.0];
-        u.yuv_matrix_r2 = [1.1643836, 2.1124018, 0.0, 0.0];
-        u.lin_matrix_r0 = [1.0, 0.0, 0.0, 0.0];
-        u.lin_matrix_r1 = [0.0, 1.0, 0.0, 0.0];
-        u.lin_matrix_r2 = [0.0, 0.0, 1.0, 0.0];
-        u
-    }
 }
 
 #[cfg(test)]
