@@ -1,6 +1,6 @@
 # Module Map: Playback Kernel (`KernelRust` + `DonbyKernelC` ABI)
 
-> Last synced: `v2.0.4` (C++20 baseline archived on `legacy/cpp-kernel`). Read [../../decisions/003-rust-kernel-migration.md](../../decisions/003-rust-kernel-migration.md) for migration rationale.
+> Last synced: `v2.0.5` (C++20 baseline archived on `legacy/cpp-kernel`). Read [../../decisions/003-rust-kernel-migration.md](../../decisions/003-rust-kernel-migration.md) for migration rationale.
 
 ## 1. Sub-Document Routing
 
@@ -21,14 +21,21 @@
   - `demux.rs` (`348L`) — `demux_worker`, buffer backpressure, DoVi probe, `execute_pending_seek`.
   - `video.rs` (`520L`) — VT callbacks, software fallback, `video_decode_worker`, `acquire_frame`, `extract_video_thumbnail`.
   - `audio.rs` (`626L`) — AQ trampolines, `stop_reset_audio_queue`/`stop_dispose_audio_queue`, clock, `audio_decode_worker`, playback controls.
-  - `tracks.rs` (`367L`) — Auto-subtitle scoring, subtitle packet history, track/chapter getters, `select_track`.
+  - `tracks.rs` (`365L`) — Auto-subtitle scoring, subtitle packet history, track/chapter getters, `select_track`.
   - `c_api.rs` (`440L`) — 37 `#[no_mangle] extern "C" fn dk_*` thin ABI wrappers.
   - `abi.rs` (`244L`) — `#[repr(C)]` ABI structs, `DKGpuColorUniforms::default_sdr()`, C-string helpers, `offset_of!` tests.
   - `ffi.rs` (`483L`) — `extern "C"` bindings + RAII `Drop` wrappers (`AvPacket`, `AvFrame`, `OwnedPixelBuffer`).
   - `clock.rs` (`124L`) — Monotonic ns clock helpers, `ClockState`, `SpeedTracker`.
   - `dovi.rs` (`79L`) — `check_dovi_rpu_or_el` (`check_dovi_fel` & `pq_norm_to_nits` are `#[cfg(test)]`).
   - `vad.rs` (`118L`) — `VadAudioRing` (60s @ 16kHz mono 3:1 decimator).
-  - `subtitle.rs` (`3,663L`) — `libass`/PGS renderers & Pair-A bilingual engine (Phase 2 split target).
+  - `subtitle/` (`3,696L` across 7 submodules; see [subtitles.md](subtitles.md) for task routing):
+    - `subtitle/mod.rs` (`485L`) — `SubtitleEngine` struct/lifecycle/`Drop`/`mark_replayed` + unit tests.
+    - `subtitle/pgs.rs` (`408L`) — FFmpeg packet decode (`DecodeCtx` callbacks) & PGS bitmap cue/pixel overrides.
+    - `subtitle/ass_text.rs` (`582L`) — External SRT/VTT/ASS ingestion, `CFStringTransform`, ASS payload/tag sanitization.
+    - `subtitle/ass_style.rs` (`432L`) — Style/viewport/affine time scale setters, header/style override application.
+    - `subtitle/compositor.rs` (`615L`) — `update_subtitle_rgba`, `raster_paired_line`, dual-layer RGBA blitting.
+    - `subtitle/pair_a_render.rs` (`619L`) — Pair-A cinema bilingual layout engine & 1200px viewport anchoring.
+    - `subtitle/pair_a_parse.rs` (`555L`) — Pair-A dialogue cleaning, speaker-dash grouping, semantic turn pairing.
 
 ## 3. Top Kernel Invariants (DO NOT BREAK)
 1. **CVDisplayLink Purity**: Never call `try_start_audio_queue_if_ready` or `AudioQueueStart` inside `acquire_frame`.

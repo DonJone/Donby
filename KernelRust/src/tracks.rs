@@ -112,9 +112,7 @@ impl DKPlayer {
             for cp in &clones {
                 sub.decode_packet_for_slot(fmt, cp.0, target_stream_idx, is_secondary);
             }
-            sub.sub_last_non_empty = false;
-            sub.sub_style_dirty = true;
-            sub.sub_serial += 1;
+            sub.mark_replayed();
         }
     }
 
