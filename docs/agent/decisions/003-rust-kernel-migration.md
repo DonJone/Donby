@@ -1,8 +1,8 @@
 # ADR-003: Rust Playback Kernel Migration Plan (`KernelRust`)
 
-- **Status**: Phases 0-3 Implemented & Verified on `feat/rust-kernel` (C++20 baseline archived at `legacy/cpp-kernel` @ `v1.4.38`)
+- **Status**: Completed & Merged to `main` as `v2.0.0` Pre-release (C++20 baseline archived at `legacy/cpp-kernel` @ `v1.4.38`)
 - **Date**: 2026-11-24
-- **Target Release**: `v1.5.0` (ready for Phase 4 merge to `main` upon user confirmation)
+- **Target Release**: `v2.0.0` (`pre-release`)
 
 ## 1. Branch & Baseline Topology
 

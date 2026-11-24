@@ -1,6 +1,6 @@
 # Module Map: Playback Kernel (`KernelRust` + `DonbyKernelC` ABI)
 
-> Last synced: `feat/rust-kernel` Phases 0-3 Complete (C++20 baseline archived on branch `legacy/cpp-kernel` @ `v1.4.38`). Read [../decisions/003-rust-kernel-migration.md](../decisions/003-rust-kernel-migration.md) for the Rust migration architecture. Load this doc for FFmpeg demuxing, VideoToolbox decoding, AudioQueue A/V sync, seek flush, rebuffer cushions, and libass/PGS subtitles.
+> Last synced: `v2.0.0` (C++20 baseline archived on branch `legacy/cpp-kernel` @ `v1.4.38`). Read [../decisions/003-rust-kernel-migration.md](../decisions/003-rust-kernel-migration.md) for the Rust migration architecture. Load this doc for FFmpeg demuxing, VideoToolbox decoding, AudioQueue A/V sync, seek flush, rebuffer cushions, and libass/PGS subtitles.
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyKernelC/include/donby_kernel.h` (~204L, **FROZEN C ABI**)
