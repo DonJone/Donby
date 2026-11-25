@@ -2,12 +2,15 @@
 
 This repository is developed primarily by AI agents (Antigravity). Follow this protocol strictly to minimize token usage, redundant codebase exploration, and regression risk.
 
-## 1. Mandatory Read-First Routing (Progressive Disclosure)
+## 1. Mandatory Read-First Routing & Targeted Read Budget (Progressive Disclosure)
 Before grepping or reading multi-file subsystems across `Sources/` or `KernelRust/src/`, ALWAYS:
 1. Read [docs/agent/INDEX.md](docs/agent/INDEX.md) first (< 100 lines).
 2. Load ONLY the 1-2 relevant module maps under `docs/agent/modules/`.
 3. Check `docs/agent/decisions/` before changing streaming concurrency, caching, or kernel architecture.
 4. For local test harness paths and real-server benchmark commands, check `docs/agent/local/` (git-ignored, local-only).
+5. **Targeted Symbol Read Budget (Overrides Default Whole-File Reads)**:
+   - **No Speculative Multi-File Full Reads**: Even though source files are `<= 800` lines, NEVER batch-read full `> 300`-line source files across multiple subsystems while diagnosing an unlocalized symptom. Narrow the stage first via runtime logs, metrics, or `ffprobe`/harnesses.
+   - **`rg -n` -> Slice Read (`StartLine`..`EndLine`)**: After getting entry symbols from `docs/agent/modules/`, locate exact line numbers with `rg -n` (or `grep -n`) and call `read_file` with `StartLine`/`EndLine` (`80-180` lines around the target function/struct). Keep exploratory source reads `<= ~400` total lines per turn; read an entire source file ONLY after confirming you will edit its broader file-wide structure.
 
 ## 2. Mandatory Commit, Version, Release & Documentation Sync Protocol
 Every **code commit** MUST bind **Version Bump + Structured Commit + `docs/agent/` Sync + GitHub Release** together (pure `docs:`-only commits do not bump the version or publish a release):
