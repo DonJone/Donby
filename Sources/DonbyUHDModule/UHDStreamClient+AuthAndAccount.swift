@@ -366,7 +366,7 @@ extension UHDStreamClient {
             expiresAt: dto.expiresAt,
             cancelledAt: dto.cancelledAt,
             trafficLimitBytes: dto.trafficLimitBytes ?? dto.trafficLimitLegacy ?? 0,
-            activeVideoDeliveryLimit: max(1, dto.activeVideoDeliveryLimit),
+            activeVideoDeliveryLimit: max(0, dto.activeVideoDeliveryLimit),
             renewDay: dto.renewDay,
             autoRenew: dto.autoRenew ?? false
         )
@@ -376,7 +376,7 @@ extension UHDStreamClient {
         let info = try await fetchSubscriptionDetail(server: server)
         return ServerDeliveryCapabilities(
             allowDownload: info.allowDownload,
-            activeVideoDeliveryLimit: max(1, info.activeVideoDeliveryLimit),
+            activeVideoDeliveryLimit: max(0, info.activeVideoDeliveryLimit),
             planName: info.plan?.name,
             displayUnlimitedTraffic: info.displayUnlimitedTraffic,
             trafficLimitBytes: info.trafficLimitBytes

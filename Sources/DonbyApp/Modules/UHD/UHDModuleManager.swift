@@ -193,7 +193,7 @@ public final class UHDModuleManager: ObservableObject {
                 if !sub.userId.isEmpty { server.userId = sub.userId }
                 appState.serverCapabilities[server.id] = ServerDeliveryCapabilities(
                     allowDownload: sub.allowDownload,
-                    activeVideoDeliveryLimit: max(1, sub.activeVideoDeliveryLimit),
+                    activeVideoDeliveryLimit: max(0, sub.activeVideoDeliveryLimit),
                     planName: sub.plan?.name,
                     displayUnlimitedTraffic: sub.displayUnlimitedTraffic,
                     trafficLimitBytes: sub.trafficLimitBytes
@@ -284,7 +284,7 @@ public final class UHDModuleManager: ObservableObject {
         if let sub = snap.subscription {
             appState.serverCapabilities[server.id] = ServerDeliveryCapabilities(
                 allowDownload: sub.allowDownload,
-                activeVideoDeliveryLimit: max(1, sub.activeVideoDeliveryLimit),
+                activeVideoDeliveryLimit: max(0, sub.activeVideoDeliveryLimit),
                 planName: sub.plan?.name,
                 displayUnlimitedTraffic: sub.displayUnlimitedTraffic,
                 trafficLimitBytes: sub.trafficLimitBytes

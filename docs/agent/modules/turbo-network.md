@@ -1,6 +1,6 @@
 # Module Map: Turbo Cache, Streaming & Network (`DonbyNetwork`)
 
-> Last synced: `v2.0.10`. Load this doc for `DonbyNetwork` streaming, seek latency, HTTP/2 Range, L1/L2 caching, detail-page preloading, Emby API (including standard Emby fallback when UHD extension is disabled), offline downloads, and channel-aware auto-updates. For optional `DonbyUHDModule` & `Modules/UHD`, load [uhd-module.md](uhd-module.md).
+> Last synced: `v2.0.11`. Load this doc for `DonbyNetwork` streaming, seek latency, HTTP/2 Range, L1/L2 caching, detail-page preloading, Emby API (including standard Emby fallback when UHD extension is disabled), offline downloads, and channel-aware auto-updates. For optional `DonbyUHDModule` & `Modules/UHD`, load [uhd-module.md](uhd-module.md).
 
 | If your task involves... | File | Entry Symbols |
 | :--- | :--- | :--- |
@@ -47,9 +47,11 @@
   - See [../decisions/002-h2-adaptive-concurrency-and-l2-cache.md](../decisions/002-h2-adaptive-concurrency-and-l2-cache.md) for full rationale.
   - **0.55s Seek-Burst Gate**: `min(2, cap)` streams for first `0.55s` post-seek to halve `RST_STREAM` churn during rapid scrubbing.
   - **Steady-State Cap**: `4` streams on `h2`/`h3` (scales to `5` when throughput `< 4.5 MB/s` and `leadCachedChunks < 6`).
-  - **Bounded Spans**: Progressive Range sizes `2 MiB -> 2 MiB -> 4 MiB -> 6 MiB` (outer lookahead spans stay compact at `2 MiB` while immediate playhead runway `< 4` contiguous chunks).
+  - **Bounded Spans**: Progressive Range sizes `2 MiB -> 2 MiB -> 4 MiB -> 6 MiB` in multi-stream mode (`8 MiB` immediate follow-up when `dynamicConcurrencyCap == 2` and warm playhead); when `dynamicConcurrencyCap <= 1` (`singleStreamMode`, `!inOpenProbePhase && index > 0`), scales Range span to `8 / 16 / 24 MiB` (`16 / 32 / 48` chunks by `measuredWireSpeedMBs`, capped at `min(64, prefetchAheadChunks)`) to amortize ~400ms TTFB and avoid 2 MiB stop-and-wait stalls, while disabling `isSlowPlayheadCrawl` concurrent rescue and cancelling stalled tasks before single-stream rescue (`timeoutIntervalForResource = 90s`).
   - **Zero-Waste Unaligned Seek Sprint (`initialByteSkip`)**: When seeking into a chunk with `offsetInChunk >= 64 KiB`, Stream #1 starts at the exact seek byte offset and stashes partial head in `directSlices` for immediate delivery.
-  - **EWMA TTFB-Adaptive Cold Rescue & Slow-Crawl Rescue**: Cold TTFB rescue uses `max(2.2, min(4.5, smoothedResponseTTFB * 2.5))`; once headers arrive (`chunkStartTimestamp` reset on response headers), immediate playhead chunks (`idx <= currentChunk + 1`) crawling below `360 KB/s` for `> 1.25s` also trigger a `1 MiB` rescue stream.
+  - **EWMA TTFB-Adaptive Cold Rescue & Slow-Crawl Rescue**: Cold TTFB rescue uses `max(2.2, min(4.5, smoothedResponseTTFB * 2.5))`; once headers arrive (`chunkStartTimestamp` reset on response headers), immediate playhead chunks (`idx <= currentChunk + 1`) crawling below `360 KB/s` for `> 1.25s` also trigger a `1 MiB` rescue stream (when `dynamicConcurrencyCap > 1`).
+  - **ULID Asset Key Canonicalization**: `DonbyTurboCacheEngine.makeAssetKey` and `cachedProgress` normalize 27-char `[ems]01...` ULID prefixes to 26-char bare ULIDs so detail-page preloads and continue-watching sessions share one L1/L2 store.
+  - **Delivery Limit Semantics (`activeVideoDeliveryLimit`)**: `0` means unlimited (never clamped to `1`); only positive limits clamp `turboConnectionBudget`.
   - **Chunk 0..3 & EOF Preservation**: Direct tail prefetch (up to `1 MiB`, final 2 chunks for `> 4 GiB`) survives open-probe seeks; returning from an EOF tail probe back to `Chunk 0..2` (`isContainerProbeSeek`) never arms `lastSeekUptime` or trims `Chunk 1..3`; cold Chunk 0 spans `2` chunks (`1 MiB`) while `inOpenProbePhase` allows `min(2, cap)` once Chunk 0 headers arrive so `Stream #2` fetches `Chunk 2..3` in parallel; `TurboStreamByteHandle.init` immediately launches urgent `Chunk 1` when `Chunk 0` is already warm; `startDetailPreload` fetches `Chunks 0..3` (`2 MiB`) in step 1 when starting at `0s` so interrupting preload never leaves a Chunk-0-only trap.
 
 ## 3. Critical Invariants & Pitfalls (DO NOT BREAK)

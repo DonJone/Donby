@@ -232,7 +232,7 @@ public struct UHDAccountDashboardContent: View {
                     columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)],
                     spacing: 10
                 ) {
-                    metricTile("最大并发", "\(sub.activeVideoDeliveryLimit) 个连接")
+                    metricTile("最大并发", sub.activeVideoDeliveryLimit == 0 ? "不限" : "\(sub.activeVideoDeliveryLimit) 个连接")
                     metricTile("离线下载", sub.allowDownload ? "允许" : "不支持")
                     metricTile("登录设备", sub.plan?.loginDeviceLimit.map { "\($0) 台" } ?? "默认")
                     if let quota = sub.plan?.memberQuota, quota > 0 {

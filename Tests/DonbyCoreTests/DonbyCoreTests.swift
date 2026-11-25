@@ -8,7 +8,7 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "2.0.10")
+        #expect(DonbyAppInfo.fallbackVersion == "2.0.11")
     }
 
     @Test func heroTopEdgeSynthesizerPreservesExactColorContrastAndSuppressesOutlierSpike() {
@@ -423,5 +423,88 @@ struct DonbyCoreTests {
         let midPos = handle.seek(offset: Int64(20 * 524_288), whence: SEEK_SET)
         #expect(midPos == Int64(20 * 524_288))
         #expect(handle.lastSeekUptime > 0)
+    }
+
+    @Test func turboHandleSingleStreamUsesLargeSpanAndAvoidsConcurrentCrawlRescue() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("donby-turbo-single-span-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let totalSize: Int64 = 200 * 524_288
+        let store = TieredAssetChunkStore(
+            assetKey: "test-single-stream-span",
+            rootDirectory: tempDir,
+            chunkSize: 524_288,
+            maxMemoryBytes: 64 * 1024 * 1024,
+            persistDisk: false
+        )
+        let handle = TurboStreamByteHandle(
+            assetKey: "test-single-stream-span",
+            streamURL: URL(string: "http://127.0.0.1:9/test.mkv")!,
+            headers: [:],
+            store: store,
+            knownTotalSize: totalSize,
+            connectionBudget: 1,
+            prefetchAheadChunks: 72
+        )
+        defer { handle.close() }
+
+        handle.condition.lock()
+        let coldChunk0Span = handle.activeAttempts.values.first { $0.startChunkIndex == 0 }.map { $0.endChunkExclusive - $0.startChunkIndex }
+        handle.inOpenProbePhase = false
+        handle.condition.unlock()
+        #expect(coldChunk0Span == 2)
+
+        _ = handle.seek(offset: Int64(10 * 524_288), whence: SEEK_SET)
+        handle.requestUrgentChunk(10)
+        handle.condition.lock()
+        let span10 = handle.activeAttempts.values.first { $0.startChunkIndex == 10 }.map { $0.endChunkExclusive - $0.startChunkIndex }
+        handle.measuredWireSpeedMBs = 4.0
+        handle.condition.unlock()
+        #expect((span10 ?? 0) >= 16)
+
+        _ = handle.seek(offset: Int64(60 * 524_288), whence: SEEK_SET)
+        handle.requestUrgentChunk(60)
+        handle.condition.lock()
+        let span60 = handle.activeAttempts.values.first { $0.startChunkIndex == 60 }.map { $0.endChunkExclusive - $0.startChunkIndex }
+        handle.measuredWireSpeedMBs = 8.0
+        handle.condition.unlock()
+        #expect((span60 ?? 0) >= 32)
+
+        _ = handle.seek(offset: Int64(120 * 524_288), whence: SEEK_SET)
+        handle.requestUrgentChunk(120)
+        handle.condition.lock()
+        let span120 = handle.activeAttempts.values.first { $0.startChunkIndex == 120 }.map { $0.endChunkExclusive - $0.startChunkIndex }
+        handle.condition.unlock()
+        #expect((span120 ?? 0) >= 48)
+    }
+
+    @Test func serverDeliveryCapabilitiesPreservesZeroAsUnlimited() {
+        let unlimited = ServerDeliveryCapabilities(allowDownload: true, activeVideoDeliveryLimit: 0)
+        #expect(unlimited.activeVideoDeliveryLimit == 0)
+        let limited = ServerDeliveryCapabilities(allowDownload: false, activeVideoDeliveryLimit: 1)
+        #expect(limited.activeVideoDeliveryLimit == 1)
+        let normal = ServerDeliveryCapabilities(allowDownload: true, activeVideoDeliveryLimit: 4)
+        #expect(normal.activeVideoDeliveryLimit == 4)
+    }
+
+    @Test func turboAssetKeyNormalizesPrefixedAndBareULIDs() {
+        let serverId = UUID()
+        let kPrefixed = DonbyTurboCacheEngine.makeAssetKey(
+            serverId: serverId,
+            itemId: "e01M7WP2PZ3MBD74AMEJV4PM8S7",
+            mediaSourceId: "e01M7WP2Q2H8MKK1RTNNYK3CN27"
+        )
+        let kBare = DonbyTurboCacheEngine.makeAssetKey(
+            serverId: serverId,
+            itemId: "01M7WP2PZ3MBD74AMEJV4PM8S7",
+            mediaSourceId: "01M7WP2Q2H8MKK1RTNNYK3CN27"
+        )
+        #expect(kPrefixed == kBare)
+
+        let kOther1 = DonbyTurboCacheEngine.makeAssetKey(serverId: serverId, itemId: "episode_123", mediaSourceId: "ms_1")
+        let kOther2 = DonbyTurboCacheEngine.makeAssetKey(serverId: serverId, itemId: "ms_episode_123", mediaSourceId: "ms_1")
+        #expect(kOther1 != kOther2)
     }
 }

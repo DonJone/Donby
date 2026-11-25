@@ -344,7 +344,10 @@ public struct PlayerView: View {
             let budget = appState.effectiveConnectionBudget(for: session.server)
             activeTurboHandle?.updateTuning(
                 connectionBudget: budget,
-                prefetchAheadChunks: max(24, min(360, Int(appState.turboPrefetchSeconds * 1.2)))
+                prefetchAheadChunks: Self.resolvedTurboPrefetchChunks(
+                    prefetchSeconds: appState.turboPrefetchSeconds,
+                    bitrateBps: currentResource.mediaSource.bitrate.map(Int64.init)
+                )
             )
         }
         .onReceive(embySyncTimer) { _ in

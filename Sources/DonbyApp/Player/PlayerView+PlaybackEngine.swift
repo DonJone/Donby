@@ -41,6 +41,15 @@ private func dkTurboCloseCB(_ opaque: UnsafeMutableRawPointer?) {
 }
 
 extension PlayerView {
+    static func resolvedTurboPrefetchChunks(prefetchSeconds: Double, bitrateBps: Int64?) -> Int {
+        let base = Int(prefetchSeconds * 1.2)
+        if let bps = bitrateBps, bps > 0 {
+            let bitrateBased = Int((Double(bps) / 8.0 / 524_288.0) * 18.0)
+            return max(24, min(360, max(base, min(144, bitrateBased))))
+        }
+        return max(24, min(360, base))
+    }
+
     func handleProgressTimerTick() {
         let hudVisible = showControls || activeDrawer != nil
             guard let handle = playerHandle, !isScrubbing else { return }
@@ -314,7 +323,10 @@ extension PlayerView {
                 mediaSourceId: currentResource.mediaSource.id,
                 baseURL: session.server.activeBaseURL
             )
-            let prefetchChunks = max(24, min(360, Int(appState.turboPrefetchSeconds * 1.2)))
+            let prefetchChunks = Self.resolvedTurboPrefetchChunks(
+                prefetchSeconds: appState.turboPrefetchSeconds,
+                bitrateBps: currentResource.mediaSource.bitrate.map(Int64.init)
+            )
             let redirectCallback: (@Sendable (URL) -> Void)? = enableRedirectCache
                 ? Self.makeRedirectStoreHandler(key: redirectKey)
                 : nil
@@ -338,7 +350,9 @@ extension PlayerView {
         }
         self.activeTurboHandle = preparedTurboHandle
 
-        DonbyLogger.shared.log("启动原生播放内核 (URL: \(PlaybackDiagnosticsRedactor.redact(urlStr)), Turbo: \(preparedTurboHandle != nil))", level: .info, subsystem: "Player")
+        let serverCapDesc = appState.serverCapabilities[session.server.id].map { String($0.activeVideoDeliveryLimit) } ?? "none"
+        let budgetDesc = preparedTurboHandle != nil ? "\(appState.effectiveConnectionBudget(for: session.server)) (serverCap=\(serverCapDesc))" : "n/a"
+        DonbyLogger.shared.log("启动原生播放内核 (URL: \(PlaybackDiagnosticsRedactor.redact(urlStr)), Turbo: \(preparedTurboHandle != nil), budget: \(budgetDesc))", level: .info, subsystem: "Player")
 
         Task.detached(priority: .userInitiated) {
             let prefetchedExtSubTask: Task<(url: URL, text: String, isAss: Bool)?, Never>? = preExternalSub.map { extItem in

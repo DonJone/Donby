@@ -128,6 +128,7 @@ extension TurboStreamByteHandle {
         // Check genuinely stalled or slow-crawling streams near cursor using adaptive CDN TTFB so slow edges
         // never trigger rescue storms while throttled playhead streams get rescued before audio underruns.
         let adaptiveColdRescue: TimeInterval = max(2.2, min(4.5, smoothedResponseTTFB * 2.5))
+        var stalledTasksToCancel: [URLSessionDataTask] = []
         for rec in activeAttempts.values where rec.currentChunkIndex >= currentChunk && rec.currentChunkIndex <= currentChunk + 2 && rec.currentChunkIndex < rec.endChunkExclusive {
             let idx = rec.currentChunkIndex
             if !rescueChunks.contains(idx) {
@@ -137,8 +138,21 @@ extension TurboStreamByteHandle {
                 let isImmediatePlayhead = (idx <= currentChunk + 1)
                 let threshold: TimeInterval = hasReceivedAny ? (isImmediatePlayhead ? 1.1 : 1.6) : adaptiveColdRescue
                 let chunkElapsed = now - rec.chunkStartTimestamp
-                let isSlowPlayheadCrawl = hasReceivedAny && isImmediatePlayhead && chunkElapsed > 1.25 && (Double(partialBytes) / max(0.1, chunkElapsed) < 360_000.0)
+                let isSlowPlayheadCrawl = (dynamicConcurrencyCap > 1) && hasReceivedAny && isImmediatePlayhead && chunkElapsed > 1.25 && (Double(partialBytes) / max(0.1, chunkElapsed) < 360_000.0)
                 if byteIdle > threshold || isSlowPlayheadCrawl {
+                    if dynamicConcurrencyCap <= 1 {
+                        if let t = rec.task { stalledTasksToCancel.append(t) }
+                        activeAttempts.removeValue(forKey: rec.attemptId)
+                        attemptBuffers.removeValue(forKey: rec.attemptId)
+                        for relIdx in rec.currentChunkIndex..<rec.endChunkExclusive where relIdx > idx {
+                            if activeDisplayAttempt[relIdx] == rec.attemptId { activeDisplayAttempt.removeValue(forKey: relIdx) }
+                            if !activeAttempts.values.contains(where: { $0.covers(relIdx) }) {
+                                inFlightChunks.remove(relIdx)
+                                rescueChunks.remove(relIdx)
+                                chunkStartTime.removeValue(forKey: relIdx)
+                            }
+                        }
+                    }
                     rescueChunks.insert(idx)
                     chunkStartTime[idx] = now
                     let rescueSkip = (idx == currentChunk) ? computeInitialByteSkipLocked(chunkIndex: idx, offsetInChunk: Int(max(0, cursorOffset) % Int64(chunkSize))) : 0
@@ -174,6 +188,9 @@ extension TurboStreamByteHandle {
             }
         }
         condition.unlock()
+        for t in stalledTasksToCancel {
+            TurboStreamingSessionHub.shared.cancelTask(t, intentional: true)
+        }
         return false
     }
 
@@ -238,15 +255,20 @@ extension TurboStreamByteHandle {
         let now = ProcessInfo.processInfo.systemUptime
         let cursorChunk = Int(max(0, cursorOffset) / Int64(chunkSize))
         let aheadFromCursor = max(0, index - cursorChunk)
+        let singleStreamMode = !inOpenProbePhase && dynamicConcurrencyCap <= 1
         let maxSpanChunks: Int = {
             if index == 0 && !chunk0HeadersReceived { return 2 }              // 1 MiB fast initial probe (Chunk 0..1) so Stream #2 can parallelize Chunk 2..3
             if isRescue { return 2 }                                          // 1 MiB ultra-fast rescue span
+            if singleStreamMode && index > 0 {
+                let singleDesired = measuredWireSpeedMBs >= 5.0 ? 48 : (measuredWireSpeedMBs >= 2.0 ? 32 : 16)
+                return min(singleDesired, min(64, max(2, prefetchAheadChunks)))
+            }
             let shallowPlayhead = !(0..<4).allSatisfy { store.hasChunk(cursorChunk + $0) }
             let desired: Int
             if aheadFromCursor <= 1 {
                 desired = safeSkip >= 262_144 ? 5 : 4  // >= 2.0 MiB usable playhead sprint
             } else if aheadFromCursor <= 6 {
-                desired = 4       // 2 MiB immediate follow-up
+                desired = (dynamicConcurrencyCap == 2 && !shallowPlayhead) ? 8 : 4
             } else if aheadFromCursor <= 22 {
                 desired = shallowPlayhead ? 4 : 8   // 4 MiB near lookahead (compact while playhead is cold)
             } else {
@@ -261,7 +283,7 @@ extension TurboStreamByteHandle {
             let horizonChunk = (index == 0 && !chunk0HeadersReceived)
                 ? totalChunks
                 : (Int(max(0, cursorOffset) / Int64(chunkSize)) + prefetchAheadChunks + 1)
-            let spanBound = (isUrgent || isRescue || index == 0) ? totalChunks : min(totalChunks, horizonChunk)
+            let spanBound = ((isUrgent && !singleStreamMode) || isRescue || index == 0) ? totalChunks : min(totalChunks, horizonChunk)
             let limit = min(spanBound, index + max(1, maxSpanChunks))
             while spanEnd < limit && !store.hasChunk(spanEnd) && !inFlightChunks.contains(spanEnd) {
                 inFlightChunks.insert(spanEnd)

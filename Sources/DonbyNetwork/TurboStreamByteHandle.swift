@@ -43,6 +43,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
     var smoothedResponseTTFB: TimeInterval = 0.6
     var recentWireBytes: Int64 = 0
     var recentWireTimestamp: TimeInterval = ProcessInfo.processInfo.systemUptime
+    var lastStallLogUptime: TimeInterval = 0
 
     struct ActiveAttemptRecord {
         let attemptId: UInt64
@@ -249,24 +250,29 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         // Urgent path: trigger urgent streaming fetch (with exact-offset zero-waste skip when unaligned) & wake coordinator
         requestUrgentChunk(targetChunk, offsetInChunk: offsetInChunk)
 
+        let waitStart = ProcessInfo.processInfo.systemUptime
         let hardDeadline = Date().addingTimeInterval(26.0)
         var stallDeadline = Date().addingTimeInterval(15.0)
         condition.lock()
         while !shouldYieldReadAtOffsetLocked(currentOffset, totalSize: meta.totalSize, chunkSize: chunkSize) {
             if let partialCopied = tryCopyPartialLocked(targetChunk: targetChunk, offsetInChunk: offsetInChunk, into: buffer, count: count) {
+                logSlowReadIfNeededLocked(chunk: targetChunk, waitStart: waitStart)
                 condition.unlock()
                 return partialCopied
             }
             if let directCopied = tryCopyDirectTailLocked(at: currentOffset, into: buffer, count: count) {
+                logSlowReadIfNeededLocked(chunk: targetChunk, waitStart: waitStart)
                 condition.unlock()
                 return directCopied
             }
             if (failedCount[targetChunk] ?? 0) >= 6 || (chunk429Retries[targetChunk] ?? 0) >= 12 {
+                logSlowReadIfNeededLocked(chunk: targetChunk, waitStart: waitStart)
                 condition.unlock()
                 return -1
             }
             let nowDate = Date()
             if nowDate >= stallDeadline || nowDate >= hardDeadline {
+                logSlowReadIfNeededLocked(chunk: targetChunk, waitStart: waitStart)
                 condition.unlock()
                 return -1
             }
@@ -303,7 +309,9 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             // Spawn a racing rescue request only when a stream genuinely stalls beyond adaptive CDN TTFB.
             let coldRescueThreshold: TimeInterval = max(2.2, min(4.5, smoothedResponseTTFB * 2.5))
             let rescueThreshold: TimeInterval = receivedAnyBytes ? 1.5 : coldRescueThreshold
-            if now >= last429BackoffUntil &&
+            let allowRescue = dynamicConcurrencyCap > 1 || !receivedAnyBytes || stalledTime > 2.5
+            if allowRescue &&
+                now >= last429BackoffUntil &&
                 (chunkStartTime[targetChunk] != nil) &&
                 stalledTime > rescueThreshold &&
                 !rescueChunks.contains(targetChunk) {
@@ -315,6 +323,11 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             condition.wait(until: Date().addingTimeInterval(0.03))
             condition.unlock()
             if let chunkData = store.readChunk(index: targetChunk) {
+                if ProcessInfo.processInfo.systemUptime - waitStart >= 1.0 {
+                    condition.lock()
+                    logSlowReadIfNeededLocked(chunk: targetChunk, waitStart: waitStart)
+                    condition.unlock()
+                }
                 return copyOut(from: chunkData, offsetInChunk: offsetInChunk, into: buffer, count: count, targetChunk: targetChunk)
             }
             let curMeta = store.currentMeta()
@@ -325,6 +338,18 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         }
         condition.unlock()
         return -1
+    }
+
+    private func logSlowReadIfNeededLocked(chunk: Int, waitStart: TimeInterval) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let waitSec = now - waitStart
+        guard waitSec >= 1.0, now - lastStallLogUptime >= 3.0 else { return }
+        lastStallLogUptime = now
+        DonbyLogger.shared.log(
+            "Turbo 读取等待较久 (chunk=\(chunk), wait=\(Int(waitSec * 1000))ms, wire=\(String(format: "%.2f", measuredWireSpeedMBs))MB/s, ttfb=\(Int(smoothedResponseTTFB * 1000))ms, inFlight=\(activeAttempts.count), cap=\(dynamicConcurrencyCap))",
+            level: .warning,
+            subsystem: "TurboCache"
+        )
     }
 
     func computeInitialByteSkipLocked(chunkIndex: Int, offsetInChunk: Int) -> Int {

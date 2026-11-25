@@ -7,7 +7,7 @@ extension AppState {
 
     public func effectiveConnectionBudget(for server: EmbyServerConfig) -> Int {
         let configured = max(1, min(8, turboConnectionBudget))
-        if let cap = serverCapabilities[server.id] {
+        if let cap = serverCapabilities[server.id], cap.activeVideoDeliveryLimit > 0 {
             return max(1, min(configured, cap.activeVideoDeliveryLimit))
         }
         return configured

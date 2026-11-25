@@ -87,8 +87,18 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
         try? FileManager.default.createDirectory(at: cacheRootDirectory, withIntermediateDirectories: true)
     }
 
+    internal static func canonicalAssetIdComponent(_ raw: String) -> String {
+        if raw.count == 27, let first = raw.first, first == "e" || first == "m" || first == "s" {
+            let tail = raw.dropFirst()
+            if tail.hasPrefix("01"), tail.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) {
+                return String(tail)
+            }
+        }
+        return raw
+    }
+
     public static func makeAssetKey(serverId: UUID, itemId: String, mediaSourceId: String) -> String {
-        let raw = "\(serverId.uuidString)_\(itemId)_\(mediaSourceId)"
+        let raw = "\(serverId.uuidString)_\(canonicalAssetIdComponent(itemId))_\(canonicalAssetIdComponent(mediaSourceId))"
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
         return String(raw.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" })
     }
@@ -246,10 +256,12 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
                 return hit
             }
         }
+        let normTarget = Self.canonicalAssetIdComponent(itemId)
+        let normSource = mediaSourceId.map { Self.canonicalAssetIdComponent($0) }
         return assets.first { summary in
-            summary.itemId == itemId &&
+            Self.canonicalAssetIdComponent(summary.itemId ?? "") == normTarget &&
             (serverId == nil || summary.serverId == serverId) &&
-            (mediaSourceId == nil || mediaSourceId?.isEmpty == true || summary.mediaSourceId == mediaSourceId)
+            (normSource == nil || normSource?.isEmpty == true || Self.canonicalAssetIdComponent(summary.mediaSourceId ?? "") == normSource)
         }
     }
 

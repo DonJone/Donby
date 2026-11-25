@@ -89,7 +89,7 @@ public struct ServerDeliveryCapabilities: Codable, Equatable, Sendable {
         checkedAt: Date = Date()
     ) {
         self.allowDownload = allowDownload
-        self.activeVideoDeliveryLimit = max(1, activeVideoDeliveryLimit)
+        self.activeVideoDeliveryLimit = max(0, activeVideoDeliveryLimit)
         self.planName = planName
         self.displayUnlimitedTraffic = displayUnlimitedTraffic
         self.trafficLimitBytes = trafficLimitBytes
@@ -167,7 +167,7 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         cfg.httpMaximumConnectionsPerHost = 12
         cfg.timeoutIntervalForRequest = 15
-        cfg.timeoutIntervalForResource = 45
+        cfg.timeoutIntervalForResource = 90
         return URLSession(configuration: cfg, delegate: self, delegateQueue: delegateQueue)
     }()
 
