@@ -167,6 +167,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
     public let antiOcclusionEnabled: Bool
     public let subtitleStyleRevision: Int
     public let onFirstFrameRendered: (() -> Void)?
+    public let onRenderDiagnostic: ((String) -> Void)?
 
     public init(
         playerHandle: OpaquePointer?,
@@ -174,7 +175,8 @@ public struct DKMetalVideoView: NSViewRepresentable {
         subtitleHDRPeakNits: Float = 203.0,
         antiOcclusionEnabled: Bool = false,
         subtitleStyleRevision: Int = 0,
-        onFirstFrameRendered: (() -> Void)? = nil
+        onFirstFrameRendered: (() -> Void)? = nil,
+        onRenderDiagnostic: ((String) -> Void)? = nil
     ) {
         self.playerHandle = playerHandle
         self.controlsOcclusionHeight = controlsOcclusionHeight
@@ -182,6 +184,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
         self.antiOcclusionEnabled = antiOcclusionEnabled
         self.subtitleStyleRevision = subtitleStyleRevision
         self.onFirstFrameRendered = onFirstFrameRendered
+        self.onRenderDiagnostic = onRenderDiagnostic
     }
 
     public func makeNSView(context: Context) -> DKMetalLayerView {
@@ -192,6 +195,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
         let coordinator = context.coordinator
         coordinator.lastSubtitleStyleRevision = subtitleStyleRevision
         coordinator.onFirstFrameRendered = onFirstFrameRendered
+        coordinator.onRenderDiagnostic = onRenderDiagnostic
         view.onDetachFromWindow = { [weak coordinator] in
             coordinator?.stopDisplayLink()
         }
@@ -204,6 +208,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
         nsView.subtitleHDRPeakNits = subtitleHDRPeakNits
         nsView.antiOcclusionEnabled = antiOcclusionEnabled
         context.coordinator.onFirstFrameRendered = onFirstFrameRendered
+        context.coordinator.onRenderDiagnostic = onRenderDiagnostic
         if context.coordinator.lastSubtitleStyleRevision != subtitleStyleRevision {
             context.coordinator.lastSubtitleStyleRevision = subtitleStyleRevision
             nsView.needsRedrawOnSameFrame = true
@@ -246,7 +251,28 @@ public struct DKMetalVideoView: NSViewRepresentable {
         var lastSubSerial: UInt64 = UInt64.max
         private var lastPausedCheckTime: TimeInterval = 0
         private var didNotifyFirstFrame: Bool = false
+        private var firstFrameRenderUptime: TimeInterval = 0
+        private var lastPresentedFrameUptime: TimeInterval = 0
+        private var lastTickUptime: TimeInterval = 0
+        private var ticksSinceRender: Int = 0
+        private var dedupSkipCount: Int = 0
+        private var renderFalseCount: Int = 0
+        private var acqNilCount: Int = 0
+        private var maxTickGapMs: Double = 0
         private var _onFirstFrameRendered: (() -> Void)?
+        private var _onRenderDiagnostic: ((String) -> Void)?
+        public var onRenderDiagnostic: ((String) -> Void)? {
+            get {
+                playerLock.lock()
+                defer { playerLock.unlock() }
+                return _onRenderDiagnostic
+            }
+            set {
+                playerLock.lock()
+                _onRenderDiagnostic = newValue
+                playerLock.unlock()
+            }
+        }
         public var onFirstFrameRendered: (() -> Void)? {
             get {
                 playerLock.lock()
@@ -272,6 +298,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
         }
 
         public func startDisplayLink(for view: DKMetalLayerView, player: OpaquePointer?) {
+            view.hasExternalDisplayLink = true
             playerLock.lock()
             self.view = view
             self.lastPts = -1.0
@@ -279,6 +306,14 @@ public struct DKMetalVideoView: NSViewRepresentable {
             self.lastSubSerial = UInt64.max
             self._player = player
             self.didNotifyFirstFrame = false
+            self.firstFrameRenderUptime = 0
+            self.lastPresentedFrameUptime = 0
+            self.lastTickUptime = 0
+            self.ticksSinceRender = 0
+            self.dedupSkipCount = 0
+            self.renderFalseCount = 0
+            self.acqNilCount = 0
+            self.maxTickGapMs = 0
             playerLock.unlock()
 
             driver.start { [weak self] in
@@ -289,6 +324,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
         public func updatePlayer(_ newPlayer: OpaquePointer?) {
             if newPlayer == nil {
                 driver.stop()
+                view?.hasExternalDisplayLink = false
                 view?.clearDisplayedFrame()
             }
             playerLock.lock()
@@ -297,9 +333,18 @@ public struct DKMetalVideoView: NSViewRepresentable {
             lastBufferPtr = nil
             lastSubSerial = UInt64.max
             didNotifyFirstFrame = false
+            firstFrameRenderUptime = 0
+            lastPresentedFrameUptime = 0
+            lastTickUptime = 0
+            ticksSinceRender = 0
+            dedupSkipCount = 0
+            renderFalseCount = 0
+            acqNilCount = 0
+            maxTickGapMs = 0
             playerLock.unlock()
             view?.updateSubtitleOverlay(rgbaPtr: nil, width: 0, height: 0)
-            if newPlayer != nil && view != nil {
+            if newPlayer != nil, let view = view {
+                view.hasExternalDisplayLink = true
                 driver.start { [weak self] in
                     self?.tick()
                 }
@@ -308,6 +353,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
 
         public func stopDisplayLink() {
             driver.stop()
+            view?.hasExternalDisplayLink = false
             playerLock.lock()
             _player = nil
             lastPts = -1.0
@@ -337,11 +383,27 @@ public struct DKMetalVideoView: NSViewRepresentable {
                 lastPausedCheckTime = now
             }
 
+            let t0 = ProcessInfo.processInfo.systemUptime
+            playerLock.lock()
+            if _player == p {
+                ticksSinceRender += 1
+                if lastTickUptime > 0 {
+                    let tickGap = (t0 - lastTickUptime) * 1000.0
+                    if tickGap > maxTickGapMs { maxTickGapMs = tickGap }
+                }
+                lastTickUptime = t0
+            }
+            playerLock.unlock()
+
             var pts: Double = 0
             var colorUniforms = DKGpuColorUniforms()
             guard let unmanagedBuf = dk_player_acquire_frame(p, &pts, &colorUniforms) else {
+                playerLock.lock()
+                if _player == p { acqNilCount += 1 }
+                playerLock.unlock()
                 return
             }
+            let tAcq = ProcessInfo.processInfo.systemUptime
             let pixbuf = unmanagedBuf.takeRetainedValue()
             let bufPtr = Unmanaged.passUnretained(pixbuf).toOpaque()
 
@@ -364,6 +426,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
                     box.view.updateSubtitleOverlay(rgbaPtr: nil, width: 0, height: 0)
                 }
             }, boxPtr)
+            let tSub = ProcessInfo.processInfo.systemUptime
             let subtitleChanged = syncBox.changed
             if subtitleChanged {
                 var by0: Int32 = 0
@@ -380,29 +443,75 @@ public struct DKMetalVideoView: NSViewRepresentable {
             // Deduplication: if PTS and pointer match the last displayed frame and the view
             // has not resized and subtitle overlay has not changed, avoid redundant GPU load
             if bufPtr == prevBufferPtr && pts == prevPts && !subtitleChanged && !needsRedraw {
+                playerLock.lock()
+                if _player == p { dedupSkipCount += 1 }
+                playerLock.unlock()
                 return
             }
 
             if v.renderPixelBuffer(pixbuf, colorUniforms: colorUniforms) {
+                let tRen = ProcessInfo.processInfo.systemUptime
                 var notifyCallback: (() -> Void)? = nil
+                var diagCallback: ((String) -> Void)? = nil
+                var diagMsg: String? = nil
+                var notifyKernelFirstFrame = false
                 playerLock.lock()
                 if _player == p {
+                    let isNewFrame = (pts != lastPts && prevPts >= 0)
+                    if firstFrameRenderUptime == 0 {
+                        firstFrameRenderUptime = tRen
+                    }
+                    let sinceFirst = tRen - firstFrameRenderUptime
+                    let gapMs = lastPresentedFrameUptime > 0 ? (tRen - lastPresentedFrameUptime) * 1000.0 : 0.0
+                    let acqMs = (tAcq - t0) * 1000.0
+                    let subMs = (tSub - tAcq) * 1000.0
+                    let renMs = (tRen - tSub) * 1000.0
+                    if sinceFirst <= 3.0 && ((isNewFrame && gapMs > 95.0) || acqMs > 50.0 || subMs > 50.0 || renMs > 50.0) {
+                        diagCallback = _onRenderDiagnostic
+                        let skipReason = renderFalseCount > 0 ? v.lastRenderSkipReason : "-"
+                        diagMsg = String(
+                            format: "首播渲染卡顿诊断: gap=%.1fms maxTick=%.1fms ticks=%d dedup=%d renFalse=%d(%@) acqNil=%d acq=%.1fms sub=%.1fms ren=%.1fms pts=%.3f prevPts=%.3f master=%.3f",
+                            gapMs, maxTickGapMs, ticksSinceRender, dedupSkipCount, renderFalseCount, skipReason, acqNilCount, acqMs, subMs, renMs, pts, prevPts, masterPos
+                        )
+                    }
+                    if pts != lastPts || lastPresentedFrameUptime == 0 {
+                        lastPresentedFrameUptime = tRen
+                        ticksSinceRender = 0
+                        dedupSkipCount = 0
+                        renderFalseCount = 0
+                        acqNilCount = 0
+                        maxTickGapMs = 0
+                    }
                     lastPts = pts
                     lastBufferPtr = bufPtr
                     lastSubSerial = syncBox.updatedSerial
                     if !didNotifyFirstFrame {
                         didNotifyFirstFrame = true
+                        notifyKernelFirstFrame = true
                         notifyCallback = _onFirstFrameRendered
                     }
                 }
                 playerLock.unlock()
+                if notifyKernelFirstFrame {
+                    dk_player_notify_metal_first_frame(p)
+                }
+                if let diagCallback, let diagMsg {
+                    DispatchQueue.main.async {
+                        diagCallback(diagMsg)
+                    }
+                }
                 if let notifyCallback {
                     DispatchQueue.main.async {
                         notifyCallback()
                     }
                 }
-            } else if subtitleChanged {
-                v.needsRedrawOnSameFrame = true
+            } else {
+                playerLock.lock()
+                if _player == p { renderFalseCount += 1 }
+                playerLock.unlock()
+                if subtitleChanged {
+                    v.needsRedrawOnSameFrame = true
+                }
             }
         }
 

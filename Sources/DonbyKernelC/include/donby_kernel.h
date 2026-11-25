@@ -189,6 +189,7 @@ int       dk_player_get_chapter_count(DKPlayer* player);
 bool      dk_player_get_chapter_info(DKPlayer* player, int ordinal, DKChapterInfo* out_info);
 
 CVPixelBufferRef dk_player_acquire_frame(DKPlayer* player, double* out_pts, DKGpuColorUniforms* out_color);
+void      dk_player_notify_metal_first_frame(DKPlayer* player);
 void      dk_player_sync_subtitle_rgba(DKPlayer* player, double pts, int32_t canvas_w, int32_t canvas_h, uint64_t last_serial, DKSubtitleRgbaCallback callback, void* context);
 
 DKPlayerState dk_player_get_state(DKPlayer* player);

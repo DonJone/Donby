@@ -531,11 +531,13 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         var tasksToCancel: [URLSessionDataTask] = []
         let totalChunks = total > 0 ? Int((total + Int64(meta.chunkSize) - 1) / Int64(meta.chunkSize)) : 0
         let isNearTailProbe = totalChunks > 2 && newChunk >= totalChunks - 2
+        let isReturningFromTailProbe = totalChunks > 2 && oldChunk >= totalChunks - 2 && newChunk <= 2
+        let isContainerProbeSeek = isNearTailProbe || isReturningFromTailProbe
         if inOpenProbePhase && chunk0HeadersReceived && !isNearTailProbe && newChunk >= 4 {
             inOpenProbePhase = false
         }
         if abs(newChunk - oldChunk) > 2 {
-            if !isNearTailProbe {
+            if !isContainerProbeSeek {
                 lastSeekUptime = ProcessInfo.processInfo.systemUptime
             }
             let aggressiveKeepEnd = newChunk + min(prefetchAheadChunks, 24)
@@ -544,7 +546,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                 if rec.currentChunkIndex == 0 && !store.hasChunk(0) {
                     // Always allow the 512 KiB Chunk 0 header to complete & persist to L2 disk so warm reopens
                     // start in <20ms, but trim any trailing chunks (1..<end) immediately when jumping away.
-                    if !inOpenProbePhase && !isNearTailProbe && rec.endChunkExclusive > 1 {
+                    if !inOpenProbePhase && !isContainerProbeSeek && rec.endChunkExclusive > 1 {
                         for relIdx in 1..<rec.endChunkExclusive {
                             if activeDisplayAttempt[relIdx] == aid {
                                 activeDisplayAttempt.removeValue(forKey: relIdx)
@@ -561,8 +563,8 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                     continue
                 }
                 if rec.startChunkIndex == 0 && inOpenProbePhase { continue }
-                if rec.currentChunkIndex < 0 && (inOpenProbePhase || isNearTailProbe) { continue }
-                if isNearTailProbe { continue }
+                if rec.currentChunkIndex < 0 && (inOpenProbePhase || isContainerProbeSeek) { continue }
+                if isContainerProbeSeek { continue }
                 let coversTargetSoon = rec.covers(newChunk) && (newChunk - rec.currentChunkIndex <= 2)
                 let inNearForwardWindow = (rec.currentChunkIndex >= newChunk && rec.currentChunkIndex <= aggressiveKeepEnd)
                 if !coversTargetSoon && !inNearForwardWindow {

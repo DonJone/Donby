@@ -89,9 +89,22 @@ extension DKMetalLayerView {
         }
     }
 
+    private func setRenderSkipReason(_ reason: String) {
+        sizeLock.lock()
+        _lastRenderSkipReason = reason
+        sizeLock.unlock()
+    }
+
+    private func pixelFormatStr(_ pf: OSType) -> String {
+        String(format: "0x%08x", pf)
+    }
+
     @discardableResult
     public func renderPixelBuffer(_ pixelBuffer: CVPixelBuffer, colorUniforms: DKGpuColorUniforms? = nil) -> Bool {
-        guard renderLock.try() else { return false }
+        guard renderLock.try() else {
+            setRenderSkipReason("tryLockBusy")
+            return false
+        }
         defer { renderLock.unlock() }
         return renderLocked(pixelBuffer, colorUniforms: colorUniforms)
     }
@@ -110,14 +123,21 @@ extension DKMetalLayerView {
         let drawableSize = cachedDrawableSize
         let gen = layoutGeneration
         sizeLock.unlock()
-        guard drawableSize.width > 0, drawableSize.height > 0 else { return false }
+        guard drawableSize.width > 0, drawableSize.height > 0 else {
+            setRenderSkipReason("zeroDrawable")
+            return false
+        }
 
         var uniforms = colorUniforms ?? self.lastColorUniforms
         uniforms.edr_headroom = currentEDRHeadroom
 
         guard let queue = commandQueue,
-              let cache = textureCache,
-              let drawable = metalLayer.nextDrawable() else {
+              let cache = textureCache else {
+            setRenderSkipReason("noQueueOrCache")
+            return false
+        }
+        guard let drawable = metalLayer.nextDrawable() else {
+            setRenderSkipReason("nilNextDrawable")
             return false
         }
 
@@ -134,7 +154,10 @@ extension DKMetalLayerView {
         switch pixelFormat {
         case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
              kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:
-            guard let pipeline = pipelineVideoMaster else { return false }
+            guard let pipeline = pipelineVideoMaster else {
+                setRenderSkipReason("noPipeline8")
+                return false
+            }
             uniforms.bit_depth = 8
             rendered = renderBiPlanar(pixelBuffer: pixelBuffer,
                                       pipeline: pipeline,
@@ -151,7 +174,10 @@ extension DKMetalLayerView {
              0x78663230, // 'xf20'
              0x70303130, // 'p010'
              0x73343230: // 's420'
-            guard let pipeline = pipelineVideoMaster else { return false }
+            guard let pipeline = pipelineVideoMaster else {
+                setRenderSkipReason("noPipeline10")
+                return false
+            }
             if uniforms.bit_depth < 10 { uniforms.bit_depth = 10 }
             rendered = renderBiPlanar(pixelBuffer: pixelBuffer,
                                       pipeline: pipeline,
@@ -164,7 +190,10 @@ extension DKMetalLayerView {
 
         case kCVPixelFormatType_32BGRA,
              0x42475241: // 'BGRA'
-            guard let pipeline = pipelineBGRA else { return false }
+            guard let pipeline = pipelineBGRA else {
+                setRenderSkipReason("noPipelineBGRA")
+                return false
+            }
             rendered = renderBGRA(pixelBuffer: pixelBuffer,
                                   pipeline: pipeline,
                                   scale: &scale,
@@ -318,6 +347,7 @@ extension DKMetalLayerView {
         guard statusY == kCVReturnSuccess, statusUV == kCVReturnSuccess,
               let yTex = yTextureRef.flatMap({ CVMetalTextureGetTexture($0) }),
               let uvTex = uvTextureRef.flatMap({ CVMetalTextureGetTexture($0) }) else {
+            setRenderSkipReason("cvTex(\(statusY),\(statusUV),pf=\(pixelFormatStr(CVPixelBufferGetPixelFormatType(pixelBuffer))))")
             return false
         }
 
@@ -328,6 +358,7 @@ extension DKMetalLayerView {
 
         guard let buffer = queue.makeCommandBuffer(),
               let encoder = buffer.makeRenderCommandEncoder(descriptor: passDesc) else {
+            setRenderSkipReason("cmdBufFail")
             return false
         }
 

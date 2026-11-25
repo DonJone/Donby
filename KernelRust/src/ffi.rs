@@ -116,6 +116,8 @@ extern "C" {
         seek_cb: unsafe extern "C" fn(*mut c_void, i64, c_int) -> i64,
         out_fmt: *mut *mut c_void,
         out_avio: *mut *mut c_void,
+        out_open_ms: *mut f64,
+        out_probe_ms: *mut f64,
     ) -> c_int;
     pub fn dk_shim_close_format(fmt: *mut *mut c_void, custom_avio: *mut *mut c_void);
     pub fn dk_shim_format_summary(

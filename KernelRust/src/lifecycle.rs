@@ -2,7 +2,7 @@ use crate::abi::{
     cchar_array_to_string, write_str_to_cchar, DKCustomIOAbortCallback, DKCustomIOCloseCallback,
     DKCustomIOReadCallback, DKCustomIOSeekCallback, DKPlayerState, DKRuntimeStats,
 };
-use crate::clock::store_f64;
+use crate::clock::{steady_now_ns, store_f64};
 use crate::ffi::{
     dk_shim_alloc_hw_fmt_ctx, dk_shim_averror_eio, dk_shim_averror_enosys, dk_shim_averror_eof,
     dk_shim_averror_exit, dk_shim_close_codec, dk_shim_close_format, dk_shim_close_swr,
@@ -230,6 +230,7 @@ impl DKPlayer {
             ),
         );
         let t0 = std::time::Instant::now();
+        self.startup_timing.reset(steady_now_ns());
 
         self.state.store(DKPlayerState::Opening as i32, Ordering::Release);
         self.is_closing.store(false, Ordering::Release);
@@ -289,6 +290,8 @@ impl DKPlayer {
         let is_mpeg_ts = normalized_url.contains(".ts") || normalized_url.contains(".m2ts");
         let mut fmt_ctx: *mut c_void = ptr::null_mut();
         let mut custom_avio: *mut c_void = ptr::null_mut();
+        let mut open_ms = -1.0f64;
+        let mut probe_ms = -1.0f64;
         let open_ret = dk_shim_open_format(
             open_target_c.as_ptr(),
             headers_crlf,
@@ -303,7 +306,15 @@ impl DKPlayer {
             avio_seek_thunk,
             &mut fmt_ctx,
             &mut custom_avio,
+            &mut open_ms,
+            &mut probe_ms,
         );
+        if open_ms >= 0.0 {
+            self.startup_timing.open_ms.store(open_ms.round() as i64, Ordering::Release);
+        }
+        if probe_ms >= 0.0 {
+            self.startup_timing.probe_ms.store(probe_ms.round() as i64, Ordering::Release);
+        }
 
         if open_ret < 0
             || fmt_ctx.is_null()
@@ -576,6 +587,9 @@ impl DKPlayer {
         let has_video = self.video_codec_mtx.lock().map(|vc| vc.0 != 0).unwrap_or(false);
         let has_audio = self.audio_codec_mtx.lock().map(|ac| ac.codec_ctx != 0).unwrap_or(false);
 
+        self.startup_timing
+            .workers_start_ns
+            .store(steady_now_ns(), Ordering::Release);
         if let Ok(mut workers) = self.workers_mtx.lock() {
             workers.demux = Some(thread::spawn(move || {
                 (*(p_addr as *const DKPlayer)).demux_worker();

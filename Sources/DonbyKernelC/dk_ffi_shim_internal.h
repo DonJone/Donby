@@ -81,7 +81,8 @@ int dk_shim_open_format(
     bool has_start_seek, bool is_mpeg_ts, bool use_custom_io, bool has_seek_cb,
     void* opaque, int (*interrupt_cb)(void*),
     int (*read_cb)(void*, uint8_t*, int), int64_t (*seek_cb)(void*, int64_t, int),
-    void** out_fmt, void** out_avio
+    void** out_fmt, void** out_avio,
+    double* out_open_ms, double* out_probe_ms
 );
 void dk_shim_close_format(void** fmt_ptr, void** custom_avio_ptr);
 void dk_shim_format_summary(

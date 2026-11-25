@@ -3,7 +3,7 @@
 > Parent: [player/INDEX.md](INDEX.md). Covers `PlayerView.swift`, `PlayerOverlays.swift`, `PlayerView+HUD.swift`, `PlayerView+Drawers.swift`, `PlayerSubtitleStyleDrawerView.swift`, `PlayerControls.swift`.
 
 ## 1. Component Responsibilities
-- `PlayerView.swift`: Root `PlayerView` shell, `init(session:)`, gesture/`NSEvent` monitor wiring, `showControlsAndResetTimer()`, `syncVisiblePlaybackStateFromBox()`, `adjustVolume()`.
+- `PlayerView.swift`: Root `PlayerView` shell, `init(session:)`, `DKMetalVideoView` (`onFirstFrameRendered` + `onRenderDiagnostic` `[Render]` logging), gesture/`NSEvent` monitor wiring, `showControlsAndResetTimer()`, `syncVisiblePlaybackStateFromBox()`, `adjustVolume()`.
 - `PlayerControls.swift`: `PlayerDrawerTab`, `TracksDrawerSection`, `PlayerAutoHideBox`, `OpeningPlayerBox`, `MiniVolumeSlider`, `PlayerConsoleIconButton`, `PlayerCircleMenu`, `PlayerTimelineScrubberView`.
 - `PlayerOverlays.swift`: Stateless overlays:
   - `PlayerLoadingOverlayView`: Startup loading pill (`"正在加载..."` + Cancel); stays visible until `DKMetalVideoView.onFirstFrameRendered` sets `hasRenderedFirstFrame = true` (prevents black-screen flash between `dk_open` and first presented frame).

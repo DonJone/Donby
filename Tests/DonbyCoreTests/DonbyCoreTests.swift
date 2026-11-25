@@ -2,12 +2,13 @@ import Foundation
 import Security
 import Testing
 @testable import DonbyCore
+@testable import DonbyNetwork
 
 @Suite("DonbyCore Policy Tests", .serialized)
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "2.0.9")
+        #expect(DonbyAppInfo.fallbackVersion == "2.0.10")
     }
 
     @Test func heroTopEdgeSynthesizerPreservesExactColorContrastAndSuppressesOutlierSpike() {
@@ -368,5 +369,59 @@ struct DonbyCoreTests {
         let decoded = try JSONDecoder().decode(WatchRecordItem.self, from: encoded)
         #expect(decoded.mediaType == "Episode")
         #expect(decoded.seriesId == "01series")
+    }
+
+    @Test func turboHandleReturnFromTailProbePreservesChunk0PipelineAndDoesNotArmSeekBurst() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("donby-turbo-probe-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let totalSize: Int64 = 100 * 524_288
+        let store = TieredAssetChunkStore(
+            assetKey: "test-tail-probe",
+            rootDirectory: tempDir,
+            chunkSize: 524_288,
+            maxMemoryBytes: 64 * 1024 * 1024,
+            persistDisk: false
+        )
+        let handle = TurboStreamByteHandle(
+            assetKey: "test-tail-probe",
+            streamURL: URL(string: "http://127.0.0.1:9/test.mkv")!,
+            headers: [:],
+            store: store,
+            knownTotalSize: totalSize,
+            connectionBudget: 4,
+            prefetchAheadChunks: 24
+        )
+        defer { handle.close() }
+
+        // Simulate open probe timeout having flipped `inOpenProbePhase = false` before tail-Cues return seek.
+        handle.condition.lock()
+        handle.inOpenProbePhase = false
+        let initialAttemptSpan = handle.activeAttempts.values.first { $0.startChunkIndex == 0 }?.endChunkExclusive
+        handle.condition.unlock()
+        #expect(initialAttemptSpan == 2)
+
+        // 1. Seek to EOF tail Cues (chunk 99) -> must not arm lastSeekUptime.
+        let tailPos = handle.seek(offset: totalSize - 1024, whence: SEEK_SET)
+        #expect(tailPos == totalSize - 1024)
+        #expect(handle.lastSeekUptime == 0)
+
+        // 2. Return from EOF tail Cues back to Cluster 0 (offset 5778, chunk 0) -> must not arm lastSeekUptime or trim Chunk 0..1.
+        let headPos = handle.seek(offset: 5778, whence: SEEK_SET)
+        #expect(headPos == 5778)
+        #expect(handle.lastSeekUptime == 0)
+        handle.condition.lock()
+        let attemptAfterReturn = handle.activeAttempts.values.first { $0.startChunkIndex == 0 }
+        handle.condition.unlock()
+        #expect(attemptAfterReturn != nil)
+        #expect(attemptAfterReturn?.trimmedEarly == false)
+        #expect(attemptAfterReturn?.endChunkExclusive == 2)
+
+        // 3. Genuine user seek to middle (chunk 20) -> must arm lastSeekUptime.
+        let midPos = handle.seek(offset: Int64(20 * 524_288), whence: SEEK_SET)
+        #expect(midPos == Int64(20 * 524_288))
+        #expect(handle.lastSeekUptime > 0)
     }
 }

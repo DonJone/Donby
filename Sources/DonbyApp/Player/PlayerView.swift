@@ -108,6 +108,9 @@ public struct PlayerView: View {
                             hasRenderedFirstFrame = true
                         }
                     }
+                },
+                onRenderDiagnostic: { msg in
+                    DonbyLogger.shared.log(msg, level: .info, subsystem: "Render")
                 }
             )
                 .ignoresSafeArea()

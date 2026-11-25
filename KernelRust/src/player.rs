@@ -161,6 +161,57 @@ impl Drop for SeekScopeGuard<'_> {
     }
 }
 
+pub(crate) struct StartupTimingState {
+    pub(crate) open_start_ns: AtomicI64,
+    pub(crate) workers_start_ns: AtomicI64,
+    pub(crate) open_ms: AtomicI64,
+    pub(crate) probe_ms: AtomicI64,
+    pub(crate) first_vpkt_ms: AtomicI64,
+    pub(crate) first_vframe_ms: AtomicI64,
+    pub(crate) aq_preroll_ms: AtomicI64,
+    pub(crate) metal_first_frame_reported: AtomicBool,
+}
+
+impl Default for StartupTimingState {
+    fn default() -> Self {
+        Self {
+            open_start_ns: AtomicI64::new(0),
+            workers_start_ns: AtomicI64::new(0),
+            open_ms: AtomicI64::new(-1),
+            probe_ms: AtomicI64::new(-1),
+            first_vpkt_ms: AtomicI64::new(-1),
+            first_vframe_ms: AtomicI64::new(-1),
+            aq_preroll_ms: AtomicI64::new(-1),
+            metal_first_frame_reported: AtomicBool::new(false),
+        }
+    }
+}
+
+impl StartupTimingState {
+    pub(crate) fn reset(&self, open_start_ns: i64) {
+        self.open_start_ns.store(open_start_ns, Ordering::Release);
+        self.workers_start_ns.store(0, Ordering::Release);
+        self.open_ms.store(-1, Ordering::Release);
+        self.probe_ms.store(-1, Ordering::Release);
+        self.first_vpkt_ms.store(-1, Ordering::Release);
+        self.first_vframe_ms.store(-1, Ordering::Release);
+        self.aq_preroll_ms.store(-1, Ordering::Release);
+        self.metal_first_frame_reported.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn format_summary(&self, metal_ms: i64) -> String {
+        format!(
+            "[StartupTiming] open={}ms probe={}ms first_vpkt={}ms first_vframe={}ms aq_preroll={}ms metal_first_frame={}ms",
+            self.open_ms.load(Ordering::Acquire),
+            self.probe_ms.load(Ordering::Acquire),
+            self.first_vpkt_ms.load(Ordering::Acquire),
+            self.first_vframe_ms.load(Ordering::Acquire),
+            self.aq_preroll_ms.load(Ordering::Acquire),
+            metal_ms
+        )
+    }
+}
+
 #[repr(C)]
 pub struct DKPlayer {
     pub(crate) state: AtomicI32,
@@ -267,6 +318,7 @@ pub struct DKPlayer {
     pub(crate) atomic_video_bitrate_bits: AtomicU64,
     pub(crate) total_bytes_read: AtomicI64,
     pub(crate) speed_mtx: Mutex<SpeedTracker>,
+    pub(crate) startup_timing: StartupTimingState,
 }
 
 unsafe impl Send for DKPlayer {}
@@ -358,6 +410,7 @@ impl DKPlayer {
             atomic_video_bitrate_bits: AtomicU64::new(0.0f64.to_bits()),
             total_bytes_read: AtomicI64::new(0),
             speed_mtx: Mutex::new(SpeedTracker::default()),
+            startup_timing: StartupTimingState::default(),
         }
     }
 
@@ -494,5 +547,35 @@ impl DKPlayer {
             out_stats.total_bytes_read = total_bytes;
             out_stats.download_speed_mbs = speed_mbs;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_timing_formats_single_line_and_resets_cleanly() {
+        let timing = StartupTimingState::default();
+        timing.reset(1_000_000);
+        timing.open_ms.store(28, Ordering::Release);
+        timing.probe_ms.store(19, Ordering::Release);
+        timing.first_vpkt_ms.store(6, Ordering::Release);
+        timing.first_vframe_ms.store(21, Ordering::Release);
+        timing.aq_preroll_ms.store(985, Ordering::Release);
+
+        assert_eq!(
+            timing.format_summary(1012),
+            "[StartupTiming] open=28ms probe=19ms first_vpkt=6ms first_vframe=21ms aq_preroll=985ms metal_first_frame=1012ms"
+        );
+        assert!(!timing.metal_first_frame_reported.swap(true, Ordering::AcqRel));
+        assert!(timing.metal_first_frame_reported.load(Ordering::Acquire));
+
+        timing.reset(2_000_000);
+        assert!(!timing.metal_first_frame_reported.load(Ordering::Acquire));
+        assert_eq!(
+            timing.format_summary(-1),
+            "[StartupTiming] open=-1ms probe=-1ms first_vpkt=-1ms first_vframe=-1ms aq_preroll=-1ms metal_first_frame=-1ms"
+        );
     }
 }

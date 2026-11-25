@@ -349,6 +349,18 @@ impl DKPlayer {
                             }
                         }
                     }
+                    if self.startup_timing.first_vframe_ms.load(Ordering::Relaxed) < 0 {
+                        let base = self.startup_timing.workers_start_ns.load(Ordering::Acquire);
+                        if base > 0 {
+                            let ms = ((steady_now_ns() - base).max(0)) / 1_000_000;
+                            let _ = self.startup_timing.first_vframe_ms.compare_exchange(
+                                -1,
+                                ms,
+                                Ordering::AcqRel,
+                                Ordering::Relaxed,
+                            );
+                        }
+                    }
                     if let Ok(mut vq) = self.video_queue_mtx.lock() {
                         vq.frames.push_back(VideoFrameEntry {
                             pixbuf: OwnedPixelBuffer(raw_pb),

@@ -364,6 +364,25 @@ pub unsafe extern "C" fn dk_player_acquire_frame(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn dk_player_notify_metal_first_frame(player: *mut DKPlayer) {
+    let guard = ReaderGuard::acquire(player);
+    let Some(p) = guard.player else { return };
+    if p.startup_timing
+        .metal_first_frame_reported
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        let open_start = p.startup_timing.open_start_ns.load(Ordering::Acquire);
+        let metal_ms = if open_start > 0 {
+            ((crate::clock::steady_now_ns() - open_start).max(0)) / 1_000_000
+        } else {
+            -1
+        };
+        crate::emit_log(0, &p.startup_timing.format_summary(metal_ms));
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn dk_player_sync_subtitle_rgba(
     player: *mut DKPlayer,
     pts: f64,

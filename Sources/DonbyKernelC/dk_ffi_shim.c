@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -125,6 +126,13 @@ void dk_shim_frame_unref(void* frame) {
 // 3. Format Open, PGS Fast-Probe Bypass, Custom AVIO, Stream & Chapter Accessors
 // -----------------------------------------------------------------------------
 
+static double dk_monotonic_ms_since(const struct timespec* start) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (double)(now.tv_sec - start->tv_sec) * 1000.0 +
+           (double)(now.tv_nsec - start->tv_nsec) / 1e6;
+}
+
 int dk_shim_open_format(
     const char* url,
     const char* headers_crlf,
@@ -138,11 +146,15 @@ int dk_shim_open_format(
     int (*read_cb)(void*, uint8_t*, int),
     int64_t (*seek_cb)(void*, int64_t, int),
     void** out_fmt,
-    void** out_avio
+    void** out_avio,
+    double* out_open_ms,
+    double* out_probe_ms
 ) {
     if (!out_fmt || !out_avio) return -1;
     *out_fmt = NULL;
     *out_avio = NULL;
+    if (out_open_ms) *out_open_ms = -1.0;
+    if (out_probe_ms) *out_probe_ms = -1.0;
 
     AVFormatContext* fmt = avformat_alloc_context();
     if (!fmt) return AVERROR(ENOMEM);
@@ -201,12 +213,15 @@ int dk_shim_open_format(
         }
     }
 
+    struct timespec t_open;
+    clock_gettime(CLOCK_MONOTONIC, &t_open);
     int open_ret = avformat_open_input(
         &fmt,
         (use_custom_io && custom_avio) ? NULL : url,
         NULL,
         &opts
     );
+    if (out_open_ms) *out_open_ms = dk_monotonic_ms_since(&t_open);
     av_dict_free(&opts);
 
     if (open_ret < 0 || (interrupt_cb && interrupt_cb(opaque) != 0)) {
@@ -228,6 +243,7 @@ int dk_shim_open_format(
     unsigned int nb = fmt->nb_streams;
     bool video_has_fps = false;
     bool all_av_params_known = (fmt->duration > 0 && nb > 0);
+    bool container_headers_complete = (fmt->duration > 0 && nb > 0);
     for (unsigned int i = 0; i < nb; i++) {
         AVStream* st = fmt->streams[i];
         if (!st || !st->codecpar) continue;
@@ -238,19 +254,29 @@ int dk_shim_open_format(
             if ((afps > 0.0 && isfinite(afps)) || (rfps > 0.0 && isfinite(rfps))) {
                 video_has_fps = true;
             }
-            if (st->codecpar->width <= 0 || st->codecpar->height <= 0 ||
-                st->codecpar->format == AV_PIX_FMT_NONE) {
+            if (st->codecpar->width <= 0 || st->codecpar->height <= 0) {
                 all_av_params_known = false;
+                container_headers_complete = false;
+            } else if (st->codecpar->format == AV_PIX_FMT_NONE) {
+                all_av_params_known = false;
+                if (st->codecpar->extradata_size <= 0) {
+                    container_headers_complete = false;
+                }
             }
         } else if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-            if (st->codecpar->sample_rate <= 0 || st->codecpar->ch_layout.nb_channels <= 0 ||
-                st->codecpar->format == AV_SAMPLE_FMT_NONE) {
+            if (st->codecpar->sample_rate <= 0 || st->codecpar->ch_layout.nb_channels <= 0) {
                 all_av_params_known = false;
+                container_headers_complete = false;
+            } else if (st->codecpar->format == AV_SAMPLE_FMT_NONE) {
+                all_av_params_known = false;
+                if (st->codecpar->extradata_size <= 0) {
+                    container_headers_complete = false;
+                }
             }
         }
     }
     fmt->fps_probe_size = (!is_mpeg_ts && video_has_fps) ? 0 : 4;
-    fmt->max_probe_packets = (!is_mpeg_ts && all_av_params_known) ? 32 : 200;
+    fmt->max_probe_packets = (!is_mpeg_ts && all_av_params_known) ? 32 : ((!is_mpeg_ts && container_headers_complete) ? 64 : 200);
 
     enum AVDiscard* saved_discard = nb > 0 ? (enum AVDiscard*)calloc(nb, sizeof(enum AVDiscard)) : NULL;
     bool* seeded_dims = nb > 0 ? (bool*)calloc(nb, sizeof(bool)) : NULL;
@@ -274,7 +300,10 @@ int dk_shim_open_format(
         }
     }
 
+    struct timespec t_probe;
+    clock_gettime(CLOCK_MONOTONIC, &t_probe);
     int find_ret = avformat_find_stream_info(fmt, NULL);
+    if (out_probe_ms) *out_probe_ms = dk_monotonic_ms_since(&t_probe);
 
     for (unsigned int i = 0; i < fmt->nb_streams && i < nb; i++) {
         AVStream* st = fmt->streams[i];

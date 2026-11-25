@@ -199,8 +199,8 @@ impl DKPlayer {
     fn required_audio_preroll_samples(&self) -> i64 {
         let is_local = self.is_local_file.load(Ordering::Relaxed) && !self.has_custom_io.load(Ordering::Relaxed);
         match self.audio_rebuffer_count.load(Ordering::Relaxed) {
-            0 => if is_local { 6_144 } else { 12_000 },
-            1 => 84_000,
+            0 => if is_local { 6_144 } else { 20_000 },
+            1 => 60_000,
             _ => 120_000,
         }
     }
@@ -227,7 +227,7 @@ impl DKPlayer {
         }
         let is_local = self.is_local_file.load(Ordering::Relaxed) && !self.has_custom_io.load(Ordering::Relaxed);
         let solo_samples = match rebuf {
-            0 => if is_local { 18_000 } else { 24_000 },
+            0 => if is_local { 18_000 } else { 32_000 },
             1 => 96_000,
             _ => 144_000,
         };
@@ -352,6 +352,20 @@ impl DKPlayer {
                 self.audio_start_fail_count.store(0, Ordering::Relaxed);
                 let started_ns = steady_now_ns();
                 self.audio_steady_start_ns.store(started_ns, Ordering::Relaxed);
+                if self.audio_rebuffer_count.load(Ordering::Relaxed) == 0
+                    && self.startup_timing.aq_preroll_ms.load(Ordering::Relaxed) < 0
+                {
+                    let base = self.startup_timing.open_start_ns.load(Ordering::Acquire);
+                    if base > 0 {
+                        let ms = ((started_ns - base).max(0)) / 1_000_000;
+                        let _ = self.startup_timing.aq_preroll_ms.compare_exchange(
+                            -1,
+                            ms,
+                            Ordering::AcqRel,
+                            Ordering::Relaxed,
+                        );
+                    }
+                }
                 self.clock.fallback_clock_ns.store(started_ns, Ordering::Relaxed);
                 self.audio_queue_started.store(true, Ordering::Release);
                 emit_log(

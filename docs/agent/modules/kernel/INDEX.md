@@ -1,6 +1,6 @@
 # Module Map: Playback Kernel (`KernelRust` + `DonbyKernelC` ABI)
 
-> Last synced: `v2.0.9` (C++20 baseline archived on `legacy/cpp-kernel`). Read [../../decisions/003-rust-kernel-migration.md](../../decisions/003-rust-kernel-migration.md) for migration rationale.
+> Last synced: `v2.0.10` (C++20 baseline archived on `legacy/cpp-kernel`). Read [../../decisions/003-rust-kernel-migration.md](../../decisions/003-rust-kernel-migration.md) for migration rationale.
 
 ## 1. Sub-Document Routing
 
@@ -12,7 +12,7 @@
 
 ## 2. File Inventory
 
-- `Sources/DonbyKernelC/include/donby_kernel.h` (**FROZEN C ABI**) — 37 `dk_*` public entrypoints.
+- `Sources/DonbyKernelC/include/donby_kernel.h` (**FROZEN C ABI**) — 38 `dk_*` public entrypoints.
 - `Sources/DonbyKernelC/dk_ffi_shim_internal.h` (pure C11 internal header) — shared `DKShimStreamMeta`, callback typedefs, and cross-unit `dk_shim_*` prototypes.
 - `Sources/DonbyKernelC/dk_ffi_shim.c` (pure C11) — `_Static_assert` ABI checks, `av_log` bridge, packet/frame alloc, format open with PGS/DVD fast-probe bypass, custom AVIO, stream/chapter metadata, seek/read, shared codec helpers.
 - `Sources/DonbyKernelC/dk_ffi_video.c` (pure C11) — VideoToolbox hwaccel, `IOSurface`-backed `CVPixelBufferPool` + `SwsContext` fallback, HDR10/DoVi RPU `DKGpuColorUniforms` builder, thumbnail extraction.
@@ -26,7 +26,7 @@
   - `video.rs` — VT callbacks, software fallback, `video_decode_worker`, `acquire_frame`, `extract_video_thumbnail`.
   - `audio.rs` — AQ trampolines, `stop_reset_audio_queue`/`stop_dispose_audio_queue`, clock, `audio_decode_worker`, playback controls.
   - `tracks.rs` — Auto-subtitle scoring, subtitle packet history, track/chapter getters, `select_track`.
-  - `c_api.rs` — 37 `#[no_mangle] extern "C" fn dk_*` thin ABI wrappers.
+  - `c_api.rs` — 38 `#[no_mangle] extern "C" fn dk_*` thin ABI wrappers (including `dk_player_notify_metal_first_frame` `[StartupTiming]` emitter).
   - `abi.rs` — `#[repr(C)]` ABI structs, `DKGpuColorUniforms::default_sdr()`, C-string helpers, `offset_of!` tests.
   - `ffi.rs` — `extern "C"` bindings + RAII `Drop` wrappers (`AvPacket`, `AvFrame`, `OwnedPixelBuffer`).
   - `clock.rs` — Monotonic ns clock helpers, `ClockState`, `SpeedTracker`.

@@ -1,5 +1,5 @@
 use crate::abi::DKPlayerState;
-use crate::clock::{load_f64, store_f64};
+use crate::clock::{load_f64, steady_now_ns, store_f64};
 use crate::dovi::check_dovi_rpu_or_el;
 use crate::emit_log;
 use crate::ffi::{
@@ -323,6 +323,18 @@ impl DKPlayer {
                 }
                 if let Some(moved) = pkt.move_out() {
                     let sz = moved.size() as i64;
+                    if self.startup_timing.first_vpkt_ms.load(Ordering::Relaxed) < 0 {
+                        let base = self.startup_timing.workers_start_ns.load(Ordering::Acquire);
+                        if base > 0 {
+                            let ms = ((steady_now_ns() - base).max(0)) / 1_000_000;
+                            let _ = self.startup_timing.first_vpkt_ms.compare_exchange(
+                                -1,
+                                ms,
+                                Ordering::AcqRel,
+                                Ordering::Relaxed,
+                            );
+                        }
+                    }
                     if let Ok(mut vq) = self.video_pkt_mtx.lock() {
                         vq.push_back(Some(QueuedVideoPacket {
                             pkt: moved,

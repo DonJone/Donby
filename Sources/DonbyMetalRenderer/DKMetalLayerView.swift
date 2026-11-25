@@ -26,6 +26,25 @@ public final class DKMetalLayerView: NSView {
     private var cachedEDRHeadroom: Float = 1.0
     var layoutGeneration: UInt64 = 0
     private var screenObserver: NSObjectProtocol?
+    var _lastRenderSkipReason: String = ""
+    var _hasExternalDisplayLink: Bool = false
+    public var hasExternalDisplayLink: Bool {
+        get {
+            sizeLock.lock()
+            defer { sizeLock.unlock() }
+            return _hasExternalDisplayLink
+        }
+        set {
+            sizeLock.lock()
+            _hasExternalDisplayLink = newValue
+            sizeLock.unlock()
+        }
+    }
+    public var lastRenderSkipReason: String {
+        sizeLock.lock()
+        defer { sizeLock.unlock() }
+        return _lastRenderSkipReason
+    }
 
     // Subtitle GPU texture cache (updated only when subtitle serial changes)
     var subtitleTextures: [MTLTexture?] = [nil, nil, nil]
@@ -50,8 +69,9 @@ public final class DKMetalLayerView: NSView {
             let changed = abs(_subtitleHDRPeakNits - newValue) > 0.5
             _subtitleHDRPeakNits = newValue
             if changed { _needsRedrawOnSameFrame = true }
+            let driverActive = _hasExternalDisplayLink
             sizeLock.unlock()
-            if changed { renderLastPixelBuffer() }
+            if changed && !driverActive { renderLastPixelBuffer() }
         }
     }
 
@@ -175,9 +195,18 @@ public final class DKMetalLayerView: NSView {
             queue: .main
         ) { [weak self] _ in
             guard let self = self else { return }
+            let prevHeadroom = self.currentEDRHeadroom
             self.updateScreenHeadroom()
-            self.needsRedrawOnSameFrame = true
-            self.renderLastPixelBuffer()
+            let headroomChanged = abs(self.currentEDRHeadroom - prevHeadroom) > 0.001
+            if headroomChanged {
+                self.needsRedrawOnSameFrame = true
+                // Never contend on renderLock / nextDrawable() synchronously on the main thread
+                // while CVDisplayLink is active: macOS EDR ramp fires didChangeScreenParameters
+                // at 60Hz for ~1s on first HDR/EDR layer presentation.
+                if !self.hasExternalDisplayLink {
+                    self.renderLastPixelBuffer()
+                }
+            }
         }
     }
 
@@ -200,7 +229,9 @@ public final class DKMetalLayerView: NSView {
         updateDrawableSize()
         updateScreenHeadroom()
         needsRedrawOnSameFrame = true
-        renderLastPixelBuffer()
+        if !hasExternalDisplayLink {
+            renderLastPixelBuffer()
+        }
     }
 
     public override func viewDidMoveToWindow() {

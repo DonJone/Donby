@@ -51,7 +51,7 @@ extension TurboStreamByteHandle {
             return true
         }
         let now = ProcessInfo.processInfo.systemUptime
-        if inOpenProbePhase && (now - openedUptime > 2.2) {
+        if inOpenProbePhase && (now - openedUptime > 6.0) {
             inOpenProbePhase = false
         }
         if now < last429BackoffUntil {
@@ -95,7 +95,7 @@ extension TurboStreamByteHandle {
         let inInitialSeekBurst = !playheadReceivingBytes && leadCachedChunks == 0 && lastSeekUptime > 0 && (now - lastSeekUptime) < 0.55
         let effectiveCap: Int
         if inOpenProbePhase {
-            effectiveCap = chunk0HeadersReceived ? min(1, dynamicConcurrencyCap) : 0
+            effectiveCap = chunk0HeadersReceived ? min(2, dynamicConcurrencyCap) : 0
         } else if inInitialSeekBurst {
             // Brief 0.55s seek-burst gate: focuses initial CWND on Stream #1 + Stream #2 and halves H2 RST_STREAM
             // churn during rapid scrubbing, then immediately opens full pipeline without deadlocking on slow CDNs.
@@ -137,7 +137,7 @@ extension TurboStreamByteHandle {
                 let isImmediatePlayhead = (idx <= currentChunk + 1)
                 let threshold: TimeInterval = hasReceivedAny ? (isImmediatePlayhead ? 1.1 : 1.6) : adaptiveColdRescue
                 let chunkElapsed = now - rec.chunkStartTimestamp
-                let isSlowPlayheadCrawl = hasReceivedAny && isImmediatePlayhead && chunkElapsed > 1.8 && (Double(partialBytes) / max(0.1, chunkElapsed) < 280_000.0)
+                let isSlowPlayheadCrawl = hasReceivedAny && isImmediatePlayhead && chunkElapsed > 1.25 && (Double(partialBytes) / max(0.1, chunkElapsed) < 360_000.0)
                 if byteIdle > threshold || isSlowPlayheadCrawl {
                     rescueChunks.insert(idx)
                     chunkStartTime[idx] = now
@@ -239,7 +239,7 @@ extension TurboStreamByteHandle {
         let cursorChunk = Int(max(0, cursorOffset) / Int64(chunkSize))
         let aheadFromCursor = max(0, index - cursorChunk)
         let maxSpanChunks: Int = {
-            if index == 0 && !chunk0HeadersReceived { return 4 }              // 2 MiB fast initial probe covering 40+ track headers in 1 RTT
+            if index == 0 && !chunk0HeadersReceived { return 2 }              // 1 MiB fast initial probe (Chunk 0..1) so Stream #2 can parallelize Chunk 2..3
             if isRescue { return 2 }                                          // 1 MiB ultra-fast rescue span
             let shallowPlayhead = !(0..<4).allSatisfy { store.hasChunk(cursorChunk + $0) }
             let desired: Int
