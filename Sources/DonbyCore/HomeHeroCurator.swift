@@ -81,10 +81,12 @@ public enum HomeHeroCurator {
 
     // MARK: - Public API
 
-    /// Selects up to `maxCount` curated hero items from library shelves.
+    /// Selects up to `maxCount` curated hero items from library shelves and optional top-rated pools.
     public static func selectHeroItems(
         libraryViews: [EmbyItem],
         latestByLibrary: [String: [EmbyItem]],
+        extraCandidates: [EmbyItem] = [],
+        ratingsByItemId: [String: MultiPlatformRatings] = [:],
         fallbackResumes: [EmbyItem] = [],
         maxCount: Int = 8,
         referenceYear: Int? = nil
@@ -114,7 +116,13 @@ public enum HomeHeroCurator {
                 return
             }
 
-            let auditResult = audit(item, libraryName: libraryName, referenceYear: refYear, libraryRank: libraryRank)
+            let auditResult = audit(
+                item,
+                libraryName: libraryName,
+                referenceYear: refYear,
+                libraryRank: libraryRank,
+                multiPlatformRatings: ratingsByItemId[item.id]
+            )
             let evaluated = EvaluatedCandidate(
                 item: item,
                 libraryId: libraryId,
@@ -144,6 +152,12 @@ public enum HomeHeroCurator {
             for (rank, item) in items.enumerated() {
                 ingest(item, libraryId: libId, libraryName: libName, libraryRank: rank)
             }
+        }
+
+        for item in extraCandidates {
+            let libId = item.parentId
+            let libName = libId.flatMap { viewNameById[$0] }
+            ingest(item, libraryId: libId, libraryName: libName, libraryRank: .max)
         }
 
         // Deduplicated candidate pool from libraries.
@@ -243,7 +257,8 @@ public enum HomeHeroCurator {
         _ item: EmbyItem,
         libraryName: String? = nil,
         referenceYear: Int? = nil,
-        libraryRank: Int = .max
+        libraryRank: Int = .max,
+        multiPlatformRatings: MultiPlatformRatings? = nil
     ) -> AuditResult {
         let refYear = referenceYear ?? Calendar.current.component(.year, from: Date())
         let typeLower = item.type?.lowercased() ?? ""
@@ -251,7 +266,6 @@ public enum HomeHeroCurator {
         let isSeries = item.isSeries
         let isEpisode = item.isEpisode
 
-        let rating = item.communityRating ?? 0
         let critic = item.criticRating ?? 0
         let year = resolvedYear(for: item)
         let age = year.map { max(0, refYear - $0) }
@@ -267,8 +281,21 @@ public enum HomeHeroCurator {
         let isForeignSeries = isSeries && isForeignOrigin
         let isDomesticSeries = isSeries && isDomesticOrigin
 
-        var score: Double = 0
+        let hasImdbProvider = item.providerIds?.keys.contains(where: { $0.lowercased() == "imdb" }) == true
+        let mpEval = MultiPlatformRatings.evaluate(
+            multiPlatformRatings,
+            fallbackTMDB: item.communityRating,
+            fallbackCriticRating: item.criticRating,
+            hasImdbProviderId: hasImdbProvider,
+            isDomesticSeries: isDomesticSeries
+        )
+        let rating = mpEval.weightedScore ?? (item.communityRating ?? 0)
+
+        var score: Double = mpEval.consensusDelta
         var reasons: [String] = []
+        if mpEval.consensusDelta != 0 {
+            reasons.append("multi_platform_consensus(\(mpEval.authoritativePlatformCount)auth):\(Int(mpEval.consensusDelta))")
+        }
         var isClassicMovie = false
         var isCheapDomesticWebDrama = false
 

@@ -196,6 +196,17 @@ public struct SettingsView: View {
                     .pickerStyle(.menu)
                     .frame(width: 220)
                 }
+                Divider().opacity(0.12)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("多平台评分数据源（MDBList API Key，可选）")
+                        .font(.system(size: 13))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    Text("用于主页海报综合评估 IMDb、烂番茄、爆米花、Trakt、Metacritic 与 TMDB 权重；留空时自动使用 TMDB + 烂番茄 + Cinemeta IMDb 免费回退。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    TextField("输入 MDBList API Key（可在 mdblist.com 免费获取）", text: $appState.mdblistAPIKey)
+                        .donbyFlatTextField(isLight: appState.isLightMode)
+                }
             }
 
             // Appearance Mode (Light / Dark / Auto)

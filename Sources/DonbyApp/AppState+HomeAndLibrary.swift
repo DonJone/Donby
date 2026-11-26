@@ -339,6 +339,20 @@ extension AppState {
         do {
             async let resumeTask = EmbyClient.shared.fetchResumeItems(server: embyServerForHome, limit: 16)
             async let favTask = EmbyClient.shared.fetchItems(server: embyServerForHome, isFavorite: true, limit: 24)
+            async let topMoviesTask = EmbyClient.shared.fetchItems(
+                server: embyServerForHome,
+                includeItemTypes: "Movie",
+                sortBy: "CommunityRating,CriticRating",
+                sortOrder: "Descending",
+                limit: 20
+            )
+            async let topSeriesTask = EmbyClient.shared.fetchItems(
+                server: embyServerForHome,
+                includeItemTypes: "Series",
+                sortBy: "CommunityRating,CriticRating",
+                sortOrder: "Descending",
+                limit: 20
+            )
 
             let views = initialViews
             guard currentGen == homeLoadGeneration else { return }
@@ -389,6 +403,9 @@ extension AppState {
                 }
             }
 
+            let topMovies = (try? await topMoviesTask)?.items ?? []
+            let topSeries = (try? await topSeriesTask)?.items ?? []
+
             guard currentGen == homeLoadGeneration else { return }
             finalizeHomeContent(
                 for: server.id,
@@ -396,7 +413,8 @@ extension AppState {
                 resumeItems: resumes,
                 nextUpItems: nextUps,
                 favoriteItems: favs,
-                latestByLibrary: latestMap
+                latestByLibrary: latestMap,
+                extraHeroCandidates: topMovies + topSeries
             )
         } catch {
             guard currentGen == homeLoadGeneration else { return }
@@ -405,15 +423,17 @@ extension AppState {
         }
     }
 
-    /// Canonical home finalizer: curates `carouselItems` strictly from library shelves
-    /// via `HomeHeroCurator` (never from extension hot/promotional feeds) and persists snapshot.
+    /// Canonical home finalizer: curates `carouselItems` strictly from library shelves + top-rated pools
+    /// via `HomeHeroCurator` (never from extension hot/promotional feeds), persists snapshot, and
+    /// asynchronously enriches top candidates with multi-platform ratings (MDBList / Cinemeta IMDb).
     public func finalizeHomeContent(
         for serverId: UUID,
         libraryViews: [EmbyItem],
         resumeItems: [EmbyItem],
         nextUpItems: [EmbyItem],
         favoriteItems: [EmbyItem],
-        latestByLibrary: [String: [EmbyItem]]
+        latestByLibrary: [String: [EmbyItem]],
+        extraHeroCandidates: [EmbyItem] = []
     ) {
         if self.latestByLibrary != latestByLibrary {
             self.latestByLibrary = latestByLibrary
@@ -421,6 +441,7 @@ extension AppState {
         let nextCarousel = HomeHeroCurator.selectHeroItems(
             libraryViews: libraryViews,
             latestByLibrary: latestByLibrary,
+            extraCandidates: extraHeroCandidates,
             fallbackResumes: resumeItems
         )
         if self.carouselItems != nextCarousel {
@@ -437,6 +458,58 @@ extension AppState {
         )
         ServerHomeCacheStore.shared.save(snapshot, for: serverId)
         self.isLoadingHome = false
+
+        // Background multi-platform rating enrichment (MDBList 6-platform batch if API key configured,
+        // or zero-key Cinemeta IMDb fallback) — re-curates hero carousel without blocking initial paint.
+        let generation = self.homeLoadGeneration
+        let apiKey = self.mdblistAPIKey
+        let poolForEnrichment: [EmbyItem] = {
+            var seen = Set<String>()
+            var pool: [EmbyItem] = []
+            for item in extraHeroCandidates where seen.insert(item.id).inserted {
+                pool.append(item)
+            }
+            for view in libraryViews {
+                for item in (latestByLibrary[view.id] ?? []).prefix(8) where seen.insert(item.id).inserted {
+                    pool.append(item)
+                }
+            }
+            return Array(pool.prefix(44))
+        }()
+
+        guard !poolForEnrichment.isEmpty else { return }
+        Task { [weak self] in
+            let enriched = await MultiPlatformRatingService.shared.enrichRatings(
+                for: poolForEnrichment,
+                mdblistAPIKey: apiKey
+            )
+            guard !enriched.isEmpty else { return }
+            await MainActor.run {
+                guard let self,
+                      self.homeLoadGeneration == generation,
+                      self.activeServer?.id == serverId else { return }
+                let curated = HomeHeroCurator.selectHeroItems(
+                    libraryViews: libraryViews,
+                    latestByLibrary: latestByLibrary,
+                    extraCandidates: extraHeroCandidates,
+                    ratingsByItemId: enriched,
+                    fallbackResumes: resumeItems
+                )
+                if self.carouselItems != curated {
+                    self.carouselItems = curated
+                    let updatedSnapshot = ServerHomeCacheStore.ServerHomeSnapshot(
+                        libraryViews: libraryViews,
+                        resumeItems: resumeItems,
+                        nextUpItems: nextUpItems,
+                        favoriteItems: favoriteItems,
+                        latestByLibrary: latestByLibrary,
+                        carouselItems: curated,
+                        cachedAt: Date()
+                    )
+                    ServerHomeCacheStore.shared.save(updatedSnapshot, for: serverId)
+                }
+            }
+        }
     }
 
     public static func detailSeriesKey(for item: EmbyItem) -> String {

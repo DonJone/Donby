@@ -118,6 +118,7 @@ public final class AppState: ObservableObject {
     @AppStorage("donby.themeColor.v2") public var themeColorRaw: String = AppThemeColor.appleMusicRed.rawValue
     @AppStorage("donby.appearanceMode.v2") public var appearanceModeRaw: String = AppAppearanceMode.light.rawValue
     @AppStorage("donby.showCarousel") public var showCarousel: Bool = true
+    @AppStorage("donby.mdblistAPIKey") public var mdblistAPIKey: String = ""
     @AppStorage("donby.showMyMedia") public var showMyMedia: Bool = true
     @AppStorage("donby.showContinueWatching") public var showContinueWatching: Bool = true
     @AppStorage("donby.showFavorites") public var showFavorites: Bool = true

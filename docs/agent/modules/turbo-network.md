@@ -1,6 +1,6 @@
 # Module Map: Turbo Cache, Streaming & Network (`DonbyNetwork`)
 
-> Last synced: `v2.0.11`. Load this doc for `DonbyNetwork` streaming, seek latency, HTTP/2 Range, L1/L2 caching, detail-page preloading, Emby API (including standard Emby fallback when UHD extension is disabled), offline downloads, and channel-aware auto-updates. For optional `DonbyUHDModule` & `Modules/UHD`, load [uhd-module.md](uhd-module.md).
+> Last synced: `v2.0.16`. Load this doc for `DonbyNetwork` streaming, seek latency, HTTP/2 Range, L1/L2 caching, detail-page preloading, Emby API (including standard Emby fallback when UHD extension is disabled), offline downloads, and channel-aware auto-updates. For optional `DonbyUHDModule` & `Modules/UHD`, load [uhd-module.md](uhd-module.md).
 
 | If your task involves... | File | Entry Symbols |
 | :--- | :--- | :--- |
@@ -15,6 +15,7 @@
 | PlaybackInfo DTO, starter server slot factory | `Sources/DonbyNetwork/EmbyPlaybackInfoResponse.swift`, `DemoServerData.swift` | `EmbyPlaybackInfoResponse`, `DemoServerData` |
 | Offline library sidecars & chunk pinning | `Sources/DonbyNetwork/OfflineMediaLibrary.swift` | `DonbyOfflineLibraryStorage`, `OfflineSeriesSidecar` |
 | Channel-aware auto-updater & hot-replace | `Sources/DonbyNetwork/AppUpdateManager.swift` | `AppUpdateManager` |
+| Multi-platform rating enrichment & cache | `Sources/DonbyNetwork/MultiPlatformRatingService.swift` | `MultiPlatformRatingService` |
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyNetwork/TurboStreamingSessionHub.swift` — `APIRequestGate` (`Priority`: `.playback` vs `.normal`), `ServerDeliveryCapabilities`, `DonbyNetworkSession`, `StreamingChunkContext`, `TurboStreamingSessionHub` (shared `URLSession` hub, `makeRangeRequest`, `URLSessionTaskMetrics` protocol detection for `h2`/`h3` vs `http/1.1`), and `DownloadRangeStreamDelegate`.
@@ -31,6 +32,7 @@
 - `Sources/DonbyNetwork/EmbyPlaybackInfoResponse.swift` — `EmbyPlaybackInfoResponse` DTO (`MediaSources`, `PlaySessionId`).
 - `Sources/DonbyNetwork/OfflineMediaLibrary.swift` — `DonbyOfflineLibraryStorage`, `OfflineSeriesSidecar`, `OfflineEpisodeOrMovieSidecar`, pinned chunk-to-offline linkage.
 - `Sources/DonbyNetwork/AppUpdateManager.swift` — channel-aware (`AppUpdateChannel`: `.stable` vs `.prerelease`) GitHub Releases / `latest.json` checker, `.app.zip` download, `ditto` hot-replace preserving `/Applications/Donby.app` inode.
+- `Sources/DonbyNetwork/MultiPlatformRatingService.swift` — `MultiPlatformRatingService` actor fetching and caching 6-platform ratings (TMDB, IMDb, Rotten Tomatoes Critics/Audience, Trakt, Metacritic, Letterboxd) via MDBList batch API (`POST /tmdb/{movie|show}/`) with zero-key Stremio Cinemeta IMDb fallback and `DONBY_HOME`-isolated 14-day disk cache.
 
 ## 2. Streaming & Caching Architecture (`TurboCacheAndDownloadEngine`)
 - **Chunk Geometry**: `512 KiB` aligned chunks (`chunkSize`).

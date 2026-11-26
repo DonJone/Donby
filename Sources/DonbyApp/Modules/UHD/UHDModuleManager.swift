@@ -493,31 +493,47 @@ public final class UHDModuleManager: ObservableObject {
             }
 
             var latestMap: [String: [EmbyItem]] = [:]
+            var topRatedCandidates: [EmbyItem] = []
             let hadCachedLatest = !appState.latestByLibrary.isEmpty
             let hideWatched = appState.hideWatchedInLatest
 
-            await withTaskGroup(of: (String, [EmbyItem]).self) { group in
+            await withTaskGroup(of: (String, [EmbyItem], [EmbyItem]).self) { group in
                 let targetSrv = workingServer
-                for view in views {
+                for (idx, view) in views.enumerated() {
+                    let fetchTopRated = idx < 4
                     group.addTask {
-                        let fetched = (try? await UHDStreamClient.shared.fetchCollectionItems(
+                        async let latestFetch = UHDStreamClient.shared.fetchCollectionItems(
                             server: targetSrv,
                             collectionId: view.id,
                             mediaType: nil,
                             sortBy: "asset_updated_at",
                             sortOrder: "desc",
                             limit: 16
-                        ).items) ?? []
+                        )
+                        async let topFetch: [EmbyItem] = fetchTopRated
+                            ? ((try? await UHDStreamClient.shared.fetchCollectionItems(
+                                server: targetSrv,
+                                collectionId: view.id,
+                                mediaType: nil,
+                                sortBy: "rating",
+                                sortOrder: "desc",
+                                limit: 12
+                            ).items) ?? [])
+                            : []
+
+                        let fetched = (try? await latestFetch.items) ?? []
                         let filtered = hideWatched ? fetched.filter { $0.userData?.played != true } : fetched
-                        return (view.id, filtered)
+                        let topItems = await topFetch
+                        return (view.id, filtered, topItems)
                     }
                 }
-                for await (viewId, items) in group {
+                for await (viewId, items, topItems) in group {
                     guard isCurrentGeneration() else { return }
                     latestMap[viewId] = items
                     if !hadCachedLatest && appState.latestByLibrary[viewId] != items {
                         appState.latestByLibrary[viewId] = items
                     }
+                    topRatedCandidates.append(contentsOf: topItems)
                 }
             }
 
@@ -528,7 +544,8 @@ public final class UHDModuleManager: ObservableObject {
                 resumeItems: states.resume,
                 nextUpItems: states.nextUp,
                 favoriteItems: favs,
-                latestByLibrary: latestMap
+                latestByLibrary: latestMap,
+                extraHeroCandidates: topRatedCandidates
             )
         } catch {
             guard isCurrentGeneration() else { return }

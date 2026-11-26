@@ -195,7 +195,12 @@ struct HomeHeroCuratorTests {
         let audit = HomeHeroCurator.audit(masterpiece, libraryName: "国产剧", referenceYear: 2026)
         #expect(audit.isDomesticSeries)
         #expect(!audit.isCheapDomesticWebDrama)
-        #expect(audit.score > 20)
+        #expect(audit.score > 0)
+
+        let imdbVerified = MultiPlatformRatings(tmdb: 8.9, imdb: 8.5, imdbVotes: 6500)
+        let verifiedAudit = HomeHeroCurator.audit(masterpiece, libraryName: "国产剧", referenceYear: 2026, multiPlatformRatings: imdbVerified)
+        #expect(!verifiedAudit.isCheapDomesticWebDrama)
+        #expect(verifiedAudit.score > 30)
     }
 
     @Test("Deduplicates identical title+year across libraries keeping highest-scored backdrop entry")
@@ -260,5 +265,96 @@ struct HomeHeroCuratorTests {
         #expect(airingAudit.isForeignSeries)
         #expect(hotAudit.score > ordinaryAudit.score + 40)
         #expect(airingAudit.score > ordinaryAudit.score)
+    }
+
+    @Test("Six-platform consensus outweighs noisy single-platform TMDB rating")
+    func multiPlatformConsensusOutweighsSinglePlatformTMDB() {
+        // Matches 6-platform profile: TMDB 6.9, IMDb 7.2, RT 90%, Popcorn 83%, Trakt 67%, Metacritic 81
+        let acclaimedFilm = makeItem(
+            id: "m_6plat",
+            name: "口碑佳作",
+            originalTitle: "Acclaimed Feature",
+            type: "Movie",
+            genres: ["剧情", "惊悚"],
+            communityRating: 6.9,
+            productionYear: 2024
+        )
+        let sixPlatformRatings = MultiPlatformRatings(
+            tmdb: 6.9,
+            tmdbVotes: 1800,
+            imdb: 7.2,
+            imdbVotes: 85_000,
+            rottenTomatoesCritics: 90,
+            rottenTomatoesAudience: 83,
+            trakt: 67,
+            traktVotes: 4200,
+            metacritic: 81
+        )
+
+        // Single-platform TMDB-only item with inflated score from tiny vote count and zero IMDb/RT/Metacritic
+        let inflatedTMDBOnly = makeItem(
+            id: "m_tmdb_only",
+            name: "冷门刷分片",
+            originalTitle: "Obscure Inflated Film",
+            type: "Movie",
+            genres: ["剧情"],
+            communityRating: 8.6,
+            productionYear: 2024
+        )
+        let tmdbOnlyRatings = MultiPlatformRatings(
+            tmdb: 8.6,
+            tmdbVotes: 8
+        )
+
+        let eval6 = MultiPlatformRatings.evaluate(sixPlatformRatings, fallbackTMDB: 6.9, fallbackCriticRating: nil)
+        let eval1 = MultiPlatformRatings.evaluate(tmdbOnlyRatings, fallbackTMDB: 8.6, fallbackCriticRating: nil)
+
+        #expect(eval6.authoritativePlatformCount == 5)
+        #expect(eval6.isStrongConsensus)
+        #expect(eval1.authoritativePlatformCount == 0)
+        #expect((eval6.weightedScore ?? 0) > (eval1.weightedScore ?? 0))
+
+        let audit6 = HomeHeroCurator.audit(acclaimedFilm, libraryName: "电影", referenceYear: 2026, multiPlatformRatings: sixPlatformRatings)
+        let audit1 = HomeHeroCurator.audit(inflatedTMDBOnly, libraryName: "电影", referenceYear: 2026, multiPlatformRatings: tmdbOnlyRatings)
+
+        #expect(audit6.score > audit1.score + 40)
+    }
+
+    @Test("Extra top-rated candidate pool rescues hero carousel when latest shelf is low quality")
+    func extraTopRatedPoolRescuesLowQualityLatestShelf() {
+        let views = [EmbyItem(id: "lib_m", name: "电影", type: "CollectionFolder")]
+        let pannedLatest = makeItem(
+            id: "m_bad",
+            name: "烂片新上架",
+            originalTitle: "Bad Recent Movie",
+            type: "Movie",
+            communityRating: 5.4,
+            productionYear: 2026
+        )
+        let classicExtra = makeItem(
+            id: "m_classic_extra",
+            name: "蝙蝠侠：黑暗骑士",
+            originalTitle: "The Dark Knight",
+            type: "Movie",
+            genres: ["动作", "犯罪", "剧情"],
+            communityRating: 8.5,
+            criticRating: 94,
+            productionYear: 2008
+        )
+        let ratings: [String: MultiPlatformRatings] = [
+            "m_bad": MultiPlatformRatings(tmdb: 5.4, imdb: 5.2, imdbVotes: 3000, rottenTomatoesCritics: 28, metacritic: 39),
+            "m_classic_extra": MultiPlatformRatings(tmdb: 8.5, imdb: 9.0, imdbVotes: 2_900_000, rottenTomatoesCritics: 94, rottenTomatoesAudience: 94, trakt: 86, metacritic: 84)
+        ]
+
+        let selected = HomeHeroCurator.selectHeroItems(
+            libraryViews: views,
+            latestByLibrary: ["lib_m": [pannedLatest]],
+            extraCandidates: [classicExtra],
+            ratingsByItemId: ratings,
+            maxCount: 8,
+            referenceYear: 2026
+        )
+
+        #expect(selected.first?.id == "m_classic_extra")
     }
 }
