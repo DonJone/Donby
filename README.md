@@ -16,11 +16,15 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/preview.png" width="900" alt="Donby Preview" />
+  <img src="docs/screenshots/preview.webp" width="900" alt="媒体库首页" />
+  <br />
+  <sub>媒体库首页</sub>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/detail.png" width="900" alt="Donby Detail Preview" />
+  <img src="docs/screenshots/detail.webp" width="900" alt="影视详情页" />
+  <br />
+  <sub>影视详情页</sub>
 </p>
 
 Donby 是一款为 macOS 设计的原生流媒体与本地播放器，支持连接 Emby、Jellyfin、UHDNow API 与本地媒体库，提供流畅的硬件解码播放、双语字幕对齐和原生系统交互体验。
@@ -33,7 +37,9 @@ Donby 是一款为 macOS 设计的原生流媒体与本地播放器，支持连�
 - **字幕与音轨管理**：支持 ASS/SSA、SRT、PGS 等内嵌与外挂字幕实时切换、双语同步渲染及基于 Silero VAD 的音轨自动时间轴对齐，多音轨无缝选择。
 
 <p align="center">
-  <img src="docs/screenshots/dual-subtitles.png" width="900" alt="Donby Dual Subtitles Preview" />
+  <img src="docs/screenshots/dual-subtitles.webp" width="900" alt="双字幕合成预览" />
+  <br />
+  <sub>双字幕合成预览</sub>
 </p>
 
 ## 下载与安装
