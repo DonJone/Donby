@@ -1,6 +1,6 @@
 # Module Map: Player Surface & Playback UI (`Sources/DonbyApp/Player/*`)
 
-> Last synced: `v2.0.10`. Load this index for any task inside `Sources/DonbyApp/Player/`, then load ONLY the relevant sub-doc below.
+> Last synced: `v2.0.21`. Load this index for any task inside `Sources/DonbyApp/Player/`, then load ONLY the relevant sub-doc below.
 
 ## 1. Sub-Doc Routing
 
@@ -17,7 +17,7 @@
 - `PlayerView+HUD.swift` — `topBarTitleString`, `topOSDBar`, `playerSpecBadge` + `spec*String`, `bottomControlBar`, 5 circular dropdown menus (`audio`, `subtitle`, `decoder`, `speed`, `more`).
 - `PlayerView+Drawers.swift` — `rightDrawerPanel(tab:)`, drawer chrome helpers, `PlayerDrawerSegmentedPill`, `.playlist`, `.tracks` (track-picker tab), `.mediaInfo`, `.watchParty`, `osdInfoRow`.
 - `PlayerSubtitleStyleDrawerView.swift` — standalone `.tracks` -> `"样式与对齐"` view (owns `@State private var showMoreSubtitleOptions`, AI alignment buttons, delay steppers, style sliders).
-- `PlayerView+PlaybackEngine.swift` — file-private `dkTurbo*CB` C-ABI callbacks, `handleProgressTimerTick()`, `startNativeKernelPlayback`, `computePreOpenTrackHints`, `makeRedirectStoreHandler`, `stopNativeKernel`, `togglePlayPause`, `seekRelative`, `seekTo`, `queryKernelChapters`, `cString(from:)`.
+- `PlayerView+PlaybackEngine.swift` — file-private `dkTurbo*CB` C-ABI callbacks, `handleProgressTimerTick()` (live `TurboStreamByteHandle.currentWireSpeedMBs` refresh including `isWaitingForSeekOrBuffer` overlay without falling back to local AVIO cache read speed), `startNativeKernelPlayback`, `computePreOpenTrackHints`, `makeRedirectStoreHandler`, `stopNativeKernel`, `togglePlayPause`, `seekRelative`, `seekTo`, `queryKernelChapters`, `cString(from:)`.
 - `PlayerView+TrackSelection.swift` — `embyAudioStreams`, `embySubtitleStreams`, `resolvedAudioOptions`, `resolvedSubtitleOptions`, `queryKernelTracks`, primary/secondary audio & subtitle selection.
 - `PlayerView+SubtitlesAndAlignment.swift` — remote/local external subtitle loading, `resolvedDualAnchorMode`, `makeKernelSubtitleStyleConfig`, `applyKernelSubtitleStyle`, `formatSubtitleDelay`, `snapshotSubtitleIntervals`, AI voice/dual-subtitle auto-alignment, undo & time-scale reset.
 - `PlayerView+LifecycleAndSession.swift` — `handleEmbySyncTimerTick()`, `prefetchNextEpisodeIfNearEnd()`, `evaluateIntroOutroSkipWindow()`, `exportRedactedDiagnostics()`, `playAdjacentEpisode()`, `switchToEpisode()`, `toggleFullScreen()`, `exitPlayer()`, `configureAndBindCompanionIfNeeded()`, `watchPartyDrawerContent`, `saveCurrentWatchProgress()`, `formatTime()`.

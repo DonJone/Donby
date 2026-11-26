@@ -41,8 +41,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
     var cleanSuccessesSinceLast429: Int = 0
     var measuredWireSpeedMBs: Double = 0.0
     var smoothedResponseTTFB: TimeInterval = 0.6
-    var recentWireBytes: Int64 = 0
-    var recentWireTimestamp: TimeInterval = ProcessInfo.processInfo.systemUptime
+    let wireSpeedMeter = SlidingWindowSpeedMeter(windowDuration: 2.5, bucketDuration: 0.10)
     var lastStallLogUptime: TimeInterval = 0
 
     struct ActiveAttemptRecord {
@@ -138,9 +137,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
     }
 
     public var currentWireSpeedMBs: Double {
-        condition.lock()
-        defer { condition.unlock() }
-        return measuredWireSpeedMBs
+        wireSpeedMeter.speedMBs()
     }
 
     public func updateTuning(connectionBudget: Int, prefetchAheadChunks: Int) {

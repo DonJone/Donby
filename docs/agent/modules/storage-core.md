@@ -1,6 +1,6 @@
 # Module Map: Core Models, Policies & Storage (`DonbyCore`)
 
-> Last synced: `v2.0.20`. Load this doc for shared data models, generic service-provider extension seam (`DonbyMediaServiceRegistry`), `DONBY_HOME` storage path isolation, unified `DonbyAppInfo.version`, AES-256-GCM local credential vault, async file logger, hero top-edge strip synthesis (`HeroTopEdgeSynthesizer`), subtitle encoding/transform/auto-alignment policies (Silero VAD + audio-first dual-subtitle aligner), diagnostics redaction, playback health state machine, update manifest parsing, and `DonbyCoreTests`.
+> Last synced: `v2.0.21`. Load this doc for shared data models, generic service-provider extension seam (`DonbyMediaServiceRegistry`), `DONBY_HOME` storage path isolation, unified `DonbyAppInfo.version`, AES-256-GCM local credential vault, async file logger, hero top-edge strip synthesis (`HeroTopEdgeSynthesizer`), subtitle encoding/transform/auto-alignment policies (Silero VAD + audio-first dual-subtitle aligner), diagnostics redaction, playback health state machine, update manifest parsing, and `DonbyCoreTests`.
 
 | If your task involves... | File | Entry Symbols |
 | :--- | :--- | :--- |

@@ -5,7 +5,7 @@ import DonbyCore
 
 private actor DownloadBatchCoordinator {
     enum BatchLease {
-        case batch(startChunk: Int, endChunk: Int, requestURL: URL, usedCDN: Bool, redirectEpoch: UInt64)
+        case batch(startChunk: Int, endChunk: Int, requestURL: URL, originHost: String?, usedCDN: Bool, redirectEpoch: UInt64)
         case wait(TimeInterval)
         case done
     }
@@ -14,9 +14,13 @@ private actor DownloadBatchCoordinator {
     private var activeWorkerCount: Int = 0
     private var workerCap: Int
     private let maxWorkerCap: Int
-    private var batchSizeChunks: Int = 16 // 16 * 512 KiB = 8 MiB contiguous range per HTTP GET
+    private var batchSizeChunks: Int
+    private let maxBatchSizeChunks: Int
 
-    private let originURL: URL
+    private var originURL: URL
+    private let fallbackOriginURL: URL?
+    private var didSwitchToFallbackOrigin = false
+    private var hasAnyCompletedBatch = false
     private var cachedCDNURL: URL?
     private var redirectEpoch: UInt64 = 0
 
@@ -25,18 +29,33 @@ private actor DownloadBatchCoordinator {
     private var cleanBatchesSince429: Int = 0
     private var batchHardRetries: [Int: Int] = [:]
     private var batch429Retries: [Int: Int] = [:]
+    private var batchCDNResets: [Int: Int] = [:]
 
     private(set) var failedError: String?
-    private var bytesSinceLastReport: Int64 = 0
-    private var lastReportTime: TimeInterval = ProcessInfo.processInfo.systemUptime
 
-    init(missingChunks: [Int], initialOriginURL: URL, initialCDNURL: URL?, maxWorkerCap: Int) {
+    init(
+        missingChunks: [Int],
+        initialOriginURL: URL,
+        fallbackOriginURL: URL?,
+        initialCDNURL: URL?,
+        maxWorkerCap: Int,
+        totalSize: Int64
+    ) {
         self.missingQueue = missingChunks
         self.originURL = initialOriginURL
+        self.fallbackOriginURL = (fallbackOriginURL?.absoluteString != initialOriginURL.absoluteString) ? fallbackOriginURL : nil
         self.cachedCDNURL = initialCDNURL
         self.redirectEpoch = initialCDNURL != nil ? 1 : 0
         self.maxWorkerCap = maxWorkerCap
         self.workerCap = maxWorkerCap
+        // Larger contiguous ranges (16-24 MiB) amortize 1-2s cross-border TTFB while tail-splitting near EOF.
+        if totalSize >= 64 * 1024 * 1024 {
+            self.batchSizeChunks = 32
+            self.maxBatchSizeChunks = 48
+        } else {
+            self.batchSizeChunks = 16
+            self.maxBatchSizeChunks = 32
+        }
     }
 
     func leaseNextBatch() -> BatchLease {
@@ -53,9 +72,19 @@ private actor DownloadBatchCoordinator {
             return .wait(0.08)
         }
 
+        // Dynamic tail splitting: when remaining work fits within one round of active workers,
+        // divide evenly so all workers finish together without a single-worker tail straggler.
+        let remaining = missingQueue.count
+        let effectiveBatchLimit: Int
+        if remaining < workerCap * batchSizeChunks && workerCap > 1 {
+            effectiveBatchLimit = max(4, min(batchSizeChunks, (remaining + workerCap - 1) / workerCap))
+        } else {
+            effectiveBatchLimit = batchSizeChunks
+        }
+
         let start = missingQueue.removeFirst()
         var end = start
-        let limit = min(batchSizeChunks, missingQueue.count + 1)
+        let limit = min(effectiveBatchLimit, missingQueue.count + 1)
         var taken = 1
         while taken < limit, let peek = missingQueue.first, peek == end + 1 {
             missingQueue.removeFirst()
@@ -69,22 +98,10 @@ private actor DownloadBatchCoordinator {
             startChunk: start,
             endChunk: end,
             requestURL: cachedCDNURL ?? originURL,
+            originHost: originURL.host,
             usedCDN: useCDN,
             redirectEpoch: useCDN ? redirectEpoch : 0
         )
-    }
-
-    func recordProgressBytes(_ byteCount: Int) -> (shouldReport: Bool, speedMBs: Double) {
-        bytesSinceLastReport += Int64(byteCount)
-        let now = ProcessInfo.processInfo.systemUptime
-        let dt = now - lastReportTime
-        if dt >= 0.35 {
-            let spd = (Double(bytesSinceLastReport) / (1024.0 * 1024.0)) / dt
-            bytesSinceLastReport = 0
-            lastReportTime = now
-            return (true, spd)
-        }
-        return (false, 0)
     }
 
     func updateResolvedRedirectURL(_ finalURL: URL?, usedCDN: Bool, epoch: UInt64) {
@@ -102,18 +119,42 @@ private actor DownloadBatchCoordinator {
 
     func finishBatchSuccess() {
         activeWorkerCount = max(0, activeWorkerCount - 1)
+        hasAnyCompletedBatch = true
         let now = ProcessInfo.processInfo.systemUptime
         if now >= backoffUntil + 2.0 {
             cleanBatchesSince429 += 1
-            if cleanBatchesSince429 >= 4 {
+            if cleanBatchesSince429 >= 3 {
                 cleanBatchesSince429 = 0
-                if batchSizeChunks < 16 {
-                    batchSizeChunks = min(16, batchSizeChunks * 2)
+                if batchSizeChunks < maxBatchSizeChunks {
+                    batchSizeChunks = min(maxBatchSizeChunks, batchSizeChunks + 16)
                 } else if workerCap < maxWorkerCap {
                     workerCap = min(maxWorkerCap, workerCap + 1)
                 }
             }
         }
+    }
+
+    private func insertSortedChunks(_ chunks: ClosedRange<Int>) {
+        // Keep missingQueue in ascending chunk order so the contiguous head frontier advances first
+        // and out-of-order `.chk` spill files remain minimal.
+        let unstored = Array(chunks)
+        if missingQueue.isEmpty || unstored.last! < missingQueue.first! {
+            missingQueue.insert(contentsOf: unstored, at: 0)
+            return
+        }
+        if unstored.first! > missingQueue.last! {
+            missingQueue.append(contentsOf: unstored)
+            return
+        }
+        // Binary search insertion point for ascending order
+        var lo = 0
+        var hi = missingQueue.count
+        let target = unstored[0]
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if missingQueue[mid] < target { lo = mid + 1 } else { hi = mid }
+        }
+        missingQueue.insert(contentsOf: unstored, at: lo)
     }
 
     func requeueBatchFailure(
@@ -122,15 +163,38 @@ private actor DownloadBatchCoordinator {
         statusCode: Int,
         usedCDN: Bool,
         epoch: UInt64,
-        retryAfterHeader: String?
+        retryAfterHeader: String?,
+        wasStallRecycle: Bool = false
     ) {
         activeWorkerCount = max(0, activeWorkerCount - 1)
         if resumeFromChunk <= endChunk {
-            let unstored = Array(resumeFromChunk...endChunk)
-            missingQueue.insert(contentsOf: unstored, at: 0)
+            insertSortedChunks(resumeFromChunk...endChunk)
         }
 
         let now = ProcessInfo.processInfo.systemUptime
+        if wasStallRecycle {
+            // Transient socket stall/crawl recycled by watchdog; allow immediate retry on fresh socket
+            // while bounding retries so permanently dead links still fail cleanly.
+            let hardCount = (batchHardRetries[resumeFromChunk] ?? 0) + 1
+            batchHardRetries[resumeFromChunk] = hardCount
+            if hardCount >= 6, failedError == nil {
+                failedError = "分片 #\(resumeFromChunk) 多次下载超时卡顿"
+            }
+            return
+        }
+
+        // If primary /download/ endpoint rejects before any batch succeeded, fall back transparently to /play/ streamURL.
+        if !hasAnyCompletedBatch && !didSwitchToFallbackOrigin,
+           let fallback = fallbackOriginURL,
+           (statusCode == 403 || statusCode == 404 || statusCode == 405 || statusCode == 501) {
+            didSwitchToFallbackOrigin = true
+            originURL = fallback
+            cachedCDNURL = nil
+            redirectEpoch &+= 1
+            DonbyLogger.shared.log("下载直链返回 HTTP \(statusCode)，自动回退至流媒体源继续下载", level: .warning, subsystem: "Download")
+            return
+        }
+
         if statusCode == 429 {
             cleanBatchesSince429 = 0
             let headerDelay = retryAfterHeader.flatMap { Double($0.trimmingCharacters(in: .whitespaces)) }
@@ -143,8 +207,8 @@ private actor DownloadBatchCoordinator {
                 if workerCap > 1 {
                     workerCap = max(1, workerCap - 1)
                     DonbyLogger.shared.log("离线下载触发 HTTP 429 限流，自动降并发至 \(workerCap) 并退避 \(String(format: "%.1fs", waitSec))", level: .warning, subsystem: "Download")
-                } else if batchSizeChunks > 4 {
-                    batchSizeChunks = max(4, batchSizeChunks / 2)
+                } else if batchSizeChunks > 8 {
+                    batchSizeChunks = max(8, batchSizeChunks / 2)
                 }
             }
             if r >= 12, failedError == nil {
@@ -154,10 +218,15 @@ private actor DownloadBatchCoordinator {
         }
 
         if usedCDN && (statusCode == 200 || statusCode >= 400) && statusCode != 416 {
+            let resets = (batchCDNResets[resumeFromChunk] ?? 0) + 1
+            batchCDNResets[resumeFromChunk] = resets
             if epoch == redirectEpoch {
                 cachedCDNURL = nil
             }
-            return
+            if resets <= 3 {
+                backoffUntil = max(backoffUntil, now + 0.25 * Double(resets))
+                return
+            }
         }
 
         let hardCount = (batchHardRetries[resumeFromChunk] ?? 0) + 1
@@ -174,6 +243,22 @@ private actor DownloadBatchCoordinator {
 }
 
 extension DonbyDownloadManager {
+    private nonisolated static func makeDedicatedWorkerSession(delegate: DownloadRangeStreamDelegate) -> URLSession {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.urlCache = nil
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        // Dedicated ephemeral session per worker gives independent TCP/TLS flows over HTTP/2 edges,
+        // avoiding single-TCP BDP / head-of-line ceilings on high-RTT links.
+        cfg.httpMaximumConnectionsPerHost = 2
+        cfg.timeoutIntervalForRequest = 18
+        cfg.timeoutIntervalForResource = 180
+        let opQueue = OperationQueue()
+        opQueue.name = "com.donby.download.worker"
+        opQueue.maxConcurrentOperationCount = 2
+        opQueue.qualityOfService = .utility
+        return URLSession(configuration: cfg, delegate: delegate, delegateQueue: opQueue)
+    }
+
     func startDownloadWorker(for entrySnapshot: DownloadEntry, connectionBudget: Int) {
         let assetKey = entrySnapshot.assetKey
         workerTasks[assetKey]?.cancel()
@@ -192,29 +277,22 @@ extension DonbyDownloadManager {
                 return
             }
 
-            let workers = max(2, min(6, connectionBudget))
-            let cfg = URLSessionConfiguration.ephemeral
-            cfg.urlCache = nil
-            cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
-            cfg.httpMaximumConnectionsPerHost = max(8, workers + 2)
-            cfg.timeoutIntervalForRequest = 20
-            cfg.timeoutIntervalForResource = 300
-
-            let streamDelegate = DownloadRangeStreamDelegate()
-            let opQueue = OperationQueue()
-            opQueue.name = "com.donby.download.worker"
-            opQueue.maxConcurrentOperationCount = max(4, workers * 2)
-            opQueue.qualityOfService = .utility
-            let session = URLSession(configuration: cfg, delegate: streamDelegate, delegateQueue: opQueue)
-            defer { session.invalidateAndCancel() }
-
+            let workers = max(1, min(6, connectionBudget))
             var originURL = targetURL
             var resolvedCDNURL: URL? = nil
             let headers = entrySnapshot.headers
 
-            // 1. Ensure chunk 0 & totalSize + 302 CDN redirect URL are resolved cleanly
+            // 1. Only run a serial probe when totalSize is unknown; when totalSize is already known
+            //    from MediaSource metadata or resume meta.json, launch full multi-TCP workers immediately!
             let probeChunkSize = store.currentMeta().chunkSize
-            if store.currentMeta().totalSize <= 0 || !store.hasChunk(0) {
+            if store.totalSizeFast() <= 0 {
+                let probeCfg = URLSessionConfiguration.ephemeral
+                probeCfg.urlCache = nil
+                probeCfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+                probeCfg.timeoutIntervalForRequest = 18
+                let probeSession = URLSession(configuration: probeCfg)
+                defer { probeSession.invalidateAndCancel() }
+
                 var probeData: Data?
                 var probeResp: HTTPURLResponse?
                 for candidate in [targetURL, fallbackURL].compactMap({ $0 }) {
@@ -227,7 +305,7 @@ extension DonbyDownloadManager {
                         endByte: Int64(probeChunkSize - 1),
                         timeout: 18
                     )
-                    if let (d, r) = try? await session.data(for: req),
+                    if let (d, r) = try? await probeSession.data(for: req),
                        let http = r as? HTTPURLResponse,
                        (http.statusCode == 206 || http.statusCode == 200) {
                         originURL = candidate
@@ -250,23 +328,7 @@ extension DonbyDownloadManager {
                     store.setTotalSize(total, sourceURL: originURL.absoluteString)
                 }
                 let slice = firstData.count > probeChunkSize ? Data(firstData.prefix(probeChunkSize)) : firstData
-                store.storeChunk(index: 0, data: slice)
-            } else {
-                let req = TurboStreamingSessionHub.makeRangeRequest(
-                    url: originURL,
-                    originHost: originURL.host,
-                    headers: headers,
-                    startByte: 0,
-                    endByte: 0,
-                    timeout: 10
-                )
-                if let (_, r) = try? await session.data(for: req),
-                   let http = r as? HTTPURLResponse,
-                   (http.statusCode == 206 || http.statusCode == 200),
-                   let finalRespURL = http.url,
-                   finalRespURL.absoluteString != originURL.absoluteString {
-                    resolvedCDNURL = finalRespURL
-                }
+                store.storeChunk(index: 0, data: slice, cacheInMemory: true)
             }
 
             let meta = store.currentMeta()
@@ -293,49 +355,106 @@ extension DonbyDownloadManager {
 
             let chunkSize = meta.chunkSize
             let totalSize = meta.totalSize
+            let speedMeter = SlidingWindowSpeedMeter(windowDuration: 2.5, bucketDuration: 0.10)
+            let byteCounter = LiveDownloadByteCounter(initialCommittedBytes: meta.cachedBytes)
             let coordinator = DownloadBatchCoordinator(
                 missingChunks: missingChunks,
                 initialOriginURL: originURL,
+                fallbackOriginURL: fallbackURL,
                 initialCDNURL: resolvedCDNURL,
-                maxWorkerCap: workers
+                maxWorkerCap: workers,
+                totalSize: totalSize
             )
 
+            // Decoupled 0.5s progress ticker: keeps UI speed smooth, decays cleanly to 0.0 MB/s during
+            // TTFB/stalls/429 backoff, and never blocks TCP packet reception on MainActor.
+            let progressTicker = Task.detached(priority: .utility) {
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    if Task.isCancelled { break }
+                    let liveSpeed = speedMeter.speedMBs()
+                    let liveBytes = max(store.cachedBytesFast(), byteCounter.liveBytes(cappedAt: totalSize))
+                    await MainActor.run {
+                        DonbyDownloadManager.shared.updateProgress(
+                            assetKey: assetKey,
+                            downloadedBytes: liveBytes,
+                            totalBytes: totalSize,
+                            speedMBs: liveSpeed
+                        )
+                    }
+                }
+            }
+            defer { progressTicker.cancel() }
+
             await withTaskGroup(of: Void.self) { group in
-                for _ in 0..<workers {
+                for workerId in 0..<workers {
                     group.addTask {
+                        var streamDelegate = DownloadRangeStreamDelegate()
+                        var workerSession = Self.makeDedicatedWorkerSession(delegate: streamDelegate)
+                        defer { workerSession.invalidateAndCancel() }
+
+                        func recycleWorkerSession() {
+                            workerSession.invalidateAndCancel()
+                            streamDelegate = DownloadRangeStreamDelegate()
+                            workerSession = Self.makeDedicatedWorkerSession(delegate: streamDelegate)
+                        }
+
                         while !Task.isCancelled {
                             switch await coordinator.leaseNextBatch() {
                             case .done:
                                 return
                             case .wait(let delaySec):
                                 try? await Task.sleep(nanoseconds: UInt64(delaySec * 1_000_000_000))
-                            case .batch(let startChunk, let endChunk, let requestURL, let usedCDN, let redirectEpoch):
+                            case .batch(let startChunk, let endChunk, let requestURL, let originHost, let usedCDN, let redirectEpoch):
                                 let batchStartByte = Int64(startChunk) * Int64(chunkSize)
                                 let batchEndByte = min(totalSize - 1, Int64(endChunk + 1) * Int64(chunkSize) - 1)
                                 let req = TurboStreamingSessionHub.makeRangeRequest(
                                     url: requestURL,
-                                    originHost: originURL.host,
+                                    originHost: originHost,
                                     headers: headers,
                                     startByte: batchStartByte,
                                     endByte: batchEndByte,
-                                    timeout: 25
+                                    timeout: 18
                                 )
 
                                 var currentChunkIdx = startChunk
                                 var statusCode = -1
                                 var retryAfterHeader: String? = nil
+                                let monitor = WorkerTransferMonitor()
 
                                 do {
-                                    let (http, byteStream) = try await streamDelegate.openStream(
-                                        session: session,
+                                    let (http, byteStream, cancelStream) = try await streamDelegate.openStream(
+                                        session: workerSession,
                                         request: req,
                                         allowStatus200: (startChunk == 0 && batchStartByte == 0)
                                     )
                                     statusCode = http.statusCode
                                     retryAfterHeader = http.value(forHTTPHeaderField: "Retry-After")
+                                    monitor.markHeadersReceived()
 
                                     if statusCode == 206 || (statusCode == 200 && startChunk == 0) {
                                         await coordinator.updateResolvedRedirectURL(http.url, usedCDN: usedCDN, epoch: redirectEpoch)
+
+                                        // Watchdog cancels stalled (>12s silence) or crawling (<150 KB/s while peers healthy) TCP sockets.
+                                        let watchdog = Task.detached(priority: .utility) {
+                                            while !Task.isCancelled {
+                                                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                                                if Task.isCancelled { break }
+                                                let now = ProcessInfo.processInfo.systemUptime
+                                                let snap = monitor.snapshot()
+                                                let idle = now - snap.lastByteUptime
+                                                let transferSec = now - snap.headersUptime
+                                                let avgBps = Double(snap.receivedBytes) / max(0.5, transferSec)
+                                                let isStalled = idle >= 12.0
+                                                let isCrawling = (workers > 1 && transferSec >= 10.0 && avgBps < 150_000.0 && speedMeter.speedMBs(at: now) >= 2.0)
+                                                if isStalled || isCrawling {
+                                                    monitor.markStallCancelled()
+                                                    cancelStream()
+                                                    break
+                                                }
+                                            }
+                                        }
+                                        defer { watchdog.cancel() }
 
                                         var acc = Data()
                                         acc.reserveCapacity(chunkSize * 2)
@@ -349,7 +468,9 @@ extension DonbyDownloadManager {
                                                 )
                                                 guard acc.count - readCursor >= expectedLen else { break }
                                                 let endPos = readCursor + expectedLen
-                                                store.storeChunk(index: currentChunkIdx, data: Data(acc[readCursor..<endPos]))
+                                                let keepInRam = (store.activeReaderCount > 0 || currentChunkIdx < 4)
+                                                store.storeChunk(index: currentChunkIdx, data: Data(acc[readCursor..<endPos]), cacheInMemory: keepInRam)
+                                                byteCounter.commitChunk(workerId: workerId, bytes: expectedLen)
                                                 readCursor = endPos
                                                 currentChunkIdx += 1
                                             }
@@ -358,25 +479,20 @@ extension DonbyDownloadManager {
                                         for try await netSlice in byteStream {
                                             if Task.isCancelled { break }
                                             acc.append(netSlice)
+                                            let now = ProcessInfo.processInfo.systemUptime
+                                            monitor.recordBytes(netSlice.count, at: now)
+                                            speedMeter.recordBytes(netSlice.count, at: now)
+                                            byteCounter.addInFlight(workerId: workerId, delta: netSlice.count)
 
-                                            let rep = await coordinator.recordProgressBytes(netSlice.count)
                                             flushReadyChunks()
                                             if readCursor >= chunkSize {
                                                 acc.removeSubrange(0..<readCursor)
                                                 readCursor = 0
                                             }
-                                            if rep.shouldReport {
-                                                let curMeta = store.currentMeta()
-                                                await MainActor.run {
-                                                    DonbyDownloadManager.shared.updateProgress(
-                                                        assetKey: assetKey,
-                                                        downloadedBytes: curMeta.cachedBytes,
-                                                        totalBytes: curMeta.totalSize,
-                                                        speedMBs: rep.speedMBs
-                                                    )
-                                                }
-                                            }
                                         }
+
+                                        watchdog.cancel()
+                                        byteCounter.clearWorkerInFlight(workerId: workerId)
 
                                         if Task.isCancelled {
                                             await coordinator.requeueBatchFailure(
@@ -394,16 +510,20 @@ extension DonbyDownloadManager {
                                         if currentChunkIdx > endChunk {
                                             await coordinator.finishBatchSuccess()
                                         } else {
+                                            let recycled = monitor.wasStallCancelled
+                                            if recycled { recycleWorkerSession() }
                                             await coordinator.requeueBatchFailure(
                                                 resumeFromChunk: currentChunkIdx,
                                                 endChunk: endChunk,
                                                 statusCode: statusCode,
                                                 usedCDN: usedCDN,
                                                 epoch: redirectEpoch,
-                                                retryAfterHeader: retryAfterHeader
+                                                retryAfterHeader: retryAfterHeader,
+                                                wasStallRecycle: recycled
                                             )
                                         }
                                     } else {
+                                        byteCounter.clearWorkerInFlight(workerId: workerId)
                                         await coordinator.requeueBatchFailure(
                                             resumeFromChunk: currentChunkIdx,
                                             endChunk: endChunk,
@@ -414,14 +534,18 @@ extension DonbyDownloadManager {
                                         )
                                     }
                                 } catch {
+                                    byteCounter.clearWorkerInFlight(workerId: workerId)
                                     if Task.isCancelled { return }
+                                    let recycled = monitor.wasStallCancelled
+                                    if recycled { recycleWorkerSession() }
                                     await coordinator.requeueBatchFailure(
                                         resumeFromChunk: currentChunkIdx,
                                         endChunk: endChunk,
                                         statusCode: statusCode,
                                         usedCDN: usedCDN,
                                         epoch: redirectEpoch,
-                                        retryAfterHeader: retryAfterHeader
+                                        retryAfterHeader: retryAfterHeader,
+                                        wasStallRecycle: recycled
                                     )
                                 }
                             }
@@ -430,6 +554,7 @@ extension DonbyDownloadManager {
                 }
             }
 
+            progressTicker.cancel()
             if Task.isCancelled { return }
             store.flushMeta()
             if let err = await coordinator.failedError {

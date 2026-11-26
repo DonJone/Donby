@@ -12,6 +12,7 @@ public final class DonbyDownloadManager: ObservableObject {
     @Published public var maxConcurrentDownloads: Int = 2
 
     var workerTasks: [String: Task<Void, Never>] = [:]
+    private var connectionBudgetByAssetKey: [String: Int] = [:]
     private let storageFileURL: URL
     private var statusRevision: Int = 0
     private var lastProgressStatusSync: TimeInterval = 0
@@ -279,6 +280,7 @@ public final class DonbyDownloadManager: ObservableObject {
             )
         }
 
+        connectionBudgetByAssetKey[assetKey] = max(1, min(6, connectionBudgetPerTask))
         if existingMeta.isFullyCached && !alreadyOnDisk {
             Task.detached(priority: .utility) {
                 let total = max(existingMeta.totalSize, 0)
@@ -297,6 +299,11 @@ public final class DonbyDownloadManager: ObservableObject {
         workerTasks.removeValue(forKey: assetKey)
         if let idx = entries.firstIndex(where: { $0.assetKey == assetKey }) {
             if entries[idx].status == .downloading || entries[idx].status == .queued {
+                let store = DonbyTurboCacheEngine.shared.store(for: assetKey, persistDisk: true)
+                let persistedBytes = store.cachedBytesFast()
+                if persistedBytes > 0 || entries[idx].downloadedBytes > 0 {
+                    entries[idx].downloadedBytes = persistedBytes > 0 ? persistedBytes : entries[idx].downloadedBytes
+                }
                 entries[idx].status = .paused
                 entries[idx].speedMBs = 0.0
                 saveToDisk()
@@ -306,6 +313,7 @@ public final class DonbyDownloadManager: ObservableObject {
     }
 
     public func resumeDownload(assetKey: String, connectionBudgetPerTask: Int = 3) {
+        connectionBudgetByAssetKey[assetKey] = max(1, min(6, connectionBudgetPerTask))
         if let idx = entries.firstIndex(where: { $0.assetKey == assetKey }) {
             if entries[idx].status != .completed {
                 entries[idx].status = .queued
@@ -394,7 +402,7 @@ public final class DonbyDownloadManager: ObservableObject {
         }
     }
 
-    private func scheduleQueue(connectionBudgetPerTask: Int = 3) {
+    private func scheduleQueue(connectionBudgetPerTask: Int? = nil) {
         let activeCount = entries.filter { $0.status == .downloading }.count
         guard activeCount < maxConcurrentDownloads else { return }
 
@@ -404,7 +412,8 @@ public final class DonbyDownloadManager: ObservableObject {
             entries[idx].status = .downloading
             entries[idx].errorMessage = nil
             saveToDisk()
-            startDownloadWorker(for: entries[idx], connectionBudget: connectionBudgetPerTask)
+            let budget = connectionBudgetByAssetKey[entries[idx].assetKey] ?? connectionBudgetPerTask ?? 3
+            startDownloadWorker(for: entries[idx], connectionBudget: budget)
         }
     }
 

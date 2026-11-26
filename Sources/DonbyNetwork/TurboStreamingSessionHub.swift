@@ -426,10 +426,172 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
     }
 }
 
+// MARK: - Sliding-Window Bandwidth Meter (Smooth, Zero-Freeze, Auto-Decaying)
+
+/// Lock-light sliding-window throughput meter shared by offline downloads and Turbo streaming.
+/// Uses fixed time buckets across a rolling window so bursty TCP arrivals smooth naturally
+/// and reported speed decays cleanly to 0.0 MB/s during stalls, backoff, or idle periods.
+public final class SlidingWindowSpeedMeter: @unchecked Sendable {
+    private let lock = NSLock()
+    private let bucketDuration: TimeInterval
+    private let bucketCount: Int
+    private let windowDuration: TimeInterval
+    private var buckets: [Int64]
+    private var headBucketIndex: Int64 = -1
+    private var firstByteUptime: TimeInterval = 0
+    private var lastByteUptime: TimeInterval = 0
+    private var totalWindowBytes: Int64 = 0
+
+    public init(windowDuration: TimeInterval = 2.5, bucketDuration: TimeInterval = 0.10) {
+        let safeBucket = max(0.05, bucketDuration)
+        let count = max(5, Int((max(0.5, windowDuration) / safeBucket).rounded()))
+        self.bucketDuration = safeBucket
+        self.bucketCount = count
+        self.windowDuration = Double(count) * safeBucket
+        self.buckets = Array(repeating: 0, count: count)
+    }
+
+    public func reset() {
+        lock.lock()
+        for i in 0..<bucketCount { buckets[i] = 0 }
+        headBucketIndex = -1
+        firstByteUptime = 0
+        lastByteUptime = 0
+        totalWindowBytes = 0
+        lock.unlock()
+    }
+
+    public func recordBytes(_ byteCount: Int, at now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        guard byteCount > 0 else { return }
+        lock.lock()
+        advanceBucketsLocked(to: now)
+        if lastByteUptime <= 0 || (now - lastByteUptime) >= windowDuration {
+            firstByteUptime = now
+        }
+        lastByteUptime = now
+        let slot = Int(headBucketIndex % Int64(bucketCount))
+        let safeSlot = slot >= 0 ? slot : (slot + bucketCount)
+        buckets[safeSlot] += Int64(byteCount)
+        totalWindowBytes += Int64(byteCount)
+        lock.unlock()
+    }
+
+    /// Returns current throughput in MiB/s (`MB/s` = 1,048,576 B/s), decaying smoothly to 0.0 when idle.
+    public func speedMBs(at now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Double {
+        lock.lock()
+        defer { lock.unlock() }
+        guard lastByteUptime > 0 else { return 0.0 }
+        let idleSec = now - lastByteUptime
+        if idleSec >= windowDuration {
+            advanceBucketsLocked(to: now)
+            return 0.0
+        }
+        advanceBucketsLocked(to: now)
+        guard totalWindowBytes > 0 else { return 0.0 }
+        let span = min(windowDuration, max(0.45, now - firstByteUptime))
+        return (Double(totalWindowBytes) / (1024.0 * 1024.0)) / span
+    }
+
+    /// Returns time in seconds since the last recorded byte (or `.infinity` if none).
+    public func idleSeconds(at now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> TimeInterval {
+        lock.lock()
+        let last = lastByteUptime
+        lock.unlock()
+        return last > 0 ? max(0.0, now - last) : .infinity
+    }
+
+    private func advanceBucketsLocked(to now: TimeInterval) {
+        let targetIdx = Int64(floor(now / bucketDuration))
+        if headBucketIndex < 0 {
+            headBucketIndex = targetIdx
+            return
+        }
+        let delta = targetIdx - headBucketIndex
+        guard delta > 0 else { return }
+        if delta >= Int64(bucketCount) {
+            for i in 0..<bucketCount { buckets[i] = 0 }
+            totalWindowBytes = 0
+        } else {
+            for step in 1...Int(delta) {
+                let idx = headBucketIndex + Int64(step)
+                let slot = Int(idx % Int64(bucketCount))
+                let safeSlot = slot >= 0 ? slot : (slot + bucketCount)
+                totalWindowBytes = max(0, totalWindowBytes - buckets[safeSlot])
+                buckets[safeSlot] = 0
+            }
+        }
+        headBucketIndex = targetIdx
+    }
+}
+
+internal final class WorkerTransferMonitor: @unchecked Sendable {
+    private let lock = NSLock()
+    let startUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    private var headersUptime: TimeInterval = 0
+    private var lastByteUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    private var receivedBytes: Int64 = 0
+    private var didTriggerStallCancel = false
+
+    func markHeadersReceived(at now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        lock.lock(); headersUptime = now; lastByteUptime = now; lock.unlock()
+    }
+
+    func recordBytes(_ count: Int, at now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        guard count > 0 else { return }
+        lock.lock(); receivedBytes += Int64(count); lastByteUptime = now; lock.unlock()
+    }
+
+    func markStallCancelled() {
+        lock.lock(); didTriggerStallCancel = true; lock.unlock()
+    }
+
+    var wasStallCancelled: Bool {
+        lock.lock(); defer { lock.unlock() }; return didTriggerStallCancel
+    }
+
+    func snapshot() -> (headersUptime: TimeInterval, lastByteUptime: TimeInterval, receivedBytes: Int64) {
+        lock.lock(); defer { lock.unlock() }; return (headersUptime, lastByteUptime, receivedBytes)
+    }
+}
+
+internal final class LiveDownloadByteCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var committedBytes: Int64
+    private var inFlightByWorker: [Int: Int64] = [:]
+
+    init(initialCommittedBytes: Int64) {
+        self.committedBytes = max(0, initialCommittedBytes)
+    }
+
+    func addInFlight(workerId: Int, delta: Int) {
+        guard delta > 0 else { return }
+        lock.lock(); inFlightByWorker[workerId, default: 0] += Int64(delta); lock.unlock()
+    }
+
+    func commitChunk(workerId: Int, bytes: Int) {
+        guard bytes > 0 else { return }
+        lock.lock()
+        inFlightByWorker[workerId] = max(0, (inFlightByWorker[workerId] ?? 0) - Int64(bytes))
+        committedBytes += Int64(bytes)
+        lock.unlock()
+    }
+
+    func clearWorkerInFlight(workerId: Int) {
+        lock.lock(); inFlightByWorker[workerId] = 0; lock.unlock()
+    }
+
+    func liveBytes(cappedAt totalSize: Int64) -> Int64 {
+        lock.lock()
+        let total = committedBytes + inFlightByWorker.values.reduce(Int64(0), +)
+        lock.unlock()
+        return totalSize > 0 ? min(totalSize, total) : total
+    }
+}
+
 internal final class DownloadRangeStreamDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private final class StreamTaskState {
         let allowStatus200: Bool
-        var responseContinuation: CheckedContinuation<(HTTPURLResponse, AsyncThrowingStream<Data, Error>), Error>?
+        var responseContinuation: CheckedContinuation<(HTTPURLResponse, AsyncThrowingStream<Data, Error>, @Sendable () -> Void), Error>?
         var dataContinuation: AsyncThrowingStream<Data, Error>.Continuation?
         var yieldedResponse = false
 
@@ -445,10 +607,10 @@ internal final class DownloadRangeStreamDelegate: NSObject, URLSessionDataDelega
         session: URLSession,
         request: URLRequest,
         allowStatus200: Bool
-    ) async throws -> (HTTPURLResponse, AsyncThrowingStream<Data, Error>) {
+    ) async throws -> (HTTPURLResponse, AsyncThrowingStream<Data, Error>, @Sendable () -> Void) {
         let dataTask = session.dataTask(with: request)
         return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (respCont: CheckedContinuation<(HTTPURLResponse, AsyncThrowingStream<Data, Error>), Error>) in
+            try await withCheckedThrowingContinuation { (respCont: CheckedContinuation<(HTTPURLResponse, AsyncThrowingStream<Data, Error>, @Sendable () -> Void), Error>) in
                 let state = StreamTaskState(allowStatus200: allowStatus200)
                 state.responseContinuation = respCont
                 lock.lock()
@@ -489,6 +651,9 @@ internal final class DownloadRangeStreamDelegate: NSObject, URLSessionDataDelega
         let stream = AsyncThrowingStream<Data, Error> { cont in
             capturedCont = cont
         }
+        let cancelTask: @Sendable () -> Void = {
+            dataTask.cancel()
+        }
         capturedCont.onTermination = { _ in
             dataTask.cancel()
         }
@@ -497,13 +662,13 @@ internal final class DownloadRangeStreamDelegate: NSObject, URLSessionDataDelega
         if accept {
             state.dataContinuation = capturedCont
             lock.unlock()
-            respCont?.resume(returning: (http, stream))
+            respCont?.resume(returning: (http, stream, cancelTask))
             completionHandler(.allow)
         } else {
             states.removeValue(forKey: dataTask.taskIdentifier)
             lock.unlock()
             capturedCont.finish()
-            respCont?.resume(returning: (http, stream))
+            respCont?.resume(returning: (http, stream, cancelTask))
             completionHandler(.cancel)
         }
     }

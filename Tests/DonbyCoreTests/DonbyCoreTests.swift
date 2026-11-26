@@ -8,7 +8,7 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "2.0.20")
+        #expect(DonbyAppInfo.fallbackVersion == "2.0.21")
     }
 
     @Test func heroTopEdgeSynthesizerPreservesExactColorContrastAndSuppressesOutlierSpike() {
@@ -506,5 +506,79 @@ struct DonbyCoreTests {
         let kOther1 = DonbyTurboCacheEngine.makeAssetKey(serverId: serverId, itemId: "episode_123", mediaSourceId: "ms_1")
         let kOther2 = DonbyTurboCacheEngine.makeAssetKey(serverId: serverId, itemId: "ms_episode_123", mediaSourceId: "ms_1")
         #expect(kOther1 != kOther2)
+    }
+
+    @Test func slidingWindowSpeedMeterTracksSteadyRateDecaysToZeroAndResetsAfterIdle() {
+        let meter = SlidingWindowSpeedMeter(windowDuration: 2.5, bucketDuration: 0.10)
+        #expect(meter.speedMBs(at: 100.0) == 0.0)
+
+        // Feed steady 8.0 MiB/s across 3.0s (30 ticks of 0.1s, 819.2 KiB each -> 8 MiB/s)
+        let bytesPerTick = Int((8.0 * 1_048_576.0) * 0.10)
+        for i in 0..<30 {
+            let t = 100.0 + Double(i) * 0.10
+            meter.recordBytes(bytesPerTick, at: t)
+        }
+        let steady = meter.speedMBs(at: 102.95)
+        #expect(steady > 7.5 && steady < 8.6)
+
+        // After 1.2s of silence, speed should decay cleanly to roughly half
+        let midDecay = meter.speedMBs(at: 104.2)
+        #expect(midDecay > 1.5 && midDecay < steady * 0.75)
+
+        // After >= 2.5s of silence, speed MUST reach exactly 0.0 (never frozen)
+        #expect(meter.speedMBs(at: 105.6) == 0.0)
+
+        // Resuming after a long 20s idle gap must NOT divide by 20s
+        meter.recordBytes(2 * 1_048_576, at: 125.0)
+        let resumed = meter.speedMBs(at: 125.5)
+        #expect(resumed > 3.5 && resumed < 4.5)
+    }
+
+    @Test func chunkStoreO1CachedBytesAndNonBlockingSpillFolding() {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("donby-chunkstore-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let chunkSize = 65_536
+        let totalChunks = 24
+        let tailBytes = 12_345
+        let totalSize = Int64((totalChunks - 1) * chunkSize + tailBytes)
+        let store = TieredAssetChunkStore(
+            assetKey: "fold_test",
+            rootDirectory: tmpDir,
+            chunkSize: chunkSize,
+            maxMemoryBytes: 32 * 1024 * 1024,
+            persistDisk: true
+        )
+        store.setTotalSize(totalSize, sourceURL: "https://example.invalid/video.mkv")
+
+        // Write chunks 1..20 out-of-order with cacheInMemory: false (simulating offline download workers)
+        for idx in 1...20 {
+            let pattern = UInt8(idx & 0xFF)
+            store.storeChunk(index: idx, data: Data(repeating: pattern, count: chunkSize), cacheInMemory: false)
+        }
+        // Write partial EOF chunk 23
+        store.storeChunk(index: 23, data: Data(repeating: 0xEE, count: tailBytes), cacheInMemory: false)
+        store.flushMeta()
+
+        let expectedMidBytes = Int64(20 * chunkSize + tailBytes)
+        #expect(store.cachedBytesFast() == expectedMidBytes)
+        #expect(store.currentMeta().cachedBytes == expectedMidBytes)
+
+        // Now write chunk 0 -> triggers lock-free spill folding of chunks 1..20 into media.bin
+        store.storeChunk(index: 0, data: Data(repeating: 0x00, count: chunkSize), cacheInMemory: true)
+        store.flushMeta()
+
+        // Verify all folded chunks read back byte-exact from media.bin
+        for idx in 0...20 {
+            let read = store.readChunk(index: idx)
+            #expect(read?.count == chunkSize)
+            #expect(read?.first == UInt8(idx & 0xFF))
+        }
+        // Verify didEnsureChunksDir invariant: writing a later spill chunk 22 still succeeds cleanly
+        store.storeChunk(index: 22, data: Data(repeating: 0x22, count: chunkSize), cacheInMemory: false)
+        store.flushMeta()
+        #expect(store.readChunk(index: 22)?.first == 0x22)
+        #expect(store.readChunk(index: 23)?.count == tailBytes)
     }
 }

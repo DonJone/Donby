@@ -590,15 +590,10 @@ extension TurboStreamByteHandle {
             }
         }
 
-        recentWireBytes += Int64(delta.count)
-        let dt = now - recentWireTimestamp
-        if dt >= 0.30 {
-            let instMBs = (Double(recentWireBytes) / (1024.0 * 1024.0)) / dt
-            measuredWireSpeedMBs = measuredWireSpeedMBs > 0.05
-                ? (measuredWireSpeedMBs * 0.35 + instMBs * 0.65)
-                : instMBs
-            recentWireBytes = 0
-            recentWireTimestamp = now
+        wireSpeedMeter.recordBytes(delta.count, at: now)
+        let smoothWire = wireSpeedMeter.speedMBs(at: now)
+        if smoothWire > 0.05 {
+            measuredWireSpeedMBs = smoothWire
         }
 
         condition.broadcast()
@@ -621,6 +616,7 @@ extension TurboStreamByteHandle {
         buf.append(delta)
         attemptBuffers[attemptId] = buf
         activeAttempts[attemptId]?.lastByteTimestamp = now
+        wireSpeedMeter.recordBytes(delta.count, at: now)
         condition.broadcast()
         condition.unlock()
     }

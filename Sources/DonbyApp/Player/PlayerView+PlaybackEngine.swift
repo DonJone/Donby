@@ -94,7 +94,7 @@ extension PlayerView {
             } else if currentItem.durationSeconds > 0 && abs(duration - currentItem.durationSeconds) > 0.01 {
                 duration = currentItem.durationSeconds
             }
-            if showControls || activeDrawer == .mediaInfo || kernelStats.width == 0 {
+            if showControls || activeDrawer == .mediaInfo || isWaitingForSeekOrBuffer || kernelStats.width == 0 {
                 var freshStats = DKRuntimeStats()
                 dk_player_get_stats(handle, &freshStats)
                 if activeDrawer == .mediaInfo ||
@@ -107,8 +107,9 @@ extension PlayerView {
                     abs(kernelStats.video_bitrate_mbps - freshStats.video_bitrate_mbps) > 0.1 {
                     kernelStats = freshStats
                 }
-                if let turboSpeed = activeTurboHandle?.currentWireSpeedMBs, turboSpeed > 0.01 {
-                    if abs(displayDownloadSpeedMBs - turboSpeed) > 0.05 {
+                if let turboHandle = activeTurboHandle {
+                    let turboSpeed = turboHandle.currentWireSpeedMBs
+                    if abs(displayDownloadSpeedMBs - turboSpeed) > 0.05 || (turboSpeed < 0.01 && displayDownloadSpeedMBs > 0) {
                         displayDownloadSpeedMBs = turboSpeed
                     }
                 } else if abs(displayDownloadSpeedMBs - freshStats.download_speed_mbs) > 0.05 {
