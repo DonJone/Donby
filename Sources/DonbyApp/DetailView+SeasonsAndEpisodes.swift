@@ -222,14 +222,14 @@ extension DetailView {
                             DonbyDownloadedBadgePill(
                                 text: "已下载",
                                 isCompleted: true,
-                                accentColor: appState.accentColor,
+                                accentColor: appState.overlayAccentColor,
                                 fontSize: 9.5
                             )
                         } else if isEpDownloading, let entry = epDownloadEntry {
                             DonbyDownloadedBadgePill(
                                 text: String(format: "%.0f%%", entry.progressFraction * 100),
                                 isCompleted: false,
-                                accentColor: appState.accentColor,
+                                accentColor: appState.overlayAccentColor,
                                 fontSize: 9.5
                             )
                         }
@@ -270,7 +270,7 @@ extension DetailView {
                     .strokeBorder(
                         isSelected
                             ? (appState.isLightMode ? appState.accentColor : Color.white)
-                            : (appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.10)),
+                            : (appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.06)),
                         lineWidth: isSelected ? 2.2 : 0.65
                     )
             )
@@ -403,51 +403,58 @@ extension DetailView {
     }
 
     func castSection(people: [EmbyPerson]) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let canOpenPerson = DonbyAppExtensionCenter.shared.isActive(for: effectiveDetailServer)
+        return VStack(alignment: .leading, spacing: 10) {
             SectionHeaderView(title: "演职人员")
                 .padding(.horizontal, 28)
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(alignment: .top, spacing: 18) {
                     ForEach(people.prefix(20)) { person in
                         let subtitle = Self.localizedPersonSubtitle(for: person)
-                        let canOpenPerson = DonbyAppExtensionCenter.shared.isActive(for: effectiveDetailServer)
-                        Button {
-                            if let srv = effectiveDetailServer {
-                                DonbyAppExtensionCenter.shared.plugin?.openPersonSheet(server: srv, person: person)
-                            }
-                        } label: {
-                            VStack(spacing: 8) {
-                                PersonAvatarView(
-                                    server: effectiveDetailServer,
-                                    person: person,
-                                    width: 78,
-                                    height: 100,
-                                    accentColor: appState.accentColor
-                                )
-
-                                VStack(spacing: 2) {
-                                    Text(person.name)
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                                        .lineLimit(1)
-                                    Text(subtitle ?? " ")
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                                        .opacity(subtitle == nil ? 0 : 1)
-                                        .lineLimit(1)
+                        if canOpenPerson {
+                            Button {
+                                if let srv = effectiveDetailServer {
+                                    DonbyAppExtensionCenter.shared.plugin?.openPersonSheet(server: srv, person: person)
                                 }
-                                .frame(width: 82)
+                            } label: {
+                                castPersonCard(person: person, subtitle: subtitle)
                             }
-                            .contentShape(Rectangle())
+                            .buttonStyle(.plain)
+                            .help("查看 \(person.name) 的库内作品")
+                        } else {
+                            castPersonCard(person: person, subtitle: subtitle)
                         }
-                        .buttonStyle(.plain)
-                        .disabled(!canOpenPerson)
-                        .help(canOpenPerson ? "查看 \(person.name) 的库内作品" : "")
                     }
                 }
                 .padding(.horizontal, 28)
                 .padding(.vertical, 6)
             }
         }
+    }
+
+    private func castPersonCard(person: EmbyPerson, subtitle: String?) -> some View {
+        VStack(spacing: 8) {
+            PersonAvatarView(
+                server: effectiveDetailServer,
+                person: person,
+                width: 78,
+                height: 100,
+                accentColor: appState.accentColor
+            )
+
+            VStack(spacing: 2) {
+                Text(person.name)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    .lineLimit(1)
+                Text(subtitle ?? " ")
+                    .font(.system(size: 11))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    .opacity(subtitle == nil ? 0 : 1)
+                    .lineLimit(1)
+            }
+            .frame(width: 82)
+        }
+        .contentShape(Rectangle())
     }
 }

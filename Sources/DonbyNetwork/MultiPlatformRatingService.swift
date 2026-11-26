@@ -80,6 +80,34 @@ public actor MultiPlatformRatingService {
         return result
     }
 
+    /// Returns a single cached rating entry if fresh.
+    public func cachedRating(
+        for item: EmbyItem,
+        resolvedImdbId: String? = nil
+    ) -> MultiPlatformRatings? {
+        let map = cachedRatingsByItemId(
+            for: [item],
+            resolvedImdbIds: resolvedImdbId.map { [item.id: $0] } ?? [:]
+        )
+        return map[item.id]
+    }
+
+    /// Enriches a single item (e.g. opened in DetailView or focused in MainCarouselView)
+    /// and returns its merged multi-platform ratings.
+    public func enrichRating(
+        for item: EmbyItem,
+        mdblistAPIKey: String?,
+        resolvedImdbId: String? = nil
+    ) async -> MultiPlatformRatings? {
+        let map = await enrichRatings(
+            for: [item],
+            mdblistAPIKey: mdblistAPIKey,
+            resolvedImdbIds: resolvedImdbId.map { [item.id: $0] } ?? [:],
+            maxFetchCount: 1
+        )
+        return map[item.id]
+    }
+
     /// Enriches uncached hero candidates with multi-platform ratings, exact IMDb vote counts,
     /// awards, and production countries, returning the combined map keyed by `EmbyItem.id`.
     public func enrichRatings(
@@ -113,7 +141,16 @@ public actor MultiPlatformRatingService {
             let imdb = effectiveImdb(for: item)
             guard let key = Self.canonicalCacheKey(for: item, resolvedImdbId: imdb) else { continue }
             if let existing = memoryCache[key], now.timeIntervalSince(existing.fetchedAt) < Self.cacheTTL {
-                continue
+                let needsMDBListUpgrade = resolvedKey != nil
+                    && existing.mdblistFetched != true
+                    && existing.rottenTomatoesCritics == nil
+                    && existing.rottenTomatoesAudience == nil
+                    && existing.metacritic == nil
+                    && existing.trakt == nil
+                    && existing.letterboxd == nil
+                if !needsMDBListUpgrade {
+                    continue
+                }
             }
             guard seenKeys.insert(key).inserted else { continue }
             if (uncachedMovies.count + uncachedShows.count + uncachedImdbOnly.count) >= maxFetchCount {
@@ -139,21 +176,21 @@ public actor MultiPlatformRatingService {
             if !uncachedMovies.isEmpty {
                 let fetched = await fetchMDBListBatch(mediaType: "movie", tmdbIds: uncachedMovies.map(\.tmdbId), apiKey: apiKey)
                 for (tmdbId, rating) in fetched {
-                    store(rating, keys: ["tmdb:movie:\(tmdbId)", rating.imdbId.map { "imdb:\($0.lowercased())" }])
+                    storeMergedMDBList(rating, keys: ["tmdb:movie:\(tmdbId)", rating.imdbId.map { "imdb:\($0.lowercased())" }])
                     didMutate = true
                 }
             }
             if !uncachedShows.isEmpty {
                 let fetched = await fetchMDBListBatch(mediaType: "show", tmdbIds: uncachedShows.map(\.tmdbId), apiKey: apiKey)
                 for (tmdbId, rating) in fetched {
-                    store(rating, keys: ["tmdb:show:\(tmdbId)", rating.imdbId.map { "imdb:\($0.lowercased())" }])
+                    storeMergedMDBList(rating, keys: ["tmdb:show:\(tmdbId)", rating.imdbId.map { "imdb:\($0.lowercased())" }])
                     didMutate = true
                 }
             }
             if !uncachedImdbOnly.isEmpty {
                 let fetched = await fetchMDBListImdbBatch(imdbIds: uncachedImdbOnly.map(\.imdbId), apiKey: apiKey)
                 for (imdbId, rating) in fetched {
-                    store(rating, keys: ["imdb:\(imdbId.lowercased())"])
+                    storeMergedMDBList(rating, keys: ["imdb:\(imdbId.lowercased())"])
                     didMutate = true
                 }
             }
@@ -359,6 +396,20 @@ public actor MultiPlatformRatingService {
         }
     }
 
+    private func storeMergedMDBList(_ incoming: MultiPlatformRatings, keys: [String?]) {
+        let existing = keys.compactMap { $0 }.compactMap { memoryCache[$0] }.first
+        var merged = incoming
+        if let existing {
+            if merged.imdb == nil { merged.imdb = existing.imdb }
+            if (merged.imdbVotes ?? 0) == 0 { merged.imdbVotes = existing.imdbVotes }
+            if merged.awardsSummary == nil { merged.awardsSummary = existing.awardsSummary }
+            if merged.countries == nil { merged.countries = existing.countries }
+            if merged.imdbId == nil { merged.imdbId = existing.imdbId }
+        }
+        merged.mdblistFetched = true
+        store(merged, keys: keys)
+    }
+
     private func resolveAPIKey(_ configured: String?) -> String? {
         if let trimmed = configured?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty {
             return trimmed
@@ -427,6 +478,7 @@ private struct MDBListEntryDTO: Decodable {
             mdblistScore: score,
             imdbId: imdbid ?? ids?.imdb,
             countries: (parsedCountries?.isEmpty == false) ? parsedCountries : nil,
+            mdblistFetched: true,
             fetchedAt: Date()
         )
         for r in ratings ?? [] {
@@ -457,6 +509,7 @@ private struct MDBListEntryDTO: Decodable {
                 else if let s = r.score, s > 0 { result.metacritic = s }
             case "letterboxd":
                 if let v = r.value, v > 0 { result.letterboxd = v }
+                else if let s = r.score, s > 0 { result.letterboxd = Double(s) / 20.0 }
             case "rogerebert":
                 if let v = r.value, v > 0 && v <= 4.0 { result.rogerEbert = v }
             default:

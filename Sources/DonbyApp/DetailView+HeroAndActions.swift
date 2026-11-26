@@ -65,7 +65,7 @@ extension DetailView {
 
                                 LiquidGlassCircleButton(
                                     systemImage: (item.userData?.played == true) ? "checkmark.circle.fill" : "checkmark",
-                                    iconColor: (item.userData?.played == true) ? appState.accentColor : nil,
+                                    iconColor: (item.userData?.played == true) ? appState.lightSurfaceAccentColor : nil,
                                     size: 38,
                                     tooltip: "标记已看 / 未看"
                                 ) {
@@ -74,7 +74,7 @@ extension DetailView {
 
                                 LiquidGlassCircleButton(
                                     systemImage: (item.userData?.isFavorite == true) ? "heart.fill" : "heart",
-                                    iconColor: (item.userData?.isFavorite == true) ? appState.accentColor : nil,
+                                    iconColor: (item.userData?.isFavorite == true) ? appState.lightSurfaceAccentColor : nil,
                                     size: 38,
                                     tooltip: "加入 / 取消收藏"
                                 ) {
@@ -223,31 +223,32 @@ extension DetailView {
                             }
                         }
 
-                        // Right Column: Rating, Specs & Synopsis
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack(spacing: 8) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "star.fill")
-                                        .font(.system(size: 12.5, weight: .bold))
-                                        .foregroundStyle(appState.accentColor)
-                                    Text(String(format: "%.1f", item.communityRating ?? 10.0))
-                                        .font(.system(size: 13.5, weight: .heavy, design: .rounded))
-                                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                                }
+                        // Right Column: Multi-Platform Ratings, Genres, Specs & Synopsis
+                        VStack(alignment: .leading, spacing: 7) {
+                            HeroRatingBadgesRow(
+                                item: item,
+                                ratings: effectiveDetailRatings,
+                                isLightSurface: appState.isLightMode,
+                                fontSize: 13.5,
+                                iconHeight: 17
+                            )
 
-                                if let genres = item.genres, !genres.isEmpty {
-                                    Text(genres.joined(separator: " · "))
-                                        .font(.system(size: 12.5, weight: .semibold))
-                                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                                }
+                            if (item.genres?.isEmpty == false) || heroDownloadedBadgeText != nil {
+                                HStack(spacing: 8) {
+                                    if let genres = item.genres, !genres.isEmpty {
+                                        Text(genres.joined(separator: " · "))
+                                            .font(.system(size: 12.5, weight: .semibold))
+                                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                                    }
 
-                                if let dlSummary = heroDownloadedBadgeText {
-                                    DonbyDownloadedBadgePill(
-                                        text: dlSummary,
-                                        isCompleted: downloadManager.completedEntry(for: item.id) != nil || item.isSeries,
-                                        accentColor: appState.accentColor,
-                                        fontSize: 10.5
-                                    )
+                                    if let dlSummary = heroDownloadedBadgeText {
+                                        DonbyDownloadedBadgePill(
+                                            text: dlSummary,
+                                            isCompleted: downloadManager.completedEntry(for: item.id) != nil || item.isSeries,
+                                            accentColor: appState.overlayAccentColor,
+                                            fontSize: 10.5
+                                        )
+                                    }
                                 }
                             }
 
@@ -331,9 +332,9 @@ extension DetailView {
             if !serverAllows { return Color(white: 0.50) }
             switch matchingEntry?.status {
             case .completed: return defaultInk
-            case .downloading, .queued: return appState.accentColor
-            case .paused: return appState.accentColor
-            default: return (cachedSummary != nil) ? appState.accentColor : defaultInk
+            case .downloading, .queued: return appState.lightSurfaceAccentColor
+            case .paused: return appState.lightSurfaceAccentColor
+            default: return (cachedSummary != nil) ? appState.lightSurfaceAccentColor : defaultInk
             }
         }()
         let tip: String = {

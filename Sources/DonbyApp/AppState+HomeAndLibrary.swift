@@ -466,13 +466,29 @@ extension AppState {
         ServerHomeCacheStore.shared.save(snapshot, for: serverId)
         self.isLoadingHome = false
 
-        // Background multi-platform rating enrichment (MDBList 6-platform batch if API key configured,
-        // or zero-key Cinemeta IMDb fallback) — re-curates hero carousel without blocking initial paint.
+        // Seed any already-cached multi-platform ratings immediately so hero badges appear without delay.
+        let initialCarousel = self.carouselItems
+        Task { [weak self] in
+            let cached = await MultiPlatformRatingService.shared.cachedRatingsByItemId(for: initialCarousel)
+            guard !cached.isEmpty else { return }
+            await MainActor.run {
+                guard let self else { return }
+                for (itemId, rating) in cached {
+                    self.multiPlatformRatingsByItemId[itemId] = rating
+                }
+            }
+        }
+
+        // Background multi-platform rating enrichment (MDBList 8-platform batch if API key configured,
+        // or zero-key IMDb Official + Cinemeta fallback) — re-curates hero carousel without blocking initial paint.
         let generation = self.homeLoadGeneration
         let apiKey = self.mdblistAPIKey
         let poolForEnrichment: [EmbyItem] = {
             var seen = Set<String>()
             var pool: [EmbyItem] = []
+            for item in initialCarousel where seen.insert(item.id).inserted {
+                pool.append(item)
+            }
             for item in extraHeroCandidates where seen.insert(item.id).inserted {
                 pool.append(item)
             }
@@ -481,7 +497,7 @@ extension AppState {
                     pool.append(item)
                 }
             }
-            return Array(pool.prefix(44))
+            return Array(pool.prefix(48))
         }()
 
         guard !poolForEnrichment.isEmpty else { return }
@@ -491,7 +507,7 @@ extension AppState {
             if let srv = targetServer,
                let plugin = DonbyAppExtensionCenter.shared.plugin,
                plugin.isActive(for: srv) {
-                bridgedImdbIds = await plugin.resolveImdbIds(for: poolForEnrichment, server: srv, maxCount: 14)
+                bridgedImdbIds = await plugin.resolveImdbIds(for: poolForEnrichment, server: srv, maxCount: 16)
             }
             let enriched = await MultiPlatformRatingService.shared.enrichRatings(
                 for: poolForEnrichment,
@@ -503,6 +519,9 @@ extension AppState {
                 guard let self,
                       self.homeLoadGeneration == generation,
                       self.activeServer?.id == serverId else { return }
+                for (itemId, rating) in enriched {
+                    self.multiPlatformRatingsByItemId[itemId] = rating
+                }
                 let curated = HomeHeroCurator.selectHeroItems(
                     libraryViews: libraryViews,
                     latestByLibrary: latestByLibrary,
@@ -529,6 +548,63 @@ extension AppState {
         }
     }
 
+    /// Loads (from disk/memory cache or remote enrichment) multi-platform ratings for a single hero item
+    /// and caches the result on `multiPlatformRatingsByItemId`.
+    public func ensureMultiPlatformRating(
+        for item: EmbyItem,
+        server: EmbyServerConfig?
+    ) async -> MultiPlatformRatings? {
+        let apiKey = self.mdblistAPIKey
+        let hasKey = !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !(ProcessInfo.processInfo.environment["DONBY_MDBLIST_API_KEY"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+
+        if let existing = multiPlatformRatingsByItemId[item.id] {
+            let needsUpgrade = hasKey
+                && existing.mdblistFetched != true
+                && existing.rottenTomatoesCritics == nil
+                && existing.rottenTomatoesAudience == nil
+                && existing.metacritic == nil
+                && existing.trakt == nil
+                && existing.letterboxd == nil
+            if !needsUpgrade {
+                return existing
+            }
+        }
+
+        if let cached = await MultiPlatformRatingService.shared.cachedRating(for: item) {
+            self.multiPlatformRatingsByItemId[item.id] = cached
+            let needsUpgrade = hasKey
+                && cached.mdblistFetched != true
+                && cached.rottenTomatoesCritics == nil
+                && cached.rottenTomatoesAudience == nil
+                && cached.metacritic == nil
+                && cached.trakt == nil
+                && cached.letterboxd == nil
+            if !needsUpgrade {
+                return cached
+            }
+        }
+
+        var bridgedImdb: String? = MultiPlatformRatingService.resolvedProviderId(in: item.providerIds, key: "imdb")
+        if bridgedImdb == nil,
+           let srv = server ?? activeServer,
+           let plugin = DonbyAppExtensionCenter.shared.plugin,
+           plugin.isActive(for: srv) {
+            let resolvedMap = await plugin.resolveImdbIds(for: [item], server: srv, maxCount: 1)
+            bridgedImdb = resolvedMap[item.id]
+        }
+
+        let enriched = await MultiPlatformRatingService.shared.enrichRating(
+            for: item,
+            mdblistAPIKey: apiKey,
+            resolvedImdbId: bridgedImdb
+        )
+        if let enriched {
+            self.multiPlatformRatingsByItemId[item.id] = enriched
+        }
+        return enriched ?? self.multiPlatformRatingsByItemId[item.id]
+    }
+
     public static func detailSeriesKey(for item: EmbyItem) -> String {
         item.isSeries ? item.id : (item.seriesId ?? item.id)
     }
@@ -549,21 +625,39 @@ extension AppState {
         detailFocusedEpisodeMemory[key] = (seasonNumber: item.parentIndexNumber, episodeId: item.id)
     }
 
+    private func cachedSeriesItem(withId seriesId: String) -> EmbyItem? {
+        carouselItems.first(where: { $0.id == seriesId && $0.isSeries })
+            ?? favoriteItems.first(where: { $0.id == seriesId && $0.isSeries })
+            ?? latestByLibrary.values.lazy.compactMap { $0.first(where: { $0.id == seriesId && $0.isSeries }) }.first
+    }
+
+    private func normalizedDetailEntry(for item: EmbyItem) -> EmbyItem {
+        guard item.isEpisode,
+              let sid = item.seriesId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sid.isEmpty else { return item }
+        if let cached = cachedSeriesItem(withId: sid) { return cached }
+        let title = (item.seriesName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ? item.seriesName! : item.name
+        return EmbyItem(
+            id: sid, name: title, serverId: item.serverId, type: "Series",
+            imageTags: item.seriesPrimaryImageTag.map { ["Primary": $0] },
+            backdropImageTags: item.parentBackdropImageTags,
+            uhdPosterURL: item.uhdPosterURL, uhdBackdropURL: item.uhdBackdropURL,
+            uhdLogoURL: item.uhdLogoURL, uhdMediaType: item.uhdMediaType != nil ? "tv" : nil
+        )
+    }
+
     public func openDetail(for item: EmbyItem, preferOfflineFocus: Bool = false) {
         cancelPendingPlaybackStart()
-        if preferOfflineFocus {
-            detailOfflineFocusIds.insert(item.id)
-        } else {
-            detailOfflineFocusIds.remove(item.id)
-        }
-        if let last = detailStack.last, last.id == item.id { return }
-        let key = Self.detailSeriesKey(for: item)
+        let entry = normalizedDetailEntry(for: item)
+        if preferOfflineFocus { detailOfflineFocusIds.insert(entry.id) } else { detailOfflineFocusIds.remove(entry.id) }
+        let key = Self.detailSeriesKey(for: entry)
         if item.isEpisode {
             detailFocusedEpisodeMemory[key] = (seasonNumber: item.parentIndexNumber, episodeId: item.id)
         } else {
             detailFocusedEpisodeMemory.removeValue(forKey: key)
         }
-        detailStack.append(item)
+        if let last = detailStack.last, last.id == entry.id { return }
+        detailStack.append(entry)
     }
 
     public func popDetail() {

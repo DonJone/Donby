@@ -365,16 +365,8 @@ public struct PersonAvatarView: View {
         .overlay(
             shape
                 .strokeBorder(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(isLight ? 0.85 : 0.46),
-                            Color.white.opacity(isLight ? 0.30 : 0.10),
-                            (isLight ? Color.black.opacity(0.06) : Color.white.opacity(0.24))
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 0.65
+                    isLight ? Color.black.opacity(0.08) : Color.white.opacity(0.08),
+                    lineWidth: 0.5
                 )
         )
         .shadow(color: Color.black.opacity(isLight ? 0.08 : 0.32), radius: isLight ? 5 : 8, y: isLight ? 2.5 : 4)

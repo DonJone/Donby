@@ -8,7 +8,7 @@ private struct LiquidGlassCircleMenuVisual: View {
     @State private var isHovered: Bool = false
 
     private var effectiveIconColor: Color {
-        if let iconColor { return iconColor }
+        if let iconColor, iconColor != .white { return iconColor }
         return Color(red: 0.12, green: 0.12, blue: 0.14)
     }
 
@@ -105,14 +105,14 @@ private struct LiquidGlassSelectorCardVisual: View {
                 Circle()
                     .fill(
                         RadialGradient(
-                            colors: [accentColor.opacity(0.32), accentColor.opacity(0.10)],
+                            colors: [accentColor.opacity(0.20), accentColor.opacity(0.06)],
                             center: .topLeading,
                             startRadius: 2,
                             endRadius: 26
                         )
                     )
                     .overlay(
-                        Circle().strokeBorder(accentColor.opacity(0.50), lineWidth: 0.75)
+                        Circle().strokeBorder(accentColor.opacity(0.24), lineWidth: 0.75)
                     )
                     .frame(width: 33, height: 33)
                 Image(systemName: icon)

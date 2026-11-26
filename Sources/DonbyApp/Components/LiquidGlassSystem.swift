@@ -223,7 +223,7 @@ public struct LiquidGlassCapsuleButton: View {
                                 .fill(Color.white.opacity(isHovered ? 1.0 : 0.95))
 
                             if progressFraction > 0 {
-                                Capsule(style: .continuous)
+                                Rectangle()
                                     .fill(Color.black.opacity(0.08))
                                     .frame(width: geo.size.width * min(1.0, max(0.0, progressFraction)))
                             }
@@ -282,7 +282,7 @@ public struct LiquidGlassCircleButton: View {
     }
 
     private var effectiveIconColor: Color {
-        if let iconColor { return iconColor }
+        if let iconColor, iconColor != .white { return iconColor }
         return Color(red: 0.12, green: 0.12, blue: 0.14)
     }
 
@@ -385,7 +385,7 @@ private struct LiquidGlassCircleMenuVisual: View {
     @State private var isHovered: Bool = false
 
     private var effectiveIconColor: Color {
-        if let iconColor { return iconColor }
+        if let iconColor, iconColor != .white { return iconColor }
         return Color(red: 0.12, green: 0.12, blue: 0.14)
     }
 
@@ -483,14 +483,14 @@ private struct LiquidGlassSelectorCardVisual: View {
                 Circle()
                     .fill(
                         RadialGradient(
-                            colors: [accentColor.opacity(0.32), accentColor.opacity(0.10)],
+                            colors: [accentColor.opacity(0.20), accentColor.opacity(0.06)],
                             center: .topLeading,
                             startRadius: 2,
                             endRadius: 26
                         )
                     )
                     .overlay(
-                        Circle().strokeBorder(accentColor.opacity(0.50), lineWidth: 0.75)
+                        Circle().strokeBorder(accentColor.opacity(0.24), lineWidth: 0.75)
                     )
                     .frame(width: 33, height: 33)
                 Image(systemName: icon)

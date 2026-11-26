@@ -159,9 +159,19 @@ public struct DonbyTheme: Equatable, Sendable {
         return accentRGB
     }
 
+    /// Accent RGB for icons placed on always-white surfaces (e.g. LiquidGlassCircleButton).
+    /// Monochrome always resolves to near-black ink so Dark Mode never renders white-on-white.
+    public var lightSurfaceAccentRGB: DonbyRGB {
+        if isMonochrome {
+            return DonbyRGB(r: 0.12, g: 0.12, b: 0.14)
+        }
+        return accentRGB
+    }
+
     public var accentColor: Color { accentRGB.color }
     public var accentTextColor: Color { accentTextRGB.color }
     public var overlayAccentColor: Color { overlayAccentRGB.color }
+    public var lightSurfaceAccentColor: Color { lightSurfaceAccentRGB.color }
 
     /// Semantic feedback colors (kept consistent regardless of active accent preset).
     public var semanticErrorColor: Color { DonbyAccentPreset.appleMusicRed.rgb.color }

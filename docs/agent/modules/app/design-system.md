@@ -1,11 +1,12 @@
 # App Sub-Map: Liquid Glass Design System, Theme Controls & Icons
 
-> Parent: [app/INDEX.md](INDEX.md). Covers 4 files under `Sources/DonbyApp/Components/`.
+> Parent: [app/INDEX.md](INDEX.md). Covers 5 files under `Sources/DonbyApp/Components/`.
 
 ## 1. File Inventory & Responsibilities
 - `Components/DonbyThemeControls.swift` — `DonbyGlassPalette` color tokens + 5 non-blue theme-faithful form controls replacing macOS system-blue controls: `DonbySegmentedControl`, `DonbyCheckboxToggleStyle`, `DonbySwitchToggleStyle`, `DonbySlider`, and `View.donbyFlatTextField(isLight:)`.
 - `Components/LiquidGlassSystem.swift` — `DonbyVisualEffectView`, `DonbyGlassContainer`, `View.donbyLiquidGlassCapsule` / `donbyLiquidGlassRect`, `DonbyLiquidGlassCapsuleSurface`, sculpted buttons (`LiquidGlassCapsuleButton`, `LiquidGlassCircleButton`, `LiquidGlassVectorCircleButton`), `DonbyMenuHoverBox`, detached-hover menus (`LiquidGlassCircleMenu`, `LiquidGlassSelectorCard`), and badges (`DonbyWatchedBadgeView`, `DonbyDownloadedBadgePill`).
 - `Components/BrandMarks.swift` — `ServerIconView` dispatcher, vector server marks (`EmbyVectorMark`, `JellyfinVectorMark`, `PlexVectorMark`, `FeiniuVectorMark`, `StorageVectorMark`), `DonbyAppLogoView`, and `UHDNowVectorLogo` (reads `AppState.sharedInstance?.appearanceMode` and bundled `uhdnow_day`/`uhdnow_night` PNGs).
+- `Components/RatingBadgesStripView.swift` — `HeroRatingBadgesRow` rendering the pure-vector 7-platform hero rating strip (TMDB, IMDb, Rotten Tomatoes Critics fresh/rotten, Rotten Tomatoes Audience fresh/spilled, Letterboxd, Trakt, Metacritic) with wrapping flow layout and dark/light surface contrast adaptation.
 - `Components/ToolbarIconsAndControls.swift` — 13 `Canvas`-drawn vector action glyphs (`RouteSwitch`, `Refresh`, `MoreDots`, `Plus`, `Download` with nested `State`, `GridWall`, `Folder`, `FinderReveal`, `SortArrows`, `Play`, `Pause`, `Trash`, `Bookmark`) + `ToolbarVectorButton`, `DonbyToolbarCircleView`, `DonbySearchPillField`.
 
 ## 2. Critical Invariants (DO NOT BREAK)

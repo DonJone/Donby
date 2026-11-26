@@ -256,7 +256,7 @@ public struct MainCarouselView: View {
                     endPoint: .bottom
                 )
 
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 11) {
                     HStack(spacing: 8) {
                         if let audioTag = item.audioSummaryTag {
                             Text(audioTag)
@@ -266,13 +266,6 @@ public struct MainCarouselView: View {
                                 .padding(.vertical, 3)
                                 .background(Color.white.opacity(0.16))
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
-                        }
-                        if let rating = item.communityRating, rating > 0 {
-                            Text(String(format: "%.1f", rating))
-                                .font(.system(size: 12, weight: .bold, design: .rounded))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 8).padding(.vertical, 3)
-                                .background(Color.black.opacity(0.45)).clipShape(Capsule())
                         }
                         if let year = item.productionYear {
                             Text(String(year)).font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.82))
@@ -295,6 +288,14 @@ public struct MainCarouselView: View {
                             Text(tagline).font(.system(size: 13, weight: .semibold)).foregroundStyle(appState.accentColor).lineLimit(1)
                         }
                     }
+
+                    HeroRatingBadgesRow(
+                        item: item,
+                        ratings: appState.multiPlatformRatingsByItemId[item.id],
+                        isLightSurface: false,
+                        fontSize: 13.5,
+                        iconHeight: 17
+                    )
 
                     if let overview = item.overview, !overview.isEmpty {
                         Text(overview)
@@ -372,12 +373,8 @@ public struct MainCarouselView: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .strokeBorder(
-                        LinearGradient(
-                            colors: [Color.white.opacity(0.28), Color.white.opacity(0.08), Color.white.opacity(0.16)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
+                        appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.06),
+                        lineWidth: 0.65
                     )
             )
             .onHover { hoverBox.isHovering = $0 }
@@ -387,6 +384,9 @@ public struct MainCarouselView: View {
                 guard !hoverBox.isHovering && items.count > 1 && Date().timeIntervalSince(lastManualInteraction) > 5.0 else { return }
                 slideDirection = 1
                 withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) { currentIndex = (currentIndex + 1) % items.count }
+            }
+            .task(id: "\(item.id)|\(appState.mdblistAPIKey)") {
+                _ = await appState.ensureMultiPlatformRating(for: item, server: appState.activeServer)
             }
             .task(id: "\(appState.activeServer?.activeBaseURL ?? "")|\(currentIndex)|\(items.count)") {
                 guard items.count > 1 else { return }

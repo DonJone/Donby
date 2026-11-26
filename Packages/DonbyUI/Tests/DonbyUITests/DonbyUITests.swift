@@ -25,18 +25,21 @@ struct DonbyUITests {
         #expect(lightMono.accentRGB == DonbyRGB(r: 0.12, g: 0.12, b: 0.12))
         #expect(lightMono.accentTextRGB == DonbyRGB(r: 1.0, g: 1.0, b: 1.0))
         #expect(lightMono.overlayAccentRGB == DonbyRGB(r: 1.0, g: 1.0, b: 1.0))
+        #expect(lightMono.lightSurfaceAccentRGB == DonbyRGB(r: 0.12, g: 0.12, b: 0.14))
 
         let darkMono = DonbyTheme.darkMonochrome
         #expect(darkMono.isMonochrome)
         #expect(darkMono.accentRGB == DonbyRGB(r: 1.0, g: 1.0, b: 1.0))
         #expect(darkMono.accentTextRGB == DonbyRGB(r: 0.0, g: 0.0, b: 0.0))
         #expect(darkMono.overlayAccentRGB == DonbyRGB(r: 1.0, g: 1.0, b: 1.0))
+        #expect(darkMono.lightSurfaceAccentRGB == DonbyRGB(r: 0.12, g: 0.12, b: 0.14))
 
         let colored = DonbyTheme(isLightMode: true, accentPreset: .cyan)
         #expect(!colored.isMonochrome)
         #expect(colored.accentRGB == DonbyAccentPreset.cyan.rgb)
         #expect(colored.accentTextRGB == DonbyRGB(r: 1.0, g: 1.0, b: 1.0))
         #expect(colored.overlayAccentRGB == DonbyAccentPreset.cyan.rgb)
+        #expect(colored.lightSurfaceAccentRGB == DonbyAccentPreset.cyan.rgb)
     }
 
     @Test("Custom RGB accent overrides preset and disables monochrome flag")

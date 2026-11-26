@@ -26,6 +26,19 @@ public struct DetailView: View {
     @State var cachedOfflineGroup: OfflineLibraryGroup? = nil
     @State var cachedUnpinnedAssets: [CachedMediaSummary] = []
     @State var showWatchPartyCreateSheet: Bool = false
+    @State var multiPlatformRatings: MultiPlatformRatings? = nil
+
+    var effectiveDetailRatings: MultiPlatformRatings? {
+        multiPlatformRatings
+            ?? appState.multiPlatformRatingsByItemId[item.id]
+            ?? appState.multiPlatformRatingsByItemId[initialItem.id]
+    }
+
+    var detailRatingsTaskKey: String {
+        let tmdb = MultiPlatformRatingService.resolvedProviderId(in: item.providerIds, key: "tmdb") ?? ""
+        let imdb = MultiPlatformRatingService.resolvedProviderId(in: item.providerIds, key: "imdb") ?? ""
+        return "\(item.id)|\(tmdb)|\(imdb)|\(appState.mdblistAPIKey)"
+    }
 
     var detailSeriesKey: String {
         AppState.detailSeriesKey(for: item)
@@ -165,6 +178,9 @@ public struct DetailView: View {
         }
         .task(id: initialItem.id) {
             await loadFullDetailData()
+        }
+        .task(id: detailRatingsTaskKey) {
+            await loadDetailMultiPlatformRatings()
         }
         .task(id: downloadManager.statusIndex) {
             await refreshOfflineAndCacheSnapshots()

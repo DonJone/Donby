@@ -615,12 +615,23 @@ public final class UHDAppExtensionPlugin: DonbyAppUIExtensionPlugin {
             && (initialItem.isEpisode || explicitKind == nil || explicitKind?.isEmpty == true)
 
         if !needsDetailFirstForSeriesContext {
-            let creditMediaId = initialItem.isEpisode ? (initialSeriesId ?? initialItem.id) : initialItem.id
-            async let detailTask = try? UHDStreamClient.shared.fetchItemDetail(server: server, item: initialItem)
+            let detailTarget: EmbyItem = if initialItem.isEpisode, let sid = initialSeriesId, !sid.isEmpty {
+                EmbyItem(
+                    id: sid,
+                    name: (initialItem.seriesName?.isEmpty == false) ? initialItem.seriesName! : initialItem.name,
+                    serverId: initialItem.serverId,
+                    type: "Series",
+                    uhdMediaType: "tv"
+                )
+            } else {
+                initialItem
+            }
+            let creditMediaId = detailTarget.id
+            async let detailTask = try? UHDStreamClient.shared.fetchItemDetail(server: server, item: detailTarget)
             async let creditsTask = try? UHDStreamClient.shared.fetchCredits(server: server, mediaId: creditMediaId)
             async let assetsTask: [MediaSourceInfo]? = {
-                guard !initialItem.isSeries else { return nil }
-                return try? await UHDStreamClient.shared.fetchAssetMediaSources(server: server, item: initialItem)
+                guard !detailTarget.isSeries else { return nil }
+                return try? await UHDStreamClient.shared.fetchAssetMediaSources(server: server, item: detailTarget)
             }()
             async let seasonsTask: [EmbyItem]? = {
                 guard let sid = initialSeriesId, !sid.isEmpty else { return nil }
@@ -638,8 +649,13 @@ public final class UHDAppExtensionPlugin: DonbyAppUIExtensionPlugin {
                 enriched = detailed.withDetailEnrichment(mediaSources: loadedSources, people: loadedPeople)
             }
             let seasons = await seasonsTask
-            let prefEp = await tvPlaybackStateTask?.preferredEpisode
-            let preferredTuple = prefEp.map { ($0.seasonId, $0.seasonNumber, $0.episodeId) }
+            let preferredTuple: (seasonId: String, seasonNumber: Int?, episodeId: String)?
+            if initialItem.isEpisode {
+                preferredTuple = (seasonId: initialItem.seasonId ?? "", seasonNumber: initialItem.parentIndexNumber, episodeId: initialItem.id)
+            } else {
+                let prefEp = await tvPlaybackStateTask?.preferredEpisode
+                preferredTuple = prefEp.map { ($0.seasonId, $0.seasonNumber, $0.episodeId) }
+            }
             return DonbyExtensionDetailPayload(enrichedItem: enriched, seasons: seasons, preferredEpisode: preferredTuple)
         }
 
@@ -669,6 +685,17 @@ public final class UHDAppExtensionPlugin: DonbyAppUIExtensionPlugin {
         }
         let creditMediaId = detailed.isEpisode ? (resolvedSeriesId ?? detailed.id) : detailed.id
 
+        async let upgradedSeriesTask: EmbyItem? = {
+            guard detailed.isEpisode, let sid = resolvedSeriesId, !sid.isEmpty else { return nil }
+            let seriesStub = EmbyItem(
+                id: sid,
+                name: (detailed.seriesName?.isEmpty == false) ? detailed.seriesName! : detailed.name,
+                serverId: detailed.serverId,
+                type: "Series",
+                uhdMediaType: "tv"
+            )
+            return try? await UHDStreamClient.shared.fetchItemDetail(server: server, item: seriesStub)
+        }()
         async let creditsTask = try? UHDStreamClient.shared.fetchCredits(server: server, mediaId: creditMediaId)
         async let fallbackAssetsTask: [MediaSourceInfo]? = {
             if let preloaded = await preflightTask?.value { return preloaded }
@@ -684,12 +711,19 @@ public final class UHDAppExtensionPlugin: DonbyAppUIExtensionPlugin {
             return try? await UHDStreamClient.shared.fetchTVPlaybackState(server: server, tvId: sid)
         }()
 
-        let loadedSources = await fallbackAssetsTask
         let loadedPeople = await creditsTask
-        let enriched = detailed.withDetailEnrichment(mediaSources: loadedSources, people: loadedPeople)
         let seasons = await seasonsTask
-        let prefEp = await tvPlaybackStateTask?.preferredEpisode
-        let preferredTuple = prefEp.map { ($0.seasonId, $0.seasonNumber, $0.episodeId) }
+        let enriched: EmbyItem
+        let preferredTuple: (seasonId: String, seasonNumber: Int?, episodeId: String)?
+        if let upgradedSeries = await upgradedSeriesTask {
+            enriched = upgradedSeries.withDetailEnrichment(people: loadedPeople)
+            preferredTuple = (seasonId: detailed.seasonId ?? "", seasonNumber: detailed.parentIndexNumber, episodeId: detailed.id)
+        } else {
+            let loadedSources = await fallbackAssetsTask
+            enriched = detailed.withDetailEnrichment(mediaSources: loadedSources, people: loadedPeople)
+            let prefEp = await tvPlaybackStateTask?.preferredEpisode
+            preferredTuple = prefEp.map { ($0.seasonId, $0.seasonNumber, $0.episodeId) }
+        }
         return DonbyExtensionDetailPayload(enrichedItem: enriched, seasons: seasons, preferredEpisode: preferredTuple)
     }
 

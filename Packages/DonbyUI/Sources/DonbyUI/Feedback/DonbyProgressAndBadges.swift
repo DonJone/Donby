@@ -243,7 +243,7 @@ public struct DonbyToastBanner: View {
         )
         .overlay(
             Capsule(style: .continuous)
-                .strokeBorder(isLight ? Color.black.opacity(0.14) : Color.white.opacity(0.20), lineWidth: 0.75)
+                .strokeBorder(isLight ? Color.black.opacity(0.14) : Color.white.opacity(0.10), lineWidth: 0.65)
         )
         .shadow(
             color: isLight ? Color.black.opacity(0.14) : Color.black.opacity(0.50),

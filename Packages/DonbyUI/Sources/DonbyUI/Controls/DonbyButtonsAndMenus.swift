@@ -121,7 +121,7 @@ public struct LiquidGlassCircleButton: View {
     }
 
     private var effectiveIconColor: Color {
-        if let iconColor { return iconColor }
+        if let iconColor, iconColor != .white { return iconColor }
         return Color(red: 0.12, green: 0.12, blue: 0.14)
     }
 

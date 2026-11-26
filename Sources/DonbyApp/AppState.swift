@@ -70,6 +70,7 @@ public final class AppState: ObservableObject {
     @Published public var homeErrorMessage: String? = nil
     @Published public var libraryViews: [EmbyItem] = []
     @Published public var carouselItems: [EmbyItem] = []
+    @Published public var multiPlatformRatingsByItemId: [String: MultiPlatformRatings] = [:]
     @Published public var resumeItems: [EmbyItem] = []
     @Published public var nextUpItems: [EmbyItem] = []
     @Published public var latestByLibrary: [String: [EmbyItem]] = [:]
@@ -596,6 +597,17 @@ public final class AppState: ObservableObject {
                 self.carouselItems = snap.carouselItems
             }
             self.isLoadingHome = false
+            let snapshotCarousel = self.carouselItems
+            Task { [weak self] in
+                let cached = await MultiPlatformRatingService.shared.cachedRatingsByItemId(for: snapshotCarousel)
+                guard !cached.isEmpty else { return }
+                await MainActor.run {
+                    guard let self else { return }
+                    for (itemId, rating) in cached {
+                        self.multiPlatformRatingsByItemId[itemId] = rating
+                    }
+                }
+            }
         } else {
             self.libraryViews = []
             self.resumeItems = []

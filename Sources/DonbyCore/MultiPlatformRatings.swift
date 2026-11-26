@@ -35,6 +35,7 @@ public struct MultiPlatformRatings: Codable, Sendable, Equatable {
     public var imdbId: String?
     public var awardsSummary: String?
     public var countries: [String]?
+    public var mdblistFetched: Bool?
     public var fetchedAt: Date
 
     public init(
@@ -53,6 +54,7 @@ public struct MultiPlatformRatings: Codable, Sendable, Equatable {
         imdbId: String? = nil,
         awardsSummary: String? = nil,
         countries: [String]? = nil,
+        mdblistFetched: Bool? = nil,
         fetchedAt: Date = Date()
     ) {
         self.tmdb = tmdb
@@ -70,6 +72,7 @@ public struct MultiPlatformRatings: Codable, Sendable, Equatable {
         self.imdbId = imdbId
         self.awardsSummary = awardsSummary
         self.countries = countries
+        self.mdblistFetched = mdblistFetched
         self.fetchedAt = fetchedAt
     }
 
@@ -460,5 +463,145 @@ public struct MultiPlatformRatings: Codable, Sendable, Equatable {
         guard let votes, votes > 0 else { return score }
         let v = Double(votes)
         return (v / (v + minVotes)) * score + (minVotes / (v + minVotes)) * prior
+    }
+
+    // MARK: - Hero Display Badges
+
+    /// Ordered visual rating platforms displayed on Home and Detail hero posters.
+    public enum RatingPlatform: String, CaseIterable, Sendable, Identifiable {
+        case tmdb
+        case imdb
+        case rottenTomatoesCritics
+        case rottenTomatoesAudience
+        case letterboxd
+        case trakt
+        case metacritic
+
+        public var id: String { rawValue }
+    }
+
+    /// Single formatted rating badge ready for rendering on hero posters.
+    public struct RatingBadgeItem: Identifiable, Equatable, Sendable {
+        public let platform: RatingPlatform
+        public let formattedValue: String
+        public let isPositive: Bool
+        public let tooltip: String
+
+        public var id: String { platform.rawValue }
+
+        public init(platform: RatingPlatform, formattedValue: String, isPositive: Bool = true, tooltip: String) {
+            self.platform = platform
+            self.formattedValue = formattedValue
+            self.isPositive = isPositive
+            self.tooltip = tooltip
+        }
+    }
+
+    /// Builds ordered visual rating badges for an `EmbyItem`, merging optional multi-platform ratings
+    /// with item-level `communityRating` (TMDB) and `criticRating` (Rotten Tomatoes Tomatometer) fallbacks.
+    public static func displayBadges(
+        for item: EmbyItem,
+        external: MultiPlatformRatings?
+    ) -> [RatingBadgeItem] {
+        displayBadges(
+            external: external,
+            fallbackTMDB: item.communityRating,
+            fallbackCriticRating: item.criticRating
+        )
+    }
+
+    /// Builds ordered visual rating badges from multi-platform data plus optional Emby fallbacks.
+    public static func displayBadges(
+        external: MultiPlatformRatings?,
+        fallbackTMDB: Double?,
+        fallbackCriticRating: Double?
+    ) -> [RatingBadgeItem] {
+        var badges: [RatingBadgeItem] = []
+
+        if let tmdb = validTenScale(external?.tmdb) ?? validTenScale(fallbackTMDB) {
+            let text = String(format: "%.1f", tmdb)
+            let tip: String
+            if let votes = external?.tmdbVotes, votes > 0 {
+                tip = "TMDB \(text) (\(formatCompactVotes(votes)) 票)"
+            } else {
+                tip = "TMDB \(text)"
+            }
+            badges.append(RatingBadgeItem(platform: .tmdb, formattedValue: text, isPositive: tmdb >= 6.0, tooltip: tip))
+        }
+
+        if let imdb = validTenScale(external?.imdb) {
+            let text = String(format: "%.1f", imdb)
+            let tip: String
+            if let votes = external?.imdbVotes, votes > 0 {
+                tip = "IMDb \(text) (\(formatCompactVotes(votes)) 票)"
+            } else {
+                tip = "IMDb \(text)"
+            }
+            badges.append(RatingBadgeItem(platform: .imdb, formattedValue: text, isPositive: imdb >= 6.0, tooltip: tip))
+        }
+
+        let rtCritics: Int? = {
+            if let v = external?.rottenTomatoesCritics, (1...100).contains(v) { return v }
+            if let fb = fallbackCriticRating, fb >= 1 && fb <= 100 { return Int(fb.rounded()) }
+            return nil
+        }()
+        if let rtCritics {
+            let isFresh = rtCritics >= 60
+            badges.append(RatingBadgeItem(
+                platform: .rottenTomatoesCritics,
+                formattedValue: "\(rtCritics)%",
+                isPositive: isFresh,
+                tooltip: "烂番茄影评人 \(rtCritics)% (\(isFresh ? "新鲜" : "烂"))"
+            ))
+        }
+
+        if let rtAudience = external?.rottenTomatoesAudience, (1...100).contains(rtAudience) {
+            let isFresh = rtAudience >= 60
+            badges.append(RatingBadgeItem(
+                platform: .rottenTomatoesAudience,
+                formattedValue: "\(rtAudience)%",
+                isPositive: isFresh,
+                tooltip: "烂番茄观众爆米花指数 \(rtAudience)%"
+            ))
+        }
+
+        if let rawLB = external?.letterboxd, rawLB > 0 {
+            let tenScale = rawLB <= 5.0 ? min(10.0, rawLB * 2.0) : min(10.0, rawLB)
+            let text = String(format: "%.1f", tenScale)
+            let tip = rawLB <= 5.0
+                ? String(format: "Letterboxd %.1f/5 (折合 %@)", rawLB, text)
+                : "Letterboxd \(text)"
+            badges.append(RatingBadgeItem(platform: .letterboxd, formattedValue: text, isPositive: tenScale >= 6.0, tooltip: tip))
+        }
+
+        if let trakt = external?.trakt, (1...100).contains(trakt) {
+            let tip: String
+            if let votes = external?.traktVotes, votes > 0 {
+                tip = "Trakt \(trakt)% (\(formatCompactVotes(votes)) 票)"
+            } else {
+                tip = "Trakt \(trakt)%"
+            }
+            badges.append(RatingBadgeItem(platform: .trakt, formattedValue: "\(trakt)%", isPositive: trakt >= 60, tooltip: tip))
+        }
+
+        if let mc = external?.metacritic, (1...100).contains(mc) {
+            let tenScale = Double(mc) / 10.0
+            let text = String(format: "%.1f", tenScale)
+            badges.append(RatingBadgeItem(
+                platform: .metacritic,
+                formattedValue: text,
+                isPositive: mc >= 61,
+                tooltip: "Metacritic \(mc)/100"
+            ))
+        }
+
+        return badges
+    }
+
+    private static func formatCompactVotes(_ votes: Int) -> String {
+        if votes >= 10_000 {
+            return String(format: "%.1f万", Double(votes) / 10_000.0)
+        }
+        return "\(votes)"
     }
 }

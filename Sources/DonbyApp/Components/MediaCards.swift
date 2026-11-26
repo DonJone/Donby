@@ -208,7 +208,7 @@ public struct PosterCardView: View, Equatable {
                                 DonbyDownloadedBadgePill(
                                     text: dlBadge,
                                     isCompleted: isDone,
-                                    accentColor: appearance.accentColor,
+                                    accentColor: appearance.isMonochromeTheme ? .white : appearance.accentColor,
                                     fontSize: 9.5
                                 )
                             }
@@ -327,7 +327,7 @@ public struct LandscapeCardView: View, Equatable {
                             DonbyDownloadedBadgePill(
                                 text: dlBadge,
                                 isCompleted: isDone,
-                                accentColor: appearance.accentColor,
+                                accentColor: appearance.isMonochromeTheme ? .white : appearance.accentColor,
                                 fontSize: 9.5
                             )
                         }
@@ -526,7 +526,7 @@ public struct ToastBannerView: View {
         )
         .overlay(
             Capsule(style: .continuous)
-                .strokeBorder(isLightMode ? Color.black.opacity(0.14) : Color.white.opacity(0.20), lineWidth: 0.75)
+                .strokeBorder(isLightMode ? Color.black.opacity(0.14) : Color.white.opacity(0.10), lineWidth: 0.65)
         )
         .shadow(
             color: isLightMode ? Color.black.opacity(0.14) : Color.black.opacity(0.50),

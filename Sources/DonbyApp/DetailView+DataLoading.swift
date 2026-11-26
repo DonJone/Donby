@@ -3,6 +3,14 @@ import DonbyCore
 import DonbyNetwork
 
 extension DetailView {
+    func loadDetailMultiPlatformRatings() async {
+        let target = item
+        if let resolved = await appState.ensureMultiPlatformRating(for: target, server: effectiveDetailServer) {
+            guard !Task.isCancelled else { return }
+            self.multiPlatformRatings = resolved
+        }
+    }
+
     var effectivePlayButtonStartSeconds: Double {
         let target = heroResolvedPlayTarget
         if target.resumePositionSeconds > 0.5 {
@@ -263,7 +271,7 @@ extension DetailView {
                    !self.item.isEpisode,
                    appState.detailFocusedEpisode(forSeriesKey: detailSeriesKey) == nil,
                    let prefEp = payload.preferredEpisode,
-                   let matchedSeason = preloadedSeasons.first(where: { $0.id == prefEp.seasonId || $0.indexNumber == prefEp.seasonNumber }) {
+                   let matchedSeason = preloadedSeasons.first(where: { (!prefEp.seasonId.isEmpty && $0.id == prefEp.seasonId) || $0.indexNumber == prefEp.seasonNumber }) {
                     await loadEpisodesForSeason(
                         matchedSeason,
                         seasonNumber: matchedSeason.indexNumber ?? prefEp.seasonNumber,
@@ -277,22 +285,50 @@ extension DetailView {
             return
         }
 
-        async let detailTask = try? EmbyClient.shared.fetchItemDetail(server: server, itemId: initialItem.id)
-        async let similarTask = try? EmbyClient.shared.fetchSimilarItems(server: server, itemId: initialItem.id)
+        let detailFetchId: String = if initialItem.isEpisode, let sid = targetSeriesId, !sid.isEmpty {
+            sid
+        } else {
+            initialItem.id
+        }
+
+        async let detailTask = try? EmbyClient.shared.fetchItemDetail(server: server, itemId: detailFetchId)
+        async let similarTask = try? EmbyClient.shared.fetchSimilarItems(server: server, itemId: detailFetchId)
         async let seasonsTask: [EmbyItem]? = {
             guard let sid = targetSeriesId, !sid.isEmpty else { return nil }
             return try? await EmbyClient.shared.fetchSeasons(server: server, seriesId: sid)
         }()
 
+        var upgradedSimilarItems: [EmbyItem]? = nil
         if let detailed = await detailTask {
             guard !Task.isCancelled else { return }
-            self.item = detailed
+            if detailed.isEpisode, let sid = detailed.seriesId, !sid.isEmpty {
+                appState.rememberDetailFocusedEpisode(
+                    seriesKey: sid,
+                    seasonNumber: detailed.parentIndexNumber,
+                    episodeId: detailed.id
+                )
+                async let parentSeriesTask = try? EmbyClient.shared.fetchItemDetail(server: server, itemId: sid)
+                async let parentSimilarTask = try? EmbyClient.shared.fetchSimilarItems(server: server, itemId: sid)
+                if let parentSeries = await parentSeriesTask {
+                    guard !Task.isCancelled else { return }
+                    self.item = parentSeries
+                    upgradedSimilarItems = await parentSimilarTask
+                } else {
+                    self.item = detailed
+                }
+            } else {
+                self.item = detailed
+            }
         }
         guard !Task.isCancelled else { return }
         syncDefaultTracks()
 
-        let preloadedSeasons = await seasonsTask
+        var preloadedSeasons = await seasonsTask
         guard !Task.isCancelled else { return }
+        if (preloadedSeasons == nil || preloadedSeasons?.isEmpty == true), item.isSeries, targetSeriesId == nil {
+            preloadedSeasons = try? await EmbyClient.shared.fetchSeasons(server: server, seriesId: item.id)
+            guard !Task.isCancelled else { return }
+        }
 
         if item.isSeries {
             if let loadedSeasons = preloadedSeasons, !loadedSeasons.isEmpty {
@@ -337,7 +373,9 @@ extension DetailView {
         }
 
         guard !Task.isCancelled else { return }
-        if let sims = await similarTask {
+        if let sims = upgradedSimilarItems {
+            self.similarItems = sims
+        } else if let sims = await similarTask {
             self.similarItems = sims
         }
     }

@@ -746,4 +746,39 @@ struct HomeHeroCuratorTests {
         )
         #expect(selected.map(\.id) == ["m_dune2", "s_severance"])
     }
+
+    @Test("Multi-platform hero display badges preserve exact platform order, scales, and fallbacks")
+    func multiPlatformDisplayBadgesFormattingAndFallbacks() {
+        let item = makeItem(
+            id: "m_aftersun",
+            name: "晒后假日",
+            originalTitle: "Aftersun",
+            communityRating: 7.2,
+            criticRating: 97,
+            productionYear: 2022
+        )
+        let ratings = MultiPlatformRatings(
+            tmdb: 7.2,
+            imdb: 7.6,
+            imdbVotes: 152_000,
+            rottenTomatoesCritics: 97,
+            rottenTomatoesAudience: 82,
+            trakt: 74,
+            metacritic: 95,
+            letterboxd: 4.2
+        )
+
+        let full = MultiPlatformRatings.displayBadges(for: item, external: ratings)
+        #expect(full.map(\.platform) == [.tmdb, .imdb, .rottenTomatoesCritics, .rottenTomatoesAudience, .letterboxd, .trakt, .metacritic])
+        #expect(full.map(\.formattedValue) == ["7.2", "7.6", "97%", "82%", "8.4", "74%", "9.5"])
+        let allPositive = full.allSatisfy { $0.isPositive }
+        #expect(allPositive)
+
+        // Emby-only fallback without external ratings shows TMDB + RT Critics only, and marks rotten < 60%
+        let rottenItem = makeItem(id: "m_rot", name: "Rotten Film", communityRating: 5.4, criticRating: 42)
+        let fallback = MultiPlatformRatings.displayBadges(for: rottenItem, external: nil)
+        #expect(fallback.map(\.platform) == [.tmdb, .rottenTomatoesCritics])
+        #expect(fallback.map(\.formattedValue) == ["5.4", "42%"])
+        #expect(fallback[1].isPositive == false)
+    }
 }
