@@ -8,7 +8,7 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "2.0.21")
+        #expect(DonbyAppInfo.fallbackVersion == "2.0.22")
     }
 
     @Test func heroTopEdgeSynthesizerPreservesExactColorContrastAndSuppressesOutlierSpike() {
@@ -580,5 +580,54 @@ struct DonbyCoreTests {
         store.flushMeta()
         #expect(store.readChunk(index: 22)?.first == 0x22)
         #expect(store.readChunk(index: 23)?.count == tailBytes)
+    }
+
+    @Test func pinnedChunkStoreWritesDirectlyToMediaBinWithoutSpillFiles() {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("donby-pinned-direct-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let chunkSize = 65_536
+        let totalSize = Int64(20 * chunkSize + 4096)
+        let store = TieredAssetChunkStore(
+            assetKey: "pinned_direct",
+            rootDirectory: tmpDir,
+            chunkSize: chunkSize,
+            maxMemoryBytes: 32 * 1024 * 1024,
+            persistDisk: true
+        )
+        store.setPinned(true)
+        store.setTotalSize(totalSize, sourceURL: "https://example.invalid/pinned.mkv")
+
+        // Out-of-order writes on pinned offline download must write directly to media.bin (0 spill files)
+        for idx in [15, 10, 20, 5, 0] {
+            let len = (idx == 20) ? 4096 : chunkSize
+            store.storeChunk(index: idx, data: Data(repeating: UInt8(idx + 1), count: len), cacheInMemory: false)
+        }
+        store.flushMeta()
+
+        let chunksDir = store.chunksDirectoryURL
+        let spillCount = (try? FileManager.default.contentsOfDirectory(atPath: chunksDir.path).count) ?? 0
+        #expect(spillCount == 0)
+        for idx in [0, 5, 10, 15, 20] {
+            let d = store.readChunk(index: idx)
+            #expect(d?.count == ((idx == 20) ? 4096 : chunkSize))
+            #expect(d?.first == UInt8(idx + 1))
+        }
+    }
+
+    @Test func activeSegmentBoundSplitsTailCleanlyForWorkStealing() {
+        let bound = ActiveSegmentBound(startChunk: 0, endChunk: 127)
+        bound.advanceCurrent(to: 28)
+        #expect(bound.remainingChunks() == 100)
+
+        let stolen = bound.tryStealTail(minRemaining: 12)
+        #expect(stolen == 78...127)
+        #expect(bound.currentEnd() == 77)
+        #expect(bound.remainingChunks() == 50)
+
+        // Too small to split once < minRemaining
+        bound.advanceCurrent(to: 70)
+        #expect(bound.tryStealTail(minRemaining: 12) == nil)
     }
 }

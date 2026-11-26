@@ -13,6 +13,7 @@ public final class DonbyDownloadManager: ObservableObject {
 
     var workerTasks: [String: Task<Void, Never>] = [:]
     private var connectionBudgetByAssetKey: [String: Int] = [:]
+    private var downloadActivityToken: NSObjectProtocol? = nil
     private let storageFileURL: URL
     private var statusRevision: Int = 0
     private var lastProgressStatusSync: TimeInterval = 0
@@ -280,7 +281,7 @@ public final class DonbyDownloadManager: ObservableObject {
             )
         }
 
-        connectionBudgetByAssetKey[assetKey] = max(1, min(6, connectionBudgetPerTask))
+        connectionBudgetByAssetKey[assetKey] = max(1, min(8, connectionBudgetPerTask))
         if existingMeta.isFullyCached && !alreadyOnDisk {
             Task.detached(priority: .utility) {
                 let total = max(existingMeta.totalSize, 0)
@@ -313,7 +314,7 @@ public final class DonbyDownloadManager: ObservableObject {
     }
 
     public func resumeDownload(assetKey: String, connectionBudgetPerTask: Int = 3) {
-        connectionBudgetByAssetKey[assetKey] = max(1, min(6, connectionBudgetPerTask))
+        connectionBudgetByAssetKey[assetKey] = max(1, min(8, connectionBudgetPerTask))
         if let idx = entries.firstIndex(where: { $0.assetKey == assetKey }) {
             if entries[idx].status != .completed {
                 entries[idx].status = .queued
@@ -402,7 +403,21 @@ public final class DonbyDownloadManager: ObservableObject {
         }
     }
 
+    private func syncDownloadActivityAssertion() {
+        let hasActive = entries.contains { $0.status == .downloading }
+        if hasActive, downloadActivityToken == nil {
+            downloadActivityToken = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiatedAllowingIdleSystemSleep],
+                reason: "Donby offline media download"
+            )
+        } else if !hasActive, let token = downloadActivityToken {
+            ProcessInfo.processInfo.endActivity(token)
+            downloadActivityToken = nil
+        }
+    }
+
     private func scheduleQueue(connectionBudgetPerTask: Int? = nil) {
+        defer { syncDownloadActivityAssertion() }
         let activeCount = entries.filter { $0.status == .downloading }.count
         guard activeCount < maxConcurrentDownloads else { return }
 

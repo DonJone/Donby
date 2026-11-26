@@ -93,7 +93,8 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
     private let lock = NSLock()
     private let memoryLock = NSLock()
     private let metaWriteLock = NSLock()
-    private let diskQueue = DispatchQueue(label: "com.donby.chunkstore.disk", qos: .utility)
+    private let diskQueue = DispatchQueue(label: "com.donby.chunkstore.disk", qos: .userInitiated)
+    private let metaWriteQueue = DispatchQueue(label: "com.donby.chunkstore.meta", qos: .utility)
     private var meta: ChunkStoreMeta
     private var memoryChunks: [Int: Data] = [:]
     private var memoryOrder: [Int] = []
@@ -312,12 +313,15 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
             return
         }
         let chunkSize = meta.chunkSize
-        let isPrefixWrite = (index <= contiguousPrefixCount)
-        let shouldCreateDir = !isPrefixWrite && !didEnsureChunksDir
-        var whForPrefix: FileHandle? = nil
-        if isPrefixWrite {
+        // Pinned offline downloads write directly to sparse APFS offsets in `media.bin` (zero spill-file
+        // double-copy amplification and zero 3,000-file unlink storms); unpinned stream caches keep
+        // anti-sparse spill files so seek-streaming a 35 GB movie never bloats logical media.bin size.
+        let directWriteToMediaBin = meta.pinned || (index <= contiguousPrefixCount)
+        let shouldCreateDir = !directWriteToMediaBin && !didEnsureChunksDir
+        var whForDirect: FileHandle? = nil
+        if directWriteToMediaBin {
             ensureFileHandlesLocked()
-            whForPrefix = writeHandle
+            whForDirect = writeHandle
         }
         lock.unlock()
 
@@ -325,13 +329,10 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
         var completedMetaForNotify: ChunkStoreMeta? = nil
         var metaSnapshotToWrite: ChunkStoreMeta? = nil
 
-        if isPrefixWrite {
-            // Perform sequential media.bin write outside `lock` (serialized by `diskQueue`;
-            // `closeFileHandles`/`prepareContiguousMediaBinForMaterialization` always drain `diskQueue.sync {}` first).
-            if let wh = whForPrefix {
-                let offset = UInt64(index) * UInt64(chunkSize)
+        if directWriteToMediaBin {
+            if let wh = whForDirect {
                 do {
-                    try wh.seek(toOffset: offset)
+                    try wh.seek(toOffset: UInt64(index) * UInt64(chunkSize))
                     try wh.write(contentsOf: data)
                     wroteOK = true
                 } catch {
@@ -344,10 +345,11 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
                 meta.completedChunks.insert(index)
                 if index == contiguousPrefixCount {
                     contiguousPrefixCount += 1
-                    shouldFoldSpills = (whForPrefix != nil)
+                    shouldFoldSpills = (whForDirect != nil)
                 }
                 dirtyMetaOps += 1
-                if dirtyMetaOps >= 64 || meta.isFullyCached {
+                let flushThreshold = meta.pinned ? 128 : 64
+                if dirtyMetaOps >= flushThreshold || meta.isFullyCached {
                     dirtyMetaOps = 0
                     metaSnapshotToWrite = meta
                 }
@@ -359,8 +361,8 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
             pendingDiskChunks.removeValue(forKey: index)
             lock.unlock()
 
-            if shouldFoldSpills, let wh = whForPrefix {
-                foldConsecutiveSpillChunksOnDiskQueue(wh: wh, chunkSize: chunkSize)
+            if shouldFoldSpills, let wh = whForDirect {
+                foldConsecutiveSpillChunksOnDiskQueue(wh: wh, chunkSize: chunkSize, maxChunksPerPass: 16)
             }
         } else {
             if shouldCreateDir {
@@ -399,7 +401,9 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
         }
 
         if let metaSnapshotToWrite {
-            writeMetaSnapshotToDisk(metaSnapshotToWrite)
+            metaWriteQueue.async { [weak self] in
+                self?.writeMetaSnapshotToDisk(metaSnapshotToWrite)
+            }
         }
         if let completedMetaForNotify {
             DonbyTurboCacheEngine.shared.notifyAssetFullyCached(completedMetaForNotify)
@@ -537,6 +541,7 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
 
     public func flushMeta() {
         diskQueue.sync {}
+        metaWriteQueue.sync {}
         lock.lock()
         let snapshot = meta
         let shouldPersist = persistDisk || meta.pinned
@@ -631,9 +636,10 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
         }
     }
 
-    private func foldConsecutiveSpillChunksOnDiskQueue(wh: FileHandle, chunkSize: Int) {
+    private func foldConsecutiveSpillChunksOnDiskQueue(wh: FileHandle, chunkSize: Int, maxChunksPerPass: Int = 16) {
         var didFoldAny = false
-        while true {
+        var foldedSpills = 0
+        while foldedSpills < maxChunksPerPass {
             lock.lock()
             let canFold = !isClosedForDisk && meta.completedChunks.contains(contiguousPrefixCount)
             let nextIdx = contiguousPrefixCount
@@ -655,6 +661,7 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
             if hasSpillFile {
                 try? FileManager.default.removeItem(at: spillURL)
                 didFoldAny = true
+                foldedSpills += 1
             }
         }
         if didFoldAny, let contents = try? FileManager.default.contentsOfDirectory(atPath: chunksDirectoryURL.path), contents.isEmpty {
@@ -715,9 +722,8 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
 
         let prefixBytes = Int64(prefix) * Int64(meta.chunkSize)
         let logicalSize = ((try? fm.attributesOfItem(atPath: dataFileURL.path))?[.size] as? NSNumber)?.int64Value ?? 0
-        // If `media.bin` is stretched > 4 chunks beyond the contiguous prefix (e.g. a 35 GB file with only 140 MB downloaded),
-        // extract out-of-order chunks >= prefix into `chunks/<idx>.chk` and truncate `media.bin` down to `prefixBytes`!
-        guard logicalSize > prefixBytes + Int64(meta.chunkSize * 4), !meta.isFullyCached else {
+        // Keep pinned offline downloads in direct sparse APFS `media.bin`; only compact unpinned streaming caches.
+        guard !meta.pinned, !meta.isFullyCached, logicalSize > prefixBytes + Int64(meta.chunkSize * 4) else {
             return
         }
 

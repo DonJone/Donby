@@ -176,7 +176,9 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
     override private init() {
         let q = OperationQueue()
         q.name = "com.donby.turbo.streaming"
-        q.maxConcurrentOperationCount = 8
+        // URLSession requires a serial delegateQueue so per-task didReceive callbacks
+        // are strictly ordered and never race didCompleteWithError.
+        q.maxConcurrentOperationCount = 1
         q.qualityOfService = .userInitiated
         self.delegateQueue = q
         super.init()
@@ -441,6 +443,7 @@ public final class SlidingWindowSpeedMeter: @unchecked Sendable {
     private var firstByteUptime: TimeInterval = 0
     private var lastByteUptime: TimeInterval = 0
     private var totalWindowBytes: Int64 = 0
+    private var peakObservedMBs: Double = 0.0
 
     public init(windowDuration: TimeInterval = 2.5, bucketDuration: TimeInterval = 0.10) {
         let safeBucket = max(0.05, bucketDuration)
@@ -489,7 +492,13 @@ public final class SlidingWindowSpeedMeter: @unchecked Sendable {
         advanceBucketsLocked(to: now)
         guard totalWindowBytes > 0 else { return 0.0 }
         let span = min(windowDuration, max(0.45, now - firstByteUptime))
-        return (Double(totalWindowBytes) / (1024.0 * 1024.0)) / span
+        let spd = (Double(totalWindowBytes) / (1024.0 * 1024.0)) / span
+        if spd > peakObservedMBs { peakObservedMBs = spd }
+        return spd
+    }
+
+    public func peakSpeedMBs() -> Double {
+        lock.lock(); defer { lock.unlock() }; return peakObservedMBs
     }
 
     /// Returns time in seconds since the last recorded byte (or `.infinity` if none).
@@ -531,6 +540,7 @@ internal final class WorkerTransferMonitor: @unchecked Sendable {
     private var lastByteUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
     private var receivedBytes: Int64 = 0
     private var didTriggerStallCancel = false
+    private let recentMeter = SlidingWindowSpeedMeter(windowDuration: 6.0, bucketDuration: 0.25)
 
     func markHeadersReceived(at now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         lock.lock(); headersUptime = now; lastByteUptime = now; lock.unlock()
@@ -539,6 +549,7 @@ internal final class WorkerTransferMonitor: @unchecked Sendable {
     func recordBytes(_ count: Int, at now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         guard count > 0 else { return }
         lock.lock(); receivedBytes += Int64(count); lastByteUptime = now; lock.unlock()
+        recentMeter.recordBytes(count, at: now)
     }
 
     func markStallCancelled() {
@@ -549,8 +560,52 @@ internal final class WorkerTransferMonitor: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }; return didTriggerStallCancel
     }
 
+    func recentBytesPerSecond(at now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Double {
+        recentMeter.speedMBs(at: now) * 1_048_576.0
+    }
+
     func snapshot() -> (headersUptime: TimeInterval, lastByteUptime: TimeInterval, receivedBytes: Int64) {
         lock.lock(); defer { lock.unlock() }; return (headersUptime, lastByteUptime, receivedBytes)
+    }
+}
+
+/// Atomic dynamic upper chunk bound for work-stealing: allows an idle peer worker to steal
+/// the back half of a large active segment so the original worker stops cleanly at the new boundary.
+internal final class ActiveSegmentBound: @unchecked Sendable {
+    private let lock = NSLock()
+    private var currentChunk: Int
+    private var endChunk: Int
+
+    init(startChunk: Int, endChunk: Int) {
+        self.currentChunk = startChunk
+        self.endChunk = endChunk
+    }
+
+    func advanceCurrent(to nextChunk: Int) {
+        lock.lock(); currentChunk = nextChunk; lock.unlock()
+    }
+
+    func currentEnd() -> Int {
+        lock.lock(); defer { lock.unlock() }; return endChunk
+    }
+
+    func remainingChunks() -> Int {
+        lock.lock(); defer { lock.unlock() }; return max(0, endChunk - currentChunk + 1)
+    }
+
+    /// Splits the un-downloaded tail in half if at least `minRemaining` chunks remain; returns stolen range.
+    func tryStealTail(minRemaining: Int = 12) -> ClosedRange<Int>? {
+        lock.lock()
+        defer { lock.unlock() }
+        let rem = endChunk - currentChunk + 1
+        guard rem >= minRemaining else { return nil }
+        let keep = max(4, rem / 2)
+        let newEnd = currentChunk + keep - 1
+        let stolenStart = newEnd + 1
+        guard stolenStart <= endChunk else { return nil }
+        let stolenEnd = endChunk
+        endChunk = newEnd
+        return stolenStart...stolenEnd
     }
 }
 

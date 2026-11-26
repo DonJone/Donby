@@ -13,6 +13,17 @@ extension AppState {
         return configured
     }
 
+    /// Offline downloads benefit from higher multi-TCP parallelism on high-RTT / per-stream-shaped CDNs:
+    /// honors explicit low user limits (`1...3`) and positive `activeVideoDeliveryLimit` caps, while lifting
+    /// the default `4` to `6` (and honoring `5...8` user settings) on unlimited servers.
+    public func effectiveDownloadConnectionBudget(for server: EmbyServerConfig) -> Int {
+        let configured = max(1, min(8, turboConnectionBudget))
+        if let cap = serverCapabilities[server.id], cap.activeVideoDeliveryLimit > 0 {
+            return max(1, min(configured, cap.activeVideoDeliveryLimit))
+        }
+        return configured >= 4 ? max(configured, 6) : configured
+    }
+
     public func canDownload(from server: EmbyServerConfig) -> Bool {
         serverCapabilities[server.id]?.allowDownload ?? true
     }
@@ -113,7 +124,7 @@ extension AppState {
 
             let poster = (seriesPoster ?? itemPoster)?.absoluteString
             let meta = formattedWatchRecordMetadata(for: targetItem, resolvedSeriesName: resolvedSeries?.name ?? targetItem.seriesName)
-            let budget = min(4, effectiveConnectionBudget(for: server))
+            let budget = effectiveDownloadConnectionBudget(for: server)
             DonbyDownloadManager.shared.enqueueDownload(
                 server: server,
                 item: targetItem,

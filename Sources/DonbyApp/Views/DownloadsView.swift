@@ -344,7 +344,7 @@ public struct DownloadsView: View {
                     } else {
                         Button {
                             let server = appState.servers.first(where: { $0.id == entry.serverId })
-                            let budget = server.map { min(4, appState.effectiveConnectionBudget(for: $0)) } ?? 3
+                            let budget = server.map { appState.effectiveDownloadConnectionBudget(for: $0) } ?? 6
                             DonbyDownloadManager.shared.resumeDownload(assetKey: entry.assetKey, connectionBudgetPerTask: budget)
                         } label: {
                             HStack(spacing: 4) {
@@ -410,7 +410,7 @@ public struct DownloadsView: View {
                                 },
                                 onPause: { DonbyDownloadManager.shared.pauseDownload(assetKey: entry.assetKey) },
                                 onResume: {
-                                    let budget = server.map { min(4, appState.effectiveConnectionBudget(for: $0)) } ?? 3
+                                    let budget = server.map { appState.effectiveDownloadConnectionBudget(for: $0) } ?? 6
                                     DonbyDownloadManager.shared.resumeDownload(assetKey: entry.assetKey, connectionBudgetPerTask: budget)
                                 },
                                 onRemove: {
