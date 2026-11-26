@@ -671,4 +671,79 @@ struct HomeHeroCuratorTests {
         #expect(results["tt9999999"] == .init(rating: 9.8, votes: 42))
         #expect(results["tt0000000"] == nil)
     }
+
+    @Test("Movies receive elevated priority while documentaries are strongly downranked")
+    func moviesBoostedAndDocumentariesDownranked() {
+        let views = [
+            EmbyItem(id: "lib_movies", name: "电影", type: "CollectionFolder"),
+            EmbyItem(id: "lib_docs", name: "纪录片", type: "CollectionFolder"),
+            EmbyItem(id: "lib_tv", name: "欧美剧", type: "CollectionFolder")
+        ]
+        let modernMovie = makeItem(
+            id: "m_dune2",
+            name: "沙丘2",
+            originalTitle: "Dune: Part Two",
+            type: "Movie",
+            genres: ["科幻", "冒险"],
+            communityRating: 8.2,
+            criticRating: 92,
+            productionYear: 2024
+        )
+        let natureDocSeries = makeItem(
+            id: "doc_planet",
+            name: "地球脉动",
+            originalTitle: "Planet Earth II",
+            type: "Series",
+            genres: ["纪录", "Documentary"],
+            communityRating: 9.1,
+            criticRating: 95,
+            productionYear: 2016,
+            studios: [EmbyNameIdPair(id: "bbc", name: "BBC Earth")]
+        )
+        let docMovie = makeItem(
+            id: "doc_film",
+            name: "徒手攀岩",
+            originalTitle: "Free Solo",
+            type: "Movie",
+            genres: ["纪录片"],
+            communityRating: 8.1,
+            criticRating: 97,
+            productionYear: 2018
+        )
+        let westernSeries = makeItem(
+            id: "s_severance",
+            name: "人生切割术",
+            originalTitle: "Severance",
+            type: "Series",
+            genres: ["科幻", "悬疑"],
+            communityRating: 8.4,
+            criticRating: 97,
+            productionYear: 2022,
+            childCount: 2
+        )
+
+        let movieAudit = HomeHeroCurator.audit(modernMovie, libraryName: "电影", referenceYear: 2026)
+        let docSeriesAudit = HomeHeroCurator.audit(natureDocSeries, libraryName: "纪录片", referenceYear: 2026)
+        let docMovieAudit = HomeHeroCurator.audit(docMovie, libraryName: "电影", referenceYear: 2026)
+        let seriesAudit = HomeHeroCurator.audit(westernSeries, libraryName: "欧美剧", referenceYear: 2026)
+
+        #expect(!movieAudit.isDocumentary)
+        #expect(docSeriesAudit.isDocumentary)
+        #expect(docMovieAudit.isDocumentary)
+        #expect(movieAudit.score > seriesAudit.score)
+        #expect(movieAudit.score > docSeriesAudit.score + 80)
+        #expect(seriesAudit.score > docMovieAudit.score + 60)
+
+        let selected = HomeHeroCurator.selectHeroItems(
+            libraryViews: views,
+            latestByLibrary: [
+                "lib_docs": [natureDocSeries],
+                "lib_movies": [docMovie, modernMovie],
+                "lib_tv": [westernSeries]
+            ],
+            maxCount: 2,
+            referenceYear: 2026
+        )
+        #expect(selected.map(\.id) == ["m_dune2", "s_severance"])
+    }
 }

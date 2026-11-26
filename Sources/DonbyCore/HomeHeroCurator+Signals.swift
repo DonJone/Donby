@@ -99,7 +99,15 @@ extension HomeHeroCurator {
     static let prestigeGenres: [String] = [
         "剧情", "drama", "科幻", "sci-fi", "science fiction", "悬疑", "mystery",
         "惊悚", "thriller", "犯罪", "crime", "战争", "war", "历史", "history",
-        "传记", "biography", "纪录", "documentary", "冒险", "adventure", "奇幻", "fantasy"
+        "传记", "biography", "冒险", "adventure", "奇幻", "fantasy"
+    ]
+
+    static let documentaryKeywords: [String] = [
+        "纪录片", "纪录", "记录片", "纪实", "documentary", "docuseries", "docu-series"
+    ]
+
+    static let documentaryStudioKeywords: [String] = [
+        "bbc earth", "national geographic", "discovery channel", "history channel", "nhk documentary", "animal planet"
     ]
 
     static let varietyGenresAndKeywords: [String] = [
@@ -157,6 +165,28 @@ extension HomeHeroCurator {
         guard !libraryViews.isEmpty else { return false }
         let animeCount = libraryViews.filter { isAnimeLibraryName($0.name) }.count
         return animeCount > 0 && animeCount * 2 >= libraryViews.count
+    }
+
+    /// Returns true when a media item is a documentary or docuseries (by library, genres, or documentary studios).
+    public static func isDocumentary(_ item: EmbyItem, libraryName: String? = nil) -> Bool {
+        if let libLower = libraryName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           !libLower.isEmpty,
+           documentaryKeywords.contains(where: { libLower.contains($0) }) {
+            return true
+        }
+        if let genres = item.genres {
+            for g in genres {
+                let gl = g.lowercased()
+                if documentaryKeywords.contains(where: { gl.contains($0) }) { return true }
+            }
+        }
+        if let studios = item.studios {
+            for s in studios {
+                let sl = (s.name ?? "").lowercased()
+                if !sl.isEmpty && documentaryStudioKeywords.contains(where: { sl.contains($0) }) { return true }
+            }
+        }
+        return false
     }
 
     // MARK: - Internal Signal & Script Helpers

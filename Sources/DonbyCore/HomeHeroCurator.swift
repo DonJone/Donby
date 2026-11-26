@@ -20,6 +20,7 @@ public enum HomeHeroCurator {
         public let isIdolOrBLFiltered: Bool
         public let isAnimeOrAnimation: Bool
         public let isAnimeExcluded: Bool
+        public let isDocumentary: Bool
         public let isSuspiciousPerfectRating: Bool
         public let reasons: [String]
     }
@@ -140,13 +141,15 @@ public enum HomeHeroCurator {
         var perLibraryCount: [String: Int] = [:]
         var domesticSeriesCount = 0
         var regionalAsianDramaCount = 0
+        var documentaryCount = 0
 
         let activeLibraryCount = Set(approved.compactMap(\.libraryId)).count
         let perLibrarySoftCap = activeLibraryCount >= 2 ? max(3, maxCount / 2) : maxCount
         let domesticSeriesSoftCap = 1
 
-        // Pass 1: High-quality diverse picks from approved pool (soft-capping domestic/Korean/Thai series to prevent flooding).
+        // Pass 1: High-quality diverse picks from approved pool (prefer narrative movies/series over documentaries).
         for cand in approved where selected.count < maxCount {
+            if cand.audit.isDocumentary { continue }
             if cand.audit.isDomesticSeries && domesticSeriesCount >= domesticSeriesSoftCap { continue }
             if (cand.audit.isKoreanSeries || cand.audit.isThaiOrSEASeries) && regionalAsianDramaCount >= 1 { continue }
             if let libId = cand.libraryId, (perLibraryCount[libId] ?? 0) >= perLibrarySoftCap { continue }
@@ -157,13 +160,15 @@ public enum HomeHeroCurator {
             if cand.audit.isKoreanSeries || cand.audit.isThaiOrSEASeries { regionalAsianDramaCount += 1 }
         }
 
-        // Pass 2: Relax library cap on approved pool.
+        // Pass 2: Relax library cap on approved pool (cap documentaries at 1 if narrative candidates are scarce).
         for cand in approved where selected.count < maxCount {
             guard !selectedIds.contains(cand.item.id) else { continue }
+            if cand.audit.isDocumentary && documentaryCount >= 1 { continue }
             if cand.audit.isDomesticSeries && domesticSeriesCount >= 2 { continue }
             if (cand.audit.isKoreanSeries || cand.audit.isThaiOrSEASeries) && regionalAsianDramaCount >= 2 { continue }
             selectedIds.insert(cand.item.id)
             selected.append(cand.item)
+            if cand.audit.isDocumentary { documentaryCount += 1 }
             if cand.audit.isDomesticSeries { domesticSeriesCount += 1 }
             if cand.audit.isKoreanSeries || cand.audit.isThaiOrSEASeries { regionalAsianDramaCount += 1 }
         }
@@ -237,6 +242,7 @@ public enum HomeHeroCurator {
 
         let isAnime = isAnimeOrAnimation(item, libraryName: libraryName)
         let isAnimeExcluded = isAnime && !allowAnime
+        let isDoc = isDocumentary(item, libraryName: libraryName)
 
         let origin = detectOrigin(
             item: item,
@@ -308,42 +314,55 @@ public enum HomeHeroCurator {
                     reasons.append("anime_good:+10")
                 }
             }
+        } else if isDoc {
+            // Documentaries & docuseries are strongly downranked relative to narrative movies and drama series.
+            score -= 38
+            reasons.append("documentary_downrank:-38")
+            if trustAcclaimTier && mpEval.hasStrongCriticEndorsement && rating >= 8.2 {
+                score += 12
+                reasons.append("documentary_critic_acclaimed:+12")
+            }
         } else if isMovie {
-            score += 18
-            reasons.append("movie:+18")
+            score += 34
+            reasons.append("movie:+34")
 
             if let age, age >= 5 {
                 if trustAcclaimTier && rating >= 8.0 {
                     isClassicMovie = true
-                    score += 36
-                    reasons.append("classic_movie_acclaimed:+36")
+                    score += 42
+                    reasons.append("classic_movie_acclaimed:+42")
                 } else if trustAcclaimTier && rating >= 7.4 {
                     isClassicMovie = true
-                    score += 26
-                    reasons.append("classic_movie_high:+26")
+                    score += 32
+                    reasons.append("classic_movie_high:+32")
                 } else if age >= 10 && trustAcclaimTier && rating >= 6.8 {
                     isClassicMovie = true
-                    score += 18
-                    reasons.append("classic_movie_catalog:+18")
+                    score += 24
+                    reasons.append("classic_movie_catalog:+24")
                 } else if isClassicLibrary && trustAcclaimTier && (rating == 0 || rating >= 6.5) {
                     isClassicMovie = true
-                    score += 20
-                    reasons.append("classic_movie_library:+20")
+                    score += 24
+                    reasons.append("classic_movie_library:+24")
                 }
             } else if trustAcclaimTier && rating >= 7.8 {
-                score += 16
-                reasons.append("modern_movie_acclaimed:+16")
+                score += 28
+                reasons.append("modern_movie_acclaimed:+28")
             } else if trustAcclaimTier && rating >= 7.0 {
-                score += 8
-                reasons.append("modern_movie_good:+8")
+                score += 18
+                reasons.append("modern_movie_good:+18")
+            }
+
+            if let age, age <= 2, trustAcclaimTier, rating >= 7.2 {
+                score += 10
+                reasons.append("hot_recent_movie:+10")
             }
 
             if isWesternOrigin {
-                score += 14
-                reasons.append("western_movie:+14")
+                score += 18
+                reasons.append("western_movie:+18")
             } else if isJapaneseOrigin {
-                score += 6
-                reasons.append("japanese_movie:+6")
+                score += 8
+                reasons.append("japanese_movie:+8")
             } else if isThaiOrigin && !mpEval.hasStrongCriticEndorsement {
                 score -= 14
                 reasons.append("thai_movie_scrutiny:-14")
@@ -595,6 +614,7 @@ public enum HomeHeroCurator {
             isIdolOrBLFiltered: isIdolOrBLFiltered,
             isAnimeOrAnimation: isAnime,
             isAnimeExcluded: isAnimeExcluded,
+            isDocumentary: isDoc,
             isSuspiciousPerfectRating: mpEval.isSuspiciousPerfectRating,
             reasons: reasons
         )
