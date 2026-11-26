@@ -251,17 +251,14 @@ extension DetailView {
 
                     Spacer()
 
-                    // Red progress line at bottom
+                    // Theme-aware progress line at bottom
                     if ep.progressFraction > 0 {
-                        GeometryReader { barGeo in
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(Color.white.opacity(0.35))
-                                Capsule()
-                                    .fill(Color(red: 0.98, green: 0.18, blue: 0.28))
-                                    .frame(width: barGeo.size.width * ep.progressFraction)
-                            }
-                        }
-                        .frame(height: 3)
+                        FractionalProgressBar(
+                            fraction: ep.progressFraction,
+                            color: appState.isMonochromeTheme ? .white : appState.accentColor,
+                            height: 3,
+                            trackColor: Color.white.opacity(0.35)
+                        )
                         .padding(.horizontal, 10)
                         .padding(.bottom, 8)
                     }

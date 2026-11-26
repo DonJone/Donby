@@ -442,7 +442,7 @@ public struct UHDPersonDetailSheet: View {
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: isFav ? "heart.fill" : "heart")
-                            .foregroundStyle(isFav ? AppState.appleMusicRed : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                            .foregroundStyle(isFav ? appState.accentColor : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                         Text(isFav ? "已收藏" : "收藏")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))

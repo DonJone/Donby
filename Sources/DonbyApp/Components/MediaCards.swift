@@ -218,12 +218,16 @@ public struct PosterCardView: View, Equatable {
                             if item.userData?.isFavorite == true {
                                 Image(systemName: "heart.fill")
                                     .font(.system(size: 10.5))
-                                    .foregroundStyle(.pink)
+                                    .foregroundStyle(appearance.isMonochromeTheme ? .white : appearance.accentColor)
                             }
                         }
 
                         if item.progressFraction > 0 && item.progressFraction < 0.99 {
-                            FractionalProgressBar(fraction: item.progressFraction, color: appearance.accentColor, height: 3)
+                            FractionalProgressBar(
+                                fraction: item.progressFraction,
+                                color: appearance.isMonochromeTheme ? .white : appearance.accentColor,
+                                height: 3
+                            )
                         }
                     }
                     .padding(7)
@@ -343,7 +347,11 @@ public struct LandscapeCardView: View, Equatable {
                     Spacer()
 
                     if item.progressFraction > 0 {
-                        FractionalProgressBar(fraction: item.progressFraction, color: appearance.accentColor, height: 3.5)
+                        FractionalProgressBar(
+                            fraction: item.progressFraction,
+                            color: appearance.isMonochromeTheme ? .white : appearance.accentColor,
+                            height: 3.5
+                        )
                             .padding(8)
                     }
                 }

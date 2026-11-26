@@ -139,7 +139,12 @@ public struct DetailView: View {
         }
         .ignoresSafeArea(.container, edges: .top)
         .sheet(item: $selectedEpisodeForInfo) { ep in
-            EpisodeInfoSheet(episode: ep, isLightMode: appState.isLightMode)
+            EpisodeInfoSheet(
+                episode: ep,
+                isLightMode: appState.isLightMode,
+                accentColor: appState.accentColor
+            )
+            .tint(appState.accentColor)
         }
         .sheet(isPresented: $showWatchPartyCreateSheet) {
             if let srv = effectiveDetailServer,
@@ -346,6 +351,7 @@ public struct EpisodeInfoSheet: View {
     @Environment(\.dismiss) private var dismiss
     public let episode: EmbyItem
     public let isLightMode: Bool
+    public let accentColor: Color
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -354,7 +360,7 @@ public struct EpisodeInfoSheet: View {
                     if let series = episode.seriesName {
                         Text(series)
                             .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(AppState.appleMusicRed)
+                            .foregroundStyle(accentColor)
                     }
                     Text(episode.name)
                         .font(.system(size: 18, weight: .bold))

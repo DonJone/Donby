@@ -299,11 +299,7 @@ public struct PersonAvatarView: View {
     public var width: CGFloat = 78
     public var height: CGFloat = 100
     public var size: CGFloat = 70
-    public var accentColor: Color = Color(
-        red: ThemeColorPalette.appleMusicRedRGB.r,
-        green: ThemeColorPalette.appleMusicRedRGB.g,
-        blue: ThemeColorPalette.appleMusicRedRGB.b
-    )
+    public var accentColor: Color = .primary
 
     @State private var avatarImage: NSImage? = nil
 
@@ -313,11 +309,7 @@ public struct PersonAvatarView: View {
         width: CGFloat = 78,
         height: CGFloat = 100,
         size: CGFloat = 70,
-        accentColor: Color = Color(
-            red: ThemeColorPalette.appleMusicRedRGB.r,
-            green: ThemeColorPalette.appleMusicRedRGB.g,
-            blue: ThemeColorPalette.appleMusicRedRGB.b
-        )
+        accentColor: Color = .primary
     ) {
         self.server = server
         self.person = person

@@ -74,7 +74,7 @@ extension DetailView {
 
                                 LiquidGlassCircleButton(
                                     systemImage: (item.userData?.isFavorite == true) ? "heart.fill" : "heart",
-                                    iconColor: (item.userData?.isFavorite == true) ? AppState.appleMusicRed : nil,
+                                    iconColor: (item.userData?.isFavorite == true) ? appState.accentColor : nil,
                                     size: 38,
                                     tooltip: "加入 / 取消收藏"
                                 ) {
@@ -229,7 +229,7 @@ extension DetailView {
                                 HStack(spacing: 4) {
                                     Image(systemName: "star.fill")
                                         .font(.system(size: 12.5, weight: .bold))
-                                        .foregroundStyle(AppState.appleMusicRed)
+                                        .foregroundStyle(appState.accentColor)
                                     Text(String(format: "%.1f", item.communityRating ?? 10.0))
                                         .font(.system(size: 13.5, weight: .heavy, design: .rounded))
                                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))

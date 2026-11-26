@@ -275,14 +275,20 @@ enum NativeCardLayerCache {
         isLight ? filmPlaceholderLightImage : filmPlaceholderDarkImage
     }
 
-    static let favoriteHeartImage: CGImage? = renderCGImage(widthPt: 14, heightPt: 14) { _, rect in
-        drawTintedSymbol(
-            name: "heart.fill",
-            pointSize: 10.5,
-            weight: .bold,
-            color: NSColor.systemPink,
-            in: rect
-        )
+    static func favoriteHeartImage(accentColor: NSColor, colorKey overrideKey: String? = nil) -> CGImage? {
+        let key = "fav_heart|\(overrideKey ?? colorKey(accentColor))"
+        if let cached = iconCache[key] { return cached }
+        let image = renderCGImage(widthPt: 14, heightPt: 14) { _, rect in
+            drawTintedSymbol(
+                name: "heart.fill",
+                pointSize: 10.5,
+                weight: .bold,
+                color: accentColor,
+                in: rect
+            )
+        }
+        if let image { iconCache[key] = image }
+        return image
     }
 
     static func infoIconImage(isLight: Bool) -> CGImage? {

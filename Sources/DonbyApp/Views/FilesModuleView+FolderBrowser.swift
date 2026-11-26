@@ -38,7 +38,7 @@ extension FilesModuleView {
                         HStack(spacing: 3) {
                             Image(systemName: "star.fill")
                                 .font(.system(size: 9))
-                                .foregroundStyle(Color.orange.opacity(0.9))
+                                .foregroundStyle(appState.accentColor)
                             Text("默认打开")
                                 .font(.system(size: 10.5, weight: .medium))
                                 .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))

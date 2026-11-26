@@ -282,7 +282,12 @@ final class NativePosterCollectionItem: NSCollectionViewItem, HoverableCollectio
         }
 
         if item.userData?.isFavorite == true {
-            configureBadgeLayer(favoriteIconLayer, with: NativeCardLayerCache.favoriteHeartImage)
+            let heartColor = appearance.isMonochromeTheme ? NSColor.white : accentInfo.ns
+            let heartKey = appearance.isMonochromeTheme ? "mono_white" : accentInfo.key
+            configureBadgeLayer(
+                favoriteIconLayer,
+                with: NativeCardLayerCache.favoriteHeartImage(accentColor: heartColor, colorKey: heartKey)
+            )
             favoriteIconLayer.isHidden = false
         } else {
             favoriteIconLayer.isHidden = true
@@ -308,7 +313,7 @@ final class NativePosterCollectionItem: NSCollectionViewItem, HoverableCollectio
         let progress = item.progressFraction
         if progress > 0 && progress < 0.99 {
             progressTrack.isHidden = false
-            progressFill.backgroundColor = accentInfo.cg
+            progressFill.backgroundColor = appearance.isMonochromeTheme ? NSColor.white.cgColor : accentInfo.cg
         } else {
             progressTrack.isHidden = true
         }

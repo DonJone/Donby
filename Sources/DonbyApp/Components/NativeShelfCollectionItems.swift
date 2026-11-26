@@ -259,7 +259,7 @@ final class NativeLandscapeCollectionItem: NSCollectionViewItem, HoverableCollec
         let progress = item.progressFraction
         if progress > 0 {
             progressTrack.isHidden = false
-            progressFill.backgroundColor = accentInfo.cg
+            progressFill.backgroundColor = appearance.isMonochromeTheme ? NSColor.white.cgColor : accentInfo.cg
             let trackW = cardWidth - 16
             progressFill.frame = CGRect(x: 0, y: 0, width: trackW * CGFloat(min(1.0, progress)), height: 3.5)
         } else {
