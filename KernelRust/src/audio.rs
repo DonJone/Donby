@@ -199,7 +199,20 @@ impl DKPlayer {
     fn required_audio_preroll_samples(&self) -> i64 {
         let is_local = self.is_local_file.load(Ordering::Relaxed) && !self.has_custom_io.load(Ordering::Relaxed);
         match self.audio_rebuffer_count.load(Ordering::Relaxed) {
-            0 => if is_local { 6_144 } else { 20_000 },
+            0 => {
+                if is_local {
+                    6_144
+                } else {
+                    let cur_pos = load_f64(&self.clock.current_pos_bits).max(0.0);
+                    let demux_ahead = (load_f64(&self.last_demuxed_pts_bits) - cur_pos).max(0.0);
+                    let v_pkts = self.video_pkt_count.load(Ordering::Relaxed);
+                    let a_pkts = self.audio_pkt_count.load(Ordering::Relaxed);
+                    let pkt_bytes = self.queued_pkt_bytes.load(Ordering::Relaxed);
+                    let has_warm_runway = demux_ahead >= 1.5
+                        && (v_pkts >= 24 || a_pkts >= 36 || pkt_bytes >= 1_572_864);
+                    if has_warm_runway { 10_240 } else { 20_000 }
+                }
+            }
             1 => 60_000,
             _ => 120_000,
         }

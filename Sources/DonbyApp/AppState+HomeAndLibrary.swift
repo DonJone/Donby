@@ -369,16 +369,6 @@ extension AppState {
             if !self.nextUpItems.isEmpty { self.nextUpItems = [] }
             if self.favoriteItems != favs { self.favoriteItems = favs }
 
-            // Silently prewarm top continue-watching PlaybackInfo so clicking from Home resolves in 0ms
-            let embyPrewarmTargets = Array(resumes.filter { !$0.isSeries }.prefix(3))
-            if !embyPrewarmTargets.isEmpty {
-                Task.detached(priority: .utility) {
-                    for target in embyPrewarmTargets {
-                        await EmbyClient.shared.prewarmPlaybackInfo(server: embyServerForHome, itemId: target.id)
-                    }
-                }
-            }
-
             var latestMap: [String: [EmbyItem]] = [:]
             let hadCachedLatest = !self.latestByLibrary.isEmpty
 
@@ -465,6 +455,18 @@ extension AppState {
         )
         ServerHomeCacheStore.shared.save(snapshot, for: serverId)
         self.isLoadingHome = false
+
+        if let activeSrv = self.servers.first(where: { $0.id == serverId }) {
+            PlaybackIntentCoordinator.shared.warmServerOnConnectOrLaunch(server: activeSrv)
+            var seenContinue = Set<String>()
+            let continueCandidates = (resumeItems + nextUpItems).filter { seenContinue.insert($0.id).inserted }
+            PlaybackIntentCoordinator.shared.warmShelfCandidates(
+                server: activeSrv,
+                items: continueCandidates,
+                preferredPreset: preferredVersionPreset,
+                enable302Cache: enable302Cache
+            )
+        }
 
         // Seed any already-cached multi-platform ratings immediately so hero badges appear without delay.
         let initialCarousel = self.carouselItems

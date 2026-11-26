@@ -1,14 +1,14 @@
 # Module Map: Optional UHDNow Streaming Integration (`DonbyUHDModule` & `Modules/UHD`)
 
-> Last synced: `v2.0.20`. Load this doc for UHDNow REST/WebSocket protocol behavior, dual-mode artwork resolution, single-episode detail hydration, CDN line selection/speed test, Watch Party, and GPU Danmu.
+> Last synced: `v2.0.25`. Load this doc for UHDNow REST/WebSocket protocol behavior, dual-mode artwork resolution, single-episode detail hydration, CDN line selection/speed test, Watch Party, and GPU Danmu.
 
 ## 1. File Inventory (Target Split: `<= 800L` per file)
 - **`Sources/DonbyUHDModule/`** (Optional SwiftPM target; excluded cleanly when `DONBY_PURE=1`):
-  - `UHDModuleConfig.swift` — `UHDModuleEndpoints` (`smart.uhdnow.com` -> `v1.uhdnow.com` fallback, China-optimized default line selection), `DonbyUHDServiceProvider` (`DonbyMediaServiceRegistry`), `DonbyUHDModule.install()` / `uninstall()`.
+  - `UHDModuleConfig.swift` — `UHDModuleEndpoints` (`smart.uhdnow.com` -> `v1.uhdnow.com` fallback, China-optimized default line selection), `DonbyUHDServiceProvider` (`DonbyMediaServiceRegistry`, parallel domain + movie/episode `assets` `prewarmPlayback`, `prewarmEdgeRoutes`, and `PlaybackIntentCoordinator` cache invalidation), `DonbyUHDModule.install()` / `uninstall()`.
   - `UHDAPIModels.swift` & `UHDDomainNormalizers.swift` — domain DTOs, `UHDSpeedTestMetricsEngine`, `UHDLoginCodeNormalizer`, `UHDWatchPartyInviteParser`, `UHDTmdbSearchQueryParser`, `UHDRatingNormalizer`, `UHDDisplayNormalizer`.
-  - `UHDStreamClient.swift` — Actor core, `DonbyNetworkSession.sharedURLSession` sharing, `APIRequestGate` integration, raw `Authorization: <token>` header construction (no `Bearer` prefix), `UHDResolvedDomainCache`, `UHDAssetResponseCache`.
+  - `UHDStreamClient.swift` — Actor core, `DonbyNetworkSession.sharedURLSession` sharing, `APIRequestGate` integration, raw `Authorization: <token>` header construction (no `Bearer` prefix), `UHDResolvedDomainCache` (backed by persistent `NetworkRouteWarmStore`), `UHDAssetResponseCache`.
   - `UHDStreamClient+AuthAndAccount.swift` — password/code/token auto-fallback login, subscription/traffic snapshots.
-  - `UHDStreamClient+SpeedTestAndLines.swift` — `/playback/domains` listing, `/resolve` edge base resolution, `TEST_BASE` chunk speed test, exit IP probe.
+  - `UHDStreamClient+SpeedTestAndLines.swift` — `/playback/domains` listing, `/resolve` edge base resolution, `prewarmPlaybackDomain` (prewarming 4 TLS/H2 streaming lanes via `DonbyNetworkSession.prewarmEdgeOrigin`), `TEST_BASE` chunk speed test, exit IP probe.
   - `UHDStreamClient+CatalogAndSearch.swift` — library mode & personal settings (`GET/PUT /me/library`, `UHDLibraryMode` `normal`/`anime`), mode-aware collections/hot/calendar/search, `playback-states` (`resume` + `nextUp`), genres, persons, TMDB search, favorites.
   - `UHDStreamClient+DetailAndMapping.swift` — `fetchItemDetail` (with ambiguous-stub 404 retry across `episode`/`movie`/`tv`), `fetchSeasons`, paginated `fetchSeasonEpisodes` (`page_size=100`, auto-fetches pages `2...20` when `total > 100`), `fetchCredits`, `fetchAssetMediaSources`, `resolvePlaybackResource`, `reportPlayback`.
   - `UHDStreamClient+DTOMapping.swift` — DTO-to-domain mappers (`resolveItemType`, `resolveStateType`, `mapSummary`, `mapDetail`, `mapEpisode` with season poster / series fanart / series logo fallbacks, `mapPlaybackItem`, `mapVideoAsset`).

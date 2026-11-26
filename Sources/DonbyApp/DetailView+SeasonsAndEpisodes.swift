@@ -148,6 +148,9 @@ extension DetailView {
                             withAnimation(.easeInOut(duration: 0.25)) {
                                 proxy.scrollTo(newId, anchor: .center)
                             }
+                            if let focusedEp = episodes.first(where: { $0.id == newId }) {
+                                stageHoveredOrFocusedEpisode(focusedEp)
+                            }
                         }
                     }
                     .onChange(of: episodes.map(\.id)) { _, _ in
@@ -280,6 +283,11 @@ extension DetailView {
                 y: isSelected ? 4 : 3
             )
             .contentShape(Rectangle())
+            .onHover { isHovering in
+                if isHovering {
+                    stageHoveredOrFocusedEpisode(ep)
+                }
+            }
             .onTapGesture {
                 userDidPickEpisodeLocally = true
                 focusedEpisodeId = ep.id

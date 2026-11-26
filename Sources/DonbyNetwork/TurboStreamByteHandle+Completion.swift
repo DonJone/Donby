@@ -21,6 +21,7 @@ extension TurboStreamByteHandle {
         inFlightChunks.remove(chunkIndex)
         rescueChunks.remove(chunkIndex)
         chunkStartTime.removeValue(forKey: chunkIndex)
+        chunkFirstBlockedUptime.removeValue(forKey: chunkIndex)
         chunkNextRetryTime.removeValue(forKey: chunkIndex)
         chunk429Retries.removeValue(forKey: chunkIndex)
         failedCount.removeValue(forKey: chunkIndex)
@@ -114,6 +115,7 @@ extension TurboStreamByteHandle {
             store.setTotalSize(totalSize, sourceURL: streamURL.absoluteString)
         }
         let now = ProcessInfo.processInfo.systemUptime
+        var didInvalidateRedirect = false
         condition.lock()
         activeAttempts.removeValue(forKey: attemptId)
         if directInFlightStarts[startOffset] == attemptId {
@@ -151,6 +153,7 @@ extension TurboStreamByteHandle {
             } else if usedRedirectedURL && (statusCode == 200 || statusCode >= 400) && statusCode != 416 {
                 if redirectEpoch == effectiveRedirectEpoch {
                     effectiveStreamURL = nil
+                    didInvalidateRedirect = true
                 }
                 directNextRetryTime[startOffset] = now + 0.05
             } else if statusCode != 416 {
@@ -161,6 +164,9 @@ extension TurboStreamByteHandle {
         }
         condition.broadcast()
         condition.unlock()
+        if didInvalidateRedirect {
+            onInvalidatedRedirectURL?()
+        }
     }
 
     func finishStreamingAttempt(
@@ -182,6 +188,7 @@ extension TurboStreamByteHandle {
         let now = ProcessInfo.processInfo.systemUptime
         var competingTasksToCancel: [URLSessionDataTask] = []
         var scheduleNext = false
+        var didInvalidateRedirect = false
 
         condition.lock()
         let removedRec = activeAttempts.removeValue(forKey: attemptId)
@@ -257,6 +264,7 @@ extension TurboStreamByteHandle {
                 } else if usedRedirectedURL && (statusCode == 200 || statusCode >= 400) && statusCode != 416 {
                     if redirectEpoch == effectiveRedirectEpoch {
                         effectiveStreamURL = nil
+                        didInvalidateRedirect = true
                     }
                     chunkNextRetryTime[curIdx] = now + 0.05
                 } else if statusCode != 416 {
@@ -281,6 +289,9 @@ extension TurboStreamByteHandle {
         for t in competingTasksToCancel {
             TurboStreamingSessionHub.shared.cancelTask(t, intentional: true)
         }
+        if didInvalidateRedirect {
+            onInvalidatedRedirectURL?()
+        }
 
         if scheduleNext {
             _ = stepBulkPrefetchSchedule()
@@ -301,5 +312,69 @@ extension TurboStreamByteHandle {
             return response.expectedContentLength
         }
         return nil
+    }
+
+    public func abort() {
+        var tasksToCancel: [URLSessionDataTask] = []
+        condition.lock()
+        isAborted = true
+        for (_, rec) in activeAttempts {
+            if let task = rec.task {
+                tasksToCancel.append(task)
+            }
+        }
+        condition.broadcast()
+        condition.unlock()
+        coordinatorTask?.cancel()
+        for task in tasksToCancel {
+            TurboStreamingSessionHub.shared.cancelTask(task, intentional: true)
+        }
+    }
+
+    public func close() {
+        var tasksToCancel: [URLSessionDataTask] = []
+        condition.lock()
+        if isClosed {
+            condition.unlock()
+            return
+        }
+        isAborted = true
+        isClosed = true
+        shouldYieldReadHandler = nil
+        for (_, rec) in activeAttempts {
+            if let task = rec.task {
+                tasksToCancel.append(task)
+            }
+        }
+        activeAttempts.removeAll()
+        attemptBuffers.removeAll()
+        activeDisplayAttempt.removeAll()
+        chunkNextRetryTime.removeAll()
+        chunkFirstBlockedUptime.removeAll()
+        chunk429Retries.removeAll()
+        directSlices.removeAll()
+        directInFlightStarts.removeAll()
+        directInFlightEndOffsets.removeAll()
+        directFailedStarts.removeAll()
+        direct429Retries.removeAll()
+        directNextRetryTime.removeAll()
+        condition.broadcast()
+        condition.unlock()
+
+        coordinatorTask?.cancel()
+        coordinatorTask = nil
+        for task in tasksToCancel {
+            TurboStreamingSessionHub.shared.cancelTask(task, intentional: true)
+        }
+
+        store.flushMeta()
+        let remainingReaders = store.releaseReader()
+        if remainingReaders == 0 {
+            store.trimIdleMemoryKeepingPinned()
+            let key = assetKey
+            Task { @MainActor in
+                DonbyDownloadManager.shared.cleanupRedundantCacheIfMaterialized(assetKey: key)
+            }
+        }
     }
 }

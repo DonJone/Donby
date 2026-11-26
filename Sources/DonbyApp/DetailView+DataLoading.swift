@@ -11,13 +11,12 @@ extension DetailView {
         }
     }
 
-    var effectivePlayButtonStartSeconds: Double {
-        let target = heroResolvedPlayTarget
-        if target.resumePositionSeconds > 0.5 {
-            return target.resumePositionSeconds
+    func effectiveStartSeconds(for candidate: EmbyItem) -> Double {
+        if candidate.resumePositionSeconds > 0.5 {
+            return candidate.resumePositionSeconds
         }
-        if target.isEpisode, let serverId = effectiveDetailServer?.id ?? appState.activeServer?.id {
-            let pref = appState.effectiveSkipPreference(serverId: serverId, item: target)
+        if candidate.isEpisode, let serverId = effectiveDetailServer?.id ?? appState.activeServer?.id {
+            let pref = appState.effectiveSkipPreference(serverId: serverId, item: candidate)
             if pref.introEnabled && pref.mode == .automatic && pref.introSeconds > 0 {
                 return Double(pref.introSeconds)
             }
@@ -25,52 +24,69 @@ extension DetailView {
         return 0.0
     }
 
+    var effectivePlayButtonStartSeconds: Double {
+        effectiveStartSeconds(for: heroResolvedPlayTarget)
+    }
+
+    func stageHoveredOrFocusedEpisode(_ ep: EmbyItem) {
+        guard appState.activePlayback == nil,
+              let server = effectiveDetailServer,
+              !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if appState.detailPreloadEnabled && ep.id == heroResolvedPlayTarget.id {
+            return
+        }
+        let targetEp = (ep.seriesName == nil || ep.seriesName!.isEmpty) ? ep.withSeriesName(item.name) : ep
+        PlaybackIntentCoordinator.shared.stageCandidateEpisode(
+            server: server,
+            item: targetEp,
+            startSeconds: effectiveStartSeconds(for: targetEp),
+            preferredPreset: appState.preferredVersionPreset,
+            enable302Cache: appState.enable302Cache,
+            turboEnabled: appState.turboEnabled,
+            debounceNanoseconds: 180_000_000,
+            maxMemoryBytes: max(64, appState.turboMemoryCacheMB) * 1024 * 1024
+        )
+    }
+
     func runDetailPrewarmAndPreload() async {
         guard !isLoadingDetails else { return }
         guard let server = effectiveDetailServer, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         if item.isSeries && heroTargetEpisode == nil { return }
         let target = heroResolvedPlayTarget
-        try? await Task.sleep(nanoseconds: 120_000_000)
+        // Stage 1 (50ms settle): resolve control-plane resource into 0ms fast table + prewarm 4 TLS/H2 edge lanes
+        try? await Task.sleep(nanoseconds: 50_000_000)
         guard !Task.isCancelled else { return }
         let sourceHint = (target.id == item.id && !selectedSourceId.isEmpty) ? selectedSourceId : nil
-        if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
-            await ext.prewarmPlayback(server: server, item: target)
-        } else {
-            await EmbyClient.shared.prewarmPlaybackInfo(server: server, itemId: target.id, mediaSourceId: sourceHint)
-        }
-
-        guard appState.detailPreloadEnabled,
-              appState.turboEnabled,
-              appState.activePlayback == nil,
-              DonbyDownloadManager.shared.completedEntry(for: target.id, serverId: server.id) == nil else {
-            return
-        }
-        // Gentle debounce so quick detail browsing never wastes traffic
-        try? await Task.sleep(nanoseconds: 350_000_000)
-        guard !Task.isCancelled, appState.activePlayback == nil else { return }
-
         let preset = appState.preferredVersionPreset
         let enable302 = appState.enable302Cache && server.cache302Request
-        let resolved: ResolvedPlaybackResource?
-        if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
-            resolved = try? await ext.resolvePlaybackResource(
-                server: server,
-                item: target,
-                preferredSourceId: sourceHint,
-                preferredPreset: preset,
-                enable302Cache: enable302
-            )
-        } else {
-            resolved = try? await EmbyClient.shared.resolvePlaybackResource(
-                server: server,
-                item: target,
-                preferredSourceId: sourceHint,
-                preferredPreset: preset,
-                enable302Cache: enable302,
-                defer302ProbeWhenTurbo: true
-            )
+
+        async let prewarmSideTask: Void = {
+            if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+                await ext.prewarmPlayback(server: server, item: target)
+            } else {
+                await EmbyClient.shared.prewarmConnection(server: server)
+            }
+        }()
+        let resolved = try? await PlaybackIntentCoordinator.shared.resolveAndCacheResource(
+            server: server,
+            item: target,
+            preferredSourceId: sourceHint,
+            preferredPreset: preset,
+            enable302Cache: appState.enable302Cache,
+            defer302ProbeWhenTurbo: true
+        )
+        _ = await prewarmSideTask
+
+        guard !Task.isCancelled,
+              appState.turboEnabled,
+              appState.activePlayback == nil,
+              DonbyDownloadManager.shared.completedEntry(for: target.id, serverId: server.id) == nil,
+              let res = resolved else {
+            return
         }
-        guard !Task.isCancelled, appState.activePlayback == nil, let res = resolved else { return }
+        // Stage 2 (220ms gentle debounce): warm data-plane chunks (full runway if detailPreloadEnabled, else 1.5 MiB micro-stage)
+        try? await Task.sleep(nanoseconds: 220_000_000)
+        guard !Task.isCancelled, appState.activePlayback == nil else { return }
         let urlStr = res.streamURL.absoluteString.lowercased()
         guard (urlStr.hasPrefix("http://") || urlStr.hasPrefix("https://")),
               !urlStr.contains(".m3u8"), !urlStr.contains(".mpd") else {
@@ -89,26 +105,43 @@ extension DetailView {
             baseURL: server.activeBaseURL
         )
         let originURL = res.originStreamURL ?? res.streamURL
-        let cachedRedirectURL: URL? = (res.originStreamURL != nil && res.originStreamURL != res.streamURL) ? res.streamURL : nil
+        let cachedRedirectURL: URL? = (res.originStreamURL != nil && res.originStreamURL != res.streamURL)
+            ? res.streamURL
+            : NetworkRouteWarmStore.shared.cachedRedirect(for: redirectKey)
         let durationSec = Double(target.runTimeTicks ?? res.mediaSource.runTimeTicks ?? 0) / 10_000_000.0
         let playStartSec = effectivePlayButtonStartSeconds
         let redirectHandler: (@Sendable (URL) -> Void)? = enable302
             ? Self.makeRedirectStoreHandler(key: redirectKey)
             : nil
+        let memoryCap = max(64, appState.turboMemoryCacheMB) * 1024 * 1024
 
-        DonbyTurboCacheEngine.shared.startDetailPreload(
-            assetKey: assetKey,
-            streamURL: originURL,
-            cachedRedirectURL: cachedRedirectURL,
-            headers: res.headers,
-            knownTotalSize: res.mediaSource.size,
-            durationSeconds: durationSec,
-            resumePositionSeconds: playStartSec,
-            preloadSeconds: appState.detailPreloadSeconds,
-            maxMemoryBytes: max(64, appState.turboMemoryCacheMB) * 1024 * 1024,
-            connectionBudget: appState.effectiveConnectionBudget(for: server),
-            onResolvedRedirectURL: redirectHandler
-        )
+        if appState.detailPreloadEnabled {
+            DonbyTurboCacheEngine.shared.startDetailPreload(
+                assetKey: assetKey,
+                streamURL: originURL,
+                cachedRedirectURL: cachedRedirectURL,
+                headers: res.headers,
+                knownTotalSize: res.mediaSource.size,
+                durationSeconds: durationSec,
+                resumePositionSeconds: playStartSec,
+                preloadSeconds: appState.detailPreloadSeconds,
+                maxMemoryBytes: memoryCap,
+                connectionBudget: appState.effectiveConnectionBudget(for: server),
+                onResolvedRedirectURL: redirectHandler
+            )
+        } else {
+            DonbyTurboCacheEngine.shared.startMicroStagePreload(
+                assetKey: assetKey,
+                streamURL: originURL,
+                cachedRedirectURL: cachedRedirectURL,
+                headers: res.headers,
+                knownTotalSize: res.mediaSource.size,
+                durationSeconds: durationSec,
+                startPositionSeconds: playStartSec,
+                maxMemoryBytes: memoryCap,
+                onResolvedRedirectURL: redirectHandler
+            )
+        }
     }
 
     private nonisolated static func makeRedirectStoreHandler(key: String) -> @Sendable (URL) -> Void {

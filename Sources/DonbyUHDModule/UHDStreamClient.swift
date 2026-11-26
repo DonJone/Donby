@@ -118,17 +118,23 @@ actor UHDResolvedDomainCache {
             return hit.url
         }
         entries.removeValue(forKey: key)
+        if let warm = NetworkRouteWarmStore.shared.cachedEdgeOrigin(serverId: serverId, lineKey: domainId) {
+            entries[key] = (warm, Date().addingTimeInterval(180))
+            return warm
+        }
         return nil
     }
 
     func set(_ url: URL, serverId: UUID, domainId: String, ttlSeconds: TimeInterval = 300) {
         let key = "\(serverId.uuidString)|\(domainId)"
         entries[key] = (url: url, expiresAt: Date().addingTimeInterval(ttlSeconds))
+        NetworkRouteWarmStore.shared.storeEdgeOrigin(url, serverId: serverId, lineKey: domainId, ttlSeconds: ttlSeconds)
     }
 
     func invalidate(serverId: UUID) {
         let prefix = "\(serverId.uuidString)|"
         entries = entries.filter { !$0.key.hasPrefix(prefix) }
+        NetworkRouteWarmStore.shared.invalidateServer(serverId)
     }
 }
 

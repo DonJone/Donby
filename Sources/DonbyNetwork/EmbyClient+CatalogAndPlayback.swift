@@ -216,6 +216,13 @@ extension EmbyClient {
         throw EmbyClientError.noPlayableStream
     }
 
+    public func invalidatePlaybackCaches(serverId: UUID? = nil) async {
+        await EmbyPlaybackInfoCache.shared.invalidate(serverId: serverId)
+        if let serverId {
+            PlaybackIntentCoordinator.shared.invalidateServer(serverId)
+        }
+    }
+
     public func prewarmPlaybackInfo(server: EmbyServerConfig, itemId: String, mediaSourceId: String? = nil) async {
         guard !isUHDNativeExtensionActive(for: server), !server.host.isEmpty else { return }
         let base = server.activeBaseURL

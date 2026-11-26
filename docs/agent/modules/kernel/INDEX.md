@@ -1,6 +1,6 @@
 # Module Map: Playback Kernel (`KernelRust` + `DonbyKernelC` ABI)
 
-> Last synced: `v2.0.10` (C++20 baseline archived on `legacy/cpp-kernel`). Read [../../decisions/003-rust-kernel-migration.md](../../decisions/003-rust-kernel-migration.md) for migration rationale.
+> Last synced: `v2.0.25` (C++20 baseline archived on `legacy/cpp-kernel`). Read [../../decisions/003-rust-kernel-migration.md](../../decisions/003-rust-kernel-migration.md) and [../../decisions/004-zero-serial-rtt-instant-play-v3.md](../../decisions/004-zero-serial-rtt-instant-play-v3.md) for architecture rationale.
 
 ## 1. Sub-Document Routing
 
@@ -20,7 +20,7 @@
 - `Sources/DonbyKernelC/dk_ffi_subtitle.c` (pure C11) — `CFStringTransform`, FFmpeg ASS/PGS/DVD subtitle packet decode, and `libass` struct accessors.
 - `KernelRust/src/` (`donby_kernel_rs`, zero external Cargo deps -> `build_kernel/libdonby_kernel.a`):
   - `lib.rs` — Crate root, `LOG_CALLBACK`/`LIVE_PLAYERS`, `dk_rust_forward_ffmpeg_log`, `ReaderGuard`, URL normalization/redaction.
-  - `player.rs` — `DKPlayer` (`#[repr(C)]`, 70 fields), sub-state structs, RAII guards, lock partial order docs.
+  - `player.rs` — `DKPlayer` (`#[repr(C)]`, including `initial_open_seek_pending`), sub-state structs, RAII guards, lock partial order docs.
   - `lifecycle.rs` — AVIO/interrupt thunks, `create_raw`/`destroy_raw`/`request_abort_raw`, `open_with_tracks`, 9-step `close_session`.
   - `demux.rs` — `demux_worker`, buffer backpressure, DoVi probe, `execute_pending_seek`.
   - `video.rs` — VT callbacks, software fallback, `video_decode_worker`, `acquire_frame`, `extract_video_thumbnail`.

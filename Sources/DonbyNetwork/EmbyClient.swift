@@ -13,6 +13,10 @@ public actor RedirectCacheStore {
             return entry.url
         }
         cache.removeValue(forKey: key)
+        if let warm = NetworkRouteWarmStore.shared.cachedRedirect(for: key) {
+            cache[key] = (url: warm, expiresAt: Date().addingTimeInterval(900))
+            return warm
+        }
         return nil
     }
 
@@ -26,6 +30,12 @@ public actor RedirectCacheStore {
             }
         }
         cache[key] = (url: url, expiresAt: now.addingTimeInterval(ttlSeconds))
+        NetworkRouteWarmStore.shared.storeRedirect(url, for: key, ttlSeconds: ttlSeconds)
+    }
+
+    public func invalidateRedirect(for key: String) {
+        cache.removeValue(forKey: key)
+        NetworkRouteWarmStore.shared.invalidateRedirect(for: key)
     }
 }
 

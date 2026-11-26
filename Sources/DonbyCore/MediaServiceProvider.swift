@@ -40,6 +40,13 @@ public protocol DonbyMediaServiceProvider: Sendable {
     func setPlayed(server: EmbyServerConfig, item: EmbyItem, isPlayed: Bool) async throws
     func pingLine(server: EmbyServerConfig, line: ServerLineInfo?) async -> Int?
     func invalidateCaches(serverId: UUID) async
+    func prewarmEdgeRoutes(server: EmbyServerConfig) async -> [URL]
+}
+
+public extension DonbyMediaServiceProvider {
+    func prewarmEdgeRoutes(server: EmbyServerConfig) async -> [URL] {
+        []
+    }
 }
 
 /// Thread-safe runtime registry for optional media service modules.

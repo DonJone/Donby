@@ -9,8 +9,8 @@ use crate::ffi::{
     dk_shim_format_summary, dk_shim_free_hw_fmt_ctx, dk_shim_get_stream_meta,
     dk_shim_install_ffmpeg_log_bridge, dk_shim_is_hevc_stream, dk_shim_open_audio_decoder,
     dk_shim_open_format, dk_shim_open_video_decoder, dk_shim_reclaim_memory,
-    dk_shim_release_sw_video_res, dk_shim_seek_format, dk_shim_unref_hw_ctx, ffmpeg_err_string,
-    DKShimStreamMeta,
+    dk_shim_release_sw_video_res, dk_shim_set_codec_skip_nonref, dk_shim_unref_hw_ctx,
+    ffmpeg_err_string, DKShimStreamMeta,
 };
 use crate::player::{AudioCodecState, CustomIoSlot, DKPlayer, SwVideoState, MAX_CACHED_STREAM_TYPES};
 use crate::tracks::score_auto_subtitle_stream;
@@ -277,6 +277,7 @@ impl DKPlayer {
             return -1;
         }
         self.seek_requested.store(false, Ordering::Release);
+        self.initial_open_seek_pending.store(false, Ordering::Release);
         self.seek_preview_pending.store(false, Ordering::Release);
         self.force_present_next_frame.store(false, Ordering::Release);
         self.video_stream_idx.store(-1, Ordering::Release);
@@ -296,7 +297,7 @@ impl DKPlayer {
             open_target_c.as_ptr(),
             headers_crlf,
             is_local_file,
-            start_sec > 0.5,
+            start_sec > 2.5,
             is_mpeg_ts,
             use_custom_io,
             has_seek_cb,
@@ -568,10 +569,28 @@ impl DKPlayer {
             }
         }
 
-        if start_sec > 0.5 {
-            let _ = dk_shim_seek_format(fmt_ctx, start_sec, false);
-            store_f64(&self.video_seek_drop_bits, -1.0);
-            store_f64(&self.audio_seek_drop_bits, -1.0);
+        if start_sec > 2.5 {
+            // Defer remote container seek onto `demux_worker` first iteration so `open_with_tracks`
+            // returns in 0ms, immediately unlocking full multi-lane network concurrency and overlapping
+            // CoreAudio HAL setup (`init_audio_queue`) with the initial seek read.
+            store_f64(&self.seek_target_bits, start_sec);
+            self.seek_accurate.store(false, Ordering::Release);
+            self.latest_seek_seq.store(1, Ordering::Release);
+            self.executing_seek_seq.store(1, Ordering::Release);
+            self.initial_open_seek_pending.store(true, Ordering::Release);
+            self.force_present_next_frame.store(true, Ordering::Release);
+            self.clock.reset_to(start_sec);
+        } else if start_sec > 0.05 {
+            // Near-zero resume (`<= 2.5s`): skip expensive remote EOF Cues seek (which falls back to
+            // the 0.0s keyframe in Chunk 0 anyway) and fast-forward locally from cached Chunk 0.
+            store_f64(&self.video_seek_drop_bits, start_sec);
+            store_f64(&self.audio_seek_drop_bits, start_sec);
+            if let Ok(vc) = self.video_codec_mtx.lock() {
+                if vc.0 != 0 {
+                    dk_shim_set_codec_skip_nonref(vc.0 as *mut c_void, true);
+                    self.video_skip_nonref_active.store(true, Ordering::Release);
+                }
+            }
             self.force_present_next_frame.store(true, Ordering::Release);
             self.clock.reset_to(start_sec);
         } else {

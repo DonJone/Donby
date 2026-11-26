@@ -92,13 +92,14 @@ extension TurboStreamByteHandle {
             return bufCount > 0 || rec.currentChunkIndex > rec.startChunkIndex
         }()
 
-        let inInitialSeekBurst = !playheadReceivingBytes && leadCachedChunks == 0 && lastSeekUptime > 0 && (now - lastSeekUptime) < 0.55
+        let isRapidScrubStreak = recentSeekStreakCount >= 2 && lastSeekUptime > 0 && (now - lastSeekUptime) < 0.35
+        let inInitialScrubGate = isRapidScrubStreak && !playheadReceivingBytes && leadCachedChunks == 0
         let effectiveCap: Int
         if inOpenProbePhase {
-            effectiveCap = chunk0HeadersReceived ? min(2, dynamicConcurrencyCap) : 0
-        } else if inInitialSeekBurst {
-            // Brief 0.55s seek-burst gate: focuses initial CWND on Stream #1 + Stream #2 and halves H2 RST_STREAM
-            // churn during rapid scrubbing, then immediately opens full pipeline without deadlocking on slow CDNs.
+            effectiveCap = (redirectResolved || chunk0HeadersReceived) ? min(2, dynamicConcurrencyCap) : 0
+        } else if inInitialScrubGate {
+            // 0.35s 2-stream gate activates ONLY on rapid consecutive scrub streaks (>= 2 seeks within 450ms)
+            // to prevent HTTP/2 RST_STREAM storms while letting single-click seeks immediately use warm lanes.
             effectiveCap = min(2, dynamicConcurrencyCap)
         } else if isMultiplexedProtocol {
             let needsPerStreamBoost = (measuredWireSpeedMBs > 0.1 && measuredWireSpeedMBs < 4.5 && leadCachedChunks < 6)
@@ -125,23 +126,77 @@ extension TurboStreamByteHandle {
             }
         }
 
+        // Work-Stealing Tail-Trim: if a stream holding >= 2 chunks near the playhead crawls below
+        // max(480 KB/s, 0.4 * fastestLaneSpeed), trim its trailing chunks immediately so fast lanes take over.
+        if dynamicConcurrencyCap > 1 {
+            let fastestLaneBps = max(
+                TurboStreamingSessionHub.shared.fastestHealthyLaneSpeedBps(),
+                measuredWireSpeedMBs * 1_048_576.0 * 0.55
+            )
+            let trimFloorBps = max(480_000.0, 0.40 * fastestLaneBps)
+            let focusChunk = urgentWaitingChunk ?? currentChunk
+            let candidateIds = Array(activeAttempts.keys)
+            for aid in candidateIds {
+                guard let rec = activeAttempts[aid],
+                      !rec.trimmedEarly,
+                      rec.currentChunkIndex >= 0,
+                      (rec.endChunkExclusive - rec.currentChunkIndex) >= 2,
+                      focusChunk >= rec.currentChunkIndex - 2 else { continue }
+                let partialBytes = attemptBuffers[aid]?.count ?? 0
+                let hasStartedBody = rec.responseHeadersReceived || partialBytes > 0 || rec.currentChunkIndex > rec.startChunkIndex
+                let elapsed = now - rec.chunkStartTimestamp
+                guard hasStartedBody && elapsed >= 0.22 else { continue }
+                let rateBps = Double(partialBytes) / max(0.05, elapsed)
+                if rateBps < trimFloorBps {
+                    trimSlowAttemptTailLocked(attemptId: aid)
+                }
+            }
+        }
+
         // Check genuinely stalled or slow-crawling streams near cursor using adaptive CDN TTFB so slow edges
         // never trigger rescue storms while throttled playhead streams get rescued before audio underruns.
         let adaptiveColdRescue: TimeInterval = max(2.2, min(4.5, smoothedResponseTTFB * 2.5))
         let crawlFloorBps: Double = measuredWireSpeedMBs >= 1.5 ? 480_000.0 : 360_000.0
         var stalledTasksToCancel: [URLSessionDataTask] = []
         var stalledLanesToReport: [Int] = []
+        let activeHost = (effectiveStreamURL ?? streamURL).host
         for rec in activeAttempts.values where rec.currentChunkIndex >= currentChunk && rec.currentChunkIndex <= currentChunk + 2 && rec.currentChunkIndex < rec.endChunkExclusive {
             let idx = rec.currentChunkIndex
             if !rescueChunks.contains(idx) {
                 let byteIdle = now - rec.lastByteTimestamp
                 let partialBytes = attemptBuffers[rec.attemptId]?.count ?? 0
-                let hasReceivedAny = (rec.currentChunkIndex > rec.startChunkIndex) || (partialBytes > 0)
+                let hasReceivedAny = rec.responseHeadersReceived || (rec.currentChunkIndex > rec.startChunkIndex) || (partialBytes > 0)
                 let isImmediatePlayhead = (idx <= currentChunk + 1)
-                let threshold: TimeInterval = hasReceivedAny ? (isImmediatePlayhead ? 1.1 : 1.6) : adaptiveColdRescue
+                let isReaderBlockedHere = (urgentWaitingChunk == idx)
+                let waitElapsed = isReaderBlockedHere ? max(0, now - urgentWaitStartUptime) : 0
                 let chunkElapsed = now - rec.chunkStartTimestamp
-                let isSlowPlayheadCrawl = (dynamicConcurrencyCap > 1) && hasReceivedAny && isImmediatePlayhead && chunkElapsed > 1.2 && (Double(partialBytes) / max(0.1, chunkElapsed) < crawlFloorBps)
-                if byteIdle > threshold || isSlowPlayheadCrawl {
+                let rateBps = Double(partialBytes) / max(0.05, chunkElapsed)
+
+                var shouldHedgeOrRescue = false
+                if isReaderBlockedHere && dynamicConcurrencyCap > 1 {
+                    if hasReceivedAny && waitElapsed >= 0.30 {
+                        let expectedLen = store.expectedChunkLength(for: idx)
+                        let skip = (idx == rec.startChunkIndex) ? rec.initialByteSkip : 0
+                        let remBytes = max(0, expectedLen - skip - partialBytes)
+                        let predictedRem = Double(remBytes) / max(1.0, rateBps)
+                        if predictedRem > 0.35 || byteIdle > 1.0 {
+                            shouldHedgeOrRescue = true
+                        }
+                    } else if !hasReceivedAny {
+                        let hasFastAlt = TurboStreamingSessionHub.shared.hasVerifiedFastAlternateLane(forHost: activeHost, excludingLane: rec.laneIndex)
+                        let coldThreshold = hasFastAlt ? max(0.95, smoothedResponseTTFB * 1.4) : adaptiveColdRescue
+                        if waitElapsed > coldThreshold || byteIdle > coldThreshold {
+                            shouldHedgeOrRescue = true
+                        }
+                    }
+                }
+                if !shouldHedgeOrRescue {
+                    let threshold: TimeInterval = hasReceivedAny ? (isImmediatePlayhead ? 1.1 : 1.6) : adaptiveColdRescue
+                    let isSlowPlayheadCrawl = (dynamicConcurrencyCap > 1) && hasReceivedAny && isImmediatePlayhead && chunkElapsed > 1.2 && (rateBps < crawlFloorBps)
+                    shouldHedgeOrRescue = (byteIdle > threshold) || isSlowPlayheadCrawl
+                }
+
+                if shouldHedgeOrRescue {
                     if dynamicConcurrencyCap <= 1 {
                         if let t = rec.task { stalledTasksToCancel.append(t) }
                         activeAttempts.removeValue(forKey: rec.attemptId)
@@ -154,12 +209,23 @@ extension TurboStreamByteHandle {
                                 chunkStartTime.removeValue(forKey: relIdx)
                             }
                         }
+                    } else {
+                        trimSlowAttemptTailLocked(attemptId: rec.attemptId)
                     }
                     rescueChunks.insert(idx)
                     chunkStartTime[idx] = now
-                    stalledLanesToReport.append(rec.laneIndex)
+                    if byteIdle > 1.5 || !isReaderBlockedHere {
+                        stalledLanesToReport.append(rec.laneIndex)
+                    }
                     let rescueSkip = (idx == currentChunk) ? computeInitialByteSkipLocked(chunkIndex: idx, offsetInChunk: Int(max(0, cursorOffset) % Int64(chunkSize))) : 0
-                    spawnChunkFetchLocked(index: idx, isUrgent: true, isRescue: true, initialByteSkip: rescueSkip, excludeLane: rec.laneIndex)
+                    spawnChunkFetchLocked(
+                        index: idx,
+                        isUrgent: true,
+                        isRescue: true,
+                        initialByteSkip: rescueSkip,
+                        excludeLane: rec.laneIndex,
+                        singleChunkMicroHedge: isReaderBlockedHere
+                    )
                 }
             }
         }
@@ -200,7 +266,35 @@ extension TurboStreamByteHandle {
         return false
     }
 
-    func spawnDirectRangeFetchLocked(startOffset: Int64, totalSize: Int64, length: Int64 = 524_288) {
+    func trimSlowAttemptTailLocked(attemptId: UInt64) {
+        guard var rec = activeAttempts[attemptId],
+              !rec.trimmedEarly,
+              rec.currentChunkIndex >= 0,
+              rec.endChunkExclusive > rec.currentChunkIndex + 1 else { return }
+        let keepEnd = rec.currentChunkIndex + 1
+        for relIdx in keepEnd..<rec.endChunkExclusive {
+            if activeDisplayAttempt[relIdx] == attemptId {
+                activeDisplayAttempt.removeValue(forKey: relIdx)
+            }
+        }
+        rec.endChunkExclusive = keepEnd
+        rec.trimmedEarly = true
+        activeAttempts[attemptId] = rec
+        for relIdx in keepEnd..<(keepEnd + 64) {
+            if inFlightChunks.contains(relIdx) && !activeAttempts.values.contains(where: { $0.covers(relIdx) }) {
+                inFlightChunks.remove(relIdx)
+                rescueChunks.remove(relIdx)
+                chunkStartTime.removeValue(forKey: relIdx)
+            }
+        }
+    }
+
+    func spawnDirectRangeFetchLocked(
+        startOffset: Int64,
+        totalSize: Int64,
+        length: Int64 = 524_288,
+        excludeLane: Int? = nil
+    ) {
         let clampedLen = max(1, min(2_097_152, length))
         let endByte = min(totalSize - 1, startOffset + clampedLen - 1)
         guard endByte >= startOffset else { return }
@@ -232,7 +326,12 @@ extension TurboStreamByteHandle {
         attemptBuffers[attemptId] = buf
         directInFlightStarts[startOffset] = attemptId
         directInFlightEndOffsets[startOffset] = endByte
-        let (task, laneIdx) = TurboStreamingSessionHub.shared.startTask(request: req, context: ctx, priority: 1.0)
+        let (task, laneIdx) = TurboStreamingSessionHub.shared.startTask(
+            request: req,
+            context: ctx,
+            priority: 1.0,
+            excludeLane: excludeLane
+        )
         activeAttempts[attemptId] = ActiveAttemptRecord(
             attemptId: attemptId,
             startChunkIndex: -1,
@@ -248,7 +347,14 @@ extension TurboStreamByteHandle {
         )
     }
 
-    func spawnChunkFetchLocked(index: Int, isUrgent: Bool, isRescue: Bool, initialByteSkip: Int = 0, excludeLane: Int? = nil) {
+    func spawnChunkFetchLocked(
+        index: Int,
+        isUrgent: Bool,
+        isRescue: Bool,
+        initialByteSkip: Int = 0,
+        excludeLane: Int? = nil,
+        singleChunkMicroHedge: Bool = false
+    ) {
         let meta = store.currentMeta()
         let chunkSize = meta.chunkSize
         let safeSkip = (index > 0 && meta.totalSize > 0 && initialByteSkip > 0 && initialByteSkip < chunkSize - 16_384) ? initialByteSkip : 0
@@ -263,12 +369,23 @@ extension TurboStreamByteHandle {
         let cursorChunk = Int(max(0, cursorOffset) / Int64(chunkSize))
         let aheadFromCursor = max(0, index - cursorChunk)
         let singleStreamMode = !inOpenProbePhase && dynamicConcurrencyCap <= 1
+        let inSingleClickSeekSprint = !singleStreamMode
+            && recentSeekStreakCount <= 1
+            && lastSeekUptime > 0
+            && (now - lastSeekUptime) < 1.2
+            && aheadFromCursor < 8
         let maxSpanChunks: Int = {
-            if index == 0 && !chunk0HeadersReceived { return 2 }              // 1 MiB fast initial probe (Chunk 0..1) so Stream #2 can parallelize Chunk 2..3
-            if isRescue { return 2 }                                          // 1 MiB ultra-fast rescue span
+            if singleChunkMicroHedge { return 1 }                             // 512 KiB exact blocked-reader micro-hedge
+            if index == 0 && !chunk0HeadersReceived { return 2 }              // 1 MiB Chunk 0..1 head probe (commits Chunk 0 progressively at 512 KiB)
+            if inOpenProbePhase && (index == 1 || index == 2) { return 2 }    // 1 MiB Chunk 2..3 parallel open head runway
+            if inOpenProbePhase && index == resumeAnchorStartChunk { return 3 } // 1.5 MiB speculative resume/intro-skip anchor
+            if isRescue { return 2 }                                          // 1 MiB fast rescue span
             if singleStreamMode && index > 0 {
                 let singleDesired = measuredWireSpeedMBs >= 5.0 ? 48 : (measuredWireSpeedMBs >= 2.0 ? 32 : 16)
                 return min(singleDesired, min(64, max(2, prefetchAheadChunks)))
+            }
+            if inSingleClickSeekSprint {
+                return safeSkip >= 262_144 ? 3 : 2                            // 1 MiB fine-grained 2-chunk stripes across warm lanes on single seek
             }
             let shallowPlayhead = !(0..<4).allSatisfy { store.hasChunk(cursorChunk + $0) }
             let desired: Int
@@ -285,12 +402,13 @@ extension TurboStreamByteHandle {
         }()
 
         var spanEnd = index + 1
-        if meta.totalSize > 0 {
-            let totalChunks = meta.totalChunks
+        let allowSpeculativeOpenSpan = (inOpenProbePhase && (index == 1 || index == 2) && redirectResolved && dynamicConcurrencyCap >= 2)
+        if meta.totalSize > 0 || allowSpeculativeOpenSpan {
+            let totalChunks = meta.totalSize > 0 ? meta.totalChunks : max(4, index + maxSpanChunks)
             let horizonChunk = (index == 0 && !chunk0HeadersReceived)
                 ? totalChunks
                 : (Int(max(0, cursorOffset) / Int64(chunkSize)) + prefetchAheadChunks + 1)
-            let spanBound = ((isUrgent && !singleStreamMode) || isRescue || index == 0) ? totalChunks : min(totalChunks, horizonChunk)
+            let spanBound = ((isUrgent && !singleStreamMode) || isRescue || index == 0 || allowSpeculativeOpenSpan) ? totalChunks : min(totalChunks, horizonChunk)
             let limit = min(spanBound, index + max(1, maxSpanChunks))
             while spanEnd < limit && !store.hasChunk(spanEnd) && !inFlightChunks.contains(spanEnd) {
                 inFlightChunks.insert(spanEnd)
@@ -303,7 +421,7 @@ extension TurboStreamByteHandle {
             if meta.totalSize > 0 {
                 return min(meta.totalSize - 1, Int64(spanEnd) * Int64(chunkSize) - 1)
             }
-            return startByte + Int64(chunkSize) - 1
+            return Int64(spanEnd) * Int64(chunkSize) - 1
         }()
         let requestByteLength = Int(max(1, endByte - startByte + 1))
 
@@ -359,28 +477,71 @@ extension TurboStreamByteHandle {
         )
     }
 
+    /// Launches parallel 1-RTT open fan-out across warm lanes once the direct/302 edge URL is known:
+    /// Lane 1 -> Chunk 1..2 (1 MiB head runway), Lane 2 -> Exact EOF 512 KiB Cues, Lane 3 -> Resume Anchor (1.5 MiB).
+    func launchOpenParallelFanOutLocked() {
+        maybePrefetchOpenHeadRunwayLocked()
+        maybePrefetchOpenProbeTailLocked()
+        maybePrefetchResumeAnchorLocked()
+    }
+
+    func maybePrefetchOpenHeadRunwayLocked() {
+        guard inOpenProbePhase,
+              !didTriggerOpenHeadRunwayPrefetch,
+              (redirectResolved || chunk0HeadersReceived),
+              dynamicConcurrencyCap >= 2,
+              !isAborted,
+              !isClosed else { return }
+        let meta = store.currentMeta()
+        let runwayStart = (!store.hasChunk(1) && !inFlightChunks.contains(1)) ? 1 : 2
+        if meta.totalSize > 0 && meta.totalChunks <= runwayStart + 1 { return }
+        if dynamicConcurrencyCap == 2, meta.totalSize > Int64(meta.chunkSize * 4) {
+            let eofStart = max(0, meta.totalSize - 524_288)
+            let eofChunk = Int(eofStart / Int64(max(1, meta.chunkSize)))
+            if !store.hasChunk(eofChunk) && !chunk0HeadersReceived {
+                return
+            }
+        }
+        didTriggerOpenHeadRunwayPrefetch = true
+        guard !store.hasChunk(runwayStart) && !inFlightChunks.contains(runwayStart) else { return }
+        let lane0ToExclude = activeAttempts.values.first(where: { $0.startChunkIndex == 0 })?.laneIndex
+        let now = ProcessInfo.processInfo.systemUptime
+        inFlightChunks.insert(runwayStart)
+        chunkStartTime[runwayStart] = now
+        spawnChunkFetchLocked(index: runwayStart, isUrgent: true, isRescue: false, excludeLane: lane0ToExclude)
+    }
+
     func maybePrefetchOpenProbeTailLocked() {
         guard inOpenProbePhase, !didTriggerProbeTailPrefetch, dynamicConcurrencyCap >= 2, !isAborted, !isClosed else { return }
         let meta = store.currentMeta()
         let chunkSize = meta.chunkSize
         let totalChunks = meta.totalChunks
-        let tailChunkCount = Self.tailProbeChunkCount(for: meta.totalSize)
-        guard totalChunks > tailChunkCount + 1, meta.totalSize > Int64(chunkSize * (tailChunkCount + 1)) else { return }
-        let tailStartChunk = max(2, totalChunks - tailChunkCount)
-        let allTailCachedOnDisk = (tailStartChunk..<totalChunks).allSatisfy { store.hasChunk($0) }
+        guard totalChunks > 3, meta.totalSize > Int64(chunkSize * 3) else { return }
+        // Tail-First Cues Sprint: fetch ONLY the exact final 512 KiB ([max(0, totalSize - 512 KiB), totalSize - 1])
+        // so 95%+ MKV Cues / MP4 moov arrive in <120ms without crawling through 1.5+ MiB of preceding tail video clusters.
+        let exactTailLength: Int64 = min(524_288, meta.totalSize)
+        let tailStartOffset = max(Int64(chunkSize * 2), meta.totalSize - exactTailLength)
+        let firstTailChunk = Int(tailStartOffset / Int64(chunkSize))
+        let allExactTailCached = (tailStartOffset % Int64(chunkSize) == 0)
+            && (firstTailChunk..<totalChunks).allSatisfy { store.hasChunk($0) }
         didTriggerProbeTailPrefetch = true
-        if allTailCachedOnDisk {
+        if allExactTailCached {
             return
         }
-        let tailStartOffset = Int64(tailStartChunk) * Int64(chunkSize)
-        let tailLength = meta.totalSize - tailStartOffset
+        let fetchLen = meta.totalSize - tailStartOffset
         let alreadyCovered = directSlices.contains { $0.startOffset <= tailStartOffset && ($0.startOffset + Int64($0.data.count)) >= meta.totalSize }
             || directInFlightStarts.keys.contains { startOff in
-                let endOff = directInFlightEndOffsets[startOff] ?? (startOff + tailLength - 1)
+                let endOff = directInFlightEndOffsets[startOff] ?? (startOff + fetchLen - 1)
                 return startOff <= tailStartOffset && endOff >= meta.totalSize - 1
             }
-        if !alreadyCovered && tailLength > 0 {
-            spawnDirectRangeFetchLocked(startOffset: tailStartOffset, totalSize: meta.totalSize, length: tailLength)
+        if !alreadyCovered && fetchLen > 0 {
+            let lane0ToExclude = activeAttempts.values.first(where: { $0.startChunkIndex == 0 })?.laneIndex
+            spawnDirectRangeFetchLocked(
+                startOffset: tailStartOffset,
+                totalSize: meta.totalSize,
+                length: fetchLen,
+                excludeLane: lane0ToExclude
+            )
         }
     }
 
@@ -402,13 +563,15 @@ extension TurboStreamByteHandle {
         guard estChunk > 6, estChunk < totalChunks - tailGuard else { return }
         let anchorChunk = max(4, estChunk - 2)
         didTriggerResumeAnchorPrefetch = true
+        resumeAnchorStartChunk = anchorChunk
         if store.hasChunk(anchorChunk) || inFlightChunks.contains(anchorChunk) {
             return
         }
+        let lane0ToExclude = activeAttempts.values.first(where: { $0.startChunkIndex == 0 })?.laneIndex
         let now = ProcessInfo.processInfo.systemUptime
         inFlightChunks.insert(anchorChunk)
         chunkStartTime[anchorChunk] = now
-        spawnChunkFetchLocked(index: anchorChunk, isUrgent: true, isRescue: false)
+        spawnChunkFetchLocked(index: anchorChunk, isUrgent: true, isRescue: false, excludeLane: lane0ToExclude)
     }
 
     private func recordResolvedRedirectLocked(finalURL: URL, originURL: URL) -> URL? {
@@ -416,6 +579,7 @@ extension TurboStreamByteHandle {
               finalURL.absoluteString != streamURL.absoluteString else {
             return nil
         }
+        redirectResolved = true
         if effectiveStreamURL?.absoluteString != finalURL.absoluteString {
             effectiveStreamURL = finalURL
             effectiveRedirectEpoch &+= 1
@@ -437,8 +601,7 @@ extension TurboStreamByteHandle {
             return
         }
         if chunkIndex == 0 {
-            maybePrefetchOpenProbeTailLocked()
-            maybePrefetchResumeAnchorLocked()
+            launchOpenParallelFanOutLocked()
         }
         let shouldStepNow = !inOpenProbePhase && !isAborted && !isClosed
         condition.broadcast()
@@ -478,15 +641,16 @@ extension TurboStreamByteHandle {
             // Reset chunkStartTimestamp to response-header arrival so slow-crawl detection measures
             // post-TTFB body transfer rate rather than conflating cold TTFB.
             rec.chunkStartTimestamp = now
+            rec.responseHeadersReceived = true
             activeAttempts[attemptId] = rec
         }
         if index == 0 {
             chunk0HeadersReceived = true
+            redirectResolved = true
         }
         let notifyRedirectURL = finalURL.flatMap { recordResolvedRedirectLocked(finalURL: $0, originURL: originURL) }
         if index == 0 {
-            maybePrefetchOpenProbeTailLocked()
-            maybePrefetchResumeAnchorLocked()
+            launchOpenParallelFanOutLocked()
         }
         condition.broadcast()
         condition.unlock()

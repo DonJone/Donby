@@ -224,9 +224,13 @@ extension AppState {
         guard let idx = servers.firstIndex(where: { $0.id == serverId }) else { return }
         let sType = servers[idx].type
         servers[idx].selectedLineId = lineId
+        let updatedServer = servers[idx]
         if let ext = DonbyMediaServiceRegistry.shared.provider(for: sType) {
             Task { await ext.invalidateCaches(serverId: serverId) }
+        } else {
+            Task { await EmbyClient.shared.invalidatePlaybackCaches(serverId: serverId) }
         }
+        PlaybackIntentCoordinator.shared.warmServerOnConnectOrLaunch(server: updatedServer)
         let newLineName = servers[idx].activeLineName
         showToast("已切换至线路：\(newLineName)", icon: "checkmark.circle.fill")
 

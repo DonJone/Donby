@@ -38,14 +38,70 @@ extension PlayerView {
             return
         }
         let nextEp = session.episodesQueue[idx + 1]
-        if prefetchedNextEpisodeResource?.itemId == nextEp.id || prefetchedNextEpisodeInFlightId == nextEp.id {
-            return
-        }
         if DonbyDownloadManager.shared.completedEntry(for: nextEp.id, serverId: session.server.id) != nil {
             return
         }
         let server = session.server
         guard !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        // If control-plane resource is already resolved, opportunistically micro-stage Head + Cues + Intro-Skip landing
+        // once current playback buffer has >= 12s cushion so episode handoff starts in <150ms.
+        if let ready = prefetchedNextEpisodeResource, ready.itemId == nextEp.id {
+            guard appState.turboEnabled,
+                  autoHideBox.liveBufferedAheadSeconds >= 12.0,
+                  !isWaitingForSeekOrBuffer else { return }
+            let res = ready.resource
+            let urlLower = res.streamURL.absoluteString.lowercased()
+            guard (urlLower.hasPrefix("http://") || urlLower.hasPrefix("https://")),
+                  !urlLower.contains(".m3u8"),
+                  !urlLower.contains(".mpd") else { return }
+            let nextAssetKey = DonbyTurboCacheEngine.makeAssetKey(
+                serverId: server.id,
+                itemId: nextEp.id,
+                mediaSourceId: res.mediaSource.id
+            )
+            let memoryCap = max(64, appState.turboMemoryCacheMB) * 1024 * 1024
+            let nextStore = DonbyTurboCacheEngine.shared.store(for: nextAssetKey, maxMemoryBytes: memoryCap, persistDisk: true)
+            guard !nextStore.hasChunk(0) else { return }
+
+            let nextPref = appState.effectiveSkipPreference(serverId: server.id, item: nextEp)
+            let nextStartSec: Double = {
+                if nextEp.resumePositionSeconds > 0.5 { return nextEp.resumePositionSeconds }
+                if nextPref.introEnabled && nextPref.mode == .automatic && nextPref.introSeconds > 5 {
+                    return nextPref.introSeconds
+                }
+                return 0.0
+            }()
+            let redirectKey = EmbyClient.redirectCacheKey(
+                serverId: server.id,
+                itemId: nextEp.id,
+                mediaSourceId: res.mediaSource.id,
+                baseURL: server.activeBaseURL
+            )
+            let originURL = res.originStreamURL ?? res.streamURL
+            let cachedRedirect: URL? = (res.originStreamURL != nil && res.originStreamURL != res.streamURL)
+                ? res.streamURL
+                : NetworkRouteWarmStore.shared.cachedRedirect(for: redirectKey)
+            let nextDuration = Double(nextEp.runTimeTicks ?? res.mediaSource.runTimeTicks ?? 0) / 10_000_000.0
+            let shouldSave302 = appState.enable302Cache && server.cache302Request
+
+            DonbyTurboCacheEngine.shared.startMicroStagePreload(
+                assetKey: nextAssetKey,
+                streamURL: originURL,
+                cachedRedirectURL: cachedRedirect,
+                headers: res.headers,
+                knownTotalSize: res.mediaSource.size,
+                durationSeconds: nextDuration,
+                startPositionSeconds: nextStartSec,
+                maxMemoryBytes: memoryCap,
+                onResolvedRedirectURL: shouldSave302 ? Self.makeRedirectStoreHandler(key: redirectKey) : nil
+            )
+            return
+        }
+
+        if prefetchedNextEpisodeInFlightId == nextEp.id {
+            return
+        }
         let preset = appState.preferredVersionPreset
         let audioIdx = selectedAudioIdx
         let enable302 = appState.enable302Cache
@@ -53,27 +109,15 @@ extension PlayerView {
         prefetchedNextEpisodeInFlightId = nextEp.id
 
         Task {
-            let resolved: ResolvedPlaybackResource? = try? await {
-                if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
-                    return try await ext.resolvePlaybackResource(
-                        server: server,
-                        item: nextEp,
-                        preferredSourceId: nil,
-                        preferredPreset: preset,
-                        enable302Cache: enable302 && server.cache302Request
-                    )
-                } else {
-                    return try await EmbyClient.shared.resolvePlaybackResource(
-                        server: server,
-                        item: nextEp,
-                        preferredPreset: preset,
-                        audioStreamIndex: audioIdx,
-                        subtitleStreamIndex: nil,
-                        enable302Cache: enable302,
-                        defer302ProbeWhenTurbo: defer302
-                    )
-                }
-            }()
+            let resolved = try? await PlaybackIntentCoordinator.shared.resolveAndCacheResource(
+                server: server,
+                item: nextEp,
+                preferredPreset: preset,
+                audioStreamIndex: audioIdx,
+                subtitleStreamIndex: nil,
+                enable302Cache: enable302,
+                defer302ProbeWhenTurbo: defer302
+            )
             await MainActor.run {
                 if self.prefetchedNextEpisodeInFlightId == nextEp.id {
                     self.prefetchedNextEpisodeInFlightId = nil
@@ -211,67 +255,83 @@ extension PlayerView {
         let prevWasFinished = isCurrentPlaybackConsideredFinished()
         finishedItemPendingCleanup = nil
         saveCurrentWatchProgress(isFinal: true)
-        episodeSwitchTask = Task {
-            do {
-                let res: ResolvedPlaybackResource
-                if let cachedNext = prefetchedNextEpisodeResource, cachedNext.itemId == nextEp.id {
-                    res = cachedNext.resource
-                } else if let offlineEntry = DonbyDownloadManager.shared.completedEntry(
-                    for: nextEp.id,
-                    serverId: server.id
-                ) ?? DonbyDownloadManager.shared.completedEntry(for: nextEp.id),
-                   let offlineRes = DonbyDownloadManager.shared.offlinePlayableResource(for: offlineEntry) {
-                    res = offlineRes
-                } else if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
-                    res = try await ext.resolvePlaybackResource(
-                        server: server,
-                        item: nextEp,
-                        preferredSourceId: nil,
-                        preferredPreset: preset,
-                        enable302Cache: enable302 && server.cache302Request
-                    )
-                } else {
-                    res = try await EmbyClient.shared.resolvePlaybackResource(
-                        server: server,
-                        item: nextEp,
-                        preferredPreset: preset,
-                        audioStreamIndex: audioIdx,
-                        subtitleStreamIndex: nil,
-                        enable302Cache: enable302,
-                        defer302ProbeWhenTurbo: appState.turboEnabled
-                    )
-                }
-                guard !Task.isCancelled else { return }
-                if !server.host.isEmpty && !server.accessToken.isEmpty {
-                    Task {
-                        if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
-                            await ext.reportPlayback(server: server, kind: .stopped, item: prevItem, assetId: prevSourceId, positionSeconds: prevPos)
-                        } else {
-                            await EmbyClient.shared.reportPlaybackStopped(
-                                server: server,
-                                itemId: prevItem.id,
-                                mediaSourceId: prevSourceId,
-                                playSessionId: prevSessionId,
-                                positionSeconds: prevPos
-                            )
-                        }
+
+        func commitEpisodeSwitch(with res: ResolvedPlaybackResource) {
+            if !server.host.isEmpty && !server.accessToken.isEmpty {
+                Task {
+                    if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+                        await ext.reportPlayback(server: server, kind: .stopped, item: prevItem, assetId: prevSourceId, positionSeconds: prevPos)
+                    } else {
+                        await EmbyClient.shared.reportPlaybackStopped(
+                            server: server,
+                            itemId: prevItem.id,
+                            mediaSourceId: prevSourceId,
+                            playSessionId: prevSessionId,
+                            positionSeconds: prevPos
+                        )
                     }
                 }
-                episodeSwitchTask = nil
-                explicitSubtitleOff = false
-                selectedSubIdx = nil
-                currentItem = nextEp
-                currentResource = res
-                appState.updateDetailFocusedEpisodeIfActive(forItem: nextEp)
-                companionBox.companion?.onLocalEpisodeSwitched(
-                    assetId: res.mediaSource.id,
-                    positionSeconds: nextEp.resumePositionSeconds,
-                    playbackSpeed: playbackSpeed
+            }
+            episodeSwitchTask = nil
+            explicitSubtitleOff = false
+            selectedSubIdx = nil
+            currentItem = nextEp
+            currentResource = res
+            appState.updateDetailFocusedEpisodeIfActive(forItem: nextEp)
+            companionBox.companion?.onLocalEpisodeSwitched(
+                assetId: res.mediaSource.id,
+                positionSeconds: nextEp.resumePositionSeconds,
+                playbackSpeed: playbackSpeed
+            )
+            startNativeKernelPlayback(startSeconds: nextEp.resumePositionSeconds)
+            if prevWasFinished {
+                appState.cleanupAutoArchivedEntryIfFinished(itemId: prevItem.id, mediaSourceId: prevSourceId)
+            }
+        }
+
+        // Synchronous 0ms fast-cut when next episode is already prefetched, offline, or in PlaybackIntentCoordinator
+        if let cachedNext = prefetchedNextEpisodeResource, cachedNext.itemId == nextEp.id {
+            let upgraded = PlaybackIntentCoordinator.shared.cachedResolvedResource(
+                server: server,
+                itemId: nextEp.id,
+                preferredSourceId: cachedNext.resource.mediaSource.id,
+                preferredPreset: preset,
+                enable302Cache: enable302 && server.cache302Request
+            ) ?? cachedNext.resource
+            commitEpisodeSwitch(with: upgraded)
+            return
+        }
+        if let offlineEntry = DonbyDownloadManager.shared.completedEntry(
+            for: nextEp.id,
+            serverId: server.id
+        ) ?? DonbyDownloadManager.shared.completedEntry(for: nextEp.id),
+           let offlineRes = DonbyDownloadManager.shared.offlinePlayableResource(for: offlineEntry) {
+            commitEpisodeSwitch(with: offlineRes)
+            return
+        }
+        if let fastRes = PlaybackIntentCoordinator.shared.cachedResolvedResource(
+            server: server,
+            itemId: nextEp.id,
+            preferredPreset: preset,
+            enable302Cache: enable302 && server.cache302Request
+        ), fastRes.isDirectStream {
+            commitEpisodeSwitch(with: fastRes)
+            return
+        }
+
+        episodeSwitchTask = Task {
+            do {
+                let res = try await PlaybackIntentCoordinator.shared.resolveAndCacheResource(
+                    server: server,
+                    item: nextEp,
+                    preferredPreset: preset,
+                    audioStreamIndex: audioIdx,
+                    subtitleStreamIndex: nil,
+                    enable302Cache: enable302,
+                    defer302ProbeWhenTurbo: appState.turboEnabled
                 )
-                startNativeKernelPlayback(startSeconds: nextEp.resumePositionSeconds)
-                if prevWasFinished {
-                    appState.cleanupAutoArchivedEntryIfFinished(itemId: prevItem.id, mediaSourceId: prevSourceId)
-                }
+                guard !Task.isCancelled else { return }
+                commitEpisodeSwitch(with: res)
             } catch {
                 guard !Task.isCancelled else { return }
                 episodeSwitchTask = nil

@@ -256,6 +256,7 @@ pub struct DKPlayer {
     pub(crate) stream_dovi_profile: AtomicU8,
 
     pub(crate) seek_requested: AtomicBool,
+    pub(crate) initial_open_seek_pending: AtomicBool,
     pub(crate) latest_seek_seq: AtomicU64,
     pub(crate) executing_seek_seq: AtomicU64,
     pub(crate) seek_executing: AtomicBool,
@@ -360,6 +361,7 @@ impl DKPlayer {
             dovi_detected: AtomicBool::new(false),
             stream_dovi_profile: AtomicU8::new(0),
             seek_requested: AtomicBool::new(false),
+            initial_open_seek_pending: AtomicBool::new(false),
             latest_seek_seq: AtomicU64::new(0),
             executing_seek_seq: AtomicU64::new(0),
             seek_executing: AtomicBool::new(false),
@@ -439,7 +441,9 @@ impl DKPlayer {
 
     #[inline]
     pub(crate) fn is_seeking(&self) -> bool {
-        self.seek_requested.load(Ordering::Acquire) || self.seek_executing.load(Ordering::Acquire)
+        self.seek_requested.load(Ordering::Acquire)
+            || self.seek_executing.load(Ordering::Acquire)
+            || self.initial_open_seek_pending.load(Ordering::Acquire)
     }
 
     #[inline]

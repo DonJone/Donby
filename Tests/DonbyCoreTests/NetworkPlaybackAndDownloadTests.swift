@@ -110,14 +110,18 @@ struct NetworkPlaybackAndDownloadTests {
         }
 
         handleFast.condition.lock()
+        let triggeredHeadRunway = handleFast.didTriggerOpenHeadRunwayPrefetch
         let triggeredTail = handleFast.didTriggerProbeTailPrefetch
         let triggeredResume = handleFast.didTriggerResumeAnchorPrefetch
-        let tailStartExpected = Int64(storeFast.currentMeta().totalChunks - 4) * Int64(storeFast.currentMeta().chunkSize)
+        let tailStartExpected = eightGiB - 524_288
         let hasTailInFlight = handleFast.directInFlightStarts[tailStartExpected] != nil
+        let hasHeadRunwayInFlight = handleFast.inFlightChunks.contains(2)
         let estChunk = Int((eightGiB / 2) / Int64(storeFast.currentMeta().chunkSize))
         let hasResumeAnchorInFlight = handleFast.inFlightChunks.contains(estChunk - 2)
         handleFast.condition.unlock()
 
+        #expect(triggeredHeadRunway)
+        #expect(hasHeadRunwayInFlight)
         #expect(triggeredTail)
         #expect(hasTailInFlight)
         #expect(triggeredResume)

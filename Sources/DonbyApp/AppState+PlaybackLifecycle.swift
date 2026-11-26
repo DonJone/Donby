@@ -121,16 +121,19 @@ extension AppState {
             ) ?? DonbyDownloadManager.shared.completedEntry(for: targetItem.id, mediaSourceId: preferredSourceId),
                let offlineRes = DonbyDownloadManager.shared.offlinePlayableResource(for: offlineEntry) {
                 resource = offlineRes
-            } else if let extProvider = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
-                resource = try await extProvider.resolvePlaybackResource(
-                    server: server,
-                    item: targetItem,
-                    preferredSourceId: preferredSourceId,
-                    preferredPreset: preferredVersionPreset,
-                    enable302Cache: enable302Cache && server.cache302Request
-                )
+            } else if let fastCached = PlaybackIntentCoordinator.shared.cachedResolvedResource(
+                server: server,
+                itemId: targetItem.id,
+                preferredSourceId: preferredSourceId,
+                preferredPreset: preferredVersionPreset,
+                enable302Cache: enable302Cache && server.cache302Request
+            ), (fastCached.isDirectStream || (audioStreamIndex == nil && subtitleStreamIndex == nil)) {
+                // 0ms synchronous fast-table hit (warmed on DetailView, episode hover/focus, or Home continue-watching)
+                resource = fastCached
+                DonbyNetworkSession.prewarmEdgeOrigin(fastCached.streamURL, laneCount: 4)
             } else {
-                resource = try await EmbyClient.shared.resolvePlaybackResource(
+                PlaybackIntentCoordinator.shared.warmServerOnConnectOrLaunch(server: server)
+                resource = try await PlaybackIntentCoordinator.shared.resolveAndCacheResource(
                     server: server,
                     item: targetItem,
                     preferredSourceId: preferredSourceId,

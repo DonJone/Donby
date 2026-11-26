@@ -222,10 +222,24 @@ public final class DonbyUHDServiceProvider: DonbyMediaServiceProvider, @unchecke
     }
 
     public func prewarmPlayback(server: EmbyServerConfig, item: EmbyItem?) async {
-        await UHDStreamClient.shared.prewarmPlaybackDomain(server: server)
-        if let item, item.isEpisode {
+        async let domainWarmTask = UHDStreamClient.shared.prewarmPlaybackDomain(server: server)
+        async let assetWarmTask: Void = {
+            guard let item, !item.isSeries else { return }
             _ = try? await UHDStreamClient.shared.fetchAssetMediaSources(server: server, item: item)
+        }()
+        _ = await (domainWarmTask, assetWarmTask)
+    }
+
+    public func prewarmEdgeRoutes(server: EmbyServerConfig) async -> [URL] {
+        if let edgeURL = await UHDStreamClient.shared.prewarmPlaybackDomain(server: server) {
+            return [edgeURL]
         }
+        return []
+    }
+
+    public func invalidateCaches(serverId: UUID) async {
+        await UHDStreamClient.shared.invalidateResolvedDomainCache(serverId: serverId)
+        PlaybackIntentCoordinator.shared.invalidateServer(serverId)
     }
 
     public func reportPlayback(
@@ -259,10 +273,6 @@ public final class DonbyUHDServiceProvider: DonbyMediaServiceProvider, @unchecke
 
     public func pingLine(server: EmbyServerConfig, line: ServerLineInfo?) async -> Int? {
         await UHDStreamClient.shared.pingLine(server: server, line: line)
-    }
-
-    public func invalidateCaches(serverId: UUID) async {
-        await UHDStreamClient.shared.invalidateResolvedDomainCache(serverId: serverId)
     }
 }
 

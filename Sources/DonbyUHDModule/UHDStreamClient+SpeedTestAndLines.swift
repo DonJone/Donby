@@ -331,10 +331,14 @@ extension UHDStreamClient {
         await UHDAssetResponseCache.shared.invalidate(serverId: serverId)
     }
 
-    public func prewarmPlaybackDomain(server: EmbyServerConfig) async {
-        guard server.type == .uhdNative, !server.mainLineURL.isEmpty, !server.accessToken.isEmpty else { return }
-        if let resolvedURL = try? await resolveActivePlaybackOrigin(server: server, forceFresh: false),
-           let host = resolvedURL.host,
+    @discardableResult
+    public func prewarmPlaybackDomain(server: EmbyServerConfig) async -> URL? {
+        guard server.type == .uhdNative, !server.mainLineURL.isEmpty, !server.accessToken.isEmpty else { return nil }
+        guard let resolvedURL = try? await resolveActivePlaybackOrigin(server: server, forceFresh: false) else {
+            return nil
+        }
+        DonbyNetworkSession.prewarmEdgeOrigin(resolvedURL, laneCount: 4)
+        if let host = resolvedURL.host,
            await UHDHostWarmCache.shared.shouldWarm(hostKey: host) {
             var headReq = URLRequest(url: resolvedURL, timeoutInterval: 3.0)
             headReq.httpMethod = "HEAD"
@@ -342,6 +346,7 @@ extension UHDStreamClient {
             headReq.setValue("Donby/\(appVersion) (macOS; UHDNow Client)", forHTTPHeaderField: "User-Agent")
             _ = try? await apiSession.data(for: headReq)
         }
+        return resolvedURL
     }
 
     public func pingLine(server: EmbyServerConfig, line: ServerLineInfo?) async -> Int? {

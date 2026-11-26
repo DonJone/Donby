@@ -148,6 +148,24 @@ impl DKPlayer {
         let mut dovi_probe_packets = 0;
 
         while !self.abort_requested.load(Ordering::Acquire) {
+            if self.initial_open_seek_pending.swap(false, Ordering::AcqRel) {
+                if !self.seek_requested.load(Ordering::Acquire) {
+                    let _demux_lk = self.demux_mtx.lock();
+                    let my_seek_seq = self.latest_seek_seq.load(Ordering::Acquire);
+                    let fmt = self.format_ctx.load(Ordering::Acquire);
+                    let outcome = unsafe { self.execute_pending_seek(fmt, my_seek_seq) };
+                    match outcome {
+                        SeekOutcome::Aborted => break,
+                        SeekOutcome::Superseded => continue,
+                        SeekOutcome::Completed => {
+                            consecutive_io_errors = 0;
+                            pkt.unref();
+                            continue;
+                        }
+                    }
+                }
+            }
+
             if self.seek_requested.load(Ordering::Acquire) {
                 let _demux_lk = self.demux_mtx.lock();
                 let my_seek_seq = self.latest_seek_seq.load(Ordering::Acquire);

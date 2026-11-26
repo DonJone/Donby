@@ -619,6 +619,7 @@ public final class AppState: ObservableObject {
         }
 
         Task { await loadActiveServerHome(syncDomains: true) }
+        PlaybackIntentCoordinator.shared.warmServerOnConnectOrLaunch(server: server)
     }
 
     public func selectSidebarModule(_ tab: MainNavigationTab) {

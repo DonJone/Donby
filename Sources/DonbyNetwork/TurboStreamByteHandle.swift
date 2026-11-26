@@ -9,6 +9,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
     public let headers: [String: String]
     public let store: TieredAssetChunkStore
     let onResolvedRedirectURL: (@Sendable (URL) -> Void)?
+    let onInvalidatedRedirectURL: (@Sendable () -> Void)?
 
     let condition = NSCondition()
     var cursorOffset: Int64 = 0
@@ -17,14 +18,21 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
     var effectiveStreamURL: URL? = nil
     var effectiveRedirectEpoch: UInt64 = 0
     var didNotifyRedirectCallback: Bool = false
+    var redirectResolved: Bool = false
 
     var inOpenProbePhase: Bool = true
     var chunk0HeadersReceived: Bool = false
+    var didTriggerOpenHeadRunwayPrefetch: Bool = false
     var didTriggerProbeTailPrefetch: Bool = false
     var didTriggerResumeAnchorPrefetch: Bool = false
+    var resumeAnchorStartChunk: Int = -1
     let initialStartFraction: Double
     let openedUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
     var lastSeekUptime: TimeInterval = 0
+    var recentSeekStreakCount: Int = 0
+    var urgentWaitingChunk: Int? = nil
+    var urgentWaitStartUptime: TimeInterval = 0
+    var chunkFirstBlockedUptime: [Int: TimeInterval] = [:]
     var isMultiplexedProtocol: Bool = false
 
     var nextAttemptId: UInt64 = 1
@@ -58,6 +66,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         weak var task: URLSessionDataTask?
         var lastByteTimestamp: TimeInterval
         var chunkStartTimestamp: TimeInterval
+        var responseHeadersReceived: Bool = false
         var trimmedEarly: Bool = false
 
         var chunkIndex: Int { currentChunkIndex }
@@ -94,7 +103,8 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         prefetchAheadChunks: Int = 72,
         initialStartSeconds: Double = 0,
         knownDurationSeconds: Double = 0,
-        onResolvedRedirectURL: (@Sendable (URL) -> Void)? = nil
+        onResolvedRedirectURL: (@Sendable (URL) -> Void)? = nil,
+        onInvalidatedRedirectURL: (@Sendable () -> Void)? = nil
     ) {
         self.assetKey = assetKey
         self.streamURL = streamURL
@@ -107,6 +117,9 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             self.effectiveStreamURL = initialRedirectedURL
             self.effectiveRedirectEpoch = 1
         }
+        let pathLower = streamURL.path.lowercased()
+        let looksLikeOriginRedirectEndpoint = pathLower.contains("/emby/") || pathLower.contains("/videos/") || pathLower.contains("/play/video/")
+        self.redirectResolved = (self.effectiveStreamURL != nil) || !looksLikeOriginRedirectEndpoint
         self.isMultiplexedProtocol = TurboStreamingSessionHub.shared.isHostKnownMultiplexed(initialRedirectedURL ?? streamURL)
         self.headers = headers
         self.store = store
@@ -115,6 +128,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         self.dynamicConcurrencyCap = clampedBudget
         self.prefetchAheadChunks = max(4, min(360, prefetchAheadChunks))
         self.onResolvedRedirectURL = onResolvedRedirectURL
+        self.onInvalidatedRedirectURL = onInvalidatedRedirectURL
 
         if let knownTotalSize, knownTotalSize > 0 {
             store.setTotalSize(knownTotalSize, sourceURL: streamURL.absoluteString)
@@ -132,12 +146,9 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         } else if !store.hasChunk(1) {
             requestUrgentChunk(1)
         }
-        let pathLower = streamURL.path.lowercased()
-        let looksLikeOriginRedirectEndpoint = pathLower.contains("/emby/") || pathLower.contains("/videos/") || pathLower.contains("/play/video/")
-        if self.effectiveStreamURL != nil || !looksLikeOriginRedirectEndpoint || hasChunk0 {
+        if self.redirectResolved || hasChunk0 {
             condition.lock()
-            maybePrefetchOpenProbeTailLocked()
-            maybePrefetchResumeAnchorLocked()
+            launchOpenParallelFanOutLocked()
             condition.unlock()
         }
         startCoordinatorLoop()
@@ -234,7 +245,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             return partialCopied
         }
 
-        // Fast path 3: exact-offset unaligned EOF tail read (hit pre-fetched direct slices or wait for in-flight tail fetch)
+        // Fast path 3: exact-offset EOF tail read (bypasses slow multi-MiB crawl when probing Cues/moov)
         let tailWindowBytes: Int64 = Int64(Self.tailProbeChunkCount(for: meta.totalSize)) * Int64(chunkSize)
         if meta.totalSize > 0, currentOffset >= meta.totalSize - tailWindowBytes {
             condition.lock()
@@ -247,8 +258,9 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                 return startOff <= currentOffset && currentOffset <= endOff
             }
             let chunkInFlight = inFlightChunks.contains(targetChunk)
+            let probePhase = inOpenProbePhase
             condition.unlock()
-            if hasDirectInFlight || (offsetInChunk >= 16_384 && !chunkInFlight) {
+            if hasDirectInFlight || probePhase || (offsetInChunk >= 16_384 && !chunkInFlight) {
                 return readDirectTailRange(at: currentOffset, totalSize: meta.totalSize, into: buffer, count: count)
             }
         }
@@ -267,25 +279,33 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         let hardDeadline = Date().addingTimeInterval(26.0)
         var stallDeadline = Date().addingTimeInterval(15.0)
         condition.lock()
+        let firstBlockedStart = chunkFirstBlockedUptime[targetChunk] ?? waitStart
+        chunkFirstBlockedUptime[targetChunk] = firstBlockedStart
+        urgentWaitingChunk = targetChunk
+        urgentWaitStartUptime = firstBlockedStart
         while !shouldYieldReadAtOffsetLocked(currentOffset, totalSize: meta.totalSize, chunkSize: chunkSize) {
             if let partialCopied = tryCopyPartialLocked(targetChunk: targetChunk, offsetInChunk: offsetInChunk, into: buffer, count: count) {
                 logSlowReadIfNeededLocked(chunk: targetChunk, waitStart: waitStart)
+                clearUrgentWaitLocked(for: targetChunk)
                 condition.unlock()
                 return partialCopied
             }
             if let directCopied = tryCopyDirectTailLocked(at: currentOffset, into: buffer, count: count) {
                 logSlowReadIfNeededLocked(chunk: targetChunk, waitStart: waitStart)
+                clearUrgentWaitLocked(for: targetChunk)
                 condition.unlock()
                 return directCopied
             }
             if (failedCount[targetChunk] ?? 0) >= 6 || (chunk429Retries[targetChunk] ?? 0) >= 12 {
                 logSlowReadIfNeededLocked(chunk: targetChunk, waitStart: waitStart)
+                clearUrgentWaitLocked(for: targetChunk)
                 condition.unlock()
                 return -1
             }
             let nowDate = Date()
             if nowDate >= stallDeadline || nowDate >= hardDeadline {
                 logSlowReadIfNeededLocked(chunk: targetChunk, waitStart: waitStart)
+                clearUrgentWaitLocked(for: targetChunk)
                 condition.unlock()
                 return -1
             }
@@ -297,9 +317,10 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                 return activeAttempts.values.first { $0.covers(targetChunk, offsetInChunk: offsetInChunk) }
             }()
             let partialBytes = coveringAttempt.flatMap { attemptBuffers[$0.attemptId]?.count } ?? 0
-            let receivedAnyBytes = (partialBytes > 0) || (coveringAttempt.map { $0.currentChunkIndex > $0.startChunkIndex } ?? false)
+            let headersArrived = coveringAttempt?.responseHeadersReceived ?? false
+            let receivedAnyBytes = headersArrived || (partialBytes > 0) || (coveringAttempt.map { $0.currentChunkIndex > $0.startChunkIndex } ?? false)
             let stalledTime: TimeInterval = coveringAttempt.map { now - $0.lastByteTimestamp } ?? (chunkStartTime[targetChunk].map { now - $0 } ?? 0)
-            if receivedAnyBytes && stalledTime < 2.5 {
+            if (partialBytes > 0 || (coveringAttempt.map { $0.currentChunkIndex > $0.startChunkIndex } ?? false)) && stalledTime < 2.5 {
                 stallDeadline = min(hardDeadline, nowDate.addingTimeInterval(12.0))
             }
             // If no active stream covers (targetChunk, offsetInChunk) closely, trigger a direct urgent stream right at currentOffset.
@@ -314,47 +335,97 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                 spawnChunkFetchLocked(index: targetChunk, isUrgent: true, isRescue: false, initialByteSkip: desiredSkip)
                 condition.unlock()
                 if let chunkData = store.readChunk(index: targetChunk) {
+                    condition.lock()
+                    clearUrgentWaitLocked(for: targetChunk)
+                    condition.unlock()
                     return copyOut(from: chunkData, offsetInChunk: offsetInChunk, into: buffer, count: count, targetChunk: targetChunk)
                 }
                 condition.lock()
                 continue
             }
-            // Spawn a racing rescue request only when a stream genuinely stalls beyond adaptive CDN TTFB.
-            let coldRescueThreshold: TimeInterval = max(2.2, min(4.5, smoothedResponseTTFB * 2.5))
-            let rescueThreshold: TimeInterval = receivedAnyBytes ? 1.5 : coldRescueThreshold
-            let allowRescue = dynamicConcurrencyCap > 1 || !receivedAnyBytes || stalledTime > 2.5
-            if allowRescue &&
-                now >= last429BackoffUntil &&
-                (chunkStartTime[targetChunk] != nil) &&
-                stalledTime > rescueThreshold &&
-                !rescueChunks.contains(targetChunk) {
-                let desiredSkip = computeInitialByteSkipLocked(chunkIndex: targetChunk, offsetInChunk: offsetInChunk)
-                let stalledLane = coveringAttempt?.laneIndex
-                rescueChunks.insert(targetChunk)
-                chunkStartTime[targetChunk] = now
-                spawnChunkFetchLocked(index: targetChunk, isUrgent: true, isRescue: true, initialByteSkip: desiredSkip, excludeLane: stalledLane)
-                if let stalledLane {
-                    TurboStreamingSessionHub.shared.reportLaneStall(laneIndex: stalledLane)
+
+            // Blocked-Reader Micro-Hedge & Adaptive TTFB Rescue:
+            if now >= last429BackoffUntil && !rescueChunks.contains(targetChunk), let cov = coveringAttempt {
+                let cumulativeChunkWait = now - (chunkFirstBlockedUptime[targetChunk] ?? waitStart)
+                let activeHost = (effectiveStreamURL ?? streamURL).host
+                var shouldMicroHedge = false
+                if dynamicConcurrencyCap > 1 && cov.currentChunkIndex == targetChunk && receivedAnyBytes && cumulativeChunkWait >= 0.30 {
+                    let expectedLen = store.expectedChunkLength(for: targetChunk)
+                    let skip = (cov.currentChunkIndex == cov.startChunkIndex) ? cov.initialByteSkip : 0
+                    let remBytes = max(0, expectedLen - skip - partialBytes)
+                    let transferElapsed = max(0.05, now - cov.chunkStartTimestamp)
+                    let rateBps = Double(partialBytes) / transferElapsed
+                    let predictedRemSec = Double(remBytes) / max(1.0, rateBps)
+                    if predictedRemSec > 0.35 || stalledTime > 1.1 {
+                        shouldMicroHedge = true
+                    }
+                } else if dynamicConcurrencyCap > 1 && !receivedAnyBytes {
+                    let hasFastAlt = TurboStreamingSessionHub.shared.hasVerifiedFastAlternateLane(forHost: activeHost, excludingLane: cov.laneIndex)
+                    let coldThreshold = hasFastAlt
+                        ? max(0.95, smoothedResponseTTFB * 1.4)
+                        : max(2.2, min(4.5, smoothedResponseTTFB * 2.5))
+                    if cumulativeChunkWait > coldThreshold || stalledTime > coldThreshold {
+                        shouldMicroHedge = true
+                    }
+                } else {
+                    let coldRescueThreshold: TimeInterval = max(2.2, min(4.5, smoothedResponseTTFB * 2.5))
+                    let rescueThreshold: TimeInterval = receivedAnyBytes ? 1.5 : coldRescueThreshold
+                    let allowSingleRescue = !receivedAnyBytes || stalledTime > 2.5
+                    if allowSingleRescue && stalledTime > rescueThreshold {
+                        shouldMicroHedge = true
+                    }
+                }
+
+                if shouldMicroHedge {
+                    trimSlowAttemptTailLocked(attemptId: cov.attemptId)
+                    let desiredSkip = computeInitialByteSkipLocked(chunkIndex: targetChunk, offsetInChunk: offsetInChunk)
+                    let stalledLane = cov.laneIndex
+                    rescueChunks.insert(targetChunk)
+                    chunkStartTime[targetChunk] = now
+                    spawnChunkFetchLocked(
+                        index: targetChunk,
+                        isUrgent: true,
+                        isRescue: true,
+                        initialByteSkip: desiredSkip,
+                        excludeLane: stalledLane,
+                        singleChunkMicroHedge: true
+                    )
+                    if stalledTime > 1.5 {
+                        TurboStreamingSessionHub.shared.reportLaneStall(laneIndex: stalledLane)
+                    }
                 }
             }
-            condition.wait(until: Date().addingTimeInterval(0.03))
+
+            condition.wait(until: Date().addingTimeInterval(0.025))
             condition.unlock()
             if let chunkData = store.readChunk(index: targetChunk) {
+                condition.lock()
                 if ProcessInfo.processInfo.systemUptime - waitStart >= 1.0 {
-                    condition.lock()
                     logSlowReadIfNeededLocked(chunk: targetChunk, waitStart: waitStart)
-                    condition.unlock()
                 }
+                clearUrgentWaitLocked(for: targetChunk)
+                condition.unlock()
                 return copyOut(from: chunkData, offsetInChunk: offsetInChunk, into: buffer, count: count, targetChunk: targetChunk)
             }
             let curMeta = store.currentMeta()
             if curMeta.totalSize > 0 && currentOffset >= curMeta.totalSize {
+                condition.lock()
+                clearUrgentWaitLocked(for: targetChunk)
+                condition.unlock()
                 return 0
             }
             condition.lock()
         }
+        clearUrgentWaitLocked(for: targetChunk)
         condition.unlock()
         return -1
+    }
+
+    private func clearUrgentWaitLocked(for targetChunk: Int) {
+        if urgentWaitingChunk == targetChunk {
+            urgentWaitingChunk = nil
+            urgentWaitStartUptime = 0
+        }
     }
 
     private func logSlowReadIfNeededLocked(chunk: Int, waitStart: TimeInterval) {
@@ -476,17 +547,33 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                 return -1
             }
             let now = ProcessInfo.processInfo.systemUptime
-            let coveredByInFlight = directInFlightStarts.keys.contains { startOff in
+            // Only treat an in-flight tail stream as covering `offset` if its received cursor is within 192 KiB;
+            // otherwise immediately launch an exact-offset 512 KiB micro-fetch on a healthy lane instead of
+            // waiting seconds for a throttled 2 MiB tail crawl to reach EOF Cues.
+            var slowCoveringLane: Int? = nil
+            let coveredSoonByInFlight = directInFlightStarts.contains { (startOff, aid) in
                 let endOff = directInFlightEndOffsets[startOff] ?? (startOff + 524_287)
-                return startOff <= offset && offset <= endOff
+                guard startOff <= offset && offset <= endOff else { return false }
+                let received = Int64(attemptBuffers[aid]?.count ?? 0)
+                let dist = offset - (startOff + received)
+                if dist <= 196_608 || dynamicConcurrencyCap <= 1 {
+                    return true
+                }
+                slowCoveringLane = activeAttempts[aid]?.laneIndex
+                return false
             }
             if now >= (directNextRetryTime[offset] ?? 0),
                directInFlightStarts[offset] == nil,
-               !coveredByInFlight {
-                let remainingToEOF = max(262_144, min(2_097_152, totalSize - offset))
-                spawnDirectRangeFetchLocked(startOffset: offset, totalSize: totalSize, length: remainingToEOF)
+               !coveredSoonByInFlight {
+                let exactTailLen = max(65_536, min(524_288, totalSize - offset))
+                spawnDirectRangeFetchLocked(
+                    startOffset: offset,
+                    totalSize: totalSize,
+                    length: exactTailLen,
+                    excludeLane: slowCoveringLane
+                )
             }
-            condition.wait(until: Date().addingTimeInterval(0.03))
+            condition.wait(until: Date().addingTimeInterval(0.025))
         }
         condition.unlock()
         return -1
@@ -581,7 +668,14 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         }
         if abs(newChunk - oldChunk) > 2 {
             if !isContainerProbeSeek {
-                lastSeekUptime = ProcessInfo.processInfo.systemUptime
+                let nowSeek = ProcessInfo.processInfo.systemUptime
+                if lastSeekUptime > 0 && (nowSeek - lastSeekUptime) < 0.45 {
+                    recentSeekStreakCount += 1
+                } else {
+                    recentSeekStreakCount = 1
+                }
+                lastSeekUptime = nowSeek
+                chunkFirstBlockedUptime.removeAll()
             }
             let aggressiveKeepEnd = newChunk + min(prefetchAheadChunks, 24)
             var attemptIdsToPurge: [UInt64] = []
@@ -660,68 +754,5 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             store.evictDistantChunks(aroundChunk: newChunk)
         }
         return resultPos
-    }
-
-    public func abort() {
-        var tasksToCancel: [URLSessionDataTask] = []
-        condition.lock()
-        isAborted = true
-        for (_, rec) in activeAttempts {
-            if let task = rec.task {
-                tasksToCancel.append(task)
-            }
-        }
-        condition.broadcast()
-        condition.unlock()
-        coordinatorTask?.cancel()
-        for task in tasksToCancel {
-            TurboStreamingSessionHub.shared.cancelTask(task, intentional: true)
-        }
-    }
-
-    public func close() {
-        var tasksToCancel: [URLSessionDataTask] = []
-        condition.lock()
-        if isClosed {
-            condition.unlock()
-            return
-        }
-        isAborted = true
-        isClosed = true
-        shouldYieldReadHandler = nil
-        for (_, rec) in activeAttempts {
-            if let task = rec.task {
-                tasksToCancel.append(task)
-            }
-        }
-        activeAttempts.removeAll()
-        attemptBuffers.removeAll()
-        activeDisplayAttempt.removeAll()
-        chunkNextRetryTime.removeAll()
-        chunk429Retries.removeAll()
-        directSlices.removeAll()
-        directInFlightStarts.removeAll()
-        directInFlightEndOffsets.removeAll()
-        directFailedStarts.removeAll()
-        direct429Retries.removeAll()
-        directNextRetryTime.removeAll()
-        condition.broadcast()
-        condition.unlock()
-
-        coordinatorTask?.cancel()
-        coordinatorTask = nil
-        for task in tasksToCancel {
-            TurboStreamingSessionHub.shared.cancelTask(task, intentional: true)
-        }
-
-        store.flushMeta()
-        let remainingReaders = store.releaseReader()
-        if remainingReaders == 0 {
-            store.trimIdleMemoryKeepingPinned()
-            let key = assetKey
-            Task { @MainActor in
-                DonbyDownloadManager.shared.cleanupRedundantCacheIfMaterialized(assetKey: key)
-            }
-        }
     }
 }

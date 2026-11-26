@@ -121,6 +121,8 @@ internal final class StreamingChunkContext {
     var cancelledIntentionally: Bool = false
     var rejectedByStatus: Bool = false
     var reached200Cap: Bool = false
+    var dispatchUptime: TimeInterval = 0
+    var responseHeaderUptime: TimeInterval = 0
 
     init(
         attemptId: UInt64,
@@ -155,25 +157,40 @@ public enum DonbyNetworkSession {
     public static var sharedURLSession: URLSession {
         TurboStreamingSessionHub.shared.apiURLSession
     }
+
+    public static func prewarmEdgeOrigin(_ url: URL, headers: [String: String] = [:], laneCount: Int = 4) {
+        TurboStreamingSessionHub.shared.prewarmEdgeOrigin(url, headers: headers, laneCount: laneCount)
+    }
 }
 
 internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     static let shared = TurboStreamingSessionHub()
     static let streamLaneCount = 4
 
-    private struct StreamLane {
+    struct StreamLaneTelemetry {
+        var ewmaTTFB: TimeInterval = 0.65
+        var ewmaThroughputBps: Double = 0
+        var consecutiveSlowTransfers: Int = 0
+        var lastHealthyUptime: TimeInterval = 0
+        var warmHosts: Set<String> = []
+    }
+
+    struct StreamLane {
         var session: URLSession
         var activeTasks: Int = 0
         var consecutiveStalls: Int = 0
         var lastStallUptime: TimeInterval = 0
         var generation: UInt64 = 1
+        var telemetry = StreamLaneTelemetry()
+        var pendingRecycleWhenIdle: Bool = false
     }
 
-    private let lock = NSLock()
-    private var contexts: [ObjectIdentifier: StreamingChunkContext] = [:]
-    private var hostProtocolMultiplexed: [String: Bool] = [:]
-    private var lanes: [StreamLane] = []
-    private var roundRobinCursor: Int = 0
+    let lock = NSLock()
+    var contexts: [ObjectIdentifier: StreamingChunkContext] = [:]
+    var hostProtocolMultiplexed: [String: Bool] = [:]
+    var lanes: [StreamLane] = []
+    var roundRobinCursor: Int = 0
+    var lastOriginPrewarmUptime: [String: TimeInterval] = [:]
 
     /// Dedicated API session isolated from bulk streaming lanes.
     let apiURLSession: URLSession
@@ -197,7 +214,7 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
         self.lanes = initialLanes
     }
 
-    private func makeStreamLaneSession(index: Int) -> URLSession {
+    func makeStreamLaneSession(index: Int) -> URLSession {
         // Ephemeral configuration per lane grants each lane an independent TCP/TLS connection pool
         // even over HTTP/2 edges, eliminating single-TCP CWND collapse & HoL starvation.
         let cfg = URLSessionConfiguration.ephemeral
@@ -237,20 +254,31 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
         return ObjectIdentifier(lanes[index].session)
     }
 
-    private func selectLaneLocked(excludeLane: Int?, now: TimeInterval) -> Int {
+    func selectLaneLocked(forHost host: String?, isUrgent: Bool, excludeLane: Int?, now: TimeInterval) -> Int {
         var bestIdx = 0
-        var bestScore = Int.max
+        var bestScore = Double.greatestFiniteMagnitude
         let count = lanes.count
+        let normHost = host?.lowercased()
         for offset in 0..<count {
             let idx = (roundRobinCursor + offset) % count
             if let excludeLane, count > 1, idx == excludeLane {
                 continue
             }
             let lane = lanes[idx]
-            let stallPenalty = (lane.consecutiveStalls > 0 && (now - lane.lastStallUptime) < 12.0)
-                ? (lane.consecutiveStalls * 25)
-                : 0
-            let score = lane.activeTasks * 10 + stallPenalty
+            let stallPenalty: Double = (lane.consecutiveStalls > 0 && (now - lane.lastStallUptime) < 12.0)
+                ? Double(lane.consecutiveStalls) * 250.0
+                : 0.0
+            let recyclePenalty: Double = lane.pendingRecycleWhenIdle ? 180.0 : 0.0
+            var score = Double(lane.activeTasks) * 100.0 + stallPenalty + recyclePenalty
+            if isUrgent {
+                if let normHost, lane.telemetry.warmHosts.contains(normHost) {
+                    score -= 18.0
+                }
+                score += min(25.0, lane.telemetry.ewmaTTFB * 12.0)
+                if lane.telemetry.ewmaThroughputBps > 0 {
+                    score -= min(15.0, (lane.telemetry.ewmaThroughputBps / 1_048_576.0) * 1.8)
+                }
+            }
             if score < bestScore {
                 bestScore = score
                 bestIdx = idx
@@ -270,15 +298,7 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
             lanes[laneIndex].consecutiveStalls += 1
             lanes[laneIndex].lastStallUptime = now
             if lanes[laneIndex].consecutiveStalls >= 2 {
-                staleSessionToFinish = lanes[laneIndex].session
-                let nextGen = lanes[laneIndex].generation &+ 1
-                lanes[laneIndex] = StreamLane(
-                    session: makeStreamLaneSession(index: laneIndex),
-                    activeTasks: 0,
-                    consecutiveStalls: 0,
-                    lastStallUptime: 0,
-                    generation: nextGen
-                )
+                staleSessionToFinish = recycleLaneLocked(index: laneIndex)
             }
         }
         lock.unlock()
@@ -289,6 +309,7 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
         lock.lock()
         if lanes.indices.contains(laneIndex) {
             lanes[laneIndex].consecutiveStalls = 0
+            lanes[laneIndex].telemetry.lastHealthyUptime = ProcessInfo.processInfo.systemUptime
         }
         lock.unlock()
     }
@@ -301,8 +322,10 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
         excludeLane: Int? = nil
     ) -> (task: URLSessionDataTask, laneIndex: Int) {
         let now = ProcessInfo.processInfo.systemUptime
+        let targetHost = request.url?.host?.lowercased()
+        let urgentSelect = context.isUrgent || context.isRescue || context.isDirectRange || context.chunkIndex == 0
         lock.lock()
-        let chosenIdx = selectLaneLocked(excludeLane: excludeLane, now: now)
+        let chosenIdx = selectLaneLocked(forHost: targetHost, isUrgent: urgentSelect, excludeLane: excludeLane, now: now)
         let session = lanes[chosenIdx].session
         let generation = lanes[chosenIdx].generation
         lanes[chosenIdx].activeTasks += 1
@@ -311,6 +334,7 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
         context.dataTask = task
         context.laneIndex = chosenIdx
         context.laneGeneration = generation
+        context.dispatchUptime = now
         contexts[ObjectIdentifier(task)] = context
         lock.unlock()
         task.resume()
@@ -386,7 +410,17 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
         ctx.acceptBody = valid
         let parsedTotal = TurboStreamByteHandle.parseTotalSize(from: http, startByte: ctx.startByte, dataCount: 0)
         ctx.parsedTotalSize = parsedTotal
-        if !valid {
+        let headerNow = ProcessInfo.processInfo.systemUptime
+        ctx.responseHeaderUptime = headerNow
+        if valid {
+            recordLaneHeaderArrivalLocked(
+                laneIndex: ctx.laneIndex,
+                laneGeneration: ctx.laneGeneration,
+                host: http?.url?.host ?? ctx.requestOriginURL.host,
+                dispatchUptime: ctx.dispatchUptime,
+                headerUptime: headerNow
+            )
+        } else {
             ctx.rejectedByStatus = true
         }
         let owner = ctx.owner
@@ -462,13 +496,25 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        let now = ProcessInfo.processInfo.systemUptime
+        var staleSessionToFinish: URLSession? = nil
         lock.lock()
         guard let ctx = contexts.removeValue(forKey: ObjectIdentifier(task)) else {
             lock.unlock()
             return
         }
+        let succeeded = ctx.reached200Cap || (error == nil && ctx.acceptBody && !ctx.rejectedByStatus && !ctx.cancelledIntentionally)
+        let wasCancelled = ctx.cancelledIntentionally && !ctx.reached200Cap
         if lanes.indices.contains(ctx.laneIndex), lanes[ctx.laneIndex].generation == ctx.laneGeneration {
             lanes[ctx.laneIndex].activeTasks = max(0, lanes[ctx.laneIndex].activeTasks - 1)
+            staleSessionToFinish = recordLaneTransferFinishedLocked(
+                laneIndex: ctx.laneIndex,
+                bytesReceived: ctx.bytesReceived,
+                headerUptime: ctx.responseHeaderUptime,
+                now: now,
+                succeeded: succeeded,
+                wasCancelled: wasCancelled
+            )
         }
         let attemptId = ctx.attemptId
         let chunkIndex = ctx.chunkIndex
@@ -481,10 +527,9 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
         let totalSize = ctx.parsedTotalSize
         let laneIndex = ctx.laneIndex
         let status = ctx.rejectedByStatus ? ctx.statusCode : (error == nil ? ctx.statusCode : -1)
-        let succeeded = ctx.reached200Cap || (error == nil && ctx.acceptBody && !ctx.rejectedByStatus && !ctx.cancelledIntentionally)
-        let wasCancelled = ctx.cancelledIntentionally && !ctx.reached200Cap
         let owner = ctx.owner
         lock.unlock()
+        staleSessionToFinish?.finishTasksAndInvalidate()
 
         if succeeded {
             reportLaneHealthy(laneIndex: laneIndex)
@@ -528,9 +573,18 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
     func isHostKnownMultiplexed(_ url: URL?) -> Bool {
         guard let host = url?.host?.lowercased(), !host.isEmpty else { return false }
         lock.lock()
-        let known = hostProtocolMultiplexed[host] ?? false
+        if let known = hostProtocolMultiplexed[host] {
+            lock.unlock()
+            return known
+        }
         lock.unlock()
-        return known
+        if let persisted = NetworkRouteWarmStore.shared.isHostKnownMultiplexed(host) {
+            lock.lock()
+            hostProtocolMultiplexed[host] = persisted
+            lock.unlock()
+            return persisted
+        }
+        return false
     }
 
     static func makeRangeRequest(
@@ -571,6 +625,12 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
         }
         let owner = contexts[ObjectIdentifier(task)]?.owner
         lock.unlock()
+        if let finalHost, !finalHost.isEmpty {
+            NetworkRouteWarmStore.shared.recordHostProtocol(host: finalHost, isMultiplexed: isMultiplexed)
+        }
+        if let origHost, !origHost.isEmpty, origHost != finalHost {
+            NetworkRouteWarmStore.shared.recordHostProtocol(host: origHost, isMultiplexed: isMultiplexed)
+        }
         owner?.markProtocolMultiplexed(isMultiplexed)
     }
 }
