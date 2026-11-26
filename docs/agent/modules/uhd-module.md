@@ -1,6 +1,6 @@
 # Module Map: Optional UHDNow Streaming Integration (`DonbyUHDModule` & `Modules/UHD`)
 
-> Last synced: `v2.0.13`. Load this doc for UHDNow REST/WebSocket protocol behavior, dual-mode artwork resolution, single-episode detail hydration, CDN line selection/speed test, Watch Party, and GPU Danmu.
+> Last synced: `v2.0.15`. Load this doc for UHDNow REST/WebSocket protocol behavior, dual-mode artwork resolution, single-episode detail hydration, CDN line selection/speed test, Watch Party, and GPU Danmu.
 
 ## 1. File Inventory (Target Split: `<= 800L` per file)
 - **`Sources/DonbyUHDModule/`** (Optional SwiftPM target; excluded cleanly when `DONBY_PURE=1`):
@@ -14,7 +14,7 @@
   - `UHDStreamClient+DTOMapping.swift` — DTO-to-domain mappers (`resolveItemType`, `resolveStateType`, `mapSummary`, `mapDetail`, `mapEpisode` with season poster / series fanart / series logo fallbacks, `mapPlaybackItem`, `mapVideoAsset`).
   - `UHDStreamClient+TeamAdmin.swift`, `UHDWatchPartyClient.swift`, `UHDDanmuClient.swift` — Team API v2 management, Watch Party REST + `@MainActor UHDWatchPartySession` WebSocket sync, and managed Danmu proxy (`DanmuSessionCache`).
 - **`Sources/DonbyApp/Modules/UHD/`** (UI plugin slots registered via `DonbyAppExtensionCenter`):
-  - `UHDModuleManager.swift` — toggle state, home loading (`resumeItems` + `nextUpItems` + `hotItems`), `resolveSeriesStartEpisode`, Watch Party creation.
+  - `UHDModuleManager.swift` — toggle state, home loading (`resumeItems` + `nextUpItems` + `hotItems`, delegating hero carousel curation cleanly to `AppState.finalizeHomeContent` with zero `hotItems` hero injection), `resolveSeriesStartEpisode`, Watch Party creation.
   - `UHDAppExtensionPlugin.swift` — `DonbyAppUIExtensionPlugin` impl; `loadDetailPayload` resolves stub episode `seriesId` first when missing so credits/seasons/playback-state load reliably.
   - `UHDPlayerCompanionController.swift`, `UHDAccountDashboardView.swift`, `UHDSpeedTestPanelView.swift`, `UHDLibraryHubSheet.swift`, `UHDDiscoverySheets.swift`, `UHDWatchPartyViews.swift`, `UHDDanmuViews.swift` — companion controller, account dashboard, speed-test panel, Library Hub (mode switch, collection order, calendar/watch-party/account hub), discovery sheets, Watch Party & GPU Danmu views.
 

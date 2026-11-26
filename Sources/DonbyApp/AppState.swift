@@ -256,6 +256,18 @@ public final class AppState: ObservableObject {
         return .white
     }
 
+    /// Accent color for elements on dark media artwork scrims (smoked badges, progress bars, hearts).
+    /// Monochrome always resolves to pure white so Light Mode stays legible on dark overlays.
+    public var overlayAccentColor: Color {
+        isMonochromeTheme ? .white : accentColor
+    }
+
+    /// Accent color for icons rendered on always-white surfaces (e.g. LiquidGlassCircleButton).
+    /// Monochrome always resolves to dark ink so Dark Mode never renders white-on-white.
+    public var lightSurfaceAccentColor: Color {
+        isMonochromeTheme ? Color(red: 0.12, green: 0.12, blue: 0.14) : accentColor
+    }
+
     public var preferredVersionPreset: PreferredVersionPreset {
         get { PreferredVersionPreset(rawValue: preferredVersionPresetRaw) ?? .higherBitrate }
         set { preferredVersionPresetRaw = newValue.rawValue }
@@ -570,7 +582,15 @@ public final class AppState: ObservableObject {
             self.nextUpItems = snap.nextUpItems
             self.favoriteItems = snap.favoriteItems
             self.latestByLibrary = snap.latestByLibrary
-            self.carouselItems = snap.carouselItems
+            if !snap.latestByLibrary.isEmpty {
+                self.carouselItems = HomeHeroCurator.selectHeroItems(
+                    libraryViews: snap.libraryViews,
+                    latestByLibrary: snap.latestByLibrary,
+                    fallbackResumes: snap.resumeItems
+                )
+            } else {
+                self.carouselItems = snap.carouselItems
+            }
             self.isLoadingHome = false
         } else {
             self.libraryViews = []

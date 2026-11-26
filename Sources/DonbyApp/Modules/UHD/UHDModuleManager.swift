@@ -493,7 +493,6 @@ public final class UHDModuleManager: ObservableObject {
             }
 
             var latestMap: [String: [EmbyItem]] = [:]
-            var heroCandidates: [EmbyItem] = hot
             let hadCachedLatest = !appState.latestByLibrary.isEmpty
             let hideWatched = appState.hideWatchedInLatest
 
@@ -519,28 +518,18 @@ public final class UHDModuleManager: ObservableObject {
                     if !hadCachedLatest && appState.latestByLibrary[viewId] != items {
                         appState.latestByLibrary[viewId] = items
                     }
-                    for item in items.prefix(3) where !heroCandidates.contains(where: { $0.id == item.id }) {
-                        heroCandidates.append(item)
-                    }
                 }
             }
 
             guard isCurrentGeneration() else { return }
-            if appState.latestByLibrary != latestMap { appState.latestByLibrary = latestMap }
-            let nextCarousel = Array((heroCandidates.isEmpty ? states.resume : heroCandidates).prefix(8))
-            if appState.carouselItems != nextCarousel { appState.carouselItems = nextCarousel }
-
-            let snapshot = ServerHomeCacheStore.ServerHomeSnapshot(
+            appState.finalizeHomeContent(
+                for: server.id,
                 libraryViews: views,
                 resumeItems: states.resume,
                 nextUpItems: states.nextUp,
                 favoriteItems: favs,
-                latestByLibrary: latestMap,
-                carouselItems: appState.carouselItems,
-                cachedAt: Date()
+                latestByLibrary: latestMap
             )
-            ServerHomeCacheStore.shared.save(snapshot, for: server.id)
-            appState.isLoadingHome = false
         } catch {
             guard isCurrentGeneration() else { return }
             let isAuthExpired: Bool = {

@@ -386,7 +386,7 @@ public final class EmbyClient: Sendable {
         _ = try? await apiSession.data(for: req)
     }
 
-    public static let standardItemFields = "BasicSyncInfo,Overview,CollectionType,PrimaryImageAspectRatio,UserData,CommunityRating,CriticRating,ProviderIds,Genres,ProductionYear,ChildCount,RecursiveItemCount,Container,OfficialRating,MediaSources,MediaStreams,DateCreated,ParentId,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber"
+    public static let standardItemFields = "BasicSyncInfo,Overview,CollectionType,PrimaryImageAspectRatio,UserData,CommunityRating,CriticRating,ProviderIds,Genres,ProductionYear,PremiereDate,RunTimeTicks,OriginalTitle,ChildCount,RecursiveItemCount,Container,OfficialRating,MediaSources,MediaStreams,DateCreated,ParentId,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber"
     public static let detailItemFields = "BasicSyncInfo,RunTimeTicks,CommunityRating,CriticRating,ProviderIds,ProductionYear,PremiereDate,EndDate,Status,Container,Overview,Taglines,UserData,MediaSources,MediaStreams,People,DateCreated,Path,ParentId,Studios,Genres,OfficialRating,Chapters,OriginalTitle,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber"
     static let standardBrowseQueryItems: [URLQueryItem] = [
         URLQueryItem(name: "Fields", value: standardItemFields),

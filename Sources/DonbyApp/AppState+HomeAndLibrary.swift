@@ -366,7 +366,6 @@ extension AppState {
             }
 
             var latestMap: [String: [EmbyItem]] = [:]
-            var heroCandidates: [EmbyItem] = []
             let hadCachedLatest = !self.latestByLibrary.isEmpty
 
             await withTaskGroup(of: (String, [EmbyItem]).self) { group in
@@ -387,37 +386,57 @@ extension AppState {
                     if !hadCachedLatest && self.latestByLibrary[viewId] != items {
                         self.latestByLibrary[viewId] = items
                     }
-                    for item in items.prefix(3) where !heroCandidates.contains(where: { $0.id == item.id }) {
-                        heroCandidates.append(item)
-                    }
                 }
             }
 
             guard currentGen == homeLoadGeneration else { return }
-            if self.latestByLibrary != latestMap {
-                self.latestByLibrary = latestMap
-            }
-            let nextCarousel = Array((heroCandidates.isEmpty ? resumes : heroCandidates).prefix(8))
-            if self.carouselItems != nextCarousel {
-                self.carouselItems = nextCarousel
-            }
-
-            let snapshot = ServerHomeCacheStore.ServerHomeSnapshot(
+            finalizeHomeContent(
+                for: server.id,
                 libraryViews: views,
                 resumeItems: resumes,
                 nextUpItems: nextUps,
                 favoriteItems: favs,
-                latestByLibrary: latestMap,
-                carouselItems: self.carouselItems,
-                cachedAt: Date()
+                latestByLibrary: latestMap
             )
-            ServerHomeCacheStore.shared.save(snapshot, for: server.id)
-            self.isLoadingHome = false
         } catch {
             guard currentGen == homeLoadGeneration else { return }
             self.homeErrorMessage = error.localizedDescription
             self.isLoadingHome = false
         }
+    }
+
+    /// Canonical home finalizer: curates `carouselItems` strictly from library shelves
+    /// via `HomeHeroCurator` (never from extension hot/promotional feeds) and persists snapshot.
+    public func finalizeHomeContent(
+        for serverId: UUID,
+        libraryViews: [EmbyItem],
+        resumeItems: [EmbyItem],
+        nextUpItems: [EmbyItem],
+        favoriteItems: [EmbyItem],
+        latestByLibrary: [String: [EmbyItem]]
+    ) {
+        if self.latestByLibrary != latestByLibrary {
+            self.latestByLibrary = latestByLibrary
+        }
+        let nextCarousel = HomeHeroCurator.selectHeroItems(
+            libraryViews: libraryViews,
+            latestByLibrary: latestByLibrary,
+            fallbackResumes: resumeItems
+        )
+        if self.carouselItems != nextCarousel {
+            self.carouselItems = nextCarousel
+        }
+        let snapshot = ServerHomeCacheStore.ServerHomeSnapshot(
+            libraryViews: libraryViews,
+            resumeItems: resumeItems,
+            nextUpItems: nextUpItems,
+            favoriteItems: favoriteItems,
+            latestByLibrary: latestByLibrary,
+            carouselItems: self.carouselItems,
+            cachedAt: Date()
+        )
+        ServerHomeCacheStore.shared.save(snapshot, for: serverId)
+        self.isLoadingHome = false
     }
 
     public static func detailSeriesKey(for item: EmbyItem) -> String {
