@@ -22,9 +22,20 @@ public struct DonbyUHDModuleSheetsModifier: ViewModifier {
                     .preferredColorScheme(appState.colorScheme)
                     .tint(appState.accentColor)
             }
+            .sheet(isPresented: $uhd.showLibraryHubSheet) {
+                if let server = appState.activeServer, uhd.isActive(for: server) {
+                    UHDLibraryHubSheet(server: server)
+                        .environmentObject(appState)
+                        .preferredColorScheme(appState.colorScheme)
+                        .tint(appState.accentColor)
+                }
+            }
             .sheet(isPresented: $uhd.showAnimeCalendarSheet) {
                 if let server = appState.activeServer, uhd.isActive(for: server) {
-                    UHDAnimeCalendarSheet(server: server)
+                    UHDAnimeCalendarSheet(
+                        server: server,
+                        initialMode: uhd.currentLibraryMode(for: server.id)
+                    )
                         .environmentObject(appState)
                         .preferredColorScheme(appState.colorScheme)
                         .tint(appState.accentColor)
@@ -53,7 +64,7 @@ public extension View {
     }
 }
 
-/// Direct Donby Liquid Glass toolbar actions for optional UHD capabilities (Anime Calendar & Watch Party).
+/// Direct Donby Liquid Glass toolbar actions for optional UHD capabilities (Library Hall, Calendar, Watch Party & Account).
 public struct UHDEmbyToolbarButtons: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject private var uhd = UHDModuleManager.shared
@@ -63,30 +74,47 @@ public struct UHDEmbyToolbarButtons: View {
         self.server = server
     }
 
+    private func standardIconColor(hovered: Bool) -> Color {
+        appState.isLightMode
+            ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28))
+            : (hovered ? .white : Color(white: 0.88))
+    }
+
     public var body: some View {
         if uhd.isActive(for: server), !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let activeMode = uhd.currentLibraryMode(for: server.id)
+
             ToolbarVectorButton(
-                tooltip: "追番日历",
+                tooltip: "馆别 · \(activeMode.displayTitle)",
+                action: { uhd.showLibraryHubSheet = true }
+            ) { hovered in
+                let iconColor = activeMode == .anime ? appState.accentColor : standardIconColor(hovered: hovered)
+                UHDLibraryModeIcon(mode: activeMode, size: 15.5, color: iconColor)
+            }
+
+            ToolbarVectorButton(
+                tooltip: activeMode.calendarTitle,
                 action: { uhd.showAnimeCalendarSheet = true }
             ) { hovered in
-                let iconColor = appState.isLightMode
-                    ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28))
-                    : (hovered ? .white : Color(white: 0.88))
                 Image(systemName: "calendar")
                     .font(.system(size: 13.5, weight: .medium))
-                    .foregroundStyle(iconColor)
+                    .foregroundStyle(standardIconColor(hovered: hovered))
             }
 
             ToolbarVectorButton(
                 tooltip: "加入同看",
                 action: { uhd.showWatchPartyJoinSheet = true }
             ) { hovered in
-                let iconColor = appState.isLightMode
-                    ? (hovered ? Color(red: 0.08, green: 0.08, blue: 0.10) : Color(red: 0.25, green: 0.25, blue: 0.28))
-                    : (hovered ? .white : Color(white: 0.88))
                 Image(systemName: "person.2.wave.2")
                     .font(.system(size: 13.5, weight: .medium))
-                    .foregroundStyle(iconColor)
+                    .foregroundStyle(standardIconColor(hovered: hovered))
+            }
+
+            ToolbarVectorButton(
+                tooltip: "账户与流量",
+                action: { uhd.accountSheetServer = server }
+            ) { hovered in
+                UHDAccountVectorIcon(size: 15.5, color: standardIconColor(hovered: hovered))
             }
         }
     }
@@ -154,7 +182,7 @@ private struct UHDServerContextMenuExtraItems: View {
     var body: some View {
         if uhd.isActive(for: server) {
             Button { uhd.accountSheetServer = server } label: {
-                Label("账户与流量", systemImage: "gauge.with.dots.needle.67percent")
+                Label("账户与流量", systemImage: "person.crop.circle")
             }
             Button {
                 appState.activeServerId = server.id
@@ -190,14 +218,6 @@ private struct UHDLineAndAccountSheetView: View {
     let serverId: UUID
     let onDismiss: () -> Void
 
-    private enum SheetTab: String, CaseIterable, Identifiable {
-        case lines = "线路"
-        case account = "账户"
-        var id: String { rawValue }
-    }
-
-    @State private var activeTab: SheetTab = .lines
-
     private var server: EmbyServerConfig? {
         appState.servers.first(where: { $0.id == serverId })
     }
@@ -220,18 +240,6 @@ private struct UHDLineAndAccountSheetView: View {
 
                     Spacer()
 
-                    DonbySegmentedControl(
-                        options: SheetTab.allCases,
-                        selection: $activeTab,
-                        isLightMode: appState.isLightMode,
-                        accentColor: appState.accentColor,
-                        accentTextColor: appState.accentTextColor,
-                        fontSize: 12,
-                        horizontalPadding: 14,
-                        verticalPadding: 5,
-                        title: { $0.rawValue }
-                    )
-
                     ToolbarVectorButton(tooltip: "关闭", action: {
                         speedModel.cancel()
                         onDismiss()
@@ -245,11 +253,7 @@ private struct UHDLineAndAccountSheetView: View {
 
                 Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
 
-                if activeTab == .account {
-                    UHDAccountDashboardContent(server: server, showRouteSwitchAction: false, onDismiss: onDismiss)
-                } else {
-                    linesBody(server: server)
-                }
+                linesBody(server: server)
             }
         }
         .padding(22)
@@ -489,12 +493,13 @@ public final class UHDAppExtensionPlugin: DonbyAppUIExtensionPlugin {
 
     public func homeShelves(for server: EmbyServerConfig?) -> [HomeShelfSection] {
         let uhd = UHDModuleManager.shared
-        guard uhd.isActive(for: server) else { return [] }
+        guard let server, uhd.isActive(for: server) else { return [] }
+        let activeMode = uhd.currentLibraryMode(for: server.id)
         var result: [HomeShelfSection] = []
         if !uhd.hotItems.isEmpty {
-            result.append(HomeShelfSection(id: "uhd_hot", title: "热门影视", kind: .poster, items: uhd.hotItems))
+            result.append(HomeShelfSection(id: "uhd_hot", title: activeMode.hotTitle, kind: .poster, items: uhd.hotItems))
         }
-        if !uhd.animeHotItems.isEmpty {
+        if activeMode == .normal, !uhd.animeHotItems.isEmpty {
             result.append(HomeShelfSection(id: "uhd_anime_hot", title: "热门动漫", kind: .poster, items: uhd.animeHotItems))
         }
         return result
@@ -518,7 +523,8 @@ public final class UHDAppExtensionPlugin: DonbyAppUIExtensionPlugin {
         cursor: String?
     ) async throws -> DonbyExtensionLibraryPage {
         if !query.isEmpty {
-            let found = try await UHDStreamClient.shared.search(server: server, query: query, limit: 50)
+            let mode = UHDModuleManager.shared.currentLibraryMode(for: server.id)
+            let found = try await UHDStreamClient.shared.search(server: server, query: query, limit: 50, mode: mode)
             return DonbyExtensionLibraryPage(items: found, nextCursor: nil, hasMore: false, totalOverride: found.count)
         }
         if filterFavoritesOnly {

@@ -10,14 +10,16 @@ public struct UHDAnimeCalendarSheet: View {
     @Environment(\.dismiss) private var dismiss
     public let server: EmbyServerConfig
 
+    @State private var mode: UHDLibraryMode
     @State private var days: [UHDAnimeCalendarDay] = (1...7).map { UHDAnimeCalendarDay(weekday: $0, total: 0) }
     @State private var selectedWeekday: Int = UHDAnimeCalendarDay.todayShanghaiWeekday()
     @State private var entries: [UHDAnimeCalendarEntry] = []
     @State private var isLoading: Bool = false
     @State private var errorMessage: String? = nil
 
-    public init(server: EmbyServerConfig) {
+    public init(server: EmbyServerConfig, initialMode: UHDLibraryMode = .anime) {
         self.server = server
+        self._mode = State(initialValue: initialMode)
     }
 
     public var body: some View {
@@ -25,15 +27,44 @@ public struct UHDAnimeCalendarSheet: View {
         let todayWD = UHDAnimeCalendarDay.todayShanghaiWeekday()
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("追番日历")
-                        .font(.system(size: 17, weight: .bold))
-                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    Text("近期播出排期")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                }
+                Text(mode.calendarTitle)
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                 Spacer()
+                HStack(spacing: 4) {
+                    ForEach(UHDLibraryMode.allCases) { targetMode in
+                        let isSelected = (mode == targetMode)
+                        Button {
+                            guard mode != targetMode else { return }
+                            mode = targetMode
+                        } label: {
+                            HStack(spacing: 5) {
+                                UHDLibraryModeIcon(
+                                    mode: targetMode,
+                                    size: 12.5,
+                                    color: isSelected ? appState.accentTextColor : DonbyGlassPalette.primaryText(isLight: appState.isLightMode)
+                                )
+                                Text(targetMode.displayTitle)
+                                    .font(.system(size: 11.5, weight: isSelected ? .semibold : .medium))
+                            }
+                            .foregroundStyle(isSelected ? appState.accentTextColor : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(
+                                Capsule().fill(isSelected ? appState.accentColor : Color.clear)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(3)
+                .background(
+                    Capsule().fill(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+                )
+                .overlay(
+                    Capsule().strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+                )
+
                 ToolbarVectorButton(tooltip: "关闭", action: { dismiss() }) { hovered in
                     let col = appState.isLightMode ? (hovered ? Color.black : Color(white: 0.35)) : (hovered ? .white : Color(white: 0.72))
                     Image(systemName: "xmark")
@@ -138,17 +169,19 @@ public struct UHDAnimeCalendarSheet: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
         )
-        .task {
-            if let fetchedDays = try? await UHDStreamClient.shared.fetchAnimeCalendarDays(server: server), !fetchedDays.isEmpty {
+        .task(id: mode) {
+            if let fetchedDays = try? await UHDStreamClient.shared.fetchAnimeCalendarDays(server: server, mode: mode), !fetchedDays.isEmpty {
                 days = fetchedDays
+            } else {
+                days = (1...7).map { UHDAnimeCalendarDay(weekday: $0, total: 0) }
             }
         }
-        .task(id: selectedWeekday) {
+        .task(id: "\(mode.rawValue)-\(selectedWeekday)") {
             isLoading = true
             errorMessage = nil
             defer { isLoading = false }
             do {
-                entries = try await UHDStreamClient.shared.fetchAnimeCalendarItems(server: server, weekday: selectedWeekday)
+                entries = try await UHDStreamClient.shared.fetchAnimeCalendarItems(server: server, weekday: selectedWeekday, mode: mode)
             } catch {
                 errorMessage = "加载失败: \(error.localizedDescription)"
             }

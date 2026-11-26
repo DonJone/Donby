@@ -42,9 +42,12 @@ public final class UHDModuleManager: ObservableObject {
     @Published public var accountSnapshots: [UUID: UHDAccountSnapshot] = [:]
     @Published public var hotItems: [EmbyItem] = []
     @Published public var animeHotItems: [EmbyItem] = []
+    @Published public var libraryModeByServer: [UUID: UHDLibraryMode] = [:]
+    @Published public var librarySettingsByServer: [UUID: UHDLibrarySettings] = [:]
 
     // UHD-scoped sheets & active Watch Party session
     @Published public var accountSheetServer: EmbyServerConfig? = nil
+    @Published public var showLibraryHubSheet: Bool = false
     @Published public var showAnimeCalendarSheet: Bool = false
     @Published public var showFavoritesSheet: Bool = false
     @Published public var showWatchPartyJoinSheet: Bool = false
@@ -78,6 +81,57 @@ public final class UHDModuleManager: ObservableObject {
         return server.type == .uhdNative
     }
 
+    public func currentLibraryMode(for serverId: UUID?) -> UHDLibraryMode {
+        guard let serverId else { return .normal }
+        return libraryModeByServer[serverId] ?? .normal
+    }
+
+    public func refreshLibrarySettings(server: EmbyServerConfig) async throws -> UHDLibrarySettings {
+        let settings = try await UHDStreamClient.shared.fetchLibrarySettings(server: server)
+        librarySettingsByServer[server.id] = settings
+        if libraryModeByServer[server.id] == nil {
+            libraryModeByServer[server.id] = settings.preferences.mode
+        }
+        return settings
+    }
+
+    public func switchLibraryMode(
+        _ mode: UHDLibraryMode,
+        persistDefault: Bool,
+        server: EmbyServerConfig,
+        appState: AppState
+    ) async throws {
+        var resolvedMode = mode
+        if persistDefault {
+            let saved = try await UHDStreamClient.shared.saveLibrarySettings(server: server, mode: mode, collectionIds: nil)
+            resolvedMode = saved.mode
+            if let existing = librarySettingsByServer[server.id] {
+                librarySettingsByServer[server.id] = UHDLibrarySettings(preferences: saved, collections: existing.collections)
+            }
+        }
+        libraryModeByServer[server.id] = resolvedMode
+        await appState.loadActiveServerHome(syncDomains: false)
+    }
+
+    public func saveLibraryCollections(
+        mode: UHDLibraryMode,
+        collectionIds: [String],
+        server: EmbyServerConfig,
+        appState: AppState
+    ) async throws -> UHDLibraryPreferences {
+        let saved = try await UHDStreamClient.shared.saveLibrarySettings(
+            server: server,
+            mode: mode,
+            collectionIds: collectionIds
+        )
+        libraryModeByServer[server.id] = saved.mode
+        if let existing = librarySettingsByServer[server.id] {
+            librarySettingsByServer[server.id] = UHDLibrarySettings(preferences: saved, collections: existing.collections)
+        }
+        await appState.loadActiveServerHome(syncDomains: false)
+        return saved
+    }
+
     public func resetHomeShelves() {
         hotItems = []
         animeHotItems = []
@@ -87,7 +141,10 @@ public final class UHDModuleManager: ObservableObject {
         accountSnapshots.removeAll()
         hotItems.removeAll()
         animeHotItems.removeAll()
+        libraryModeByServer.removeAll()
+        librarySettingsByServer.removeAll()
         accountSheetServer = nil
+        showLibraryHubSheet = false
         showAnimeCalendarSheet = false
         showFavoritesSheet = false
         showWatchPartyJoinSheet = false
@@ -365,9 +422,16 @@ public final class UHDModuleManager: ObservableObject {
         var workingServer = server
 
         do {
+            if libraryModeByServer[workingServer.id] == nil,
+               let settings = try? await UHDStreamClient.shared.fetchLibrarySettings(server: workingServer) {
+                librarySettingsByServer[workingServer.id] = settings
+                libraryModeByServer[workingServer.id] = settings.preferences.mode
+            }
+            let activeMode = currentLibraryMode(for: workingServer.id)
+
             let views: [EmbyItem]
             do {
-                views = try await UHDStreamClient.shared.fetchCollections(server: workingServer)
+                views = try await UHDStreamClient.shared.fetchCollections(server: workingServer, mode: activeMode)
             } catch {
                 // If user temporarily disabled the extension (which re-authed as standard Emby) and later re-enabled it,
                 // transparently re-acquire a UHD Stream session using saved credentials.
@@ -389,7 +453,7 @@ public final class UHDModuleManager: ObservableObject {
                         appState.servers[idx].accessToken = workingServer.accessToken
                         appState.servers[idx].tokenExpiresAt = workingServer.tokenExpiresAt
                     }
-                    views = try await UHDStreamClient.shared.fetchCollections(server: workingServer)
+                    views = try await UHDStreamClient.shared.fetchCollections(server: workingServer, mode: activeMode)
                 } else {
                     throw error
                 }
@@ -398,8 +462,10 @@ public final class UHDModuleManager: ObservableObject {
             let resolvedServer = workingServer
             async let statesTask = UHDStreamClient.shared.fetchPlaybackStates(server: resolvedServer, limit: 16)
             async let favTask = UHDStreamClient.shared.fetchFavorites(server: resolvedServer, limit: 24)
-            async let hotTask = UHDStreamClient.shared.fetchHot(server: resolvedServer, limit: 20)
-            async let animeHotTask = UHDStreamClient.shared.fetchAnimeHot(server: resolvedServer, limit: 20)
+            async let hotTask = UHDStreamClient.shared.fetchHot(server: resolvedServer, limit: 20, mode: activeMode)
+            async let animeHotTask: [EmbyItem]? = activeMode == .normal
+                ? (try? await UHDStreamClient.shared.fetchAnimeHot(server: resolvedServer, limit: 20))
+                : []
 
             guard isCurrentGeneration() else { return }
             if appState.libraryViews != views { appState.libraryViews = views }
@@ -407,7 +473,7 @@ public final class UHDModuleManager: ObservableObject {
             let states = (try? await statesTask) ?? (resume: [], nextUp: [])
             let favs = (try? await favTask)?.items ?? []
             let hot = (try? await hotTask) ?? []
-            let animeHot = (try? await animeHotTask) ?? []
+            let animeHot = (await animeHotTask) ?? []
 
             guard isCurrentGeneration() else { return }
             if appState.resumeItems != states.resume { appState.resumeItems = states.resume }
