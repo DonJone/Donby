@@ -4,150 +4,161 @@ import AppKit
 import DonbyCore
 import DonbyNetwork
 
-/// Captures macOS two-finger trackpad horizontal swipes over its host bounds without
-/// intercepting vertical scrolling or button hit-testing.
-private struct TrackpadHorizontalSwipeDetector: NSViewRepresentable {
-    let isEnabled: Bool
-    let onSwipeNext: () -> Void
-    let onSwipePrev: () -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onSwipeNext: onSwipeNext, onSwipePrev: onSwipePrev)
+/// Hosts `MainCarouselView` inside `NativeEmbyHomeView` and intercepts two-finger trackpad
+/// horizontal swipes directly via AppKit's responder chain (`scrollWheel(with:)`) while
+/// forwarding vertical scrolling cleanly to the enclosing `NonDraggableScrollView`.
+final class CarouselHostingView: NSHostingView<AnyView> {
+    private enum ScrollAxis {
+        case undecided
+        case horizontal
+        case vertical
     }
 
-    func makeNSView(context: Context) -> AnchorNSView {
-        let view = AnchorNSView()
-       view.setContentHuggingPriority(.defaultLow, for: .horizontal)
-       view.setContentHuggingPriority(.defaultLow, for: .vertical)
-       view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-       view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-        context.coordinator.anchorView = view
-        if isEnabled {
-            context.coordinator.attach(to: view)
+    var onHorizontalSwipe: ((Int) -> Void)?
+
+    private var activeGestureAxis: ScrollAxis = .undecided
+    private var momentumAxis: ScrollAxis = .undecided
+    private var accumulatedAbsX: CGFloat = 0
+    private var accumulatedAbsY: CGFloat = 0
+    private var accumulatedDeltaX: CGFloat = 0
+    private var didFireForCurrentSwipe: Bool = false
+    private var lastCooldownTriggerTime: TimeInterval = 0
+    private var pendingBeganEvent: NSEvent?
+
+    private func resetActiveTracking() {
+        activeGestureAxis = .undecided
+        accumulatedAbsX = 0
+        accumulatedAbsY = 0
+        accumulatedDeltaX = 0
+        didFireForCurrentSwipe = false
+        pendingBeganEvent = nil
+    }
+
+    private func handleHorizontalDelta(_ event: NSEvent) {
+        guard !didFireForCurrentSwipe else { return }
+        let dx = event.scrollingDeltaX
+        // Normalize finger motion: swiping two fingers LEFT advances to next poster (+1)
+        let fingerDeltaX = event.isDirectionInvertedFromDevice ? dx : -dx
+        accumulatedDeltaX += fingerDeltaX
+        let threshold: CGFloat = 14.0
+        if accumulatedDeltaX <= -threshold {
+            didFireForCurrentSwipe = true
+            accumulatedDeltaX = 0
+            onHorizontalSwipe?(1)
+        } else if accumulatedDeltaX >= threshold {
+            didFireForCurrentSwipe = true
+            accumulatedDeltaX = 0
+            onHorizontalSwipe?(-1)
         }
-        return view
     }
 
-    func updateNSView(_ nsView: AnchorNSView, context: Context) {
-        context.coordinator.onSwipeNext = onSwipeNext
-        context.coordinator.onSwipePrev = onSwipePrev
-        context.coordinator.anchorView = nsView
-        if isEnabled {
-            context.coordinator.attach(to: nsView)
-        } else {
-            context.coordinator.detach()
-        }
-    }
+    override func scrollWheel(with event: NSEvent) {
+        let absX = abs(event.scrollingDeltaX)
+        let absY = abs(event.scrollingDeltaY)
 
-    static func dismantleNSView(_ nsView: AnchorNSView, coordinator: Coordinator) {
-        coordinator.detach()
-    }
-
-    func sizeThatFits(_ proposal: ProposedViewSize, nsView: AnchorNSView, context: Context) -> CGSize? {
-        proposal.replacingUnspecifiedDimensions()
-    }
-
-    final class AnchorNSView: NSView {
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    }
-
-    final class Coordinator {
-        var onSwipeNext: () -> Void
-        var onSwipePrev: () -> Void
-        weak var anchorView: NSView?
-        private var monitor: Any?
-        private var accumulatedDeltaX: CGFloat = 0
-        private var didFireForCurrentSwipe: Bool = false
-        private var lastDiscreteTriggerTime: TimeInterval = 0
-
-        init(onSwipeNext: @escaping () -> Void, onSwipePrev: @escaping () -> Void) {
-            self.onSwipeNext = onSwipeNext
-            self.onSwipePrev = onSwipePrev
-        }
-
-        func attach(to view: NSView) {
-            guard monitor == nil else { return }
-            detach()
-            self.anchorView = view
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-                guard let self = self else { return event }
-                return self.handleScrollWheel(event)
+        // Phaseless scroll events (discrete mouse wheel or smooth-scroll utilities)
+        if event.phase.isEmpty && event.momentumPhase.isEmpty {
+            if absY >= absX {
+                nextResponder?.scrollWheel(with: event)
+                return
             }
-        }
-
-        func detach() {
-            if let monitor {
-                NSEvent.removeMonitor(monitor)
-                self.monitor = nil
-            }
-        }
-
-        private func handleScrollWheel(_ event: NSEvent) -> NSEvent? {
-            // Never swallow gesture lifecycle boundaries so enclosing/frontmost NSScrollViews
-            // always receive finger-lift (.ended/.cancelled) and bounce back cleanly.
-            if event.phase == .began || event.phase == .ended || event.phase == .cancelled || event.phase == .mayBegin {
-                accumulatedDeltaX = 0
-                didFireForCurrentSwipe = false
-                return event
-            }
-
-            let dx = event.scrollingDeltaX
-            let dy = event.scrollingDeltaY
-
-            // Only intercept clear horizontal swipes; always pass vertical or zero-delta events through.
-            guard abs(dx) > abs(dy) * 1.25 && abs(dx) > 0.5 else {
-                return event
-            }
-
-            guard let view = anchorView,
-                  let win = view.window,
-                  event.window === win,
-                  win.isVisible else {
-                return event
-            }
-
-            let localPt = view.convert(event.locationInWindow, from: nil)
-            guard view.visibleRect.contains(localPt) else {
-                return event
-            }
-
-            // Swallow only horizontal post-lift trackpad inertia so one horizontal flick advances one poster
-            if !event.momentumPhase.isEmpty {
-                return nil
-            }
-
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now - lastCooldownTriggerTime > 0.35 else { return }
             if event.hasPreciseScrollingDeltas {
-                guard !didFireForCurrentSwipe else { return nil }
-                // Normalize finger motion: swiping two fingers LEFT advances to next poster
-                let fingerDeltaX = event.isDirectionInvertedFromDevice ? dx : -dx
+                let fingerDeltaX = event.isDirectionInvertedFromDevice ? event.scrollingDeltaX : -event.scrollingDeltaX
                 accumulatedDeltaX += fingerDeltaX
-                let threshold: CGFloat = 20.0
-                if accumulatedDeltaX <= -threshold {
-                    didFireForCurrentSwipe = true
+                if accumulatedDeltaX <= -14.0 {
+                    lastCooldownTriggerTime = now
                     accumulatedDeltaX = 0
-                    DispatchQueue.main.async { self.onSwipeNext() }
-                } else if accumulatedDeltaX >= threshold {
-                    didFireForCurrentSwipe = true
+                    onHorizontalSwipe?(1)
+                } else if accumulatedDeltaX >= 14.0 {
+                    lastCooldownTriggerTime = now
                     accumulatedDeltaX = 0
-                    DispatchQueue.main.async { self.onSwipePrev() }
+                    onHorizontalSwipe?(-1)
                 }
-                return nil
-            } else {
-                // Discrete horizontal scroll wheel / tilt wheel with cooldown
-                let now = ProcessInfo.processInfo.systemUptime
-                guard now - lastDiscreteTriggerTime > 0.35 else { return nil }
-                lastDiscreteTriggerTime = now
-                if dx < 0 {
-                    DispatchQueue.main.async { self.onSwipeNext() }
-                } else {
-                    DispatchQueue.main.async { self.onSwipePrev() }
-                }
-                return nil
+            } else if absX > 0.5 {
+                lastCooldownTriggerTime = now
+                onHorizontalSwipe?(event.scrollingDeltaX < 0 ? 1 : -1)
             }
+            return
         }
 
-        deinit {
-            detach()
+        // Post-lift trackpad inertia: swallow horizontal inertia so one flick advances one poster
+        if !event.momentumPhase.isEmpty {
+            let targetAxis: ScrollAxis = momentumAxis != .undecided
+                ? momentumAxis
+                : (absX > absY ? .horizontal : .vertical)
+            if targetAxis == .vertical {
+                nextResponder?.scrollWheel(with: event)
+            }
+            if event.momentumPhase == .ended || event.momentumPhase == .cancelled {
+                momentumAxis = .undecided
+            }
+            return
+        }
+
+        switch event.phase {
+        case .mayBegin:
+            resetActiveTracking()
+            momentumAxis = .undecided
+            nextResponder?.scrollWheel(with: event)
+
+        case .began:
+            resetActiveTracking()
+            momentumAxis = .undecided
+            accumulatedAbsX = absX
+            accumulatedAbsY = absY
+            if max(accumulatedAbsX, accumulatedAbsY) >= 1.5 {
+                let locked: ScrollAxis = accumulatedAbsX >= accumulatedAbsY ? .horizontal : .vertical
+                activeGestureAxis = locked
+                momentumAxis = locked
+                if locked == .horizontal {
+                    handleHorizontalDelta(event)
+                } else {
+                    nextResponder?.scrollWheel(with: event)
+                }
+            } else {
+                pendingBeganEvent = event
+            }
+
+        case .changed, .stationary:
+            if activeGestureAxis == .undecided {
+                accumulatedAbsX += absX
+                accumulatedAbsY += absY
+                guard max(accumulatedAbsX, accumulatedAbsY) >= 1.5 else { return }
+                let locked: ScrollAxis = accumulatedAbsX >= accumulatedAbsY ? .horizontal : .vertical
+                activeGestureAxis = locked
+                momentumAxis = locked
+                if locked == .vertical, let began = pendingBeganEvent {
+                    pendingBeganEvent = nil
+                    nextResponder?.scrollWheel(with: began)
+                } else {
+                    pendingBeganEvent = nil
+                }
+            }
+            if activeGestureAxis == .horizontal {
+                handleHorizontalDelta(event)
+            } else {
+                nextResponder?.scrollWheel(with: event)
+            }
+
+        case .ended, .cancelled:
+            let axis = activeGestureAxis
+            let began = pendingBeganEvent
+            resetActiveTracking()
+            if axis != .horizontal {
+                if let began {
+                    nextResponder?.scrollWheel(with: began)
+                }
+                nextResponder?.scrollWheel(with: event)
+            }
+
+        default:
+            if activeGestureAxis == .horizontal {
+                handleHorizontalDelta(event)
+            } else {
+                nextResponder?.scrollWheel(with: event)
+            }
         }
     }
 }
@@ -157,6 +168,7 @@ public struct MainCarouselView: View {
     public let items: [EmbyItem]
     public var height: CGFloat = 365
     public var isScrollPaused: (() -> Bool)? = nil
+    public var swipePublisher: AnyPublisher<Int, Never>? = nil
     public let onPlay: (EmbyItem) -> Void
     public let onSelectDetail: (EmbyItem) -> Void
 
@@ -175,12 +187,14 @@ public struct MainCarouselView: View {
         items: [EmbyItem],
         height: CGFloat = 365,
         isScrollPaused: (() -> Bool)? = nil,
+        swipePublisher: AnyPublisher<Int, Never>? = nil,
         onPlay: @escaping (EmbyItem) -> Void,
         onSelectDetail: @escaping (EmbyItem) -> Void
     ) {
         self.items = items
         self.height = height
         self.isScrollPaused = isScrollPaused
+        self.swipePublisher = swipePublisher
         self.onPlay = onPlay
         self.onSelectDetail = onSelectDetail
     }
@@ -322,13 +336,9 @@ public struct MainCarouselView: View {
                 .padding(.trailing, 160) // reserve room for indicators
             }
             .frame(height: height)
-            .background(
-                TrackpadHorizontalSwipeDetector(
-                    isEnabled: appState.currentDetailItem == nil && appState.activePlayback == nil,
-                    onSwipeNext: { stepSlide(1) },
-                    onSwipePrev: { stepSlide(-1) }
-                )
-            )
+            .onReceive(swipePublisher ?? Empty<Int, Never>().eraseToAnyPublisher()) { delta in
+                stepSlide(delta)
+            }
             .gesture(
                 DragGesture(minimumDistance: 28)
                     .onEnded { val in

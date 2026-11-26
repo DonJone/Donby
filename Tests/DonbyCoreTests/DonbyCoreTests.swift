@@ -8,7 +8,7 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "2.0.13")
+        #expect(DonbyAppInfo.fallbackVersion == "2.0.14")
     }
 
     @Test func heroTopEdgeSynthesizerPreservesExactColorContrastAndSuppressesOutlierSpike() {

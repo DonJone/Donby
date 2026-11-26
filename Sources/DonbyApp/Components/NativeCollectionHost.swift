@@ -29,6 +29,18 @@ final class NonDraggableScrollView: NSScrollView {
 }
 
 final class HorizontalShelfScrollView: NSScrollView {
+    private enum ScrollAxis {
+        case undecided
+        case horizontal
+        case vertical
+    }
+
+    private var activeGestureAxis: ScrollAxis = .undecided
+    private var momentumAxis: ScrollAxis = .undecided
+    private var accumulatedAbsX: CGFloat = 0
+    private var accumulatedAbsY: CGFloat = 0
+    private var pendingBeganEvent: NSEvent?
+
     override var mouseDownCanMoveWindow: Bool { false }
 
     override func tile() {
@@ -39,13 +51,123 @@ final class HorizontalShelfScrollView: NSScrollView {
         }
     }
 
-    override func scrollWheel(with event: NSEvent) {
-        if abs(event.scrollingDeltaY) > abs(event.scrollingDeltaX) {
-            nextResponder?.scrollWheel(with: event)
-            return
-        }
+    private func dispatchToHorizontal(_ event: NSEvent) {
         (documentView as? InteractiveCollectionView)?.clearHover()
         super.scrollWheel(with: event)
+    }
+
+    private func dispatchToVertical(_ event: NSEvent) {
+        nextResponder?.scrollWheel(with: event)
+    }
+
+    private func dispatch(_ event: NSEvent, axis: ScrollAxis) {
+        switch axis {
+        case .horizontal:
+            dispatchToHorizontal(event)
+        case .vertical:
+            dispatchToVertical(event)
+        case .undecided:
+            super.scrollWheel(with: event)
+            nextResponder?.scrollWheel(with: event)
+        }
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        let absX = abs(event.scrollingDeltaX)
+        let absY = abs(event.scrollingDeltaY)
+
+        // Discrete scroll wheels (no trackpad gesture/momentum phase)
+        if event.phase.isEmpty && event.momentumPhase.isEmpty {
+            if absY > absX {
+                dispatchToVertical(event)
+            } else {
+                dispatchToHorizontal(event)
+            }
+            return
+        }
+
+        // Post-lift trackpad inertia: route along the locked gesture axis
+        if !event.momentumPhase.isEmpty {
+            let targetAxis: ScrollAxis
+            if momentumAxis != .undecided {
+                targetAxis = momentumAxis
+            } else {
+                targetAxis = absY > absX ? .vertical : .horizontal
+            }
+            dispatch(event, axis: targetAxis)
+            if event.momentumPhase == .ended || event.momentumPhase == .cancelled {
+                momentumAxis = .undecided
+            }
+            return
+        }
+
+        switch event.phase {
+        case .mayBegin:
+            activeGestureAxis = .undecided
+            momentumAxis = .undecided
+            accumulatedAbsX = 0
+            accumulatedAbsY = 0
+            pendingBeganEvent = nil
+            // Let both scroll views stop any residual momentum cleanly.
+            super.scrollWheel(with: event)
+            nextResponder?.scrollWheel(with: event)
+
+        case .began:
+            activeGestureAxis = .undecided
+            momentumAxis = .undecided
+            accumulatedAbsX = absX
+            accumulatedAbsY = absY
+            pendingBeganEvent = nil
+            if max(accumulatedAbsX, accumulatedAbsY) >= 1.5 {
+                let locked: ScrollAxis = accumulatedAbsX >= accumulatedAbsY ? .horizontal : .vertical
+                activeGestureAxis = locked
+                momentumAxis = locked
+                dispatch(event, axis: locked)
+            } else {
+                // Defer .began until initial finger movement clarifies axis so the winning
+                // NSScrollView always receives .began before .changed.
+                pendingBeganEvent = event
+            }
+
+        case .changed, .stationary:
+            if activeGestureAxis == .undecided {
+                accumulatedAbsX += absX
+                accumulatedAbsY += absY
+                guard max(accumulatedAbsX, accumulatedAbsY) >= 1.5 else {
+                    return
+                }
+                let locked: ScrollAxis = accumulatedAbsX >= accumulatedAbsY ? .horizontal : .vertical
+                activeGestureAxis = locked
+                momentumAxis = locked
+                if let began = pendingBeganEvent {
+                    pendingBeganEvent = nil
+                    dispatch(began, axis: locked)
+                }
+            }
+            dispatch(event, axis: activeGestureAxis)
+
+        case .ended, .cancelled:
+            let axis = activeGestureAxis
+            activeGestureAxis = .undecided
+            accumulatedAbsX = 0
+            accumulatedAbsY = 0
+            if let began = pendingBeganEvent {
+                pendingBeganEvent = nil
+                if axis != .undecided {
+                    dispatch(began, axis: axis)
+                }
+            }
+            dispatch(event, axis: axis)
+
+        default:
+            if activeGestureAxis != .undecided {
+                dispatch(event, axis: activeGestureAxis)
+            } else if absY > absX {
+                dispatchToVertical(event)
+            } else {
+                dispatchToHorizontal(event)
+            }
+        }
     }
 }
 

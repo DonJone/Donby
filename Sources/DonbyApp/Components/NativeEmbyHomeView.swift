@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import AppKit
 import QuartzCore
 import DonbyCore
@@ -110,6 +111,8 @@ private final class NativeHomeShelfView: FlippedLayerHostView, NSCollectionViewD
         horizontalScrollView.hasHorizontalScroller = false
         horizontalScrollView.autohidesScrollers = true
         horizontalScrollView.scrollerStyle = .overlay
+        horizontalScrollView.verticalScrollElasticity = .none
+        horizontalScrollView.horizontalScrollElasticity = .allowed
         horizontalScrollView.horizontalScroller?.isHidden = true
         horizontalScrollView.horizontalScroller?.alphaValue = 0
 
@@ -466,7 +469,8 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
 
         private weak var scrollView: NSScrollView?
         private weak var documentView: FlippedLayerHostView?
-        private var carouselHostingView: NSHostingView<AnyView>?
+        private var carouselHostingView: CarouselHostingView?
+        private let carouselSwipeSubject = PassthroughSubject<Int, Never>()
         private var shelfViewsById: [String: NativeHomeShelfView] = [:]
         private var orderedShelfViews: [NativeHomeShelfView] = []
 
@@ -603,6 +607,7 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
                     items: items,
                     height: carouselHeight,
                     isScrollPaused: { [weak pauseState = carouselPauseState] in pauseState?.isScrolling ?? false },
+                    swipePublisher: carouselSwipeSubject.eraseToAnyPublisher(),
                     onPlay: { [weak self] item in self?.onPlayItem(item) },
                     onSelectDetail: { [weak self] item in self?.onSelectItem(item) }
                 )
@@ -613,9 +618,12 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
             if let existing = carouselHostingView {
                 existing.rootView = carouselRoot
             } else {
-                let hosting = NSHostingView(rootView: carouselRoot)
+                let hosting = CarouselHostingView(rootView: carouselRoot)
                 hosting.sizingOptions = []
                 hosting.layerContentsRedrawPolicy = .onSetNeedsDisplay
+                hosting.onHorizontalSwipe = { [weak self] delta in
+                    self?.carouselSwipeSubject.send(delta)
+                }
                 documentView.addSubview(hosting)
                 carouselHostingView = hosting
             }
