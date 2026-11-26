@@ -6,7 +6,7 @@
 ## 1. Repository Overview
 - **Product**: Donby — native macOS media player (macOS 14+, Apple Silicon) for Emby / Jellyfin / UHDNow / local media.
 - **Stack**: SwiftUI + AppKit (`DonbyApp`, `DonbyCore`, `DonbyNetwork`, optional `DonbyUHDModule`), Metal EDR renderer (`DonbyMetalRenderer`), Rust + FFmpeg/VideoToolbox/AudioToolbox/libass playback kernel (`KernelRust` + C11 header shim `DonbyKernelC`; legacy C++20 baseline archived on `legacy/cpp-kernel`).
-- **Current Version**: `2.0.23` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
+- **Current Version**: `2.0.24` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
 
 ## 2. Task-to-Module Routing Table
 
@@ -27,7 +27,8 @@
 - [decisions/003-rust-kernel-migration.md](decisions/003-rust-kernel-migration.md) — Zero-dependency `KernelRust` rewrite architecture, C11 header shim rationale, and 4-phase parity plan (`legacy/cpp-kernel` -> `feat/rust-kernel` -> `v1.5.0`).
 
 ## 4. Changelog Shards (L2)
-- [changelog/v2.0.md](changelog/v2.0.md) — Active shard (`v2.0.0` onward: zero-dependency Rust playback kernel & pure-C11 ABI shim).
+- [changelog/v2.0.md](changelog/v2.0.md) — Active shard (`v2.0.24` onward: multi-lane streaming, instant-start, playback-priority downloads).
+- [changelog/v2.0.0-v2.0.23.md](changelog/v2.0.0-v2.0.23.md) — Archived shard (`v2.0.0`–`v2.0.23`: zero-dependency Rust playback kernel, C11 ABI shim, rating consensus, offline engine overhaul).
 - [changelog/v1.4.md](changelog/v1.4.md) — Archived shard (`v1.4.22`–`v1.4.38`: frontend overhaul, `#03` hero strip, UHDNow module, GPU danmu, non-blue Liquid Glass).
 - [changelog/v1.4.0-v1.4.21.md](changelog/v1.4.0-v1.4.21.md) — HTTP/2 adaptive streaming, async L2 cache, detail preloading, Silero VAD & Pair-A subtitles, AES-256-GCM vault, fast builds.
 - [changelog/v1.3.29-v1.3.34.md](changelog/v1.3.29-v1.3.34.md) — 4K Remux seek, multi-MiB Range streaming, prewarm, Dock inode fixes.

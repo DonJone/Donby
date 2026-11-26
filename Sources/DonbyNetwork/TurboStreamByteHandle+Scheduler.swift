@@ -128,7 +128,9 @@ extension TurboStreamByteHandle {
         // Check genuinely stalled or slow-crawling streams near cursor using adaptive CDN TTFB so slow edges
         // never trigger rescue storms while throttled playhead streams get rescued before audio underruns.
         let adaptiveColdRescue: TimeInterval = max(2.2, min(4.5, smoothedResponseTTFB * 2.5))
+        let crawlFloorBps: Double = measuredWireSpeedMBs >= 1.5 ? 480_000.0 : 360_000.0
         var stalledTasksToCancel: [URLSessionDataTask] = []
+        var stalledLanesToReport: [Int] = []
         for rec in activeAttempts.values where rec.currentChunkIndex >= currentChunk && rec.currentChunkIndex <= currentChunk + 2 && rec.currentChunkIndex < rec.endChunkExclusive {
             let idx = rec.currentChunkIndex
             if !rescueChunks.contains(idx) {
@@ -138,7 +140,7 @@ extension TurboStreamByteHandle {
                 let isImmediatePlayhead = (idx <= currentChunk + 1)
                 let threshold: TimeInterval = hasReceivedAny ? (isImmediatePlayhead ? 1.1 : 1.6) : adaptiveColdRescue
                 let chunkElapsed = now - rec.chunkStartTimestamp
-                let isSlowPlayheadCrawl = (dynamicConcurrencyCap > 1) && hasReceivedAny && isImmediatePlayhead && chunkElapsed > 1.25 && (Double(partialBytes) / max(0.1, chunkElapsed) < 360_000.0)
+                let isSlowPlayheadCrawl = (dynamicConcurrencyCap > 1) && hasReceivedAny && isImmediatePlayhead && chunkElapsed > 1.2 && (Double(partialBytes) / max(0.1, chunkElapsed) < crawlFloorBps)
                 if byteIdle > threshold || isSlowPlayheadCrawl {
                     if dynamicConcurrencyCap <= 1 {
                         if let t = rec.task { stalledTasksToCancel.append(t) }
@@ -155,8 +157,9 @@ extension TurboStreamByteHandle {
                     }
                     rescueChunks.insert(idx)
                     chunkStartTime[idx] = now
+                    stalledLanesToReport.append(rec.laneIndex)
                     let rescueSkip = (idx == currentChunk) ? computeInitialByteSkipLocked(chunkIndex: idx, offsetInChunk: Int(max(0, cursorOffset) % Int64(chunkSize))) : 0
-                    spawnChunkFetchLocked(index: idx, isUrgent: true, isRescue: true, initialByteSkip: rescueSkip)
+                    spawnChunkFetchLocked(index: idx, isUrgent: true, isRescue: true, initialByteSkip: rescueSkip, excludeLane: rec.laneIndex)
                 }
             }
         }
@@ -191,11 +194,14 @@ extension TurboStreamByteHandle {
         for t in stalledTasksToCancel {
             TurboStreamingSessionHub.shared.cancelTask(t, intentional: true)
         }
+        for lane in stalledLanesToReport {
+            TurboStreamingSessionHub.shared.reportLaneStall(laneIndex: lane)
+        }
         return false
     }
 
     func spawnDirectRangeFetchLocked(startOffset: Int64, totalSize: Int64, length: Int64 = 524_288) {
-        let clampedLen = max(1, min(1_048_576, length))
+        let clampedLen = max(1, min(2_097_152, length))
         let endByte = min(totalSize - 1, startOffset + clampedLen - 1)
         guard endByte >= startOffset else { return }
 
@@ -226,7 +232,7 @@ extension TurboStreamByteHandle {
         attemptBuffers[attemptId] = buf
         directInFlightStarts[startOffset] = attemptId
         directInFlightEndOffsets[startOffset] = endByte
-        let task = TurboStreamingSessionHub.shared.startTask(request: req, context: ctx, priority: 1.0)
+        let (task, laneIdx) = TurboStreamingSessionHub.shared.startTask(request: req, context: ctx, priority: 1.0)
         activeAttempts[attemptId] = ActiveAttemptRecord(
             attemptId: attemptId,
             startChunkIndex: -1,
@@ -235,13 +241,14 @@ extension TurboStreamByteHandle {
             initialByteSkip: 0,
             isUrgent: true,
             isRescue: false,
+            laneIndex: laneIdx,
             task: task,
             lastByteTimestamp: now,
             chunkStartTimestamp: now
         )
     }
 
-    func spawnChunkFetchLocked(index: Int, isUrgent: Bool, isRescue: Bool, initialByteSkip: Int = 0) {
+    func spawnChunkFetchLocked(index: Int, isUrgent: Bool, isRescue: Bool, initialByteSkip: Int = 0, excludeLane: Int? = nil) {
         let meta = store.currentMeta()
         let chunkSize = meta.chunkSize
         let safeSkip = (index > 0 && meta.totalSize > 0 && initialByteSkip > 0 && initialByteSkip < chunkSize - 16_384) ? initialByteSkip : 0
@@ -331,7 +338,12 @@ extension TurboStreamByteHandle {
             if aheadFromCursor <= 28 { return 0.75 }
             return 0.35
         }()
-        let task = TurboStreamingSessionHub.shared.startTask(request: req, context: ctx, priority: taskPriority)
+        let (task, laneIdx) = TurboStreamingSessionHub.shared.startTask(
+            request: req,
+            context: ctx,
+            priority: taskPriority,
+            excludeLane: excludeLane
+        )
         activeAttempts[attemptId] = ActiveAttemptRecord(
             attemptId: attemptId,
             startChunkIndex: index,
@@ -340,6 +352,7 @@ extension TurboStreamByteHandle {
             initialByteSkip: safeSkip,
             isUrgent: isUrgent,
             isRescue: isRescue,
+            laneIndex: laneIdx,
             task: task,
             lastByteTimestamp: now,
             chunkStartTimestamp: now
@@ -347,12 +360,12 @@ extension TurboStreamByteHandle {
     }
 
     func maybePrefetchOpenProbeTailLocked() {
-        guard inOpenProbePhase, !didTriggerProbeTailPrefetch, !isAborted, !isClosed else { return }
+        guard inOpenProbePhase, !didTriggerProbeTailPrefetch, dynamicConcurrencyCap >= 2, !isAborted, !isClosed else { return }
         let meta = store.currentMeta()
         let chunkSize = meta.chunkSize
         let totalChunks = meta.totalChunks
-        guard totalChunks > 3, meta.totalSize > Int64(chunkSize * 3) else { return }
-        let tailChunkCount = meta.totalSize > 4_294_967_296 ? 2 : 1
+        let tailChunkCount = Self.tailProbeChunkCount(for: meta.totalSize)
+        guard totalChunks > tailChunkCount + 1, meta.totalSize > Int64(chunkSize * (tailChunkCount + 1)) else { return }
         let tailStartChunk = max(2, totalChunks - tailChunkCount)
         let allTailCachedOnDisk = (tailStartChunk..<totalChunks).allSatisfy { store.hasChunk($0) }
         didTriggerProbeTailPrefetch = true
@@ -369,6 +382,33 @@ extension TurboStreamByteHandle {
         if !alreadyCovered && tailLength > 0 {
             spawnDirectRangeFetchLocked(startOffset: tailStartOffset, totalSize: meta.totalSize, length: tailLength)
         }
+    }
+
+    /// Speculatively prefetches the estimated resume window in parallel with Chunk 0 & EOF Cues
+    /// so cold resume playback collapses 3 serial RTTs (header -> Cues -> resume jump) into 1 RTT.
+    func maybePrefetchResumeAnchorLocked() {
+        guard inOpenProbePhase,
+              !didTriggerResumeAnchorPrefetch,
+              initialStartFraction > 0.005,
+              dynamicConcurrencyCap >= 3,
+              !isAborted,
+              !isClosed else { return }
+        let meta = store.currentMeta()
+        let chunkSize = meta.chunkSize
+        let totalChunks = meta.totalChunks
+        guard meta.totalSize > 0, chunkSize > 0, totalChunks > 12 else { return }
+        let estChunk = Int(Int64(initialStartFraction * Double(meta.totalSize)) / Int64(chunkSize))
+        let tailGuard = Self.tailProbeChunkCount(for: meta.totalSize)
+        guard estChunk > 6, estChunk < totalChunks - tailGuard else { return }
+        let anchorChunk = max(4, estChunk - 2)
+        didTriggerResumeAnchorPrefetch = true
+        if store.hasChunk(anchorChunk) || inFlightChunks.contains(anchorChunk) {
+            return
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        inFlightChunks.insert(anchorChunk)
+        chunkStartTime[anchorChunk] = now
+        spawnChunkFetchLocked(index: anchorChunk, isUrgent: true, isRescue: false)
     }
 
     private func recordResolvedRedirectLocked(finalURL: URL, originURL: URL) -> URL? {
@@ -398,6 +438,7 @@ extension TurboStreamByteHandle {
         }
         if chunkIndex == 0 {
             maybePrefetchOpenProbeTailLocked()
+            maybePrefetchResumeAnchorLocked()
         }
         let shouldStepNow = !inOpenProbePhase && !isAborted && !isClosed
         condition.broadcast()
@@ -445,6 +486,7 @@ extension TurboStreamByteHandle {
         let notifyRedirectURL = finalURL.flatMap { recordResolvedRedirectLocked(finalURL: $0, originURL: originURL) }
         if index == 0 {
             maybePrefetchOpenProbeTailLocked()
+            maybePrefetchResumeAnchorLocked()
         }
         condition.broadcast()
         condition.unlock()
@@ -454,70 +496,6 @@ extension TurboStreamByteHandle {
         }
         if index == 0 {
             _ = stepBulkPrefetchSchedule()
-        }
-    }
-
-    private func commitCompletedChunkSliceLocked(
-        chunkIndex: Int,
-        skip: Int,
-        storeChunkSize: Int,
-        data: Data,
-        attemptId: UInt64,
-        now: TimeInterval
-    ) {
-        if skip == 0 {
-            store.storeChunk(index: chunkIndex, data: data)
-        } else {
-            let sliceStartOffset = Int64(chunkIndex) * Int64(storeChunkSize) + Int64(skip)
-            appendDirectSliceLocked(startOffset: sliceStartOffset, data: data)
-        }
-        inFlightChunks.remove(chunkIndex)
-        rescueChunks.remove(chunkIndex)
-        chunkStartTime.removeValue(forKey: chunkIndex)
-        chunkNextRetryTime.removeValue(forKey: chunkIndex)
-        chunk429Retries.removeValue(forKey: chunkIndex)
-        failedCount.removeValue(forKey: chunkIndex)
-        if activeDisplayAttempt[chunkIndex] == attemptId {
-            activeDisplayAttempt.removeValue(forKey: chunkIndex)
-        }
-        if chunkIndex == 0 {
-            chunk0HeadersReceived = true
-        }
-        recordCleanCompletionAndRecoverConcurrencyLocked(now: now)
-    }
-
-    private func cancelCompetingAttemptsLocked(
-        forChunk curIdx: Int,
-        winnerAttemptId: UInt64,
-        winnerIsRescue: Bool,
-        now: TimeInterval,
-        competingTasksToCancel: inout [URLSessionDataTask]
-    ) {
-        let competingIds = activeAttempts.values
-            .filter { other in
-                guard other.attemptId != winnerAttemptId && other.currentChunkIndex == curIdx else { return false }
-                if other.isRescue || other.endChunkExclusive == curIdx + 1 { return true }
-                if winnerIsRescue && (now - other.lastByteTimestamp) > 1.5 { return true }
-                return false
-            }
-            .map(\.attemptId)
-        for cid in competingIds {
-            if let cRec = activeAttempts.removeValue(forKey: cid) {
-                if let t = cRec.task { competingTasksToCancel.append(t) }
-                if cRec.currentChunkIndex >= 0 {
-                    for relIdx in cRec.currentChunkIndex..<cRec.endChunkExclusive {
-                        if activeDisplayAttempt[relIdx] == cid {
-                            activeDisplayAttempt.removeValue(forKey: relIdx)
-                        }
-                        if !activeAttempts.values.contains(where: { $0.covers(relIdx) }) {
-                            inFlightChunks.remove(relIdx)
-                            rescueChunks.remove(relIdx)
-                            chunkStartTime.removeValue(forKey: relIdx)
-                        }
-                    }
-                }
-            }
-            attemptBuffers.removeValue(forKey: cid)
         }
     }
 
@@ -619,152 +597,5 @@ extension TurboStreamByteHandle {
         wireSpeedMeter.recordBytes(delta.count, at: now)
         condition.broadcast()
         condition.unlock()
-    }
-
-    func handleRateLimit429Locked(now: TimeInterval) {
-        cleanSuccessesSinceLast429 = 0
-        last429BackoffUntil = max(last429BackoffUntil, now + 0.9)
-        if now >= last429StepDownUptime + 1.5 {
-            last429StepDownUptime = now
-            if dynamicConcurrencyCap > 1 {
-                dynamicConcurrencyCap = max(1, dynamicConcurrencyCap - 1)
-                DonbyLogger.shared.log("Turbo 分片引擎检测到 HTTP 429 限流，自动降并发至 \(dynamicConcurrencyCap) 并退避", level: .warning, subsystem: "TurboCache")
-            }
-        }
-    }
-
-    func recordCleanCompletionAndRecoverConcurrencyLocked(now: TimeInterval) {
-        guard dynamicConcurrencyCap < configuredConcurrencyBudget else { return }
-        guard now >= last429BackoffUntil + 2.5 else { return }
-        cleanSuccessesSinceLast429 += 1
-        if cleanSuccessesSinceLast429 >= 8 {
-            cleanSuccessesSinceLast429 = 0
-            dynamicConcurrencyCap = min(configuredConcurrencyBudget, dynamicConcurrencyCap + 1)
-            DonbyLogger.shared.log("Turbo 分片引擎限流缓解，并发恢复至 \(dynamicConcurrencyCap)", level: .info, subsystem: "TurboCache")
-        }
-    }
-
-    func finishStreamingAttempt(
-        attemptId: UInt64,
-        index: Int,
-        isUrgent: Bool,
-        isRescue: Bool,
-        usedRedirectedURL: Bool,
-        redirectEpoch: UInt64,
-        totalSize: Int64?,
-        statusCode: Int,
-        succeeded: Bool,
-        wasCancelled: Bool
-    ) {
-        if let totalSize, totalSize > 0 {
-            store.setTotalSize(totalSize, sourceURL: streamURL.absoluteString)
-        }
-
-        let now = ProcessInfo.processInfo.systemUptime
-        var competingTasksToCancel: [URLSessionDataTask] = []
-        var scheduleNext = false
-
-        condition.lock()
-        let removedRec = activeAttempts.removeValue(forKey: attemptId)
-        var buf = attemptBuffers.removeValue(forKey: attemptId) ?? Data()
-        var curIdx = removedRec?.currentChunkIndex ?? index
-        let endExcl = removedRec?.endChunkExclusive ?? (index + 1)
-        let startIdx = removedRec?.startChunkIndex ?? index
-        let initialSkip = removedRec?.initialByteSkip ?? 0
-        let storeChunkSize = store.currentMeta().chunkSize
-        var completedAnyInFinish = false
-
-        while curIdx < endExcl && !buf.isEmpty {
-            let skip = (curIdx == startIdx) ? initialSkip : 0
-            let expectedLen = store.expectedChunkLength(for: curIdx)
-            let neededLen = max(0, expectedLen - skip)
-            let canCommitFull = (neededLen > 0 && buf.count >= neededLen)
-            let canCommitFinal = (succeeded && curIdx == endExcl - 1 && !buf.isEmpty && (store.currentMeta().totalSize <= 0 || buf.count == neededLen))
-            guard canCommitFull || canCommitFinal else { break }
-
-            let sliceLen = canCommitFull ? neededLen : buf.count
-            let completedData = Data(buf.prefix(sliceLen))
-            buf.removeFirst(sliceLen)
-
-            commitCompletedChunkSliceLocked(
-                chunkIndex: curIdx,
-                skip: skip,
-                storeChunkSize: storeChunkSize,
-                data: completedData,
-                attemptId: attemptId,
-                now: now
-            )
-            completedAnyInFinish = true
-            cancelCompetingAttemptsLocked(
-                forChunk: curIdx,
-                winnerAttemptId: attemptId,
-                winnerIsRescue: isRescue,
-                now: now,
-                competingTasksToCancel: &competingTasksToCancel
-            )
-            curIdx += 1
-        }
-
-        let completedAnyOverall = completedAnyInFinish || ((removedRec?.currentChunkIndex ?? index) > (removedRec?.startChunkIndex ?? index))
-
-        if curIdx < endExcl {
-            for remIdx in curIdx..<endExcl {
-                if activeDisplayAttempt[remIdx] == attemptId {
-                    let fallbackAttempt = activeAttempts.values
-                        .filter { $0.currentChunkIndex == remIdx }
-                        .max { (attemptBuffers[$0.attemptId]?.count ?? 0) < (attemptBuffers[$1.attemptId]?.count ?? 0) }
-                    if let fallbackAttempt {
-                        activeDisplayAttempt[remIdx] = fallbackAttempt.attemptId
-                    } else {
-                        activeDisplayAttempt.removeValue(forKey: remIdx)
-                    }
-                }
-                let hasOtherAttempt = activeAttempts.values.contains { $0.covers(remIdx) }
-                if !hasOtherAttempt {
-                    if !isRescue || remIdx > curIdx { inFlightChunks.remove(remIdx) }
-                    rescueChunks.remove(remIdx)
-                    chunkStartTime.removeValue(forKey: remIdx)
-                } else if isRescue {
-                    rescueChunks.remove(remIdx)
-                }
-            }
-
-            if !wasCancelled && !completedAnyOverall {
-                if statusCode == 429 {
-                    handleRateLimit429Locked(now: now)
-                    let r = (chunk429Retries[curIdx] ?? 0) + 1
-                    chunk429Retries[curIdx] = r
-                    chunkNextRetryTime[curIdx] = now + min(2.4, 0.45 * Double(r))
-                } else if usedRedirectedURL && (statusCode == 200 || statusCode >= 400) && statusCode != 416 {
-                    if redirectEpoch == effectiveRedirectEpoch {
-                        effectiveStreamURL = nil
-                    }
-                    chunkNextRetryTime[curIdx] = now + 0.05
-                } else if statusCode != 416 {
-                    let f = (failedCount[curIdx] ?? 0) + 1
-                    failedCount[curIdx] = f
-                    chunkNextRetryTime[curIdx] = now + min(1.5, 0.15 * Double(f))
-                    if f == 1 || f == 6 {
-                        DonbyLogger.shared.log(
-                            "Turbo 分片拉取失败 (chunk=\(curIdx), status=\(statusCode), retry=\(f)/6, redirected=\(usedRedirectedURL))",
-                            level: .warning,
-                            subsystem: "Turbo"
-                        )
-                    }
-                }
-            }
-        }
-
-        scheduleNext = !isAborted && !isClosed && (completedAnyOverall || !wasCancelled)
-        condition.broadcast()
-        condition.unlock()
-
-        for t in competingTasksToCancel {
-            TurboStreamingSessionHub.shared.cancelTask(t, intentional: true)
-        }
-
-        if scheduleNext {
-            _ = stepBulkPrefetchSchedule()
-        }
     }
 }

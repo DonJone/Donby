@@ -281,7 +281,7 @@ extension AppState {
             ?? (isUHD ? nil : targetItem.seriesId.flatMap { EmbyClient.shared.imageURL(server: server, itemId: $0, kind: .logo, maxWidth: 800) })
 
         let meta = formattedWatchRecordMetadata(for: targetItem, resolvedSeriesName: resolvedSeries?.name ?? targetItem.seriesName)
-        let budget = min(4, effectiveConnectionBudget(for: server))
+        let budget = effectiveDownloadConnectionBudget(for: server)
         DonbyDownloadManager.shared.enqueueDownload(
             server: server,
             item: targetItem,

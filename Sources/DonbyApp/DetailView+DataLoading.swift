@@ -106,6 +106,7 @@ extension DetailView {
             resumePositionSeconds: playStartSec,
             preloadSeconds: appState.detailPreloadSeconds,
             maxMemoryBytes: max(64, appState.turboMemoryCacheMB) * 1024 * 1024,
+            connectionBudget: appState.effectiveConnectionBudget(for: server),
             onResolvedRedirectURL: redirectHandler
         )
     }

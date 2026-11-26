@@ -3,6 +3,23 @@ import DonbyCore
 
 // MARK: - Download Batch Coordinator, Range Worker & Legacy Migration
 
+private final class ActiveWorkerCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active: Int = 0
+
+    func increment() {
+        lock.lock(); active += 1; lock.unlock()
+    }
+
+    func decrement() {
+        lock.lock(); active = max(0, active - 1); lock.unlock()
+    }
+
+    func count() -> Int {
+        lock.lock(); defer { lock.unlock() }; return active
+    }
+}
+
 private actor DownloadBatchCoordinator {
     enum BatchLease {
         case batch(startChunk: Int, bound: ActiveSegmentBound, requestURL: URL, originHost: String?, usedCDN: Bool, redirectEpoch: UInt64)
@@ -24,6 +41,10 @@ private actor DownloadBatchCoordinator {
     private var hasAnyCompletedBatch = false
     private var cachedCDNURL: URL?
     private var redirectEpoch: UInt64 = 0
+    private var routeSettled: Bool
+    private var routeProbeWorkerId: Int? = nil
+    private let routeProbeStartUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    private var consecutiveCDNStalls: Int = 0
 
     private var backoffUntil: TimeInterval = 0
     private var last429StepDownTime: TimeInterval = 0
@@ -47,6 +68,7 @@ private actor DownloadBatchCoordinator {
         self.fallbackOriginURL = (fallbackOriginURL?.absoluteString != initialOriginURL.absoluteString) ? fallbackOriginURL : nil
         self.cachedCDNURL = initialCDNURL
         self.redirectEpoch = initialCDNURL != nil ? 1 : 0
+        self.routeSettled = (initialCDNURL != nil || maxWorkerCap <= 1)
         self.maxWorkerCap = maxWorkerCap
         self.workerCap = maxWorkerCap
         // Large continuous segments (64-128 MiB) keep TCP cwnd and origin prefetch pipelines warm
@@ -68,6 +90,18 @@ private actor DownloadBatchCoordinator {
         let now = ProcessInfo.processInfo.systemUptime
         if now < backoffUntil {
             return .wait(min(1.5, max(0.05, backoffUntil - now)))
+        }
+        // Let Worker 0 resolve the 302 CDN redirect (or /download -> /play fallback) once before
+        // fanning out all sibling TCP workers, avoiding a 6-worker origin 302 burst & 429 storm.
+        if !routeSettled {
+            if routeProbeWorkerId == nil {
+                routeProbeWorkerId = workerId
+            } else if routeProbeWorkerId != workerId {
+                if (now - routeProbeStartUptime) < 1.5 {
+                    return .wait(0.06)
+                }
+                routeSettled = true
+            }
         }
         if activeWorkerCount >= workerCap {
             return .wait(0.08)
@@ -134,16 +168,24 @@ private actor DownloadBatchCoordinator {
         return nil
     }
 
+    func markRouteSettled() {
+        routeSettled = true
+    }
+
     func updateResolvedRedirectURL(_ finalURL: URL?, usedCDN: Bool, epoch: UInt64) {
         guard let finalURL else { return }
         if !usedCDN, finalURL.absoluteString != originURL.absoluteString {
             if cachedCDNURL?.absoluteString != finalURL.absoluteString {
                 cachedCDNURL = finalURL
                 redirectEpoch &+= 1
+                consecutiveCDNStalls = 0
             }
+            routeSettled = true
         } else if usedCDN, epoch == redirectEpoch, finalURL.absoluteString != cachedCDNURL?.absoluteString {
             cachedCDNURL = finalURL
             redirectEpoch &+= 1
+            consecutiveCDNStalls = 0
+            routeSettled = true
         }
     }
 
@@ -151,6 +193,8 @@ private actor DownloadBatchCoordinator {
         activeBounds.removeValue(forKey: workerId)
         activeWorkerCount = max(0, activeWorkerCount - 1)
         hasAnyCompletedBatch = true
+        routeSettled = true
+        consecutiveCDNStalls = 0
         let now = ProcessInfo.processInfo.systemUptime
         if now >= backoffUntil + 2.0 {
             cleanBatchesSince429 += 1
@@ -187,6 +231,7 @@ private actor DownloadBatchCoordinator {
 
     func requeueBatchFailure(
         workerId: Int,
+        startChunk: Int,
         resumeFromChunk: Int,
         endChunk: Int,
         statusCode: Int,
@@ -202,11 +247,24 @@ private actor DownloadBatchCoordinator {
         }
 
         let now = ProcessInfo.processInfo.systemUptime
+        let madeForwardProgress = resumeFromChunk > startChunk
         if wasStallRecycle {
-            let hardCount = (batchHardRetries[resumeFromChunk] ?? 0) + 1
-            batchHardRetries[resumeFromChunk] = hardCount
-            if hardCount >= 8, failedError == nil {
-                failedError = "分片 #\(resumeFromChunk) 多次下载超时卡顿"
+            if usedCDN {
+                consecutiveCDNStalls += 1
+                // Escape a degraded CDN edge node after repeated stall recycles by re-resolving origin 302.
+                if consecutiveCDNStalls >= 2 && epoch == redirectEpoch {
+                    cachedCDNURL = nil
+                    consecutiveCDNStalls = 0
+                    routeSettled = false
+                    routeProbeWorkerId = nil
+                }
+            }
+            if !madeForwardProgress {
+                let hardCount = (batchHardRetries[resumeFromChunk] ?? 0) + 1
+                batchHardRetries[resumeFromChunk] = hardCount
+                if hardCount >= 8, failedError == nil {
+                    failedError = "分片 #\(resumeFromChunk) 多次下载超时卡顿"
+                }
             }
             return
         }
@@ -218,6 +276,8 @@ private actor DownloadBatchCoordinator {
             originURL = fallback
             cachedCDNURL = nil
             redirectEpoch &+= 1
+            routeSettled = false
+            routeProbeWorkerId = nil
             DonbyLogger.shared.log("下载直链返回 HTTP \(statusCode)，自动回退至流媒体源继续下载", level: .warning, subsystem: "Download")
             return
         }
@@ -380,6 +440,7 @@ extension DonbyDownloadManager {
             let totalSize = meta.totalSize
             let speedMeter = SlidingWindowSpeedMeter(windowDuration: 2.5, bucketDuration: 0.10)
             let byteCounter = LiveDownloadByteCounter(initialCommittedBytes: meta.cachedBytes)
+            let activeCounter = ActiveWorkerCounter()
             let coordinator = DownloadBatchCoordinator(
                 missingChunks: missingChunks,
                 initialOriginURL: originURL,
@@ -448,7 +509,12 @@ extension DonbyDownloadManager {
                                     let (http, byteStream, cancelStream) = try await streamDelegate.openStream(
                                         session: workerSession,
                                         request: req,
-                                        allowStatus200: (startChunk == 0 && batchStartByte == 0)
+                                        allowStatus200: (startChunk == 0 && batchStartByte == 0),
+                                        onRedirectResolved: { finalURL in
+                                            Task {
+                                                await coordinator.updateResolvedRedirectURL(finalURL, usedCDN: usedCDN, epoch: redirectEpoch)
+                                            }
+                                        }
                                     )
                                     statusCode = http.statusCode
                                     retryAfterHeader = http.value(forHTTPHeaderField: "Retry-After")
@@ -456,8 +522,11 @@ extension DonbyDownloadManager {
 
                                     if statusCode == 206 || (statusCode == 200 && startChunk == 0) {
                                         await coordinator.updateResolvedRedirectURL(http.url, usedCDN: usedCDN, epoch: redirectEpoch)
+                                        await coordinator.markRouteSettled()
+                                        activeCounter.increment()
+                                        defer { activeCounter.decrement() }
 
-                                        // Watchdog cancels stalled (>8s silence) or peer-relative crawling TCP sockets (>6s at <28% peer avg).
+                                        // Watchdog cancels stalled (>8s silence) or peer-relative crawling TCP sockets.
                                         let watchdog = Task.detached(priority: .userInitiated) {
                                             while !Task.isCancelled {
                                                 try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -468,12 +537,13 @@ extension DonbyDownloadManager {
                                                 let transferSec = now - snap.headersUptime
                                                 let isStalled = idle >= 8.0
                                                 var isCrawling = false
-                                                if workers > 1 && transferSec >= 6.0 {
+                                                let livePeers = activeCounter.count()
+                                                if workers > 1 && livePeers > 1 && transferSec >= 6.0 {
                                                     let workerBps = monitor.recentBytesPerSecond(at: now)
                                                     let aggBps = speedMeter.speedMBs(at: now) * 1_048_576.0
-                                                    let peerAvgBps = max(0.0, (aggBps - workerBps) / Double(workers - 1))
-                                                    let relativeCrawl = (peerAvgBps >= 700_000.0 && workerBps < max(250_000.0, peerAvgBps * 0.28))
-                                                    let stragglerCrawl = (transferSec >= 8.0 && speedMeter.peakSpeedMBs() >= 1.5 && workerBps < 200_000.0)
+                                                    let peerAvgBps = max(0.0, (aggBps - workerBps) / Double(livePeers - 1))
+                                                    let relativeCrawl = (peerAvgBps >= 600_000.0 && workerBps < max(250_000.0, peerAvgBps * 0.28))
+                                                    let stragglerCrawl = (transferSec >= 9.0 && aggBps >= 800_000.0 && speedMeter.peakSpeedMBs() >= 1.5 && workerBps < 180_000.0)
                                                     isCrawling = relativeCrawl || stragglerCrawl
                                                 }
                                                 if isStalled || isCrawling {
@@ -533,7 +603,7 @@ extension DonbyDownloadManager {
                                         byteCounter.clearWorkerInFlight(workerId: workerId)
 
                                         if Task.isCancelled {
-                                            await coordinator.requeueBatchFailure(workerId: workerId, resumeFromChunk: currentChunkIdx, endChunk: bound.currentEnd(), statusCode: -1, usedCDN: usedCDN, epoch: redirectEpoch, retryAfterHeader: nil)
+                                            await coordinator.requeueBatchFailure(workerId: workerId, startChunk: startChunk, resumeFromChunk: currentChunkIdx, endChunk: bound.currentEnd(), statusCode: -1, usedCDN: usedCDN, epoch: redirectEpoch, retryAfterHeader: nil)
                                             return
                                         }
 
@@ -543,11 +613,11 @@ extension DonbyDownloadManager {
                                         } else {
                                             let recycled = monitor.wasStallCancelled
                                             if recycled { recycleWorkerSession() }
-                                            await coordinator.requeueBatchFailure(workerId: workerId, resumeFromChunk: currentChunkIdx, endChunk: bound.currentEnd(), statusCode: statusCode, usedCDN: usedCDN, epoch: redirectEpoch, retryAfterHeader: retryAfterHeader, wasStallRecycle: recycled)
+                                            await coordinator.requeueBatchFailure(workerId: workerId, startChunk: startChunk, resumeFromChunk: currentChunkIdx, endChunk: bound.currentEnd(), statusCode: statusCode, usedCDN: usedCDN, epoch: redirectEpoch, retryAfterHeader: retryAfterHeader, wasStallRecycle: recycled)
                                         }
                                     } else {
                                         byteCounter.clearWorkerInFlight(workerId: workerId)
-                                        await coordinator.requeueBatchFailure(workerId: workerId, resumeFromChunk: currentChunkIdx, endChunk: bound.currentEnd(), statusCode: statusCode, usedCDN: usedCDN, epoch: redirectEpoch, retryAfterHeader: retryAfterHeader)
+                                        await coordinator.requeueBatchFailure(workerId: workerId, startChunk: startChunk, resumeFromChunk: currentChunkIdx, endChunk: bound.currentEnd(), statusCode: statusCode, usedCDN: usedCDN, epoch: redirectEpoch, retryAfterHeader: retryAfterHeader)
                                     }
                                 } catch {
                                     byteCounter.clearWorkerInFlight(workerId: workerId)
@@ -558,7 +628,7 @@ extension DonbyDownloadManager {
                                     }
                                     let recycled = monitor.wasStallCancelled || statusCode <= 0
                                     if recycled { recycleWorkerSession() }
-                                    await coordinator.requeueBatchFailure(workerId: workerId, resumeFromChunk: currentChunkIdx, endChunk: bound.currentEnd(), statusCode: statusCode, usedCDN: usedCDN, epoch: redirectEpoch, retryAfterHeader: retryAfterHeader, wasStallRecycle: monitor.wasStallCancelled)
+                                    await coordinator.requeueBatchFailure(workerId: workerId, startChunk: startChunk, resumeFromChunk: currentChunkIdx, endChunk: bound.currentEnd(), statusCode: statusCode, usedCDN: usedCDN, epoch: redirectEpoch, retryAfterHeader: retryAfterHeader, wasStallRecycle: monitor.wasStallCancelled)
                                 }
                             }
                         }
@@ -585,213 +655,5 @@ extension DonbyDownloadManager {
             }
         }
         workerTasks[assetKey] = task
-    }
-
-    /// Migrates previously completed downloads from cache bins (`ChunkStore`) or legacy split folders
-    /// into the unified `~/Movies/Donby` hierarchy along with artwork, subtitles, and metadata sidecars.
-    public func migrateLegacyCompletedDownloads(servers: [EmbyServerConfig]) async {
-        DonbyOfflineLibraryStorage.ensureRootDirectories()
-        let fm = FileManager.default
-        var didMutate = false
-
-        let snapshotEntries = entries
-        for entry in snapshotEntries where entry.status == .completed {
-            let server = servers.first(where: { $0.id == entry.serverId })
-            let fallbackServer = server ?? EmbyServerConfig(
-                id: entry.serverId,
-                name: entry.serverName,
-                host: "",
-                username: ""
-            )
-
-            var resolvedSeries: EmbyItem? = nil
-            if entry.itemSnapshot.isEpisode, let sid = entry.itemSnapshot.seriesId, !sid.isEmpty {
-                if let existingSeriesFolder = entry.localSeriesFolderPath {
-                    let sMeta = URL(fileURLWithPath: existingSeriesFolder).appendingPathComponent("donby.series.json")
-                    if let d = try? Data(contentsOf: sMeta),
-                       let decoded = try? JSONDecoder().decode(OfflineSeriesSidecar.self, from: d) {
-                        resolvedSeries = decoded.seriesItem
-                    }
-                }
-                if resolvedSeries == nil, let server {
-                    if let extProvider = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
-                        resolvedSeries = try? await extProvider.fetchItemDetail(
-                            server: server,
-                            item: EmbyItem(
-                                id: sid,
-                                name: entry.itemSnapshot.seriesName ?? "",
-                                type: "Series",
-                                uhdMediaType: "tv"
-                            )
-                        )
-                    } else if !(server.type == .uhdNative && DonbyMediaServiceRegistry.shared.isRegistered(.uhdNative)) {
-                        resolvedSeries = try? await EmbyClient.shared.fetchItemDetail(server: server, itemId: sid)
-                    }
-                }
-            }
-
-            let streamURL = URL(string: entry.streamURLString)
-                ?? URL(fileURLWithPath: entry.localVideoFilePath ?? "/tmp/video.mkv")
-            let layout = DonbyOfflineLibraryStorage.makeLayoutPaths(
-                item: entry.itemSnapshot,
-                seriesItem: resolvedSeries,
-                mediaSource: entry.mediaSourceSnapshot,
-                streamURL: streamURL
-            )
-
-            var hasVideoOnDisk = fm.fileExists(atPath: layout.videoFileURL.path)
-
-            if !hasVideoOnDisk, let oldPath = entry.localVideoFilePath, fm.fileExists(atPath: oldPath) {
-                let oldVideoURL = URL(fileURLWithPath: oldPath)
-                let oldItemDir = oldVideoURL.deletingLastPathComponent()
-                if oldVideoURL.standardizedFileURL.path != layout.videoFileURL.standardizedFileURL.path {
-                    try? fm.createDirectory(at: layout.itemFolderURL, withIntermediateDirectories: true)
-                    if let seriesDir = layout.seriesFolderURL {
-                        try? fm.createDirectory(at: seriesDir, withIntermediateDirectories: true)
-                    }
-                    if (try? fm.moveItem(at: oldVideoURL, to: layout.videoFileURL)) != nil {
-                        hasVideoOnDisk = true
-                        didMutate = true
-                    }
-                    if let oldFiles = try? fm.contentsOfDirectory(at: oldItemDir, includingPropertiesForKeys: nil) {
-                        for srcFile in oldFiles {
-                            let dstFile = layout.itemFolderURL.appendingPathComponent(srcFile.lastPathComponent)
-                            if !fm.fileExists(atPath: dstFile.path) {
-                                try? fm.moveItem(at: srcFile, to: dstFile)
-                            }
-                        }
-                    }
-                    if let oldSeriesPath = entry.localSeriesFolderPath,
-                       let newSeriesDir = layout.seriesFolderURL {
-                        let oldSeriesURL = URL(fileURLWithPath: oldSeriesPath)
-                        if oldSeriesURL.standardizedFileURL.path != newSeriesDir.standardizedFileURL.path {
-                            for name in ["poster.jpg", "backdrop.jpg", "clearlogo.png", "donby.series.json"] {
-                                let src = oldSeriesURL.appendingPathComponent(name)
-                                let dst = newSeriesDir.appendingPathComponent(name)
-                                if fm.fileExists(atPath: src.path), !fm.fileExists(atPath: dst.path) {
-                                    try? fm.moveItem(at: src, to: dst)
-                                }
-                            }
-                            if let rem = try? fm.contentsOfDirectory(atPath: oldItemDir.path),
-                               rem.filter({ $0 != ".DS_Store" }).isEmpty {
-                                try? fm.removeItem(at: oldItemDir)
-                            }
-                            if let remSeries = try? fm.contentsOfDirectory(atPath: oldSeriesURL.path),
-                               remSeries.filter({ $0 != ".DS_Store" }).isEmpty {
-                                try? fm.removeItem(at: oldSeriesURL)
-                            }
-                        }
-                    } else if let rem = try? fm.contentsOfDirectory(atPath: oldItemDir.path),
-                              rem.filter({ $0 != ".DS_Store" }).isEmpty {
-                        try? fm.removeItem(at: oldItemDir)
-                    }
-                }
-            }
-
-            if !hasVideoOnDisk {
-                let store = DonbyTurboCacheEngine.shared.store(for: entry.assetKey, persistDisk: true)
-                let meta = store.currentMeta()
-                let isCompleteInStore = meta.isFullyCached ||
-                    (entry.totalBytes > 0 && entry.downloadedBytes >= entry.totalBytes && fm.fileExists(atPath: store.dataFileURL.path))
-                if isCompleteInStore && fm.fileExists(atPath: store.dataFileURL.path) {
-                    let expectedSize = max(meta.totalSize, entry.totalBytes)
-                    try? fm.createDirectory(at: layout.itemFolderURL, withIntermediateDirectories: true)
-                    if let seriesDir = layout.seriesFolderURL {
-                        try? fm.createDirectory(at: seriesDir, withIntermediateDirectories: true)
-                    }
-                    let legacySubDir = store.assetDirectory.appendingPathComponent("subtitles", isDirectory: true)
-                    if let subFiles = try? fm.contentsOfDirectory(at: legacySubDir, includingPropertiesForKeys: nil) {
-                        for srcSub in subFiles {
-                            let dstSub = layout.itemFolderURL.appendingPathComponent(srcSub.lastPathComponent)
-                            if !fm.fileExists(atPath: dstSub.path) {
-                                try? fm.moveItem(at: srcSub, to: dstSub)
-                            }
-                        }
-                    }
-                    if Self.materializeAndCleanupIfIdle(store: store, assetKey: entry.assetKey, destinationURL: layout.videoFileURL, expectedSize: expectedSize) {
-                        hasVideoOnDisk = true
-                        didMutate = true
-                    }
-                }
-            }
-
-            guard hasVideoOnDisk else { continue }
-
-            let needsPathUpdate = entry.localVideoFilePath != layout.videoFileURL.path ||
-                entry.localFolderPath != layout.itemFolderURL.path ||
-                entry.localSeriesFolderPath != layout.seriesFolderURL?.path ||
-                entry.localPosterPath != layout.primaryPosterFileURL.path
-            let needsMetadataOrArtwork = !fm.fileExists(atPath: layout.metadataFileURL.path) ||
-                !fm.fileExists(atPath: layout.primaryPosterFileURL.path) ||
-                (layout.seriesMetadataFileURL.map { !fm.fileExists(atPath: $0.path) } ?? false)
-
-            if needsPathUpdate, let idx = entries.firstIndex(where: { $0.assetKey == entry.assetKey }) {
-                entries[idx].applyLayoutPaths(layout)
-                didMutate = true
-            }
-
-            if needsMetadataOrArtwork {
-                let targetItem = entry.itemSnapshot
-                let itemPoster: URL?
-                let itemBackdrop: URL?
-                let itemThumb: URL?
-                let itemLogo: URL?
-                let seasonPoster: URL?
-                let seriesPoster: URL?
-                let seriesBackdrop: URL?
-                let seriesLogo: URL?
-
-                if let server {
-                    let isUHD = (server.type == .uhdNative && DonbyMediaServiceRegistry.shared.isRegistered(.uhdNative))
-                    let p = EmbyClient.shared.imageURL(server: server, item: targetItem, kind: .primary, maxWidth: 800)
-                        ?? (isUHD ? nil : EmbyClient.shared.imageURL(server: server, itemId: targetItem.id, kind: .primary, maxWidth: 800))
-                        ?? entry.posterURLString.flatMap { URL(string: $0) }
-                    itemPoster = p
-                    itemBackdrop = EmbyClient.shared.imageURL(server: server, item: targetItem, kind: .backdrop, maxWidth: 1920)
-                        ?? (isUHD ? nil : EmbyClient.shared.imageURL(server: server, itemId: targetItem.id, kind: .backdrop, maxWidth: 1920))
-                    itemThumb = EmbyClient.shared.imageURL(server: server, item: targetItem, kind: .thumb, maxWidth: 800)
-                        ?? (isUHD ? nil : EmbyClient.shared.imageURL(server: server, itemId: targetItem.id, kind: .thumb, maxWidth: 800))
-                    itemLogo = EmbyClient.shared.imageURL(server: server, item: targetItem, kind: .logo, maxWidth: 800)
-                        ?? (isUHD ? nil : EmbyClient.shared.imageURL(server: server, itemId: targetItem.id, kind: .logo, maxWidth: 800))
-                    seasonPoster = isUHD ? nil : targetItem.seasonId.flatMap { EmbyClient.shared.imageURL(server: server, itemId: $0, kind: .primary, maxWidth: 600) }
-
-                    seriesPoster = resolvedSeries.flatMap { EmbyClient.shared.imageURL(server: server, item: $0, kind: .primary, maxWidth: 800) }
-                        ?? (isUHD ? nil : targetItem.seriesId.flatMap { EmbyClient.shared.imageURL(server: server, itemId: $0, kind: .primary, maxWidth: 800) })
-                        ?? p
-                    seriesBackdrop = resolvedSeries.flatMap { EmbyClient.shared.imageURL(server: server, item: $0, kind: .backdrop, maxWidth: 1920) }
-                        ?? (isUHD ? nil : targetItem.seriesId.flatMap { EmbyClient.shared.imageURL(server: server, itemId: $0, kind: .backdrop, maxWidth: 1920) })
-                    seriesLogo = resolvedSeries.flatMap { EmbyClient.shared.imageURL(server: server, item: $0, kind: .logo, maxWidth: 800) }
-                        ?? (isUHD ? nil : targetItem.seriesId.flatMap { EmbyClient.shared.imageURL(server: server, itemId: $0, kind: .logo, maxWidth: 800) })
-                } else {
-                    let p = entry.posterURLString.flatMap { URL(string: $0) }
-                    itemPoster = p
-                    itemBackdrop = targetItem.uhdBackdropURL.flatMap { URL(string: $0) }
-                    itemThumb = targetItem.uhdThumbURL.flatMap { URL(string: $0) }
-                    itemLogo = targetItem.uhdLogoURL.flatMap { URL(string: $0) }
-                    seasonPoster = nil
-                    seriesPoster = resolvedSeries?.uhdPosterURL.flatMap { URL(string: $0) } ?? p
-                    seriesBackdrop = resolvedSeries?.uhdBackdropURL.flatMap { URL(string: $0) }
-                    seriesLogo = resolvedSeries?.uhdLogoURL.flatMap { URL(string: $0) }
-                }
-
-                await downloadMetadataAndArtwork(
-                    assetKey: entry.assetKey,
-                    server: fallbackServer,
-                    item: targetItem,
-                    seriesItem: resolvedSeries,
-                    mediaSource: entry.mediaSourceSnapshot,
-                    layout: layout,
-                    headers: entry.headers,
-                    itemArtworkURLs: (poster: itemPoster, backdrop: itemBackdrop, thumb: itemThumb, logo: itemLogo, seasonPoster: seasonPoster),
-                    seriesArtworkURLs: (poster: seriesPoster, backdrop: seriesBackdrop, logo: seriesLogo)
-                )
-                didMutate = true
-            }
-        }
-
-        DonbyOfflineLibraryStorage.ensureRootDirectories()
-        if didMutate {
-            saveToDisk()
-        }
     }
 }

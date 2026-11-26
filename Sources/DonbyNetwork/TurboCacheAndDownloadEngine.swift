@@ -321,7 +321,7 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
     }
 
     /// Background detail-page preloader: writes Chunk 0..3, EOF Cues, and target playhead duration
-    /// directly into the shared TieredAssetChunkStore so clicking Play starts from warm cache.
+    /// directly into the shared TieredAssetChunkStore via warm streaming lanes so clicking Play starts from warm cache & warm TCP sockets.
     public func startDetailPreload(
         assetKey: String,
         streamURL: URL,
@@ -332,6 +332,7 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
         resumePositionSeconds: Double,
         preloadSeconds: Int,
         maxMemoryBytes: Int = 524_288_000,
+        connectionBudget: Int = 3,
         onResolvedRedirectURL: (@Sendable (URL) -> Void)? = nil
     ) {
         let clampedSeconds = max(15, min(300, preloadSeconds))
@@ -353,60 +354,85 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
             store.setTotalSize(knownTotalSize, sourceURL: streamURL.absoluteString)
         }
 
-        let task = Task.detached(priority: .utility) { [weak self] in
+        let parallelLanes = max(1, min(3, connectionBudget))
+        let task = Task.detached(priority: .userInitiated) { [weak self] in
             defer {
                 self?.clearDetailPreloadIfMatching(preloadSignature)
             }
 
-            let sessionConfig = URLSessionConfiguration.ephemeral
-            sessionConfig.waitsForConnectivity = false
-            sessionConfig.timeoutIntervalForRequest = 12
-            sessionConfig.timeoutIntervalForResource = 60
-            let session = URLSession(configuration: sessionConfig)
-            defer { session.finishTasksAndInvalidate() }
-
+            let urlStateLock = NSLock()
             var activeURL = cachedRedirectURL ?? streamURL
             var totalSize = max(knownTotalSize ?? 0, store.currentMeta().totalSize)
             let chunkSize = Int64(store.currentMeta().chunkSize)
             guard chunkSize > 0 else { return }
 
-            func makeRangeRequest(url: URL, startByte: Int64, endByte: Int64) -> URLRequest {
-                var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 12)
-                req.httpMethod = "GET"
-                req.setValue("bytes=\(startByte)-\(endByte)", forHTTPHeaderField: "Range")
-                for (k, v) in headers where k.lowercased() != "range" {
-                    req.setValue(v, forHTTPHeaderField: k)
-                }
-                return req
+            func currentRoute() -> (url: URL, total: Int64) {
+                urlStateLock.lock()
+                defer { urlStateLock.unlock() }
+                return (activeURL, totalSize)
             }
 
             func record206Metadata(resp: URLResponse, startByte: Int64, dataCount: Int) {
+                var notifiedURL: URL? = nil
+                urlStateLock.lock()
                 if let finalURL = resp.url, finalURL != activeURL {
                     activeURL = finalURL
-                    onResolvedRedirectURL?(finalURL)
+                    notifiedURL = finalURL
                 }
                 if let http = resp as? HTTPURLResponse,
                    let parsedTotal = TurboStreamByteHandle.parseTotalSize(from: http, startByte: startByte, dataCount: dataCount),
                    parsedTotal > 0 {
                     totalSize = parsedTotal
+                    urlStateLock.unlock()
                     store.setTotalSize(parsedTotal, sourceURL: streamURL.absoluteString)
+                } else {
+                    urlStateLock.unlock()
+                }
+                if let notifiedURL {
+                    onResolvedRedirectURL?(notifiedURL)
                 }
             }
 
-            func fetchRange(startByte: Int64, endByte: Int64) async -> (data: Data, status: Int)? {
+            func fetchRange(startByte: Int64, endByte: Int64, laneIndex: Int) async -> (data: Data, status: Int)? {
                 guard !Task.isCancelled, endByte >= startByte else { return nil }
+                // Reuse warm streaming pool lanes so TCP/TLS sockets stay hot for immediate playback.
+                let session = TurboStreamingSessionHub.shared.warmStreamSession(forLane: laneIndex)
+                let route = currentRoute()
+                let req = TurboStreamingSessionHub.makeRangeRequest(
+                    url: route.url,
+                    originHost: streamURL.host,
+                    headers: headers,
+                    startByte: startByte,
+                    endByte: endByte,
+                    timeout: 12
+                )
                 do {
-                    let (data, resp) = try await session.data(for: makeRangeRequest(url: activeURL, startByte: startByte, endByte: endByte))
+                    let (data, resp) = try await session.data(for: req)
                     guard !Task.isCancelled, let http = resp as? HTTPURLResponse else { return nil }
-                    if http.statusCode == 206 {
+                    let contentType = http.value(forHTTPHeaderField: "Content-Type") ?? ""
+                    if !TurboStreamingSessionHub.isLikelyNonMediaErrorContentType(contentType),
+                       http.statusCode == 206 {
                         record206Metadata(resp: resp, startByte: startByte, dataCount: data.count)
                         return (data, 206)
                     }
                     // If cached redirect expired, retry once against origin URL
-                    if activeURL != streamURL && (http.statusCode == 403 || http.statusCode == 404 || http.statusCode == 410 || http.statusCode == 200) {
-                        activeURL = streamURL
-                        let (retryData, retryResp) = try await session.data(for: makeRangeRequest(url: streamURL, startByte: startByte, endByte: endByte))
-                        guard !Task.isCancelled, let retryHttp = retryResp as? HTTPURLResponse, retryHttp.statusCode == 206 else {
+                    if route.url != streamURL && (http.statusCode == 403 || http.statusCode == 404 || http.statusCode == 410 || http.statusCode == 200) {
+                        urlStateLock.withLock {
+                            if activeURL == route.url { activeURL = streamURL }
+                        }
+                        let retryReq = TurboStreamingSessionHub.makeRangeRequest(
+                            url: streamURL,
+                            originHost: streamURL.host,
+                            headers: headers,
+                            startByte: startByte,
+                            endByte: endByte,
+                            timeout: 12
+                        )
+                        let (retryData, retryResp) = try await session.data(for: retryReq)
+                        guard !Task.isCancelled,
+                              let retryHttp = retryResp as? HTTPURLResponse,
+                              !TurboStreamingSessionHub.isLikelyNonMediaErrorContentType(retryHttp.value(forHTTPHeaderField: "Content-Type") ?? ""),
+                              retryHttp.statusCode == 206 else {
                             return nil
                         }
                         record206Metadata(resp: retryResp, startByte: startByte, dataCount: retryData.count)
@@ -418,7 +444,7 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
                 }
             }
 
-            func storeAlignedRange(startChunk: Int, chunkCount: Int) async -> Bool {
+            func storeAlignedRange(startChunk: Int, chunkCount: Int, batchChunks: Int = 8, laneIndex: Int = 0) async -> Bool {
                 var idx = startChunk
                 let endExcl = startChunk + chunkCount
                 while idx < endExcl {
@@ -429,9 +455,8 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
                         idx += 1
                         continue
                     }
-                    // Batch up to 4 contiguous missing chunks (2 MiB) per Range request
                     var batchEnd = idx + 1
-                    let maxBatch = min(endExcl, idx + 4)
+                    let maxBatch = min(endExcl, idx + max(1, batchChunks))
                     while batchEnd < maxBatch {
                         if metaNow.totalChunks > 0 && batchEnd >= metaNow.totalChunks { break }
                         if store.hasChunk(batchEnd) { break }
@@ -439,11 +464,13 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
                     }
                     let startByte = Int64(idx) * chunkSize
                     var endByte = Int64(batchEnd) * chunkSize - 1
-                    if totalSize > 0 {
-                        endByte = min(endByte, totalSize - 1)
+                    let curTotal = currentRoute().total
+                    if curTotal > 0 {
+                        endByte = min(endByte, curTotal - 1)
                     }
                     guard endByte >= startByte else { break }
-                    guard let res = await fetchRange(startByte: startByte, endByte: endByte), res.status == 206, !res.data.isEmpty else {
+                    guard let res = await fetchRange(startByte: startByte, endByte: endByte, laneIndex: laneIndex),
+                          res.status == 206, !res.data.isEmpty else {
                         return false
                     }
                     var cursor = 0
@@ -463,27 +490,19 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
                 return true
             }
 
-            // 1. Always ensure container header is cached. When starting at 0s, fetch Chunks 0..3 (2 MiB)
-            // in a single Range RTT so interrupting preload right after step 1 never leaves a Chunk-0-only trap.
-            let initialHeadChunks = (resumePositionSeconds <= 0.5) ? 4 : 1
-            if (0..<initialHeadChunks).contains(where: { !store.hasChunk($0) }) {
-                guard await storeAlignedRange(startChunk: 0, chunkCount: initialHeadChunks) else { return }
+            // 1. Resolve route/size first with Chunks 0..3 when redirect or totalSize is not yet known;
+            //    otherwise launch Head + EOF Cues + Opening Playhead Runway in parallel for instant 秒播.
+            let initialHeadChunks = (resumePositionSeconds <= 0.5) ? 4 : 2
+            let headMissing = (0..<initialHeadChunks).contains(where: { !store.hasChunk($0) })
+            if headMissing && (cachedRedirectURL == nil || currentRoute().total <= 0 || parallelLanes <= 1) {
+                guard await storeAlignedRange(startChunk: 0, chunkCount: initialHeadChunks, batchChunks: 4, laneIndex: 0) else { return }
             }
             guard !Task.isCancelled else { return }
 
-            // 2. Always ensure final 2 EOF chunks (MKV Cues / MP4 moov) are cached when totalSize is known
             let metaAfterHead = store.currentMeta()
-            if metaAfterHead.totalChunks >= 3 {
-                let tailStart = metaAfterHead.totalChunks - 2
-                if !store.hasChunk(tailStart) || !store.hasChunk(tailStart + 1) {
-                    _ = await storeAlignedRange(startChunk: tailStart, chunkCount: 2)
-                }
-            }
-            guard !Task.isCancelled else { return }
-
-            // 3. Preload target duration window anchored at the exact Play-button start position
-            let bytesPerSec: Double = (totalSize > 0 && durationSeconds > 10)
-                ? (Double(totalSize) / durationSeconds)
+            let knownTotalNow = max(currentRoute().total, metaAfterHead.totalSize)
+            let bytesPerSec: Double = (knownTotalNow > 0 && durationSeconds > 10)
+                ? (Double(knownTotalNow) / durationSeconds)
                 : 2_500_000.0
             let rawTargetBytes = Int64(Double(clampedSeconds) * bytesPerSec)
             let maxBudgetBytes = min(Int64(maxMemoryBytes / 2), 384 * 1024 * 1024)
@@ -492,9 +511,9 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
 
             var playheadChunk = 0
             var preloadChunks = targetChunkCount
-            if resumePositionSeconds > 0.5, totalSize > 0, durationSeconds > 10 {
+            if resumePositionSeconds > 0.5, knownTotalNow > 0, durationSeconds > 10 {
                 let frac = max(0.0, min(0.98, resumePositionSeconds / durationSeconds))
-                let estByte = Int64(frac * Double(totalSize))
+                let estByte = Int64(frac * Double(knownTotalNow))
                 let estChunk = Int(estByte / chunkSize)
                 if estChunk > 4 {
                     playheadChunk = estChunk - 4
@@ -502,7 +521,39 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
                 }
             }
 
-            let ok = await storeAlignedRange(startChunk: playheadChunk, chunkCount: preloadChunks)
+            let tailCount = TurboStreamByteHandle.tailProbeChunkCount(for: knownTotalNow)
+            let tailStart: Int? = (metaAfterHead.totalChunks > tailCount + 1) ? (metaAfterHead.totalChunks - tailCount) : nil
+            let openingRunwayChunks = min(preloadChunks, 8)
+
+            // 2. Parallel critical-path warm-up: Head (if still needed) + EOF Cues + first 4 MiB of playhead
+            if parallelLanes >= 2 {
+                await withTaskGroup(of: Void.self) { group in
+                    if (0..<initialHeadChunks).contains(where: { !store.hasChunk($0) }) {
+                        group.addTask {
+                            _ = await storeAlignedRange(startChunk: 0, chunkCount: initialHeadChunks, batchChunks: 4, laneIndex: 0)
+                        }
+                    }
+                    if let tailStart, (tailStart..<(tailStart + tailCount)).contains(where: { !store.hasChunk($0) }) {
+                        group.addTask {
+                            _ = await storeAlignedRange(startChunk: tailStart, chunkCount: tailCount, batchChunks: tailCount, laneIndex: 1)
+                        }
+                    }
+                    if playheadChunk >= initialHeadChunks || openingRunwayChunks > initialHeadChunks {
+                        let runwayLane = parallelLanes >= 3 ? 2 : 0
+                        group.addTask {
+                            _ = await storeAlignedRange(startChunk: playheadChunk, chunkCount: openingRunwayChunks, batchChunks: 4, laneIndex: runwayLane)
+                        }
+                    }
+                }
+            } else {
+                if let tailStart, (tailStart..<(tailStart + tailCount)).contains(where: { !store.hasChunk($0) }) {
+                    _ = await storeAlignedRange(startChunk: tailStart, chunkCount: tailCount, batchChunks: tailCount, laneIndex: 0)
+                }
+            }
+            guard !Task.isCancelled else { return }
+
+            // 3. Finish remaining target duration window in 4 MiB batches across warm lanes
+            let ok = await storeAlignedRange(startChunk: playheadChunk, chunkCount: preloadChunks, batchChunks: 8, laneIndex: 0)
             if ok && !Task.isCancelled {
                 DonbyLogger.shared.log(
                     "详情页预加载完成: 起点 \(String(format: "%.0fs", resumePositionSeconds)), 预读 \(clampedSeconds)s (\(preloadChunks) 分片 / 约 \(clampedBytes / (1024 * 1024)) MB, 起点分片 #\(playheadChunk))",

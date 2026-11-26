@@ -250,18 +250,15 @@ extension PlayerView {
         seekGeneration += 1
         healthPolicy.reset()
 
-        let urlStr: String
-        if currentResource.streamURL.isFileURL {
-            urlStr = currentResource.streamURL.path
-        } else if currentResource.streamURL.scheme == "file" {
-            urlStr = currentResource.streamURL.path
-        } else if let unescaped = currentResource.streamURL.absoluteString.removingPercentEncoding, unescaped.hasPrefix("file://") {
-            urlStr = String(unescaped.dropFirst("file://".count))
-        } else if currentResource.streamURL.absoluteString.hasPrefix("/") {
-            urlStr = currentResource.streamURL.absoluteString
-        } else {
-            urlStr = currentResource.streamURL.absoluteString
-        }
+        let urlStr: String = {
+            if currentResource.streamURL.isFileURL || currentResource.streamURL.scheme == "file" {
+                return currentResource.streamURL.path
+            }
+            if let unescaped = currentResource.streamURL.absoluteString.removingPercentEncoding, unescaped.hasPrefix("file://") {
+                return String(unescaped.dropFirst("file://".count))
+            }
+            return currentResource.streamURL.absoluteString
+        }()
         let headersStr = currentResource.headers.map { "\($0.key): \($0.value)\r\n" }.joined()
         let hwDecode = appState.enableHardwareDecode
         let cachePoolMB = Int32(appState.cachePoolSizeMB)
@@ -339,6 +336,10 @@ extension PlayerView {
             let cachedRedirectURL: URL? = (currentResource.originStreamURL != nil && currentResource.originStreamURL != currentResource.streamURL)
                 ? currentResource.streamURL
                 : nil
+            let knownDurationSec = currentItem.durationSeconds > 0
+                ? currentItem.durationSeconds
+                : Double(currentResource.mediaSource.runTimeTicks ?? 0) / 10_000_000.0
+            self.playbackNetworkPriorityToken = DonbyDownloadManager.shared.beginPlaybackNetworkPriority(activeAssetKey: assetKey)
             preparedTurboHandle = TurboStreamByteHandle(
                 assetKey: assetKey,
                 streamURL: originURL,
@@ -348,6 +349,8 @@ extension PlayerView {
                 knownTotalSize: currentResource.mediaSource.size,
                 connectionBudget: budget,
                 prefetchAheadChunks: prefetchChunks,
+                initialStartSeconds: startSeconds,
+                knownDurationSeconds: knownDurationSec,
                 onResolvedRedirectURL: redirectCallback
             )
         } else {
@@ -384,6 +387,7 @@ extension PlayerView {
                     if self.openingBox === openBox { self.openingBox = nil }
                     guard self.activePlaybackGeneration == thisGeneration else { return }
                     self.activeTurboHandle = nil
+                    self.releasePlaybackNetworkPriority()
                     self.openingErrorMessage = "初始化原生播放内核失败"
                     self.isOpeningMedia = false
                 }
@@ -439,6 +443,7 @@ extension PlayerView {
                         self.startNativeKernelPlayback(startSeconds: startSeconds, allowWarmCacheRetry: false)
                         return
                     }
+                    self.releasePlaybackNetworkPriority()
                     self.openingErrorMessage = "解析流媒体格式失败 (错误码: \(ret))，请检查网络连接或更换线路"
                     self.isOpeningMedia = false
                     return
@@ -677,18 +682,24 @@ extension PlayerView {
         }
     }
 
+    func releasePlaybackNetworkPriority() {
+        if let token = playbackNetworkPriorityToken {
+            playbackNetworkPriorityToken = nil
+            DonbyDownloadManager.shared.endPlaybackNetworkPriority(token: token)
+        }
+    }
+
     func stopNativeKernel() {
         activePlaybackGeneration &+= 1
         let activeHandle = playerHandle
         self.playerHandle = nil
-        if let activeHandle {
-            dk_player_request_abort(activeHandle)
-        }
+        if let activeHandle { dk_player_request_abort(activeHandle) }
         openingBox?.abort()
         openingBox = nil
         let turboToClose = activeTurboHandle
         self.activeTurboHandle = nil
         turboToClose?.abort()
+        releasePlaybackNetworkPriority()
         episodeSwitchTask?.cancel()
         episodeSwitchTask = nil
         displayDownloadSpeedMBs = 0.0
@@ -767,12 +778,7 @@ extension PlayerView {
         for ord in 0..<count {
             var info = DKChapterInfo()
             if dk_player_get_chapter_info(handle, ord, &info) {
-                chapters.append(PlaybackChapterItem(
-                    id: Int(info.index),
-                    startSeconds: info.start_sec,
-                    endSeconds: info.end_sec,
-                    title: cString(from: info.title)
-                ))
+                chapters.append(PlaybackChapterItem(id: Int(info.index), startSeconds: info.start_sec, endSeconds: info.end_sec, title: cString(from: info.title)))
             }
         }
         return chapters
@@ -782,10 +788,8 @@ extension PlayerView {
         withUnsafeBytes(of: tuple) { raw in
             guard let base = raw.baseAddress?.assumingMemoryBound(to: CChar.self) else { return "" }
             var length = 0
-            while length < raw.count && base[length] != 0 {
-                length += 1
-            }
+            while length < raw.count && base[length] != 0 { length += 1 }
             return String(decoding: raw.prefix(length), as: UTF8.self)
         }
-}
+    }
 }

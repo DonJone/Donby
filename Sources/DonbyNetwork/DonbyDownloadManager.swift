@@ -9,14 +9,22 @@ public final class DonbyDownloadManager: ObservableObject {
 
     @Published public internal(set) var entries: [DownloadEntry] = []
     @Published public private(set) var statusIndex: DonbyDownloadStatusIndex = .empty
-    @Published public var maxConcurrentDownloads: Int = 2
+    /// Default to 1 focused multi-TCP download task so all 6-8 dedicated sockets saturate one file
+    /// without 12+ cross-task sockets triggering server 429 rate-limiting or TCP contention.
+    @Published public var maxConcurrentDownloads: Int = 1
 
     var workerTasks: [String: Task<Void, Never>] = [:]
     private var connectionBudgetByAssetKey: [String: Int] = [:]
+    private var playbackPriorityTokens: [UUID: String?] = [:]
+    private var yieldedForPlaybackAssetKeys: Set<String> = []
     private var downloadActivityToken: NSObjectProtocol? = nil
     private let storageFileURL: URL
     private var statusRevision: Int = 0
     private var lastProgressStatusSync: TimeInterval = 0
+
+    public var isYieldingForPlayback: Bool {
+        !playbackPriorityTokens.isEmpty
+    }
 
     private init() {
         DonbyOfflineLibraryStorage.ensureRootDirectories()
@@ -296,6 +304,7 @@ public final class DonbyDownloadManager: ObservableObject {
     }
 
     public func pauseDownload(assetKey: String) {
+        yieldedForPlaybackAssetKeys.remove(assetKey)
         workerTasks[assetKey]?.cancel()
         workerTasks.removeValue(forKey: assetKey)
         if let idx = entries.firstIndex(where: { $0.assetKey == assetKey }) {
@@ -309,6 +318,51 @@ public final class DonbyDownloadManager: ObservableObject {
                 entries[idx].speedMBs = 0.0
                 saveToDisk()
             }
+        }
+        scheduleQueue()
+    }
+
+    /// Temporarily yields active offline downloads while remote streaming playback is active so
+    /// instant playback (秒播) and 4K streaming receive 100% of bandwidth & server delivery slots.
+    /// Automatically resumes yielded downloads when `endPlaybackNetworkPriority(token:)` is called.
+    @discardableResult
+    public func beginPlaybackNetworkPriority(activeAssetKey: String? = nil) -> UUID {
+        let token = UUID()
+        let wasYielding = !playbackPriorityTokens.isEmpty
+        playbackPriorityTokens[token] = activeAssetKey
+
+        var didYieldAny = false
+        for idx in entries.indices where entries[idx].status == .downloading {
+            let key = entries[idx].assetKey
+            workerTasks[key]?.cancel()
+            workerTasks.removeValue(forKey: key)
+            let store = DonbyTurboCacheEngine.shared.store(for: key, persistDisk: true)
+            let persistedBytes = store.cachedBytesFast()
+            if persistedBytes > 0 {
+                entries[idx].downloadedBytes = max(entries[idx].downloadedBytes, persistedBytes)
+            }
+            entries[idx].status = .queued
+            entries[idx].speedMBs = 0.0
+            yieldedForPlaybackAssetKeys.insert(key)
+            didYieldAny = true
+        }
+        if didYieldAny {
+            saveToDisk()
+            syncDownloadActivityAssertion()
+            if !wasYielding {
+                DonbyLogger.shared.log("在线播放启动，已自动让渡后台离线下载带宽以保障秒播与流畅播放", level: .info, subsystem: "Download")
+            }
+        }
+        return token
+    }
+
+    public func endPlaybackNetworkPriority(token: UUID) {
+        guard playbackPriorityTokens.removeValue(forKey: token) != nil else { return }
+        guard playbackPriorityTokens.isEmpty else { return }
+        let resumedCount = yieldedForPlaybackAssetKeys.count
+        yieldedForPlaybackAssetKeys.removeAll()
+        if resumedCount > 0 {
+            DonbyLogger.shared.log("在线播放结束，自动恢复 \(resumedCount) 个后台离线下载任务", level: .info, subsystem: "Download")
         }
         scheduleQueue()
     }
@@ -346,6 +400,7 @@ public final class DonbyDownloadManager: ObservableObject {
     }
 
     public func removeDownload(assetKey: String, deleteCachedData: Bool = true) {
+        yieldedForPlaybackAssetKeys.remove(assetKey)
         workerTasks[assetKey]?.cancel()
         workerTasks.removeValue(forKey: assetKey)
         let removedEntry = entries.first { $0.assetKey == assetKey }
@@ -363,46 +418,6 @@ public final class DonbyDownloadManager: ObservableObject {
         scheduleQueue()
     }
 
-    private func cleanupOfflineMediaFiles(for entry: DownloadEntry) {
-        let fm = FileManager.default
-        if let videoPath = entry.localVideoFilePath {
-            let videoURL = URL(fileURLWithPath: videoPath)
-            let stem = videoURL.deletingPathExtension().lastPathComponent
-            let folder = videoURL.deletingLastPathComponent()
-            try? fm.removeItem(at: videoURL)
-            try? fm.removeItem(at: folder.appendingPathComponent("\(stem).meta.json"))
-            try? fm.removeItem(at: folder.appendingPathComponent("\(stem)-thumb.jpg"))
-            for sub in entry.offlineSubtitles {
-                try? fm.removeItem(at: folder.appendingPathComponent(sub.localFileName))
-            }
-            pruneEmptyFolderArtworkAndDirs(startingAt: folder, seriesFolder: entry.localSeriesFolderPath.map { URL(fileURLWithPath: $0) })
-        }
-    }
-
-    private func pruneEmptyFolderArtworkAndDirs(startingAt folder: URL, seriesFolder: URL?) {
-        let fm = FileManager.default
-        let videoExts: Set<String> = ["mkv", "mp4", "mov", "m4v", "webm", "avi", "ts", "m2ts", "flv"]
-
-        func directoryHasVideos(_ dir: URL) -> Bool {
-            guard let enumerator = fm.enumerator(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
-                return false
-            }
-            for case let file as URL in enumerator {
-                if videoExts.contains(file.pathExtension.lowercased()) {
-                    return true
-                }
-            }
-            return false
-        }
-
-        if !directoryHasVideos(folder) {
-            try? fm.removeItem(at: folder)
-        }
-        if let seriesFolder, seriesFolder != folder, !directoryHasVideos(seriesFolder) {
-            try? fm.removeItem(at: seriesFolder)
-        }
-    }
-
     private func syncDownloadActivityAssertion() {
         let hasActive = entries.contains { $0.status == .downloading }
         if hasActive, downloadActivityToken == nil {
@@ -418,17 +433,20 @@ public final class DonbyDownloadManager: ObservableObject {
 
     private func scheduleQueue(connectionBudgetPerTask: Int? = nil) {
         defer { syncDownloadActivityAssertion() }
+        guard playbackPriorityTokens.isEmpty else { return }
+        let maxTasks = max(1, maxConcurrentDownloads)
         let activeCount = entries.filter { $0.status == .downloading }.count
-        guard activeCount < maxConcurrentDownloads else { return }
+        guard activeCount < maxTasks else { return }
 
         for idx in entries.indices where entries[idx].status == .queued {
             let currentlyActive = entries.filter { $0.status == .downloading }.count
-            if currentlyActive >= maxConcurrentDownloads { break }
+            if currentlyActive >= maxTasks { break }
             entries[idx].status = .downloading
             entries[idx].errorMessage = nil
             saveToDisk()
-            let budget = connectionBudgetByAssetKey[entries[idx].assetKey] ?? connectionBudgetPerTask ?? 3
-            startDownloadWorker(for: entries[idx], connectionBudget: budget)
+            let requestedBudget = connectionBudgetByAssetKey[entries[idx].assetKey] ?? connectionBudgetPerTask ?? 6
+            let effectiveBudget = maxTasks > 1 ? max(1, requestedBudget / maxTasks) : requestedBudget
+            startDownloadWorker(for: entries[idx], connectionBudget: effectiveBudget)
         }
     }
 

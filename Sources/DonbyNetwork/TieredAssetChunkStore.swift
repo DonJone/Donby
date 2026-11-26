@@ -313,7 +313,8 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
         if shouldPersist {
             pendingDiskChunks[index] = data
         }
-        let needsBackpressure = shouldPersist && (pendingDiskChunks.count >= 64)
+        let backpressureLimit = cacheInMemory ? 128 : 96
+        let needsBackpressure = shouldPersist && (pendingDiskChunks.count >= backpressureLimit)
         lock.unlock()
 
         // 1. Store in L1 Memory cache under fast memoryLock (skipped for background offline downloads

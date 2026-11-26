@@ -21,6 +21,8 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
     var inOpenProbePhase: Bool = true
     var chunk0HeadersReceived: Bool = false
     var didTriggerProbeTailPrefetch: Bool = false
+    var didTriggerResumeAnchorPrefetch: Bool = false
+    let initialStartFraction: Double
     let openedUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
     var lastSeekUptime: TimeInterval = 0
     var isMultiplexedProtocol: Bool = false
@@ -52,6 +54,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         let initialByteSkip: Int
         let isUrgent: Bool
         let isRescue: Bool
+        let laneIndex: Int
         weak var task: URLSessionDataTask?
         var lastByteTimestamp: TimeInterval
         var chunkStartTimestamp: TimeInterval
@@ -89,10 +92,17 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         knownTotalSize: Int64? = nil,
         connectionBudget: Int = 4,
         prefetchAheadChunks: Int = 72,
+        initialStartSeconds: Double = 0,
+        knownDurationSeconds: Double = 0,
         onResolvedRedirectURL: (@Sendable (URL) -> Void)? = nil
     ) {
         self.assetKey = assetKey
         self.streamURL = streamURL
+        if initialStartSeconds > 5.0 && knownDurationSeconds > 10.0 {
+            self.initialStartFraction = max(0.0, min(0.98, initialStartSeconds / knownDurationSeconds))
+        } else {
+            self.initialStartFraction = 0.0
+        }
         if let initialRedirectedURL, initialRedirectedURL.absoluteString != streamURL.absoluteString {
             self.effectiveStreamURL = initialRedirectedURL
             self.effectiveRedirectEpoch = 1
@@ -127,6 +137,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         if self.effectiveStreamURL != nil || !looksLikeOriginRedirectEndpoint || hasChunk0 {
             condition.lock()
             maybePrefetchOpenProbeTailLocked()
+            maybePrefetchResumeAnchorLocked()
             condition.unlock()
         }
         startCoordinatorLoop()
@@ -168,12 +179,17 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
 
     private func shouldYieldReadAtOffsetLocked(_ offset: Int64, totalSize: Int64, chunkSize: Int) -> Bool {
         if isAborted || isClosed { return true }
-        // Never abort a near-tail container index read (e.g. 64+ KB Matroska Cues at the end of a 3h 30GB MKV)
+        // Never abort a near-tail container index read (e.g. 64+ KB..2 MiB Matroska Cues at the end of a 4K Remux)
         // on an intermediate seek, because FFmpeg sets `cues_parsing_deferred = 0` before reading Cues.
-        if totalSize > Int64(chunkSize * 4) && offset >= totalSize - Int64(chunkSize * 2) {
+        let tailChunks = Self.tailProbeChunkCount(for: totalSize)
+        if totalSize > Int64(chunkSize * (tailChunks + 2)) && offset >= totalSize - Int64(chunkSize * tailChunks) {
             return false
         }
         return shouldYieldReadHandler?() ?? false
+    }
+
+    static func tailProbeChunkCount(for totalSize: Int64) -> Int {
+        totalSize > 4_294_967_296 ? 4 : 2
     }
 
     /// Signals that FFmpeg header/stream probing has finished so full multi-connection lookahead may engage.
@@ -219,7 +235,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         }
 
         // Fast path 3: exact-offset unaligned EOF tail read (hit pre-fetched direct slices or wait for in-flight tail fetch)
-        let tailWindowBytes: Int64 = meta.totalSize > 4_294_967_296 ? 1_048_576 : 524_288
+        let tailWindowBytes: Int64 = Int64(Self.tailProbeChunkCount(for: meta.totalSize)) * Int64(chunkSize)
         if meta.totalSize > 0, currentOffset >= meta.totalSize - tailWindowBytes {
             condition.lock()
             if let copied = tryCopyDirectTailLocked(at: currentOffset, into: buffer, count: count) {
@@ -313,9 +329,13 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                 stalledTime > rescueThreshold &&
                 !rescueChunks.contains(targetChunk) {
                 let desiredSkip = computeInitialByteSkipLocked(chunkIndex: targetChunk, offsetInChunk: offsetInChunk)
+                let stalledLane = coveringAttempt?.laneIndex
                 rescueChunks.insert(targetChunk)
                 chunkStartTime[targetChunk] = now
-                spawnChunkFetchLocked(index: targetChunk, isUrgent: true, isRescue: true, initialByteSkip: desiredSkip)
+                spawnChunkFetchLocked(index: targetChunk, isUrgent: true, isRescue: true, initialByteSkip: desiredSkip, excludeLane: stalledLane)
+                if let stalledLane {
+                    TurboStreamingSessionHub.shared.reportLaneStall(laneIndex: stalledLane)
+                }
             }
             condition.wait(until: Date().addingTimeInterval(0.03))
             condition.unlock()
@@ -463,7 +483,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             if now >= (directNextRetryTime[offset] ?? 0),
                directInFlightStarts[offset] == nil,
                !coveredByInFlight {
-                let remainingToEOF = max(262_144, min(1_048_576, totalSize - offset))
+                let remainingToEOF = max(262_144, min(2_097_152, totalSize - offset))
                 spawnDirectRangeFetchLocked(startOffset: offset, totalSize: totalSize, length: remainingToEOF)
             }
             condition.wait(until: Date().addingTimeInterval(0.03))
@@ -552,8 +572,9 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         let newChunk = Int(max(0, cursorOffset) / Int64(meta.chunkSize))
         var tasksToCancel: [URLSessionDataTask] = []
         let totalChunks = total > 0 ? Int((total + Int64(meta.chunkSize) - 1) / Int64(meta.chunkSize)) : 0
-        let isNearTailProbe = totalChunks > 2 && newChunk >= totalChunks - 2
-        let isReturningFromTailProbe = totalChunks > 2 && oldChunk >= totalChunks - 2 && newChunk <= 2
+        let tailProbeChunks = Self.tailProbeChunkCount(for: total)
+        let isNearTailProbe = totalChunks > tailProbeChunks && newChunk >= totalChunks - tailProbeChunks
+        let isReturningFromTailProbe = totalChunks > tailProbeChunks && oldChunk >= totalChunks - tailProbeChunks && newChunk <= 2
         let isContainerProbeSeek = isNearTailProbe || isReturningFromTailProbe
         if inOpenProbePhase && chunk0HeadersReceived && !isNearTailProbe && newChunk >= 4 {
             inOpenProbePhase = false
@@ -702,92 +723,5 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                 DonbyDownloadManager.shared.cleanupRedundantCacheIfMaterialized(assetKey: key)
             }
         }
-    }
-
-    func appendDirectSliceLocked(startOffset: Int64, data: Data) {
-        directSlices.removeAll { $0.startOffset == startOffset }
-        directSlices.append((startOffset: startOffset, data: data))
-        if directSlices.count > 16 {
-            directSlices.removeFirst()
-        }
-    }
-
-    func finishDirectRangeAttempt(
-        attemptId: UInt64,
-        startOffset: Int64,
-        usedRedirectedURL: Bool,
-        redirectEpoch: UInt64,
-        totalSize: Int64?,
-        statusCode: Int,
-        succeeded: Bool,
-        wasCancelled: Bool
-    ) {
-        if let totalSize, totalSize > 0 {
-            store.setTotalSize(totalSize, sourceURL: streamURL.absoluteString)
-        }
-        let now = ProcessInfo.processInfo.systemUptime
-        condition.lock()
-        activeAttempts.removeValue(forKey: attemptId)
-        if directInFlightStarts[startOffset] == attemptId {
-            directInFlightStarts.removeValue(forKey: startOffset)
-            directInFlightEndOffsets.removeValue(forKey: startOffset)
-        }
-        let data = attemptBuffers.removeValue(forKey: attemptId)
-        if succeeded, let data, !data.isEmpty {
-            directFailedStarts.removeValue(forKey: startOffset)
-            direct429Retries.removeValue(forKey: startOffset)
-            directNextRetryTime.removeValue(forKey: startOffset)
-            appendDirectSliceLocked(startOffset: startOffset, data: data)
-            let curMeta = store.currentMeta()
-            let cs = Int64(curMeta.chunkSize)
-            if cs > 0 && curMeta.totalSize > 0 {
-                let firstAlignedChunk = Int((startOffset + cs - 1) / cs)
-                let sliceEnd = startOffset + Int64(data.count)
-                var cIdx = firstAlignedChunk
-                while cIdx < curMeta.totalChunks {
-                    let cStart = Int64(cIdx) * cs
-                    let expected = Int64(store.expectedChunkLength(for: cIdx))
-                    guard expected > 0, cStart >= startOffset, cStart + expected <= sliceEnd else { break }
-                    let relStart = Int(cStart - startOffset)
-                    store.storeChunk(index: cIdx, data: Data(data[relStart..<(relStart + Int(expected))]))
-                    cIdx += 1
-                }
-            }
-            recordCleanCompletionAndRecoverConcurrencyLocked(now: now)
-        } else if !wasCancelled {
-            if statusCode == 429 {
-                handleRateLimit429Locked(now: now)
-                let r = (direct429Retries[startOffset] ?? 0) + 1
-                direct429Retries[startOffset] = r
-                directNextRetryTime[startOffset] = now + min(2.0, 0.45 * Double(r))
-            } else if usedRedirectedURL && (statusCode == 200 || statusCode >= 400) && statusCode != 416 {
-                if redirectEpoch == effectiveRedirectEpoch {
-                    effectiveStreamURL = nil
-                }
-                directNextRetryTime[startOffset] = now + 0.05
-            } else if statusCode != 416 {
-                let f = (directFailedStarts[startOffset] ?? 0) + 1
-                directFailedStarts[startOffset] = f
-                directNextRetryTime[startOffset] = now + min(1.5, 0.15 * Double(f))
-            }
-        }
-        condition.broadcast()
-        condition.unlock()
-    }
-
-    public static func parseTotalSize(from response: HTTPURLResponse?, startByte: Int64, dataCount: Int) -> Int64? {
-        guard let response else { return nil }
-        if let cr = response.value(forHTTPHeaderField: "Content-Range") ?? response.value(forHTTPHeaderField: "content-range") {
-            if let slashIdx = cr.lastIndex(of: "/") {
-                let totalStr = cr[cr.index(after: slashIdx)...].trimmingCharacters(in: .whitespacesAndNewlines)
-                if let total = Int64(totalStr), total > 0 {
-                    return total
-                }
-            }
-        }
-        if response.statusCode == 200, response.expectedContentLength > 0 {
-            return response.expectedContentLength
-        }
-        return nil
     }
 }

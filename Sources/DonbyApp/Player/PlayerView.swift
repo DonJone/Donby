@@ -49,6 +49,7 @@ public struct PlayerView: View {
     @State var displayDownloadSpeedMBs: Double = 0.0
     @State private var bottomControlBarHeight: CGFloat = 96
     @State var activeTurboHandle: TurboStreamByteHandle? = nil
+    @State var playbackNetworkPriorityToken: UUID? = nil
     @State var activeSecondarySubtitleSelection: PlayerSubtitleSelection = .off
     @State var secondaryLocalSubtitleName: String? = nil
     @State var explicitSubtitleOff: Bool = false

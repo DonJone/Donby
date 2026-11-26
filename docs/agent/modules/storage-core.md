@@ -1,6 +1,6 @@
 # Module Map: Core Models, Policies & Storage (`DonbyCore`)
 
-> Last synced: `v2.0.23`. Load this doc for shared data models, generic service-provider extension seam (`DonbyMediaServiceRegistry`), `DONBY_HOME` storage path isolation, unified `DonbyAppInfo.version`, AES-256-GCM local credential vault, async file logger, hero top-edge strip synthesis (`HeroTopEdgeSynthesizer`), subtitle encoding/transform/auto-alignment policies (Silero VAD + audio-first dual-subtitle aligner), diagnostics redaction, playback health state machine, update manifest parsing, and `DonbyCoreTests`.
+> Last synced: `v2.0.24`. Load this doc for shared data models, generic service-provider extension seam (`DonbyMediaServiceRegistry`), `DONBY_HOME` storage path isolation, unified `DonbyAppInfo.version`, AES-256-GCM local credential vault, async file logger, hero top-edge strip synthesis (`HeroTopEdgeSynthesizer`), subtitle encoding/transform/auto-alignment policies (Silero VAD + audio-first dual-subtitle aligner), diagnostics redaction, playback health state machine, update manifest parsing, and `DonbyCoreTests`.
 
 | If your task involves... | File | Entry Symbols |
 | :--- | :--- | :--- |
@@ -12,7 +12,7 @@
 | Emby/Server models & extension registry | `Sources/DonbyCore/EmbyServerModels.swift`, `Sources/DonbyCore/EmbyModels.swift`, `MediaServiceProvider.swift` | `EmbyServerConfig`, `ServerLineInfo`, `EmbyItem`, `DonbyMediaServiceRegistry` |
 | Version info & release manifest DTOs | `Sources/DonbyCore/AppUpdatePolicies.swift` | `DonbyAppInfo`, `AppVersionComparator`, `AppReleaseInfo` |
 | Home hero poster curation & web-drama audit | `Sources/DonbyCore/HomeHeroCurator.swift`, `Sources/DonbyCore/HomeHeroCurator+Signals.swift`, `Sources/DonbyCore/MultiPlatformRatings.swift` | `HomeHeroCurator`, `MultiPlatformRatings` |
-| Core unit test suite (`./scripts/dev.sh test`) | `Tests/DonbyCoreTests/DonbyCoreTests.swift`, `Tests/DonbyCoreTests/SubtitleAutoAlignerTests.swift`, `Tests/DonbyCoreTests/UHDAndArtworkIntegrationTests.swift`, `Tests/DonbyCoreTests/HomeHeroCuratorTests.swift` | `DonbyCoreTests`, `SubtitleAutoAlignerTests`, `UHDAndArtworkIntegrationTests`, `HomeHeroCuratorTests` |
+| Core unit test suite (`./scripts/dev.sh test`) | `Tests/DonbyCoreTests/DonbyCoreTests.swift`, `Tests/DonbyCoreTests/SubtitleAutoAlignerTests.swift`, `Tests/DonbyCoreTests/UHDAndArtworkIntegrationTests.swift`, `Tests/DonbyCoreTests/HomeHeroCuratorTests.swift`, `Tests/DonbyCoreTests/NetworkPlaybackAndDownloadTests.swift` | `DonbyCoreTests`, `SubtitleAutoAlignerTests`, `UHDAndArtworkIntegrationTests`, `HomeHeroCuratorTests`, `NetworkPlaybackAndDownloadTests` |
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyCore/DonbyStoragePaths.swift` — `DonbyStoragePaths`: Centralized path resolver supporting `DONBY_HOME` environment override (`isIsolatedHome`, `cachesDirectoryURL`, `applicationSupportDirectoryURL`, `libraryDirectoryURL`, `moviesDirectoryURL`).
@@ -46,6 +46,7 @@
 - `Tests/DonbyCoreTests/SubtitleAutoAlignerTests.swift` — `SubtitleAutoAlignerTests` covering Silero VAD golden parity, audio-to-subtitle shift recovery & silence rejection, dual-subtitle shift + FPS drift alignment, audio-anchored dual/post-seek detour prevention, and short embedded clip carryover.
 - `Tests/DonbyCoreTests/UHDAndArtworkIntegrationTests.swift` — Serialized `UHDAndArtworkIntegrationTests` covering `UHDSpeedTestMetricsEngine`, UHD parsers/extrapolation, Smart->V1 fallback & China-optimized selection, `DonbyUHDModule` install/uninstall registry isolation, `UHDDisplayNormalizer` line/exit normalization (under `#if canImport(DonbyUHDModule) && !DONBY_PURE_BUILD`), and dual-mode episode artwork & UHD token isolation with standard Emby fallback.
 - `Tests/DonbyCoreTests/HomeHeroCuratorTests.swift` — `HomeHeroCuratorTests` covering classic movie & foreign series weighting, JP/KR originalTitle detection, cheap domestic web-drama/micro-drama audit filtering, acclaimed domestic masterpiece retention, and cross-library deduplication.
+- `Tests/DonbyCoreTests/NetworkPlaybackAndDownloadTests.swift` — `NetworkPlaybackAndDownloadTests` covering `TurboStreamingSessionHub` API-vs-streaming isolation, 4-lane multi-TCP distribution, cross-lane rescue exclusion & stalled lane recycling, `TurboStreamByteHandle` 2 MiB large-file EOF Cues window & speculative resume anchor prefetch (respecting single-stream caps), rescue-winner crawling-attempt cancellation, `DonbyDownloadManager` single-task default & nested playback-priority yielding, and loopback HTTP 302 cross-host `Authorization` stripping + early redirect signaling.
 
 ## 2. Critical Invariants & Pitfalls (DO NOT BREAK)
 1. **`DONBY_HOME` Isolation**: Every cache/storage path in `DonbyNetwork` and `DonbyApp` MUST route through `DonbyStoragePaths` (never hardcode `FileManager.default.urls(for: .cachesDirectory, ...)` directly), so automated tests with `DONBY_HOME=$(mktemp -d)` remain 100% isolated from user data.
