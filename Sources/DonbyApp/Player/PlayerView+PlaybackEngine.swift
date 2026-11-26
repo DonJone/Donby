@@ -216,7 +216,7 @@ extension PlayerView {
             }
     }
 
-    func startNativeKernelPlayback(startSeconds: Double) {
+    func startNativeKernelPlayback(startSeconds: Double, allowWarmCacheRetry: Bool = true) {
         stopNativeKernel()
         activePlaybackGeneration &+= 1
         let thisGeneration = activePlaybackGeneration
@@ -290,6 +290,8 @@ extension PlayerView {
             && !lowerURL.contains(".m3u8")
             && !lowerURL.contains(".mpd")
         let preparedTurboHandle: TurboStreamByteHandle?
+        let preparedTurboStore: TieredAssetChunkStore?
+        let hadWarmCachedHeader: Bool
         if appState.turboEnabled && isRemoteHTTPVOD {
             let assetKey = DonbyTurboCacheEngine.makeAssetKey(
                 serverId: session.server.id,
@@ -301,6 +303,8 @@ extension PlayerView {
                 maxMemoryBytes: max(64, appState.turboMemoryCacheMB) * 1024 * 1024,
                 persistDisk: true
             )
+            preparedTurboStore = store
+            hadWarmCachedHeader = store.hasChunk(0)
             if let knownSize = currentResource.mediaSource.size, knownSize > 0 {
                 store.setTotalSize(knownSize, sourceURL: urlStr)
             }
@@ -348,6 +352,8 @@ extension PlayerView {
             )
         } else {
             preparedTurboHandle = nil
+            preparedTurboStore = nil
+            hadWarmCachedHeader = false
         }
         self.activeTurboHandle = preparedTurboHandle
 
@@ -425,11 +431,16 @@ extension PlayerView {
                 if ret != 0 {
                     DonbyLogger.shared.log("内核打开视频流失败 (错误码: \(ret))", level: .error, subsystem: "Player")
                     self.activeTurboHandle = nil
+                    Task.detached(priority: .userInitiated) { dk_player_destroy(validHandle) }
+                    if allowWarmCacheRetry && hadWarmCachedHeader, let store = preparedTurboStore {
+                        DonbyLogger.shared.log("检测到缓存文件头解析失败，自动清理探测分片并重试 (\(store.assetKey))", level: .warning, subsystem: "Player")
+                        preparedTurboHandle?.abort()
+                        store.invalidateProbeChunks()
+                        self.startNativeKernelPlayback(startSeconds: startSeconds, allowWarmCacheRetry: false)
+                        return
+                    }
                     self.openingErrorMessage = "解析流媒体格式失败 (错误码: \(ret))，请检查网络连接或更换线路"
                     self.isOpeningMedia = false
-                    Task.detached(priority: .userInitiated) {
-                        dk_player_destroy(validHandle)
-                    }
                     return
                 }
 

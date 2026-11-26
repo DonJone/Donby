@@ -8,7 +8,7 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "2.0.22")
+        #expect(DonbyAppInfo.fallbackVersion == "2.0.23")
     }
 
     @Test func heroTopEdgeSynthesizerPreservesExactColorContrastAndSuppressesOutlierSpike() {
@@ -629,5 +629,133 @@ struct DonbyCoreTests {
         // Too small to split once < minRemaining
         bound.advanceCurrent(to: 70)
         #expect(bound.tryStealTail(minRemaining: 12) == nil)
+    }
+
+    @Test func chunkStoreInvalidateForRemovalPreventsZombieMetaResurrection() {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("donby-zombie-meta-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let assetDir = tmpDir.appendingPathComponent("zombie_test", isDirectory: true)
+        do {
+            let store = TieredAssetChunkStore(
+                assetKey: "zombie_test",
+                rootDirectory: tmpDir,
+                chunkSize: 65_536,
+                maxMemoryBytes: 32 * 1024 * 1024,
+                persistDisk: true
+            )
+            store.setPinned(true)
+            store.setTotalSize(65_536 * 10, sourceURL: "https://example.invalid/z.mkv")
+            for idx in 0..<4 {
+                store.storeChunk(index: idx, data: Data(repeating: UInt8(idx + 1), count: 65_536), cacheInMemory: true)
+            }
+            store.flushMeta()
+            #expect(FileManager.default.fileExists(atPath: store.metaFileURL.path))
+
+            // Simulate removeAsset: invalidate first, delete directory, then let worker defer flushMeta() + deinit fire.
+            store.invalidateForRemoval()
+            try? FileManager.default.removeItem(at: assetDir)
+            #expect(!FileManager.default.fileExists(atPath: assetDir.path))
+
+            store.setPinned(false)
+            store.flushMeta()
+            store.closeFileHandles()
+            // `store` deinit runs right here as scope exits.
+        }
+
+        #expect(!FileManager.default.fileExists(atPath: assetDir.path))
+        #expect(!FileManager.default.fileExists(atPath: assetDir.appendingPathComponent("meta.json").path))
+    }
+
+    @Test func chunkStoreReconcilePrunesMissingMediaBinPastEOFAndSparseHoles() throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("donby-reconcile-holes-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let chunkSize = 524_288
+        let assetKey = "sparse_reconcile"
+        let assetDir = tmpDir.appendingPathComponent(assetKey, isDirectory: true)
+        try FileManager.default.createDirectory(at: assetDir, withIntermediateDirectories: true)
+
+        // Case 1: Zombie meta.json claiming chunks [0..9] with NO media.bin -> must prune all chunks.
+        let zombieMeta = ChunkStoreMeta(
+            assetKey: assetKey,
+            totalSize: Int64(chunkSize) * 400,
+            chunkSize: chunkSize,
+            completedChunks: Set(0..<10),
+            pinned: true
+        )
+        try JSONEncoder().encode(zombieMeta).write(to: assetDir.appendingPathComponent("meta.json"), options: .atomic)
+
+        let store1 = TieredAssetChunkStore(assetKey: assetKey, rootDirectory: tmpDir, chunkSize: chunkSize, persistDisk: true)
+        #expect(store1.currentMeta().completedChunks.isEmpty)
+        #expect(!store1.hasChunk(0))
+        // Reading missing chunk must NOT create an empty media.bin on disk.
+        #expect(store1.readChunk(index: 0) == nil)
+        #expect(!FileManager.default.fileExists(atPath: store1.dataFileURL.path))
+
+        // Case 2: Pinned sparse media.bin with real data ONLY at chunk 256 (~128 MiB), leaving [0..10]
+        // as an unallocated APFS sparse hole and [398, 399] past EOF -> reconcile must keep ONLY chunk 256.
+        let mediaURL = assetDir.appendingPathComponent("media.bin")
+        FileManager.default.createFile(atPath: mediaURL.path, contents: nil)
+        let fh = try FileHandle(forWritingTo: mediaURL)
+        try fh.seek(toOffset: UInt64(256) * UInt64(chunkSize))
+        try fh.write(contentsOf: Data(repeating: 0x5A, count: chunkSize))
+        try fh.close()
+
+        var sparseMeta = zombieMeta
+        sparseMeta.completedChunks = Set(0..<10).union([256, 398, 399])
+        try JSONEncoder().encode(sparseMeta).write(to: assetDir.appendingPathComponent("meta.json"), options: .atomic)
+
+        let store2 = TieredAssetChunkStore(assetKey: assetKey, rootDirectory: tmpDir, chunkSize: chunkSize, persistDisk: true)
+        let remaining = store2.currentMeta().completedChunks
+        #expect(remaining == Set([256]))
+        #expect(!store2.hasChunk(0))
+        #expect(!store2.hasChunk(398))
+        #expect(store2.readChunk(index: 256)?.first == 0x5A)
+
+        // Case 3: External truncation of media.bin AFTER init -> readChunk must evict stale chunk immediately.
+        let truncHandle = try FileHandle(forWritingTo: mediaURL)
+        try truncHandle.truncate(atOffset: 0)
+        try truncHandle.close()
+        // Drop L1 memory copy so readChunk must hit disk.
+        store2.trimIdleMemoryKeepingPinned()
+        #expect(store2.readChunk(index: 256) == nil)
+        #expect(!store2.hasChunk(256))
+    }
+
+    @Test func chunkStoreInvalidateProbeChunksEvictsHeaderAndTailOnly() {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("donby-probe-invalidate-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let chunkSize = 65_536
+        let totalChunks = 12
+        let store = TieredAssetChunkStore(assetKey: "probe_inv", rootDirectory: tmpDir, chunkSize: chunkSize, persistDisk: true)
+        store.setPinned(true)
+        store.setTotalSize(Int64(totalChunks * chunkSize), sourceURL: "https://example.invalid/p.mkv")
+        for i in 0..<totalChunks {
+            store.storeChunk(index: i, data: Data(repeating: UInt8(i + 1), count: chunkSize), cacheInMemory: true)
+        }
+        store.flushMeta()
+        #expect(store.currentMeta().completedChunks.count == totalChunks)
+
+        store.invalidateProbeChunks()
+        for head in 0..<4 { #expect(!store.hasChunk(head)) }
+        for tail in 10..<12 { #expect(!store.hasChunk(tail)) }
+        for mid in 4..<10 {
+            #expect(store.hasChunk(mid))
+            #expect(store.readChunk(index: mid)?.first == UInt8(mid + 1))
+        }
+    }
+
+    @Test func turboSessionRejectsHTMLAndJSONErrorPayloads() {
+        #expect(TurboStreamingSessionHub.isLikelyNonMediaErrorContentType("text/html; charset=utf-8"))
+        #expect(TurboStreamingSessionHub.isLikelyNonMediaErrorContentType("application/json"))
+        #expect(TurboStreamingSessionHub.isLikelyNonMediaErrorContentType("application/problem+json"))
+        #expect(!TurboStreamingSessionHub.isLikelyNonMediaErrorContentType("video/x-matroska"))
+        #expect(!TurboStreamingSessionHub.isLikelyNonMediaErrorContentType("application/octet-stream"))
+        #expect(!TurboStreamingSessionHub.isLikelyNonMediaErrorContentType(""))
     }
 }

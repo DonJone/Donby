@@ -136,7 +136,7 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
             storeToClose = activeStores.removeValue(forKey: assetKey)
         }
         lock.unlock()
-        storeToClose?.closeFileHandles()
+        storeToClose?.invalidateForRemoval()
         let dir = cacheRootDirectory.appendingPathComponent(assetKey, isDirectory: true)
         if !forceIncludePinned, let meta = loadMeta(in: dir), meta.pinned {
             return

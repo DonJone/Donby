@@ -351,14 +351,14 @@ public final class DonbyDownloadManager: ObservableObject {
         let removedEntry = entries.first { $0.assetKey == assetKey }
         entries.removeAll { $0.assetKey == assetKey }
         saveToDisk()
-        let store = DonbyTurboCacheEngine.shared.store(for: assetKey, persistDisk: true)
-        store.setPinned(false)
         if deleteCachedData {
-            store.closeFileHandles()
             DonbyTurboCacheEngine.shared.removeAsset(assetKey: assetKey, forceIncludePinned: true)
             if let removedEntry {
                 cleanupOfflineMediaFiles(for: removedEntry)
             }
+        } else {
+            let store = DonbyTurboCacheEngine.shared.store(for: assetKey, persistDisk: true)
+            store.setPinned(false)
         }
         scheduleQueue()
     }

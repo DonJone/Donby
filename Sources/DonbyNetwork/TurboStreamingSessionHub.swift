@@ -250,7 +250,9 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
             completionHandler(.cancel)
             return
         }
-        let valid = (status == 206) || (status == 200 && (ctx.chunkIndex == 0 || ctx.isDirectRange))
+        let contentType = http?.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
+        let isErrorDocument = Self.isLikelyNonMediaErrorContentType(contentType)
+        let valid = !isErrorDocument && ((status == 206) || (status == 200 && (ctx.chunkIndex == 0 || ctx.isDirectRange)))
         ctx.statusCode = status
         ctx.acceptBody = valid
         let parsedTotal = TurboStreamByteHandle.parseTotalSize(from: http, startByte: ctx.startByte, dataCount: 0)
@@ -376,6 +378,12 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
                 wasCancelled: wasCancelled
             )
         }
+    }
+
+    internal static func isLikelyNonMediaErrorContentType(_ contentType: String) -> Bool {
+        let lower = contentType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lower.isEmpty else { return false }
+        return lower.hasPrefix("text/html") || lower.hasPrefix("application/json") || lower.hasPrefix("application/problem+json")
     }
 
     func isHostKnownMultiplexed(_ url: URL?) -> Bool {
@@ -713,7 +721,9 @@ internal final class DownloadRangeStreamDelegate: NSObject, URLSessionDataDelega
             dataTask.cancel()
         }
 
-        let accept = (http.statusCode == 206) || (http.statusCode == 200 && state.allowStatus200)
+        let contentType = http.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
+        let isErrorDocument = TurboStreamingSessionHub.isLikelyNonMediaErrorContentType(contentType)
+        let accept = !isErrorDocument && ((http.statusCode == 206) || (http.statusCode == 200 && state.allowStatus200))
         if accept {
             state.dataContinuation = capturedCont
             lock.unlock()
