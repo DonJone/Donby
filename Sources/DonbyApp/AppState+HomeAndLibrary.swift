@@ -485,10 +485,18 @@ extension AppState {
         }()
 
         guard !poolForEnrichment.isEmpty else { return }
+        let targetServer = self.servers.first(where: { $0.id == serverId })
         Task { [weak self] in
+            var bridgedImdbIds: [String: String] = [:]
+            if let srv = targetServer,
+               let plugin = DonbyAppExtensionCenter.shared.plugin,
+               plugin.isActive(for: srv) {
+                bridgedImdbIds = await plugin.resolveImdbIds(for: poolForEnrichment, server: srv, maxCount: 14)
+            }
             let enriched = await MultiPlatformRatingService.shared.enrichRatings(
                 for: poolForEnrichment,
-                mdblistAPIKey: apiKey
+                mdblistAPIKey: apiKey,
+                resolvedImdbIds: bridgedImdbIds
             )
             guard !enriched.isEmpty else { return }
             await MainActor.run {

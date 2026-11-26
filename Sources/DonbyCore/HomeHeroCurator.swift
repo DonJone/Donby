@@ -3,9 +3,9 @@ import Foundation
 /// Curates the home hero carousel (`carouselItems`) from library candidates.
 ///
 /// Ranking priorities:
-/// 1. Boosts classic movies and acclaimed foreign TV series (US/UK/EU/JP/KR/etc.).
-/// 2. Audits and strongly downranks / filters out cheap domestic web dramas and micro-dramas.
-/// 3. Operates strictly on canonical library items (never on extension-injected promotional/hot feeds).
+/// 1. Boosts classic movies, critically-acclaimed Western series, and professional critic consensus (Metacritic / RT Critics / Letterboxd / Major Awards).
+/// 2. Deflates fandom-brigaded Korean & Thai/SEA dramas and strongly filters idol / BL / romance / soap dramas without hard-banning verified masterpieces.
+/// 3. Strictly audits cheap domestic web dramas / micro-dramas and excludes anime on non-anime servers and UHD Normal Hall.
 public enum HomeHeroCurator {
     public struct AuditResult: Sendable, Equatable {
         public let score: Double
@@ -13,8 +13,11 @@ public enum HomeHeroCurator {
         public let isClassicMovie: Bool
         public let isForeignSeries: Bool
         public let isForeignMovie: Bool
+        public let isKoreanSeries: Bool
+        public let isThaiOrSEASeries: Bool
         public let isDomesticSeries: Bool
         public let isCheapDomesticWebDrama: Bool
+        public let isIdolOrBLFiltered: Bool
         public let isAnimeOrAnimation: Bool
         public let isAnimeExcluded: Bool
         public let isSuspiciousPerfectRating: Bool
@@ -118,10 +121,9 @@ public enum HomeHeroCurator {
             ingest(item, libraryId: libId, libraryName: libName, libraryRank: .max)
         }
 
-        // Deduplicated candidate pool from libraries.
         let libraryCandidates = Array(bestByDedupeKey.values)
         let isHardExcluded: (EvaluatedCandidate) -> Bool = {
-            $0.audit.isCheapDomesticWebDrama || $0.audit.isAnimeExcluded
+            $0.audit.isCheapDomesticWebDrama || $0.audit.isAnimeExcluded || $0.audit.isIdolOrBLFiltered
         }
         let approved = libraryCandidates
             .filter { !isHardExcluded($0) && !$0.audit.isSuspiciousPerfectRating && $0.audit.score >= 0 }
@@ -137,28 +139,33 @@ public enum HomeHeroCurator {
         var selectedIds = Set<String>()
         var perLibraryCount: [String: Int] = [:]
         var domesticSeriesCount = 0
+        var regionalAsianDramaCount = 0
 
         let activeLibraryCount = Set(approved.compactMap(\.libraryId)).count
         let perLibrarySoftCap = activeLibraryCount >= 2 ? max(3, maxCount / 2) : maxCount
         let domesticSeriesSoftCap = 1
 
-        // Pass 1: High-quality diverse picks from approved pool.
+        // Pass 1: High-quality diverse picks from approved pool (soft-capping domestic/Korean/Thai series to prevent flooding).
         for cand in approved where selected.count < maxCount {
             if cand.audit.isDomesticSeries && domesticSeriesCount >= domesticSeriesSoftCap { continue }
+            if (cand.audit.isKoreanSeries || cand.audit.isThaiOrSEASeries) && regionalAsianDramaCount >= 1 { continue }
             if let libId = cand.libraryId, (perLibraryCount[libId] ?? 0) >= perLibrarySoftCap { continue }
             guard selectedIds.insert(cand.item.id).inserted else { continue }
             selected.append(cand.item)
             if let libId = cand.libraryId { perLibraryCount[libId, default: 0] += 1 }
             if cand.audit.isDomesticSeries { domesticSeriesCount += 1 }
+            if cand.audit.isKoreanSeries || cand.audit.isThaiOrSEASeries { regionalAsianDramaCount += 1 }
         }
 
-        // Pass 2: Relax library cap on approved pool (keep domestic series capped at 2 if possible).
+        // Pass 2: Relax library cap on approved pool.
         for cand in approved where selected.count < maxCount {
             guard !selectedIds.contains(cand.item.id) else { continue }
             if cand.audit.isDomesticSeries && domesticSeriesCount >= 2 { continue }
+            if (cand.audit.isKoreanSeries || cand.audit.isThaiOrSEASeries) && regionalAsianDramaCount >= 2 { continue }
             selectedIds.insert(cand.item.id)
             selected.append(cand.item)
             if cand.audit.isDomesticSeries { domesticSeriesCount += 1 }
+            if cand.audit.isKoreanSeries || cand.audit.isThaiOrSEASeries { regionalAsianDramaCount += 1 }
         }
 
         // Pass 3: Remaining approved items.
@@ -173,7 +180,7 @@ public enum HomeHeroCurator {
             selected.append(cand.item)
         }
 
-        // Pass 5: Audited fallback resume items (avoiding cheap domestic web dramas & excluded anime).
+        // Pass 5: Audited fallback resume items (avoiding excluded cheap/idol/BL/anime items).
         if selected.count < maxCount && !fallbackResumes.isEmpty {
             let evaluatedResumes = fallbackResumes.enumerated().map { idx, item in
                 EvaluatedCandidate(
@@ -190,7 +197,7 @@ public enum HomeHeroCurator {
             }
         }
 
-        // Pass 6: Last-resort fallback only if the entire library has almost no approved items.
+        // Pass 6: Last-resort fallback only if the entire server has zero approved/secondary items.
         if selected.isEmpty {
             for cand in rejected where selected.count < maxCount {
                 guard selectedIds.insert(cand.item.id).inserted else { continue }
@@ -231,16 +238,35 @@ public enum HomeHeroCurator {
         let isAnime = isAnimeOrAnimation(item, libraryName: libraryName)
         let isAnimeExcluded = isAnime && !allowAnime
 
-        let origin = detectOrigin(item: item, libraryLower: libLower)
-        let isForeignOrigin = (origin == .foreign)
-        let isDomesticOrigin = (origin == .domestic)
+        let origin = detectOrigin(
+            item: item,
+            libraryLower: libLower,
+            externalCountries: multiPlatformRatings?.countries
+        )
         let isClassicLibrary = classicLibraryKeywords.contains { libLower.contains($0) }
 
-        let isForeignMovie = isMovie && isForeignOrigin && !isAnime
-        let isForeignSeries = isSeries && isForeignOrigin && !isAnime
+        let isWesternOrigin = (origin == .western)
+        let isJapaneseOrigin = (origin == .japanese)
+        let isKoreanOrigin = (origin == .korean)
+        let isThaiOrigin = (origin == .thaiOrSEA)
+        let isDomesticOrigin = (origin == .domestic)
+
+        let isForeignMovie = isMovie && (isWesternOrigin || isJapaneseOrigin || isKoreanOrigin) && !isAnime
+        let isForeignSeries = isSeries && (isWesternOrigin || isJapaneseOrigin) && !isAnime
+        let isKoreanSeries = isSeries && isKoreanOrigin && !isAnime
+        let isThaiOrSEASeries = isSeries && isThaiOrigin && !isAnime
         let isDomesticSeries = isSeries && isDomesticOrigin && !isAnime
 
+        let biasProfile: RatingBiasProfile = {
+            if isAnime { return .anime }
+            if isThaiOrigin { return .thaiOrSEADrama }
+            if isKoreanSeries { return .koreanDrama }
+            if isDomesticSeries { return .domesticDrama }
+            return .standard
+        }()
+
         let hasImdbProvider = item.providerIds?.keys.contains(where: { $0.lowercased() == "imdb" }) == true
+            || !(multiPlatformRatings?.imdbId ?? "").isEmpty
         let mpEval = MultiPlatformRatings.evaluate(
             multiPlatformRatings,
             fallbackTMDB: item.communityRating,
@@ -248,7 +274,8 @@ public enum HomeHeroCurator {
             hasImdbProviderId: hasImdbProvider,
             isDomesticSeries: isDomesticSeries,
             isMovie: isMovie,
-            isAnime: isAnime
+            isAnime: isAnime,
+            biasProfile: biasProfile
         )
         let rating = mpEval.weightedScore ?? 0
         let trustAcclaimTier = !mpEval.isSuspiciousPerfectRating
@@ -256,7 +283,7 @@ public enum HomeHeroCurator {
         var score: Double = mpEval.consensusDelta
         var reasons: [String] = []
         if mpEval.consensusDelta != 0 {
-            reasons.append("multi_platform_consensus(\(mpEval.authoritativePlatformCount)auth):\(Int(mpEval.consensusDelta))")
+            reasons.append("multi_platform(\(mpEval.professionalCriticCount)critic/\(mpEval.authoritativePlatformCount)auth):\(Int(mpEval.consensusDelta))")
         }
         if mpEval.isSuspiciousPerfectRating {
             reasons.append("suspicious_perfect_rating_unverified")
@@ -267,11 +294,10 @@ public enum HomeHeroCurator {
         }
         var isClassicMovie = false
         var isCheapDomesticWebDrama = false
+        var isIdolOrBLFiltered = false
 
-        // 1. Media Type & Classic / Foreign Weighting
+        // 1. Media Type & Region-Tiered Weighting
         if isAnime {
-            // Even when allowed (Anime server / Anime hall), avoid live-action foreign boosts;
-            // rely on deflated multi-platform quality + recency.
             if allowAnime {
                 score += 12
                 if trustAcclaimTier && rating >= 7.8 {
@@ -312,59 +338,104 @@ public enum HomeHeroCurator {
                 reasons.append("modern_movie_good:+8")
             }
 
-            if isForeignMovie {
-                score += 12
-                reasons.append("foreign_movie:+12")
+            if isWesternOrigin {
+                score += 14
+                reasons.append("western_movie:+14")
+            } else if isJapaneseOrigin {
+                score += 6
+                reasons.append("japanese_movie:+6")
+            } else if isThaiOrigin && !mpEval.hasStrongCriticEndorsement {
+                score -= 14
+                reasons.append("thai_movie_scrutiny:-14")
             }
             if isClassicLibrary {
                 score += 12
                 reasons.append("classic_library:+12")
             }
-        } else if isForeignSeries {
+        } else if isSeries && isWesternOrigin {
             score += 26
-            reasons.append("foreign_series:+26")
+            reasons.append("western_series:+26")
 
             if trustAcclaimTier && rating >= 8.2 {
                 score += 26
-                reasons.append("foreign_series_acclaimed:+26")
+                reasons.append("western_series_acclaimed:+26")
             } else if trustAcclaimTier && rating >= 7.6 {
                 score += 18
-                reasons.append("foreign_series_high:+18")
+                reasons.append("western_series_high:+18")
             } else if trustAcclaimTier && rating >= 7.0 {
                 score += 10
-                reasons.append("foreign_series_good:+10")
+                reasons.append("western_series_good:+10")
             } else if rating > 0 && rating < 6.0 {
                 score -= 14
-                reasons.append("foreign_series_low_rating:-14")
+                reasons.append("western_series_low_rating:-14")
             }
 
             if let age, age >= 5, trustAcclaimTier, rating >= 7.6 {
                 score += 12
-                reasons.append("classic_foreign_series:+12")
+                reasons.append("classic_western_series:+12")
             } else if let age, age <= 1 {
                 if trustAcclaimTier && rating >= 7.5 {
                     score += 20
-                    reasons.append("hot_recent_foreign_series_high:+20")
+                    reasons.append("hot_recent_western_series_high:+20")
                 } else if trustAcclaimTier && (rating >= 6.8 || rating == 0) {
                     score += 14
-                    reasons.append("hot_recent_foreign_series:+14")
+                    reasons.append("hot_recent_western_series:+14")
                 }
             } else if let age, age <= 3, trustAcclaimTier, rating >= 7.2 {
                 score += 12
-                reasons.append("recent_foreign_series:+12")
+                reasons.append("recent_western_series:+12")
             }
 
             if item.status?.lowercased() == "continuing", trustAcclaimTier, (rating == 0 || rating >= 6.8) {
                 score += 8
-                reasons.append("continuing_foreign_series:+8")
+                reasons.append("continuing_western_series:+8")
             }
             if libraryRank < 5, (age ?? 99) <= 2, trustAcclaimTier, (rating == 0 || rating >= 6.8) {
                 score += 8
-                reasons.append("fresh_hot_foreign_series:+8")
+                reasons.append("fresh_hot_western_series:+8")
             }
             if (item.childCount ?? 0) >= 2 && trustAcclaimTier && rating >= 7.0 {
                 score += 6
-                reasons.append("multi_season_foreign_series:+6")
+                reasons.append("multi_season_western_series:+6")
+            }
+        } else if isSeries && isJapaneseOrigin {
+            // Live-action Japanese series: moderate prestige tier without blind Western hype boost.
+            score += 10
+            reasons.append("japanese_series:+10")
+            if trustAcclaimTier && rating >= 8.0 {
+                score += 16
+                reasons.append("japanese_series_acclaimed:+16")
+            } else if trustAcclaimTier && rating >= 7.4 {
+                score += 8
+                reasons.append("japanese_series_good:+8")
+            } else if rating > 0 && rating < 6.5 {
+                score -= 12
+                reasons.append("japanese_series_low:-12")
+            }
+        } else if isKoreanSeries {
+            // Korean series: stripped of Western boost; heavily scrutinized unless critic-verified non-idol prestige.
+            score -= 18
+            reasons.append("korean_series_scrutiny:-18")
+            if trustAcclaimTier && mpEval.hasStrongCriticEndorsement && rating >= 7.8 {
+                score += 18
+                reasons.append("korean_series_critic_verified:+18")
+            } else if trustAcclaimTier && rating >= 7.6 && mpEval.imdbVotes >= 30_000 {
+                score += 10
+                reasons.append("korean_series_global_hit:+10")
+            } else if rating <= 0 || rating < 7.0 {
+                score -= 16
+                reasons.append("korean_series_weak_effective_rating:-16")
+            }
+        } else if isThaiOrSEASeries {
+            // Thai / SEA series: heaviest fandom-inflation scrutiny; not hard-banned, but requires extraordinary critic backing.
+            score -= 32
+            reasons.append("thai_series_heavy_scrutiny:-32")
+            if trustAcclaimTier && mpEval.hasStrongCriticEndorsement && rating >= 8.0 {
+                score += 16
+                reasons.append("thai_series_critic_verified:+16")
+            } else if rating <= 0 || rating < 7.2 {
+                score -= 18
+                reasons.append("thai_series_weak_effective_rating:-18")
             }
         } else if isSeries {
             if isDomesticSeries {
@@ -379,7 +450,28 @@ public enum HomeHeroCurator {
             reasons.append("episode_penalty:-35")
         }
 
-        // 2. Cheap Domestic Web Drama & Micro-Drama Audit
+        // 2. Universal Idol / BL / Romance / Soap Fandom Filter (applies to Korean, Thai/SEA, Japanese, and ambiguous series)
+        let idolSignals = hasIdolBLOrRomanceSignals(item: item, libraryLower: libLower, genresLower: genresLower)
+        if !mpEval.hasStrongCriticEndorsement {
+            if idolSignals.hasExplicitBLOrFandom {
+                score -= 65
+                isIdolOrBLFiltered = true
+                reasons.append("bl_idol_fandom_filtered:-65")
+            } else if isThaiOrSEASeries && (idolSignals.hasIdolRomanceGenre || rating < 7.5) {
+                score -= 52
+                isIdolOrBLFiltered = true
+                reasons.append("thai_idol_romance_filtered:-52")
+            } else if isKoreanSeries && idolSignals.hasIdolRomanceGenre {
+                score -= 48
+                isIdolOrBLFiltered = true
+                reasons.append("korean_idol_romance_filtered:-48")
+            } else if isSeries && isJapaneseOrigin && idolSignals.hasIdolRomanceGenre && rating < 7.6 {
+                score -= 22
+                reasons.append("japanese_romance_penalty:-22")
+            }
+        }
+
+        // 3. Cheap Domestic Web Drama & Micro-Drama Audit
         let cheapHitCount = countCheapWebDramaSignals(item: item, libraryLower: libLower, genresLower: genresLower)
         if cheapHitCount > 0 {
             let keywordPenalty = min(105.0, 65.0 + Double(cheapHitCount - 1) * 20.0)
@@ -389,14 +481,11 @@ public enum HomeHeroCurator {
         }
 
         if isDomesticSeries {
-            // Short runtime per episode (< 22 min) is a strong micro-drama / cheap web-drama indicator.
             if let ticks = item.runTimeTicks, ticks > 0, ticks < shortEpisodeTicksThreshold {
                 score -= 45
                 isCheapDomesticWebDrama = true
                 reasons.append("domestic_short_episode_runtime:-45")
             }
-
-            // Strict rating audit for domestic series.
             if rating <= 0 {
                 score -= 36
                 isCheapDomesticWebDrama = true
@@ -416,30 +505,22 @@ public enum HomeHeroCurator {
                 reasons.append("domestic_series_acclaimed:+6")
             }
 
-            // Idol / romance / soap genre scrutiny when not genuinely acclaimed.
-            let hasIdolGenre = genresLower.contains { g in
-                domesticIdolGenres.contains { g.contains($0) }
-            }
-            if hasIdolGenre && rating < 7.8 {
+            if idolSignals.hasIdolRomanceGenre && rating < 7.8 {
                 score -= 18
                 if rating < 7.0 { isCheapDomesticWebDrama = true }
                 reasons.append("domestic_idol_genre_penalty:-18")
             }
-
-            // Recent single-season domestic series without strong acclaim.
             if let age, age <= 2, (item.childCount ?? 1) <= 1, rating < 7.6 {
                 score -= 14
                 reasons.append("domestic_recent_single_season:-14")
             }
-
-            // Cliché long Chinese title without strong rating.
             if cjkCharacterCount(item.name) >= 9 && rating < 7.6 {
                 score -= 12
                 reasons.append("domestic_long_trope_title:-12")
             }
         }
 
-        // 3. Universal Quality & Visual Polish Signals
+        // 4. Universal Quality & Visual Polish Signals
         let hasBackdrop = hasWideBackdrop(item)
         let hasAnyArtwork = hasBackdrop || hasPosterOrThumb(item)
         if hasBackdrop {
@@ -448,9 +529,9 @@ public enum HomeHeroCurator {
         } else if hasAnyArtwork {
             score -= 18
             reasons.append("no_backdrop:-18")
-            if isDomesticSeries {
+            if isDomesticSeries || isKoreanSeries || isThaiOrSEASeries {
                 score -= 16
-                reasons.append("domestic_series_no_backdrop:-16")
+                reasons.append("regional_series_no_backdrop:-16")
             }
         } else {
             score -= 40
@@ -484,7 +565,7 @@ public enum HomeHeroCurator {
         let hasPrestigeGenre = genresLower.contains { g in
             prestigeGenres.contains { g.contains($0) }
         }
-        if hasPrestigeGenre && (isMovie || isForeignSeries || rating >= 7.8) {
+        if hasPrestigeGenre && (isMovie || isForeignSeries || mpEval.hasStrongCriticEndorsement || rating >= 7.8) {
             score += 5
             reasons.append("prestige_genre:+5")
         }
@@ -507,8 +588,11 @@ public enum HomeHeroCurator {
             isClassicMovie: isClassicMovie,
             isForeignSeries: isForeignSeries,
             isForeignMovie: isForeignMovie,
+            isKoreanSeries: isKoreanSeries,
+            isThaiOrSEASeries: isThaiOrSEASeries,
             isDomesticSeries: isDomesticSeries,
             isCheapDomesticWebDrama: isCheapDomesticWebDrama,
+            isIdolOrBLFiltered: isIdolOrBLFiltered,
             isAnimeOrAnimation: isAnime,
             isAnimeExcluded: isAnimeExcluded,
             isSuspiciousPerfectRating: mpEval.isSuspiciousPerfectRating,

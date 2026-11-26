@@ -405,6 +405,11 @@ public final class UHDAppExtensionPlugin: DonbyAppUIExtensionPlugin {
         return uhd.currentLibraryMode(for: server.id) == .anime
     }
 
+    public func resolveImdbIds(for items: [EmbyItem], server: EmbyServerConfig, maxCount: Int) async -> [String: String] {
+        guard UHDModuleManager.shared.isActive(for: server) else { return [:] }
+        return await UHDImdbBridge.shared.resolveImdbIds(for: items, server: server, maxCount: maxCount)
+    }
+
     public func authenticateAndConfigureServer(
         draft: EmbyServerConfig,
         loginCode: String?,

@@ -41,7 +41,10 @@ var packageTargets: [Target] = [
     .target(
         name: "DonbyNetwork",
         dependencies: ["DonbyCore"],
-        path: "Sources/DonbyNetwork"
+        path: "Sources/DonbyNetwork",
+        linkerSettings: [
+            .linkedLibrary("z")
+        ]
     ),
     .target(
         name: "DonbyKernelC",

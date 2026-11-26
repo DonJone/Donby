@@ -201,7 +201,7 @@ public struct SettingsView: View {
                     Text("多平台评分数据源（MDBList API Key，可选）")
                         .font(.system(size: 13))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    Text("用于主页海报综合评估 IMDb、烂番茄、爆米花、Trakt、Metacritic 与 TMDB 权重；留空时自动使用 TMDB + 烂番茄 + Cinemeta IMDb 免费回退。")
+                    Text("优先以专业影评权重（Metacritic、烂番茄新鲜度、Letterboxd、RogerEbert）结合 IMDb 官方投票人数、国际奖项、Trakt 与 TMDB 综合评估；留空时自动启用 IMDb 官方全量票数库与 Cinemeta 奖项/产地免费校验。")
                         .font(.system(size: 11))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     TextField("输入 MDBList API Key（可在 mdblist.com 免费获取）", text: $appState.mdblistAPIKey)

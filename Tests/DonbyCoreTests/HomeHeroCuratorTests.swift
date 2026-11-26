@@ -1,6 +1,8 @@
 import Foundation
 import Testing
+import zlib
 @testable import DonbyCore
+@testable import DonbyNetwork
 
 @Suite("HomeHeroCuratorTests")
 struct HomeHeroCuratorTests {
@@ -108,8 +110,8 @@ struct HomeHeroCuratorTests {
         #expect(foreignAudit.score > unratedAudit.score + 80)
     }
 
-    @Test("Japanese and Korean series with Kana/Hangul originalTitle are recognized as foreign series")
-    func jpKrOriginalTitlesDetectedAsForeign() {
+    @Test("Japanese series are foreign tier while Korean series route to dedicated Korean scrutiny tier")
+    func jpKrOriginalTitlesDetectedByRegion() {
         let jdrama = makeItem(
             id: "s_jp",
             name: "重启人生",
@@ -135,7 +137,8 @@ struct HomeHeroCuratorTests {
 
         #expect(jpAudit.isForeignSeries)
         #expect(!jpAudit.isCheapDomesticWebDrama)
-        #expect(krAudit.isForeignSeries)
+        #expect(krAudit.isKoreanSeries)
+        #expect(!krAudit.isIdolOrBLFiltered)
         #expect(!krAudit.isCheapDomesticWebDrama)
     }
 
@@ -200,7 +203,8 @@ struct HomeHeroCuratorTests {
         let imdbVerified = MultiPlatformRatings(tmdb: 8.9, imdb: 8.5, imdbVotes: 6500)
         let verifiedAudit = HomeHeroCurator.audit(masterpiece, libraryName: "国产剧", referenceYear: 2026, multiPlatformRatings: imdbVerified)
         #expect(!verifiedAudit.isCheapDomesticWebDrama)
-        #expect(verifiedAudit.score > 30)
+        #expect(verifiedAudit.score > 20)
+        #expect(verifiedAudit.score > audit.score + 15)
     }
 
     @Test("Deduplicates identical title+year across libraries keeping highest-scored backdrop entry")
@@ -506,5 +510,165 @@ struct HomeHeroCuratorTests {
         #expect(!animeHallAudit.isAnimeExcluded)
         // Anime fan rating deflation reduces unverified 9.4 significantly
         #expect(animeHallAudit.effectiveRating < 8.5)
+    }
+
+    @Test("Thai BL and Korean idol romance are filtered while critic-verified masterpieces are not hard-banned")
+    func thaiBLAndKoreanIdolFilteredWhileCriticallyAcclaimedSurvive() {
+        let views = [
+            EmbyItem(id: "lib_movies", name: "电影", type: "CollectionFolder"),
+            EmbyItem(id: "lib_tv", name: "剧集", type: "CollectionFolder")
+        ]
+        let thaiBL = makeItem(
+            id: "th_bl",
+            name: "校园心动泰腐剧",
+            originalTitle: "ซีรีส์วายยอดนิยม",
+            type: "Series",
+            genres: ["爱情", "剧情"],
+            communityRating: 9.1,
+            productionYear: 2025,
+            studios: [EmbyNameIdPair(id: "gmm", name: "GMMTV")]
+        )
+        let koreanIdol = makeItem(
+            id: "kr_idol",
+            name: "财阀千金恋爱记",
+            originalTitle: "재벌집 로맨스",
+            type: "Series",
+            genres: ["爱情", "喜剧"],
+            communityRating: 8.8,
+            productionYear: 2025,
+            studios: [EmbyNameIdPair(id: "tvn", name: "tvN")]
+        )
+        let parasite = makeItem(
+            id: "kr_parasite",
+            name: "寄生虫",
+            originalTitle: "기생충",
+            type: "Movie",
+            genres: ["剧情", "惊悚"],
+            communityRating: 8.5,
+            criticRating: 99,
+            productionYear: 2019
+        )
+        let badGenius = makeItem(
+            id: "th_bad_genius",
+            name: "天才枪手",
+            originalTitle: "ฉลาดเกมส์โกง",
+            type: "Movie",
+            genres: ["惊悚", "犯罪", "剧情"],
+            communityRating: 7.6,
+            criticRating: 92,
+            productionYear: 2017
+        )
+        let westernPrestige = makeItem(
+            id: "us_succession",
+            name: "继承之战",
+            originalTitle: "Succession",
+            type: "Series",
+            genres: ["剧情"],
+            communityRating: 8.3,
+            criticRating: 95,
+            productionYear: 2018,
+            childCount: 4
+        )
+
+        let ratings: [String: MultiPlatformRatings] = [
+            "th_bl": MultiPlatformRatings(tmdb: 9.1, tmdbVotes: 180, imdb: 9.0, imdbVotes: 1_800, countries: ["Thailand"]),
+            "kr_idol": MultiPlatformRatings(tmdb: 8.8, tmdbVotes: 240, imdb: 8.6, imdbVotes: 2_600, countries: ["South Korea"]),
+            "kr_parasite": MultiPlatformRatings(tmdb: 8.5, tmdbVotes: 18_000, imdb: 8.5, imdbVotes: 1_000_000, rottenTomatoesCritics: 99, rottenTomatoesAudience: 90, metacritic: 96, letterboxd: 4.5, rogerEbert: 4.0, awardsSummary: "Won 4 Oscars. 309 wins & 265 nominations total", countries: ["South Korea"]),
+            "th_bad_genius": MultiPlatformRatings(tmdb: 7.6, tmdbVotes: 900, imdb: 7.6, imdbVotes: 26_000, rottenTomatoesCritics: 92, metacritic: 72, letterboxd: 3.9, countries: ["Thailand"]),
+            "us_succession": MultiPlatformRatings(tmdb: 8.3, tmdbVotes: 1_900, imdb: 8.8, imdbVotes: 290_000, rottenTomatoesCritics: 95, metacritic: 89, awardsSummary: "Won 19 Primetime Emmys", countries: ["United States"])
+        ]
+
+        let thaiAudit = HomeHeroCurator.audit(thaiBL, libraryName: "剧集", referenceYear: 2026, multiPlatformRatings: ratings["th_bl"])
+        let krIdolAudit = HomeHeroCurator.audit(koreanIdol, libraryName: "剧集", referenceYear: 2026, multiPlatformRatings: ratings["kr_idol"])
+        let parasiteAudit = HomeHeroCurator.audit(parasite, libraryName: "电影", referenceYear: 2026, multiPlatformRatings: ratings["kr_parasite"])
+        let badGeniusAudit = HomeHeroCurator.audit(badGenius, libraryName: "电影", referenceYear: 2026, multiPlatformRatings: ratings["th_bad_genius"])
+        let successionAudit = HomeHeroCurator.audit(westernPrestige, libraryName: "剧集", referenceYear: 2026, multiPlatformRatings: ratings["us_succession"])
+
+        #expect(thaiAudit.isThaiOrSEASeries)
+        #expect(thaiAudit.isIdolOrBLFiltered)
+        #expect(krIdolAudit.isKoreanSeries)
+        #expect(krIdolAudit.isIdolOrBLFiltered)
+        #expect(!parasiteAudit.isIdolOrBLFiltered)
+        #expect(!badGeniusAudit.isIdolOrBLFiltered)
+        #expect(parasiteAudit.score > krIdolAudit.score + 120)
+        #expect(successionAudit.score > thaiAudit.score + 140)
+
+        let selected = HomeHeroCurator.selectHeroItems(
+            libraryViews: views,
+            latestByLibrary: [
+                "lib_tv": [thaiBL, koreanIdol, westernPrestige],
+                "lib_movies": [parasite, badGenius]
+            ],
+            ratingsByItemId: ratings,
+            maxCount: 8,
+            referenceYear: 2026
+        )
+        let ids = selected.map(\.id)
+        #expect(ids.contains("kr_parasite"))
+        #expect(ids.contains("us_succession"))
+        #expect(ids.contains("th_bad_genius"))
+        #expect(!ids.contains("th_bl"))
+        #expect(!ids.contains("kr_idol"))
+    }
+
+    @Test("Professional critic platforms heavily outweigh fan-only audience scores")
+    func professionalCriticsOutweighCrowdOnlyRatings() {
+        let criticDarling = MultiPlatformRatings(
+            tmdb: 7.4, tmdbVotes: 4_000,
+            imdb: 7.7, imdbVotes: 160_000,
+            rottenTomatoesCritics: 96,
+            rottenTomatoesAudience: 79,
+            trakt: 74,
+            metacritic: 91,
+            letterboxd: 4.2,
+            rogerEbert: 4.0,
+            awardsSummary: "Won 2 Oscars. 45 wins & 80 nominations total"
+        )
+        let fanBrigaded = MultiPlatformRatings(
+            tmdb: 8.9, tmdbVotes: 900,
+            imdb: 8.6, imdbVotes: 4_200,
+            rottenTomatoesCritics: 52,
+            rottenTomatoesAudience: 95,
+            trakt: 88,
+            metacritic: 49
+        )
+
+        let evalCritic = MultiPlatformRatings.evaluate(criticDarling, fallbackTMDB: 7.4, fallbackCriticRating: 96, isMovie: true)
+        let evalFan = MultiPlatformRatings.evaluate(fanBrigaded, fallbackTMDB: 8.9, fallbackCriticRating: 52, isMovie: true)
+
+        #expect(evalCritic.professionalCriticCount == 4)
+        #expect(evalCritic.hasMajorAwards)
+        #expect((evalCritic.weightedScore ?? 0) > 8.6)
+        #expect((evalFan.weightedScore ?? 10) < 6.5)
+        #expect(evalFan.isRatingInflated)
+        #expect(evalCritic.consensusDelta > evalFan.consensusDelta + 90)
+    }
+
+    @Test("IMDbOfficialRatingsStore stream-scans gzipped TSV for exact rating and vote counts")
+    func imdbOfficialStoreScansGzipTSV() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("donby-imdb-tsv-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let gzURL = tempDir.appendingPathComponent("title.ratings.tsv.gz")
+        let tsv = """
+        tconst\taverageRating\tnumVotes
+        tt0111161\t9.3\t2950000
+        tt0903747\t9.5\t2310000
+        tt9999999\t9.8\t42
+        """
+        guard let gz = gzopen(gzURL.path, "wb") else {
+            Issue.record("Failed to open gzip file for writing")
+            return
+        }
+        let bytes = Array(tsv.utf8)
+        _ = gzwrite(gz, bytes, UInt32(bytes.count))
+        gzclose(gz)
+
+        let results = IMDbOfficialRatingsStore.scanGzipTSV(at: gzURL, targetIds: ["tt0111161", "tt9999999", "tt0000000"])
+        #expect(results.count == 2)
+        #expect(results["tt0111161"] == .init(rating: 9.3, votes: 2_950_000))
+        #expect(results["tt9999999"] == .init(rating: 9.8, votes: 42))
+        #expect(results["tt0000000"] == nil)
     }
 }

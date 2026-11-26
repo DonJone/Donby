@@ -145,6 +145,8 @@ public protocol DonbyAppUIExtensionPlugin: AnyObject {
     func resetHomeShelves()
     /// Returns explicit anime-hall state (`true` = Anime Hall, `false` = Normal Hall) when this plugin owns the server, or `nil` for standard Emby auto-detection.
     func isAnimeModeActive(for server: EmbyServerConfig) -> Bool?
+    /// Lazily resolves missing `imdbId`s (mapped by `EmbyItem.id`) for extension items that only carry `tmdbId` in summary payloads.
+    func resolveImdbIds(for items: [EmbyItem], server: EmbyServerConfig, maxCount: Int) async -> [String: String]
     func authenticateAndConfigureServer(
         draft: EmbyServerConfig,
         loginCode: String?,

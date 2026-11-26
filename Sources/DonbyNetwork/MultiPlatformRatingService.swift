@@ -1,13 +1,15 @@
 import Foundation
 import DonbyCore
 
-/// Fetches and caches multi-platform ratings (TMDB, IMDb, Rotten Tomatoes Critics/Audience,
-/// Trakt, Metacritic, Letterboxd) for home hero curation.
+/// Fetches and caches multi-platform ratings across professional critic and audience platforms
+/// (Metacritic, Rotten Tomatoes Critics/Audience, Letterboxd, RogerEbert, IMDb + exact votes,
+/// Trakt + votes, TMDB + votes, plus major awards & production countries) for home hero curation.
 ///
 /// - Primary mode: MDBList batch API (`POST https://api.mdblist.com/tmdb/{movie|show}/?apikey=...`)
 ///   when an API key is configured in Settings or `DONBY_MDBLIST_API_KEY`.
-/// - Zero-key fallback: Stremio Cinemeta (`https://v3-cinemeta.strem.io/meta/{movie|series}/{imdbId}.json`)
-///   for items carrying an `Imdb` provider ID, providing real IMDb scores with zero configuration.
+/// - Zero-key enrichment: IMDb official daily ratings dataset (`IMDbOfficialRatingsStore` for exact
+///   `imdb + imdbVotes`) + Stremio Cinemeta (`awards`, `country`, `imdbRating`) for all items with
+///   native or bridge-resolved `imdbId`.
 /// - All results are persisted to a `DONBY_HOME`-isolated disk cache (14-day TTL).
 public actor MultiPlatformRatingService {
     public static let shared = MultiPlatformRatingService()
@@ -18,21 +20,22 @@ public actor MultiPlatformRatingService {
 
     private let session: URLSession = {
         let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 4.0
-        cfg.timeoutIntervalForResource = 8.0
+        cfg.timeoutIntervalForRequest = 4.5
+        cfg.timeoutIntervalForResource = 9.0
         cfg.waitsForConnectivity = false
         return URLSession(configuration: cfg)
     }()
 
     // MARK: - Cache Keys
 
-    public nonisolated static func canonicalCacheKey(for item: EmbyItem) -> String? {
+    public nonisolated static func canonicalCacheKey(for item: EmbyItem, resolvedImdbId: String? = nil) -> String? {
         if let tmdb = resolvedProviderId(in: item.providerIds, key: "tmdb") {
             let kind = item.isSeries ? "show" : "movie"
             return "tmdb:\(kind):\(tmdb)"
         }
-        if let imdb = resolvedProviderId(in: item.providerIds, key: "imdb") {
-            return "imdb:\(imdb.lowercased())"
+        if let imdb = resolvedImdbId ?? resolvedProviderId(in: item.providerIds, key: "imdb") {
+            let clean = imdb.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if clean.hasPrefix("tt") { return "imdb:\(clean)" }
         }
         return nil
     }
@@ -52,23 +55,37 @@ public actor MultiPlatformRatingService {
     // MARK: - Public API
 
     /// Returns any already-cached multi-platform ratings mapped by `EmbyItem.id`.
-    public func cachedRatingsByItemId(for items: [EmbyItem]) -> [String: MultiPlatformRatings] {
+    public func cachedRatingsByItemId(
+        for items: [EmbyItem],
+        resolvedImdbIds: [String: String] = [:]
+    ) -> [String: MultiPlatformRatings] {
         loadDiskCacheIfNeeded()
         let now = Date()
         var result: [String: MultiPlatformRatings] = [:]
         for item in items {
-            guard let key = Self.canonicalCacheKey(for: item),
-                  let entry = memoryCache[key],
-                  now.timeIntervalSince(entry.fetchedAt) < Self.cacheTTL else { continue }
-            result[item.id] = entry
+            let bridgedImdb = resolvedImdbIds[item.id]?.lowercased()
+            if let key = Self.canonicalCacheKey(for: item, resolvedImdbId: bridgedImdb),
+               let entry = memoryCache[key],
+               now.timeIntervalSince(entry.fetchedAt) < Self.cacheTTL {
+                result[item.id] = entry
+                continue
+            }
+            if let imdb = bridgedImdb ?? Self.resolvedProviderId(in: item.providerIds, key: "imdb")?.lowercased(),
+               imdb.hasPrefix("tt"),
+               let entry = memoryCache["imdb:\(imdb)"],
+               now.timeIntervalSince(entry.fetchedAt) < Self.cacheTTL {
+                result[item.id] = entry
+            }
         }
         return result
     }
 
-    /// Enriches uncached hero candidates with multi-platform ratings and returns the combined map keyed by `EmbyItem.id`.
+    /// Enriches uncached hero candidates with multi-platform ratings, exact IMDb vote counts,
+    /// awards, and production countries, returning the combined map keyed by `EmbyItem.id`.
     public func enrichRatings(
         for items: [EmbyItem],
         mdblistAPIKey: String?,
+        resolvedImdbIds: [String: String] = [:],
         maxFetchCount: Int = 40
     ) async -> [String: MultiPlatformRatings] {
         loadDiskCacheIfNeeded()
@@ -80,8 +97,21 @@ public actor MultiPlatformRatingService {
         var uncachedImdbOnly: [(item: EmbyItem, imdbId: String, cacheKey: String)] = []
         var seenKeys = Set<String>()
 
+        func effectiveImdb(for item: EmbyItem) -> String? {
+            if let bridged = resolvedImdbIds[item.id]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+               bridged.hasPrefix("tt") {
+                return bridged
+            }
+            if let native = Self.resolvedProviderId(in: item.providerIds, key: "imdb")?.lowercased(),
+               native.hasPrefix("tt") {
+                return native
+            }
+            return nil
+        }
+
         for item in items {
-            guard let key = Self.canonicalCacheKey(for: item) else { continue }
+            let imdb = effectiveImdb(for: item)
+            guard let key = Self.canonicalCacheKey(for: item, resolvedImdbId: imdb) else { continue }
             if let existing = memoryCache[key], now.timeIntervalSince(existing.fetchedAt) < Self.cacheTTL {
                 continue
             }
@@ -97,77 +127,105 @@ public actor MultiPlatformRatingService {
                 } else {
                     uncachedMovies.append((item, tmdbId, key))
                 }
-            } else if let imdb = Self.resolvedProviderId(in: item.providerIds, key: "imdb"),
-                      imdb.lowercased().hasPrefix("tt") {
-                uncachedImdbOnly.append((item, imdb.lowercased(), key))
+            } else if let imdb {
+                uncachedImdbOnly.append((item, imdb, key))
             }
         }
 
         var didMutate = false
 
+        // 1. Primary path: MDBList 8-platform batch API when API key is configured.
         if let apiKey = resolvedKey {
-            // Primary path: MDBList batch API (1 request per media type for up to 40 items)
             if !uncachedMovies.isEmpty {
                 let fetched = await fetchMDBListBatch(mediaType: "movie", tmdbIds: uncachedMovies.map(\.tmdbId), apiKey: apiKey)
                 for (tmdbId, rating) in fetched {
-                    memoryCache["tmdb:movie:\(tmdbId)"] = rating
-                    if let imdb = rating.imdbId?.lowercased(), !imdb.isEmpty {
-                        memoryCache["imdb:\(imdb)"] = rating
-                    }
+                    store(rating, keys: ["tmdb:movie:\(tmdbId)", rating.imdbId.map { "imdb:\($0.lowercased())" }])
                     didMutate = true
                 }
             }
             if !uncachedShows.isEmpty {
                 let fetched = await fetchMDBListBatch(mediaType: "show", tmdbIds: uncachedShows.map(\.tmdbId), apiKey: apiKey)
                 for (tmdbId, rating) in fetched {
-                    memoryCache["tmdb:show:\(tmdbId)"] = rating
-                    if let imdb = rating.imdbId?.lowercased(), !imdb.isEmpty {
-                        memoryCache["imdb:\(imdb)"] = rating
-                    }
+                    store(rating, keys: ["tmdb:show:\(tmdbId)", rating.imdbId.map { "imdb:\($0.lowercased())" }])
                     didMutate = true
                 }
             }
             if !uncachedImdbOnly.isEmpty {
                 let fetched = await fetchMDBListImdbBatch(imdbIds: uncachedImdbOnly.map(\.imdbId), apiKey: apiKey)
                 for (imdbId, rating) in fetched {
-                    memoryCache["imdb:\(imdbId.lowercased())"] = rating
+                    store(rating, keys: ["imdb:\(imdbId.lowercased())"])
                     didMutate = true
                 }
             }
-        } else {
-            // Zero-key fallback: fetch real IMDb ratings from Stremio Cinemeta for items with IMDb IDs.
-            var cinemetaTargets: [(imdbId: String, isSeries: Bool, cacheKeys: [String])] = []
-            for item in items {
-                guard let imdb = Self.resolvedProviderId(in: item.providerIds, key: "imdb")?.lowercased(),
-                      imdb.hasPrefix("tt") else { continue }
-                let primaryKey = Self.canonicalCacheKey(for: item) ?? "imdb:\(imdb)"
-                if let existing = memoryCache[primaryKey], now.timeIntervalSince(existing.fetchedAt) < Self.cacheTTL {
-                    continue
-                }
-                if cinemetaTargets.contains(where: { $0.imdbId == imdb }) { continue }
-                var keys = [primaryKey]
-                let imdbKey = "imdb:\(imdb)"
-                if !keys.contains(imdbKey) { keys.append(imdbKey) }
-                cinemetaTargets.append((imdb, item.isSeries, keys))
-                if cinemetaTargets.count >= min(18, maxFetchCount) { break }
+        }
+
+        // 2. Zero-key IMDb official vote-depth store + Cinemeta awards/country enrichment.
+        var imdbLookupIds: [String] = []
+        var imdbToCacheKeys: [String: [String]] = [:]
+        var cinemetaTargets: [(imdbId: String, isSeries: Bool, cacheKeys: [String])] = []
+
+        for item in items {
+            let bridged = effectiveImdb(for: item)
+            let primaryKey = Self.canonicalCacheKey(for: item, resolvedImdbId: bridged)
+            let existing = primaryKey.flatMap { memoryCache[$0] }
+            guard let imdb = bridged ?? existing?.imdbId?.lowercased(), imdb.hasPrefix("tt") else { continue }
+
+            var keys: [String] = []
+            if let primaryKey { keys.append(primaryKey) }
+            let imdbKey = "imdb:\(imdb)"
+            if !keys.contains(imdbKey) { keys.append(imdbKey) }
+            imdbToCacheKeys[imdb] = keys
+
+            let needsOfficialVotes = (existing?.imdbVotes ?? 0) == 0
+            if needsOfficialVotes && !imdbLookupIds.contains(imdb) {
+                imdbLookupIds.append(imdb)
             }
 
-            if !cinemetaTargets.isEmpty {
-                let fetched = await fetchCinemetaRatings(targets: cinemetaTargets)
-                for (keys, rating) in fetched {
-                    for k in keys {
-                        memoryCache[k] = rating
-                    }
-                    didMutate = true
-                }
+            let needsCinemetaMeta = existing == nil
+                || (existing?.awardsSummary == nil && existing?.countries == nil)
+            if needsCinemetaMeta && cinemetaTargets.count < min(20, maxFetchCount)
+                && !cinemetaTargets.contains(where: { $0.imdbId == imdb }) {
+                cinemetaTargets.append((imdb, item.isSeries, keys))
             }
+        }
+
+        let imdbLookupSnapshot = imdbLookupIds
+        let cinemetaSnapshot = cinemetaTargets
+        async let officialTask = IMDbOfficialRatingsStore.shared.lookup(imdbIds: imdbLookupSnapshot)
+        async let cinemetaTask = cinemetaSnapshot.isEmpty
+            ? []
+            : fetchCinemetaMetadata(targets: cinemetaSnapshot)
+
+        let officialMap = await officialTask
+        let cinemetaList = await cinemetaTask
+
+        for (imdbId, entry) in officialMap {
+            let keys = imdbToCacheKeys[imdbId] ?? ["imdb:\(imdbId)"]
+            var merged = keys.compactMap { memoryCache[$0] }.first ?? MultiPlatformRatings(imdbId: imdbId, fetchedAt: now)
+            merged.imdb = entry.rating
+            merged.imdbVotes = entry.votes
+            merged.imdbId = imdbId
+            merged.fetchedAt = now
+            store(merged, keys: keys.map(Optional.some))
+            didMutate = true
+        }
+
+        for (keys, meta) in cinemetaList {
+            var merged = keys.compactMap { memoryCache[$0] }.first ?? MultiPlatformRatings(imdbId: meta.imdbId, fetchedAt: now)
+            if merged.imdb == nil, let score = meta.imdb { merged.imdb = score }
+            if let awards = meta.awardsSummary, !awards.isEmpty { merged.awardsSummary = awards }
+            if let countries = meta.countries, !countries.isEmpty { merged.countries = countries }
+            if merged.imdbId == nil { merged.imdbId = meta.imdbId }
+            merged.fetchedAt = now
+            store(merged, keys: keys.map(Optional.some))
+            didMutate = true
         }
 
         if didMutate {
             saveDiskCache()
         }
 
-        return cachedRatingsByItemId(for: items)
+        return cachedRatingsByItemId(for: items, resolvedImdbIds: resolvedImdbIds)
     }
 
     // MARK: - MDBList Batch Client
@@ -228,9 +286,9 @@ public actor MultiPlatformRatingService {
         return map
     }
 
-    // MARK: - Zero-Key Cinemeta Fallback
+    // MARK: - Zero-Key Cinemeta Metadata (IMDb Rating + Major Awards + Production Country)
 
-    private func fetchCinemetaRatings(
+    private func fetchCinemetaMetadata(
         targets: [(imdbId: String, isSeries: Bool, cacheKeys: [String])]
     ) async -> [([String], MultiPlatformRatings)] {
         await withTaskGroup(of: ([String], MultiPlatformRatings)?.self) { group in
@@ -251,14 +309,24 @@ public actor MultiPlatformRatingService {
                           let http = resp as? HTTPURLResponse,
                           (200...299).contains(http.statusCode),
                           let parsed = try? JSONDecoder().decode(CinemetaMetaResponseDTO.self, from: data),
-                          let ratingStr = parsed.meta?.imdbRating,
-                          let imdbScore = Double(ratingStr),
-                          imdbScore > 0 && imdbScore <= 10.0 else {
+                          let meta = parsed.meta else {
+                        return nil
+                    }
+                    let imdbScore = meta.imdbRating.flatMap(Double.init).flatMap { ($0 > 0 && $0 <= 10.0) ? $0 : nil }
+                    let awards = meta.awards?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let countries: [String]? = meta.country.map { raw in
+                        raw.split(separator: ",")
+                            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                            .filter { !$0.isEmpty }
+                    }
+                    guard imdbScore != nil || !(awards ?? "").isEmpty || !(countries ?? []).isEmpty else {
                         return nil
                     }
                     let mp = MultiPlatformRatings(
                         imdb: imdbScore,
                         imdbId: target.imdbId,
+                        awardsSummary: (awards?.isEmpty == false) ? awards : nil,
+                        countries: (countries?.isEmpty == false) ? countries : nil,
                         fetchedAt: Date()
                     )
                     return (target.cacheKeys, mp)
@@ -285,6 +353,12 @@ public actor MultiPlatformRatingService {
 
     // MARK: - Helpers & Disk Persistence
 
+    private func store(_ rating: MultiPlatformRatings, keys: [String?]) {
+        for case let key? in keys where !key.isEmpty {
+            memoryCache[key] = rating
+        }
+    }
+
     private func resolveAPIKey(_ configured: String?) -> String? {
         if let trimmed = configured?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty {
             return trimmed
@@ -297,7 +371,7 @@ public actor MultiPlatformRatingService {
     }
 
     private func cacheFileURL() -> URL {
-        DonbyStoragePaths.cachesDirectoryURL.appendingPathComponent("multi_platform_ratings_v1.json")
+        DonbyStoragePaths.cachesDirectoryURL.appendingPathComponent("multi_platform_ratings_v2.json")
     }
 
     private func loadDiskCacheIfNeeded() {
@@ -340,12 +414,19 @@ private struct MDBListEntryDTO: Decodable {
     let tmdbid: Int?
     let ids: IDsDTO?
     let score: Int?
+    let country: String?
     let ratings: [RatingItemDTO]?
 
     func toMultiPlatformRatings() -> MultiPlatformRatings {
+        let parsedCountries = country.map { raw in
+            raw.split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
         var result = MultiPlatformRatings(
             mdblistScore: score,
             imdbId: imdbid ?? ids?.imdb,
+            countries: (parsedCountries?.isEmpty == false) ? parsedCountries : nil,
             fetchedAt: Date()
         )
         for r in ratings ?? [] {
@@ -376,6 +457,8 @@ private struct MDBListEntryDTO: Decodable {
                 else if let s = r.score, s > 0 { result.metacritic = s }
             case "letterboxd":
                 if let v = r.value, v > 0 { result.letterboxd = v }
+            case "rogerebert":
+                if let v = r.value, v > 0 && v <= 4.0 { result.rogerEbert = v }
             default:
                 break
             }
@@ -387,6 +470,8 @@ private struct MDBListEntryDTO: Decodable {
 private struct CinemetaMetaResponseDTO: Decodable {
     struct MetaDTO: Decodable {
         let imdbRating: String?
+        let awards: String?
+        let country: String?
     }
     let meta: MetaDTO?
 }

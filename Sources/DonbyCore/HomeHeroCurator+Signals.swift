@@ -2,22 +2,44 @@ import Foundation
 
 extension HomeHeroCurator {
     enum OriginClass {
-        case foreign
+        case western
+        case japanese
+        case korean
+        case thaiOrSEA
         case domestic
         case unknown
     }
 
     // MARK: - Keyword Tables
 
-    static let foreignLibraryKeywords: [String] = [
-        "欧美", "美剧", "英剧", "日剧", "韩剧", "日韩", "海外", "外剧", "外语",
-        "泰剧", "欧洲", "好莱坞", "hollywood", "foreign", "western",
-        "korean", "japanese", "kdrama", "jdrama", "us/uk", "uk/us"
+    static let westernLibraryKeywords: [String] = [
+        "欧美", "美剧", "英剧", "欧洲", "好莱坞", "hollywood", "western", "us/uk", "uk/us", "hbo", "bbc"
+    ]
+
+    static let japaneseLibraryKeywords: [String] = [
+        "日剧", "日本", "japanese", "jdrama"
+    ]
+
+    static let koreanLibraryKeywords: [String] = [
+        "韩剧", "韩国", "日韩", "korean", "kdrama"
+    ]
+
+    static let thaiLibraryKeywords: [String] = [
+        "泰剧", "泰国", "东南亚", "thai", "lakorn", "腐剧", "泰腐"
     ]
 
     static let domesticLibraryKeywords: [String] = [
         "国产", "华语", "大陆", "内地", "国剧", "短剧", "微短剧", "网剧",
         "国产剧", "内地剧", "中文剧", "港台"
+    ]
+
+    static let koreanStudioKeywords: [String] = [
+        "tvn", "jtbc", "studio dragon", "sbs", "mbc", "kbs", "ocn", "ena", "wavve", "tving", "coupang play"
+    ]
+
+    static let thaiStudioKeywords: [String] = [
+        "gmmtv", "gmm25", "be on cloud", "one31", "channel 3", "ch3", "ch7", "nadao",
+        "domundi", "me mind y", "wabi sabi", "star hunter", "change2561", "idol factory", "copy a bangkok", "gdh"
     ]
 
     static let animeLibraryKeywords: [String] = [
@@ -63,8 +85,15 @@ extension HomeHeroCurator {
         "横店", "快手", "抖音", "红果", "番茄", "九州", "点众", "容量", "麦芽", "微短剧"
     ]
 
+    /// Universal idol / romance / soap / melodrama genres scrutinized heavily on Korean, Thai, and Domestic series.
     static let domesticIdolGenres: [String] = [
-        "古偶", "仙侠", "甜宠", "都市", "爱情", "romance", "soap", "肥皂剧", "言情", "偶像"
+        "古偶", "仙侠", "甜宠", "都市", "爱情", "romance", "soap", "肥皂剧", "言情", "偶像", "melodrama", "浪漫", "狗血"
+    ]
+
+    /// Explicit BL / Y-series / idol fandom signals (heavily filtered on hero unless backed by extraordinary critical acclaim).
+    static let blAndIdolFandomKeywords: [String] = [
+        "boys' love", "boys love", "y-series", "lakorn", "泰腐", "腐剧", "耽美", "耽改",
+        "同性恋情", "校园恋爱", "先婚后爱", "契约恋爱", "财阀恋", "霸道总裁", "甜宠剧", "偶像剧", "恋综", "双男主", "gl剧", "bl剧"
     ]
 
     static let prestigeGenres: [String] = [
@@ -114,8 +143,6 @@ extension HomeHeroCurator {
     }
 
     /// Determines whether anime content is allowed on the homepage (hero & pushed shelves).
-    /// - `explicitAnimeMode`: non-nil for multi-hall servers (e.g. UHD Normal Hall = `false`, Anime Hall = `true`).
-    /// - For standard servers (`nil`), returns `true` only when the server name or >= 50% of libraries are anime-focused.
     public static func isAnimeFocusedServer(
         serverName: String? = nil,
         libraryViews: [EmbyItem] = [],
@@ -154,41 +181,95 @@ extension HomeHeroCurator {
         return nil
     }
 
-    static func detectOrigin(item: EmbyItem, libraryLower: String) -> OriginClass {
-        let libIsForeign = foreignLibraryKeywords.contains { libraryLower.contains($0) }
-        let libIsDomestic = domesticLibraryKeywords.contains { libraryLower.contains($0) }
+    static func detectOrigin(
+        item: EmbyItem,
+        libraryLower: String,
+        externalCountries: [String]? = nil
+    ) -> OriginClass {
+        // 1. Explicit production country metadata (e.g. Cinemeta / MDBList) is the most authoritative signal.
+        if let countries = externalCountries, !countries.isEmpty {
+            let joined = countries.map { $0.lowercased() }.joined(separator: " | ")
+            if joined.contains("thailand") || joined.contains("philippines") || joined.contains("vietnam") || joined.contains("indonesia") {
+                return .thaiOrSEA
+            }
+            if joined.contains("south korea") || joined.contains("korea") {
+                return .korean
+            }
+            if joined.contains("japan") {
+                return .japanese
+            }
+            if joined.contains("united states") || joined.contains("united kingdom") || joined.contains("canada")
+                || joined.contains("france") || joined.contains("germany") || joined.contains("spain")
+                || joined.contains("italy") || joined.contains("australia") || joined.contains("sweden")
+                || joined.contains("denmark") || joined.contains("norway") || joined.contains("ireland")
+                || joined.contains("new zealand") || joined.contains("poland") {
+                return .western
+            }
+            if joined.contains("china") || joined.contains("hong kong") || joined.contains("taiwan") {
+                return .domestic
+            }
+        }
 
+        // 2. Network / studio markers (distinguish Thai BL & K-drama studios even under generic "剧集" libraries).
+        let studioLower = (item.studios ?? []).compactMap { $0.name?.lowercased() }.joined(separator: " ")
+        if !studioLower.isEmpty {
+            if thaiStudioKeywords.contains(where: { studioLower.contains($0) }) { return .thaiOrSEA }
+            if koreanStudioKeywords.contains(where: { studioLower.contains($0) }) { return .korean }
+        }
+
+        // 3. Original title Unicode script detection (precise regional split).
         if let orig = item.originalTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !orig.isEmpty {
-            let origHasForeign = containsForeignScript(orig)
+            if containsThaiScript(orig) { return .thaiOrSEA }
+            if containsHangul(orig) { return .korean }
+            if containsKana(orig) { return .japanese }
+            let origHasWestern = containsWesternForeignScript(orig)
             let origHasCJK = containsCJK(orig)
-            if origHasForeign && !origHasCJK {
-                return .foreign
+            if origHasWestern && !origHasCJK {
+                return .western
             }
-            if origHasForeign && origHasCJK {
-                if containsKanaOrHangul(orig) || libIsForeign {
-                    return .foreign
-                }
-            }
-            if origHasCJK && !origHasForeign {
-                return libIsForeign ? .foreign : .domestic
+            if origHasCJK && !origHasWestern {
+                if japaneseLibraryKeywords.contains(where: { libraryLower.contains($0) }) { return .japanese }
+                if koreanLibraryKeywords.contains(where: { libraryLower.contains($0) }) { return .korean }
+                if thaiLibraryKeywords.contains(where: { libraryLower.contains($0) }) { return .thaiOrSEA }
+                return .domestic
             }
         }
 
-        if libIsForeign && !libIsDomestic {
-            return .foreign
-        }
-        if libIsDomestic && !libIsForeign {
-            return .domestic
-        }
+        // 4. Library name classification.
+        if thaiLibraryKeywords.contains(where: { libraryLower.contains($0) }) { return .thaiOrSEA }
+        if koreanLibraryKeywords.contains(where: { libraryLower.contains($0) }) { return .korean }
+        if japaneseLibraryKeywords.contains(where: { libraryLower.contains($0) }) { return .japanese }
+        if westernLibraryKeywords.contains(where: { libraryLower.contains($0) }) { return .western }
+        if domesticLibraryKeywords.contains(where: { libraryLower.contains($0) }) { return .domestic }
 
+        // 5. Display name fallback.
         let name = item.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if containsForeignScript(name) && !containsCJK(name) {
-            return .foreign
-        }
-        if containsCJK(name) && item.isSeries {
-            return .domestic
-        }
+        if containsThaiScript(name) { return .thaiOrSEA }
+        if containsHangul(name) { return .korean }
+        if containsKana(name) { return .japanese }
+        if containsWesternForeignScript(name) && !containsCJK(name) { return .western }
+        if containsCJK(name) && item.isSeries { return .domestic }
         return .unknown
+    }
+
+    static func hasIdolBLOrRomanceSignals(
+        item: EmbyItem,
+        libraryLower: String,
+        genresLower: [String]
+    ) -> (hasIdolRomanceGenre: Bool, hasExplicitBLOrFandom: Bool) {
+        let hasIdolRomanceGenre = genresLower.contains { g in
+            domesticIdolGenres.contains { g.contains($0) }
+        }
+        let nameLower = item.name.lowercased()
+        let taglineLower = (item.taglines ?? []).joined(separator: " ").lowercased()
+        let overviewPrefix = String((item.overview ?? "").prefix(220)).lowercased()
+        let studioLower = (item.studios ?? []).compactMap { $0.name?.lowercased() }.joined(separator: " ")
+
+        let hasExplicitBL = blAndIdolFandomKeywords.contains { kw in
+            nameLower.contains(kw) || libraryLower.contains(kw) || taglineLower.contains(kw) || overviewPrefix.contains(kw) || genresLower.contains(where: { $0.contains(kw) })
+        } || thaiStudioKeywords.contains { studioLower.contains($0) }
+
+        return (hasIdolRomanceGenre, hasExplicitBL)
     }
 
     static func countCheapWebDramaSignals(
@@ -243,9 +324,7 @@ extension HomeHeroCurator {
     static func containsCJK(_ text: String) -> Bool {
         for scalar in text.unicodeScalars {
             let v = scalar.value
-            if (0x4E00...0x9FFF).contains(v) || (0x3400...0x4DBF).contains(v) {
-                return true
-            }
+            if (0x4E00...0x9FFF).contains(v) || (0x3400...0x4DBF).contains(v) { return true }
         }
         return false
     }
@@ -254,32 +333,41 @@ extension HomeHeroCurator {
         var count = 0
         for scalar in text.unicodeScalars {
             let v = scalar.value
-            if (0x4E00...0x9FFF).contains(v) || (0x3400...0x4DBF).contains(v) {
-                count += 1
-            }
+            if (0x4E00...0x9FFF).contains(v) || (0x3400...0x4DBF).contains(v) { count += 1 }
         }
         return count
     }
 
-    static func containsKanaOrHangul(_ text: String) -> Bool {
+    static func containsKana(_ text: String) -> Bool {
         for scalar in text.unicodeScalars {
-            let v = scalar.value
-            if (0x3040...0x30FF).contains(v) || (0xAC00...0xD7AF).contains(v) || (0x1100...0x11FF).contains(v) {
-                return true
-            }
+            if (0x3040...0x30FF).contains(scalar.value) { return true }
         }
         return false
     }
 
-    static func containsForeignScript(_ text: String) -> Bool {
-        if containsKanaOrHangul(text) { return true }
+    static func containsHangul(_ text: String) -> Bool {
+        for scalar in text.unicodeScalars {
+            let v = scalar.value
+            if (0xAC00...0xD7AF).contains(v) || (0x1100...0x11FF).contains(v) { return true }
+        }
+        return false
+    }
+
+    static func containsThaiScript(_ text: String) -> Bool {
+        for scalar in text.unicodeScalars {
+            if (0x0E00...0x0E7F).contains(scalar.value) { return true }
+        }
+        return false
+    }
+
+    static func containsWesternForeignScript(_ text: String) -> Bool {
         var latinLetters = 0
         for scalar in text.unicodeScalars {
             let v = scalar.value
+            // Cyrillic, Greek, Arabic, Devanagari, Latin Extended (excluding Thai/Hangul/Kana)
             if (0x0400...0x04FF).contains(v)
                 || (0x0370...0x03FF).contains(v)
                 || (0x0600...0x06FF).contains(v)
-                || (0x0E00...0x0E7F).contains(v)
                 || (0x0900...0x097F).contains(v)
                 || (0x00C0...0x024F).contains(v) {
                 return true
