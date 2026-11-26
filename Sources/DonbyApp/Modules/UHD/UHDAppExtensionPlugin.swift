@@ -399,6 +399,12 @@ public final class UHDAppExtensionPlugin: DonbyAppUIExtensionPlugin {
         UHDModuleManager.shared.resetHomeShelves()
     }
 
+    public func isAnimeModeActive(for server: EmbyServerConfig) -> Bool? {
+        let uhd = UHDModuleManager.shared
+        guard uhd.isActive(for: server) else { return nil }
+        return uhd.currentLibraryMode(for: server.id) == .anime
+    }
+
     public func authenticateAndConfigureServer(
         draft: EmbyServerConfig,
         loginCode: String?,
@@ -496,11 +502,11 @@ public final class UHDAppExtensionPlugin: DonbyAppUIExtensionPlugin {
         guard let server, uhd.isActive(for: server) else { return [] }
         let activeMode = uhd.currentLibraryMode(for: server.id)
         var result: [HomeShelfSection] = []
-        if !uhd.hotItems.isEmpty {
-            result.append(HomeShelfSection(id: "uhd_hot", title: activeMode.hotTitle, kind: .poster, items: uhd.hotItems))
-        }
-        if activeMode == .normal, !uhd.animeHotItems.isEmpty {
-            result.append(HomeShelfSection(id: "uhd_anime_hot", title: "热门动漫", kind: .poster, items: uhd.animeHotItems))
+        let filteredHot = activeMode == .normal
+            ? uhd.hotItems.filter { !HomeHeroCurator.isAnimeOrAnimation($0) }
+            : uhd.hotItems
+        if !filteredHot.isEmpty {
+            result.append(HomeShelfSection(id: "uhd_hot", title: activeMode.hotTitle, kind: .poster, items: filteredHot))
         }
         return result
     }

@@ -62,6 +62,10 @@ public struct MultiPlatformRatings: Codable, Sendable, Equatable {
         public let isLowConsensus: Bool
         /// True when >= 3 authoritative platforms agree on high quality.
         public let isStrongConsensus: Bool
+        /// True when a perfect / near-perfect rating (>= 9.4 movie or >= 9.5 series, or 9.6+ overall) lacks verified multi-platform vote backing.
+        public let isSuspiciousPerfectRating: Bool
+        /// True when rating appears inflated (unverified high single-source, fan-brigaded anime, or audience-vs-critic divergence).
+        public let isRatingInflated: Bool
     }
 
     /// Evaluates weighted consensus across all available platforms, merging optional Emby fallback fields
@@ -71,7 +75,9 @@ public struct MultiPlatformRatings: Codable, Sendable, Equatable {
         fallbackTMDB: Double?,
         fallbackCriticRating: Double?,
         hasImdbProviderId: Bool = false,
-        isDomesticSeries: Bool = false
+        isDomesticSeries: Bool = false,
+        isMovie: Bool = false,
+        isAnime: Bool = false
     ) -> Evaluation {
         let rawTMDB = validTenScale(external?.tmdb) ?? validTenScale(fallbackTMDB)
         let rawIMDb = validTenScale(external?.imdb)
@@ -85,17 +91,113 @@ public struct MultiPlatformRatings: Codable, Sendable, Equatable {
         let rawMetacritic = (external?.metacritic).flatMap { ($0 > 0 && $0 <= 100) ? $0 : nil }
         let rawLetterboxd = (external?.letterboxd).flatMap { ($0 > 0 && $0 <= 5.0) ? $0 : nil }
 
-        // Apply Bayesian vote-count shrinkage when vote counts are available so 5-vote 9.5 entries don't game rankings.
-        let effIMDb = rawIMDb.map { bayesianShrink(score: $0, votes: external?.imdbVotes, prior: 6.2, minVotes: 1500) }
-        let effTMDB = rawTMDB.map { bayesianShrink(score: $0, votes: external?.tmdbVotes, prior: 6.2, minVotes: 250) }
-        let effTrakt = rawTrakt.map {
-            let tenScale = Double($0) / 10.0
-            return bayesianShrink(score: tenScale, votes: external?.traktVotes, prior: 6.4, minVotes: 300)
+        let imdbVotes = external?.imdbVotes ?? 0
+        let tmdbVotes = external?.tmdbVotes ?? 0
+
+        // Count authoritative non-TMDB platforms up front so verification checks can use it.
+        var preAuthCount = 0
+        if rawIMDb != nil { preAuthCount += 1 }
+        if rawRTCritics != nil { preAuthCount += 1 }
+        if rawMetacritic != nil { preAuthCount += 1 }
+        if rawRTAudience != nil { preAuthCount += 1 }
+        if rawTrakt != nil { preAuthCount += 1 }
+        if rawLetterboxd != nil { preAuthCount += 1 }
+
+        // Perfect / near-perfect score verification:
+        // Real cinema/TV history tops out around IMDb 9.3 (movies) / 9.5 (series).
+        // Scores >= 9.4 (movies) or >= 9.5 (series) MUST be backed by multi-platform consensus,
+        // substantial vote depth, and non-contradicting critics.
+        let extremeThreshold: Double = isMovie ? 9.4 : 9.5
+        let highestRawCommunity = max(rawTMDB ?? 0, rawIMDb ?? 0)
+        let criticSupportsExtreme: Bool = {
+            if let mc = rawMetacritic, mc < 75 { return false }
+            if let rt = rawRTCritics, rt < 75 { return false }
+            return rawMetacritic != nil || rawRTCritics != nil
+        }()
+        let hasSubstantialVotes = imdbVotes >= 15_000
+            || tmdbVotes >= 1_500
+            || (imdbVotes >= 5_000 && (rawRTCritics ?? 0) >= 85)
+        let extremeVerified = preAuthCount >= 2 && hasSubstantialVotes && criticSupportsExtreme
+
+        var isSuspiciousPerfectRating = false
+        var isRatingInflated = false
+        var suspiciousPenalty: Double = 0
+
+        if highestRawCommunity >= extremeThreshold && !extremeVerified {
+            isSuspiciousPerfectRating = true
+            isRatingInflated = true
+            if highestRawCommunity >= 9.8 {
+                // Exact 10.0 / 9.9 / 9.8 without high-vote multi-platform verification is almost always 1-vote junk or brigading.
+                suspiciousPenalty -= 44
+            } else if highestRawCommunity >= 9.6 {
+                suspiciousPenalty -= 34
+            } else {
+                suspiciousPenalty -= 24
+            }
+        } else if let lb = rawLetterboxd, lb >= 4.8, preAuthCount < 2 {
+            isSuspiciousPerfectRating = true
+            isRatingInflated = true
+            suspiciousPenalty -= 24
+        }
+
+        // Apply strict Bayesian vote-count shrinkage (higher thresholds for anime to counter fan brigading).
+        let imdbMinVotes: Double = isAnime ? 6000 : 2500
+        let tmdbMinVotes: Double = isAnime ? 1500 : 500
+        let traktMinVotes: Double = isAnime ? 1200 : 400
+
+        var effIMDb = rawIMDb.map { raw -> Double in
+            let shrunk = bayesianShrink(score: raw, votes: external?.imdbVotes, prior: 6.2, minVotes: imdbMinVotes)
+            if external?.imdbVotes == nil && raw >= extremeThreshold && !extremeVerified {
+                return min(shrunk, 6.6)
+            }
+            return shrunk
+        }
+
+        var effTMDB = rawTMDB.map { raw -> Double in
+            if let votes = external?.tmdbVotes, votes > 0 {
+                let shrunk = bayesianShrink(score: raw, votes: votes, prior: 6.2, minVotes: tmdbMinVotes)
+                if raw >= extremeThreshold && !extremeVerified {
+                    return min(shrunk, raw >= 9.8 ? 6.2 : 6.7)
+                }
+                return shrunk
+            }
+            // Unknown vote count (Emby communityRating / UHD rating):
+            // Deflate suspicious perfect scores harshly and compress unverified high scores above 8.4.
+            if raw >= 9.8 && !extremeVerified {
+                return 6.2
+            }
+            if raw >= extremeThreshold && !extremeVerified {
+                return 6.7
+            }
+            if preAuthCount == 0 && raw > 8.4 {
+                return 8.4 + (raw - 8.4) * 0.42
+            }
+            return raw
+        }
+
+        var effTrakt = rawTrakt.map { raw -> Double in
+            let tenScale = Double(raw) / 10.0
+            let shrunk = bayesianShrink(score: tenScale, votes: external?.traktVotes, prior: 6.3, minVotes: traktMinVotes)
+            if external?.traktVotes == nil && tenScale >= 9.4 && !extremeVerified {
+                return 6.8
+            }
+            return shrunk
         }
         let effRTCritics = rawRTCritics.map { Double($0) / 10.0 }
-        let effRTAudience = rawRTAudience.map { Double($0) / 10.0 }
+        var effRTAudience = rawRTAudience.map { Double($0) / 10.0 }
         let effMetacritic = rawMetacritic.map { Double($0) / 10.0 }
         let effLetterboxd = rawLetterboxd.map { $0 * 2.0 }
+
+        // Anime fan rating deflation: anime fanbases systematically over-rate shows by ~0.7–1.2 points.
+        if isAnime {
+            let animeDeflation = 0.75
+            if let v = effTMDB { effTMDB = max(1.0, v - animeDeflation) }
+            if let v = effTrakt { effTrakt = max(1.0, v - animeDeflation) }
+            if let v = effRTAudience { effRTAudience = max(1.0, v - animeDeflation) }
+            if let v = effIMDb, imdbVotes < 50_000 {
+                effIMDb = max(1.0, v - (imdbVotes == 0 ? 0.70 : 0.45))
+            }
+        }
 
         var weightedSum: Double = 0
         var weightTotal: Double = 0
@@ -120,44 +222,62 @@ public struct MultiPlatformRatings: Codable, Sendable, Equatable {
         add(effLetterboxd, weight: 0.08, authoritative: true)
 
         let weightedScore = weightTotal > 0 ? (weightedSum / weightTotal) : nil
-        let imdbVotes = external?.imdbVotes ?? 0
 
-        var delta: Double = 0
+        var delta: Double = suspiciousPenalty
         var isLowConsensus = false
         var isStrongConsensus = false
 
         if let ws = weightedScore {
             // 1. Multi-platform consensus bonus / verification
-            if authCount >= 3 && ws >= 7.6 {
+            if authCount >= 3 && ws >= 7.6 && !isSuspiciousPerfectRating {
                 isStrongConsensus = true
-                delta += 26
-            } else if authCount >= 2 && ws >= 7.2 {
-                delta += 16
-            } else if authCount >= 1 && ws >= 7.0 {
-                delta += 8
+                delta += 28
+            } else if authCount >= 2 && ws >= 7.2 && !isSuspiciousPerfectRating {
+                delta += 18
+            } else if authCount >= 1 && ws >= 7.0 && !isSuspiciousPerfectRating {
+                delta += 9
             } else if authCount == 0 {
                 // Only TMDB present (no IMDb / RT / Metacritic / Trakt verification)
-                // If item doesn't even have an IMDb provider ID, apply stronger credibility penalty.
                 if isDomesticSeries {
-                    delta -= hasImdbProviderId ? 14 : 22
+                    delta -= hasImdbProviderId ? 16 : 24
                 } else {
-                    delta -= hasImdbProviderId ? 6 : 14
+                    delta -= hasImdbProviderId ? 8 : 16
+                }
+                // Extra inflation guard when single-source TMDB has unknown votes and suspiciously high score >= 9.0.
+                if let t = rawTMDB, t >= 9.0, external?.tmdbVotes == nil, !isSuspiciousPerfectRating {
+                    isRatingInflated = true
+                    delta -= 10
+                }
+                if isAnime, let t = rawTMDB, t >= 8.6 {
+                    isRatingInflated = true
+                    delta -= 16
                 }
             }
 
             // 2. Popularity / vote-depth confidence (IMDb votes)
             if imdbVotes >= 100_000 {
-                delta += 14
+                delta += 16
             } else if imdbVotes >= 30_000 {
-                delta += 10
+                delta += 11
             } else if imdbVotes >= 5_000 {
-                delta += 5
-            } else if let v = external?.imdbVotes, v > 0 && v < 400 {
-                // Extremely obscure title on IMDb
-                delta -= 12
+                delta += 6
+            } else if let v = external?.imdbVotes, v > 0 && v < 800 {
+                // Obscure / low-sample title on IMDb
+                delta -= 16
             }
 
-            // 3. Rotten / panned / low-consensus penalties
+            // 3. Audience-vs-critic divergence (fan-brigaded titles with weak critical reception)
+            let fanScore = max(rawTMDB ?? 0, effRTAudience ?? 0, rawTrakt.map { Double($0) / 10.0 } ?? 0)
+            let criticValues = [effRTCritics, effMetacritic].compactMap { $0 }
+            if !criticValues.isEmpty {
+                let avgCritic = criticValues.reduce(0, +) / Double(criticValues.count)
+                if fanScore >= 8.4 && avgCritic < 6.6 && (fanScore - avgCritic) >= 1.9 {
+                    isRatingInflated = true
+                    delta -= 18
+                }
+            }
+
+            // 4. Rotten / panned / low-consensus penalties
             if ws < 6.4 {
                 isLowConsensus = true
                 delta -= 24
@@ -178,11 +298,11 @@ public struct MultiPlatformRatings: Codable, Sendable, Equatable {
                 delta -= 16
             }
 
-            // 4. Bonus for certified-fresh / critically acclaimed multi-platform harmony
-            if let rt = rawRTCritics, rt >= 85, let aud = rawRTAudience, aud >= 80 {
+            // 5. Bonus for certified-fresh / critically acclaimed multi-platform harmony
+            if let rt = rawRTCritics, rt >= 85, let aud = rawRTAudience, aud >= 80, !isSuspiciousPerfectRating {
                 delta += 10
             }
-            if let mc = rawMetacritic, mc >= 78 {
+            if let mc = rawMetacritic, mc >= 78, !isSuspiciousPerfectRating {
                 delta += 8
             }
         }
@@ -194,7 +314,9 @@ public struct MultiPlatformRatings: Codable, Sendable, Equatable {
             imdbVotes: imdbVotes,
             consensusDelta: delta,
             isLowConsensus: isLowConsensus,
-            isStrongConsensus: isStrongConsensus
+            isStrongConsensus: isStrongConsensus,
+            isSuspiciousPerfectRating: isSuspiciousPerfectRating,
+            isRatingInflated: isRatingInflated
         )
     }
 

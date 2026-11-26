@@ -1,6 +1,6 @@
 # Module Map: Turbo Cache, Streaming & Network (`DonbyNetwork`)
 
-> Last synced: `v2.0.16`. Load this doc for `DonbyNetwork` streaming, seek latency, HTTP/2 Range, L1/L2 caching, detail-page preloading, Emby API (including standard Emby fallback when UHD extension is disabled), offline downloads, and channel-aware auto-updates. For optional `DonbyUHDModule` & `Modules/UHD`, load [uhd-module.md](uhd-module.md).
+> Last synced: `v2.0.17`. Load this doc for `DonbyNetwork` streaming, seek latency, HTTP/2 Range, L1/L2 caching, detail-page preloading, Emby API (including standard Emby fallback when UHD extension is disabled), offline downloads, and channel-aware auto-updates. For optional `DonbyUHDModule` & `Modules/UHD`, load [uhd-module.md](uhd-module.md).
 
 | If your task involves... | File | Entry Symbols |
 | :--- | :--- | :--- |

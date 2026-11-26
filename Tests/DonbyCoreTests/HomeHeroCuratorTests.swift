@@ -357,4 +357,154 @@ struct HomeHeroCuratorTests {
 
         #expect(selected.first?.id == "m_classic_extra")
     }
+
+    @Test("Unverified 10.0 / 9.8 perfect ratings are flagged suspicious and lose to verified classics")
+    func unverifiedPerfectRatingsFlaggedAndPenalized() {
+        let fakePerfectMovie = makeItem(
+            id: "m_fake_10",
+            name: "冷门满分刷分片",
+            originalTitle: "Obscure Perfect 10",
+            type: "Movie",
+            genres: ["剧情"],
+            communityRating: 10.0,
+            productionYear: 2025
+        )
+        let lowVoteBrigaded = makeItem(
+            id: "s_brigaded",
+            name: "开播刷分剧",
+            originalTitle: "Brigaded Launch Show",
+            type: "Series",
+            genres: ["剧情"],
+            communityRating: 9.7,
+            productionYear: 2026
+        )
+        let verifiedClassic = makeItem(
+            id: "m_verified",
+            name: "奥本海默",
+            originalTitle: "Oppenheimer",
+            type: "Movie",
+            genres: ["剧情", "历史"],
+            communityRating: 8.1,
+            criticRating: 93,
+            productionYear: 2023
+        )
+        let verifiedSeries = makeItem(
+            id: "s_breaking_bad",
+            name: "绝命毒师",
+            originalTitle: "Breaking Bad",
+            type: "Series",
+            genres: ["犯罪", "剧情"],
+            communityRating: 8.9,
+            criticRating: 96,
+            productionYear: 2008,
+            childCount: 5
+        )
+
+        let fakeAudit = HomeHeroCurator.audit(fakePerfectMovie, libraryName: "电影", referenceYear: 2026)
+        let brigadedMP = MultiPlatformRatings(tmdb: 9.7, tmdbVotes: 25, imdb: 9.7, imdbVotes: 120)
+        let brigadedAudit = HomeHeroCurator.audit(lowVoteBrigaded, libraryName: "欧美剧", referenceYear: 2026, multiPlatformRatings: brigadedMP)
+        let verifiedMP = MultiPlatformRatings(tmdb: 8.1, tmdbVotes: 9200, imdb: 8.3, imdbVotes: 850_000, rottenTomatoesCritics: 93, rottenTomatoesAudience: 91, metacritic: 90)
+        let verifiedAudit = HomeHeroCurator.audit(verifiedClassic, libraryName: "电影", referenceYear: 2026, multiPlatformRatings: verifiedMP)
+        let bbMP = MultiPlatformRatings(tmdb: 8.9, tmdbVotes: 14_000, imdb: 9.5, imdbVotes: 2_300_000, rottenTomatoesCritics: 96, rottenTomatoesAudience: 97, metacritic: 87)
+        let bbAudit = HomeHeroCurator.audit(verifiedSeries, libraryName: "欧美剧", referenceYear: 2026, multiPlatformRatings: bbMP)
+
+        #expect(fakeAudit.isSuspiciousPerfectRating)
+        #expect(fakeAudit.effectiveRating < 7.0)
+        #expect(brigadedAudit.isSuspiciousPerfectRating)
+        #expect(!verifiedAudit.isSuspiciousPerfectRating)
+        #expect(!bbAudit.isSuspiciousPerfectRating)
+        #expect(verifiedAudit.score > fakeAudit.score + 70)
+        #expect(bbAudit.score > brigadedAudit.score + 70)
+    }
+
+    @Test("Fan-brigaded audience-vs-critic divergence is penalized as inflated")
+    func audienceVsCriticDivergencePenalized() {
+        let brigadedMP = MultiPlatformRatings(
+            tmdb: 9.1,
+            tmdbVotes: 800,
+            imdb: 7.1,
+            imdbVotes: 12_000,
+            rottenTomatoesCritics: 46,
+            rottenTomatoesAudience: 94,
+            metacritic: 51
+        )
+        let eval = MultiPlatformRatings.evaluate(brigadedMP, fallbackTMDB: 9.1, fallbackCriticRating: 46, isMovie: true)
+        #expect(eval.isRatingInflated)
+        #expect(eval.consensusDelta < 0)
+    }
+
+    @Test("Non-anime servers and UHD Normal Hall exclude anime from hero; Anime Hall/server allows it with deflation")
+    func animeExclusionOnNonAnimeHomeAndNormalHall() {
+        let views = [
+            EmbyItem(id: "lib_m", name: "电影", type: "CollectionFolder"),
+            EmbyItem(id: "lib_us", name: "欧美剧", type: "CollectionFolder"),
+            EmbyItem(id: "lib_anime", name: "动漫", type: "CollectionFolder")
+        ]
+        let hypedAnime = makeItem(
+            id: "a_hyped",
+            name: "某某异世界转生神作",
+            originalTitle: "異世界転生アニメ",
+            type: "Series",
+            genres: ["动画", "奇幻"],
+            communityRating: 9.4,
+            productionYear: 2025,
+            studios: [EmbyNameIdPair(id: "st1", name: "MAPPA")]
+        )
+        let animeMovieInMovieLib = makeItem(
+            id: "a_movie",
+            name: "热门动漫剧场版",
+            originalTitle: "劇場版アニメ",
+            type: "Movie",
+            genres: ["动画", "动作"],
+            communityRating: 9.2,
+            productionYear: 2025
+        )
+        let normalClassic = makeItem(
+            id: "m_classic",
+            name: "盗梦空间",
+            originalTitle: "Inception",
+            type: "Movie",
+            genres: ["科幻", "动作"],
+            communityRating: 8.4,
+            criticRating: 87,
+            productionYear: 2010
+        )
+
+        // 1. Standard non-anime server
+        #expect(!HomeHeroCurator.isAnimeFocusedServer(serverName: "我的影视服", libraryViews: views, explicitAnimeMode: nil))
+        let nonAnimeSelected = HomeHeroCurator.selectHeroItems(
+            libraryViews: views,
+            latestByLibrary: [
+                "lib_m": [animeMovieInMovieLib, normalClassic],
+                "lib_anime": [hypedAnime]
+            ],
+            maxCount: 8,
+            referenceYear: 2026,
+            serverName: "我的影视服",
+            explicitAnimeMode: nil
+        )
+        #expect(nonAnimeSelected.map(\.id) == ["m_classic"])
+
+        // 2. UHD Normal Hall (explicitAnimeMode: false)
+        let normalHallSelected = HomeHeroCurator.selectHeroItems(
+            libraryViews: views,
+            latestByLibrary: [
+                "lib_m": [animeMovieInMovieLib, normalClassic],
+                "lib_anime": [hypedAnime]
+            ],
+            maxCount: 8,
+            referenceYear: 2026,
+            serverName: "UHDNow",
+            explicitAnimeMode: false
+        )
+        #expect(normalHallSelected.map(\.id) == ["m_classic"])
+
+        // 3. UHD Anime Hall (explicitAnimeMode: true) & Dedicated Anime Server
+        #expect(HomeHeroCurator.isAnimeFocusedServer(serverName: "二次元动漫服", libraryViews: views, explicitAnimeMode: nil))
+        let animeHallAudit = HomeHeroCurator.audit(hypedAnime, libraryName: "动漫", referenceYear: 2026, allowAnime: true)
+        #expect(animeHallAudit.isAnimeOrAnimation)
+        #expect(!animeHallAudit.isAnimeExcluded)
+        // Anime fan rating deflation reduces unverified 9.4 significantly
+        #expect(animeHallAudit.effectiveRating < 8.5)
+    }
 }

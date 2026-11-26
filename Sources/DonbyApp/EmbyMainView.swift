@@ -178,13 +178,25 @@ public struct EmbyMainView: View {
         if let extShelves = extCenter.plugin?.homeShelves(for: appState.activeServer) {
             result.append(contentsOf: extShelves)
         }
+        let allowAnimeOnHome = HomeHeroCurator.isAnimeFocusedServer(
+            serverName: appState.activeServer?.name,
+            libraryViews: appState.libraryViews,
+            explicitAnimeMode: appState.activeServer.flatMap { extCenter.plugin?.isAnimeModeActive(for: $0) }
+        )
         for lib in appState.libraryViews {
+            if !allowAnimeOnHome && HomeHeroCurator.isAnimeLibraryName(lib.name) {
+                continue
+            }
             if let items = appState.latestByLibrary[lib.id], !items.isEmpty {
+                let displayItems = allowAnimeOnHome
+                    ? items
+                    : items.filter { !HomeHeroCurator.isAnimeOrAnimation($0, libraryName: lib.name) }
+                guard !displayItems.isEmpty else { continue }
                 result.append(HomeShelfSection(
                     id: "lib_\(lib.id)",
                     title: lib.name,
                     kind: .poster,
-                    items: items,
+                    items: displayItems,
                     library: lib
                 ))
             }

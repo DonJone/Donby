@@ -342,16 +342,16 @@ extension AppState {
             async let topMoviesTask = EmbyClient.shared.fetchItems(
                 server: embyServerForHome,
                 includeItemTypes: "Movie",
-                sortBy: "CommunityRating,CriticRating",
+                sortBy: "CriticRating,CommunityRating",
                 sortOrder: "Descending",
-                limit: 20
+                limit: 36
             )
             async let topSeriesTask = EmbyClient.shared.fetchItems(
                 server: embyServerForHome,
                 includeItemTypes: "Series",
-                sortBy: "CommunityRating,CriticRating",
+                sortBy: "CriticRating,CommunityRating",
                 sortOrder: "Descending",
-                limit: 20
+                limit: 36
             )
 
             let views = initialViews
@@ -414,7 +414,9 @@ extension AppState {
                 nextUpItems: nextUps,
                 favoriteItems: favs,
                 latestByLibrary: latestMap,
-                extraHeroCandidates: topMovies + topSeries
+                extraHeroCandidates: topMovies + topSeries,
+                serverName: embyServerForHome.name,
+                explicitAnimeMode: nil
             )
         } catch {
             guard currentGen == homeLoadGeneration else { return }
@@ -433,16 +435,21 @@ extension AppState {
         nextUpItems: [EmbyItem],
         favoriteItems: [EmbyItem],
         latestByLibrary: [String: [EmbyItem]],
-        extraHeroCandidates: [EmbyItem] = []
+        extraHeroCandidates: [EmbyItem] = [],
+        serverName: String? = nil,
+        explicitAnimeMode: Bool? = nil
     ) {
         if self.latestByLibrary != latestByLibrary {
             self.latestByLibrary = latestByLibrary
         }
+        let resolvedServerName = serverName ?? self.servers.first(where: { $0.id == serverId })?.name
         let nextCarousel = HomeHeroCurator.selectHeroItems(
             libraryViews: libraryViews,
             latestByLibrary: latestByLibrary,
             extraCandidates: extraHeroCandidates,
-            fallbackResumes: resumeItems
+            fallbackResumes: resumeItems,
+            serverName: resolvedServerName,
+            explicitAnimeMode: explicitAnimeMode
         )
         if self.carouselItems != nextCarousel {
             self.carouselItems = nextCarousel
@@ -493,7 +500,9 @@ extension AppState {
                     latestByLibrary: latestByLibrary,
                     extraCandidates: extraHeroCandidates,
                     ratingsByItemId: enriched,
-                    fallbackResumes: resumeItems
+                    fallbackResumes: resumeItems,
+                    serverName: resolvedServerName,
+                    explicitAnimeMode: explicitAnimeMode
                 )
                 if self.carouselItems != curated {
                     self.carouselItems = curated

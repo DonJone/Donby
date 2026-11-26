@@ -463,9 +463,6 @@ public final class UHDModuleManager: ObservableObject {
             async let statesTask = UHDStreamClient.shared.fetchPlaybackStates(server: resolvedServer, limit: 16)
             async let favTask = UHDStreamClient.shared.fetchFavorites(server: resolvedServer, limit: 24)
             async let hotTask = UHDStreamClient.shared.fetchHot(server: resolvedServer, limit: 20, mode: activeMode)
-            async let animeHotTask: [EmbyItem]? = activeMode == .normal
-                ? (try? await UHDStreamClient.shared.fetchAnimeHot(server: resolvedServer, limit: 20))
-                : []
 
             guard isCurrentGeneration() else { return }
             if appState.libraryViews != views { appState.libraryViews = views }
@@ -473,14 +470,13 @@ public final class UHDModuleManager: ObservableObject {
             let states = (try? await statesTask) ?? (resume: [], nextUp: [])
             let favs = (try? await favTask)?.items ?? []
             let hot = (try? await hotTask) ?? []
-            let animeHot = (await animeHotTask) ?? []
 
             guard isCurrentGeneration() else { return }
             if appState.resumeItems != states.resume { appState.resumeItems = states.resume }
             if appState.nextUpItems != states.nextUp { appState.nextUpItems = states.nextUp }
             if appState.favoriteItems != favs { appState.favoriteItems = favs }
             if self.hotItems != hot { self.hotItems = hot }
-            if self.animeHotItems != animeHot { self.animeHotItems = animeHot }
+            if !self.animeHotItems.isEmpty { self.animeHotItems = [] }
 
             let homePrewarmTargets = Array((states.resume + states.nextUp).filter { !$0.isSeries }.prefix(3))
             if !homePrewarmTargets.isEmpty {
@@ -496,11 +492,15 @@ public final class UHDModuleManager: ObservableObject {
             var topRatedCandidates: [EmbyItem] = []
             let hadCachedLatest = !appState.latestByLibrary.isEmpty
             let hideWatched = appState.hideWatchedInLatest
+            let allowAnime = (activeMode == .anime)
 
             await withTaskGroup(of: (String, [EmbyItem], [EmbyItem]).self) { group in
                 let targetSrv = workingServer
-                for (idx, view) in views.enumerated() {
-                    let fetchTopRated = idx < 4
+                var topFetchCount = 0
+                for view in views {
+                    let isAnimeCollection = HomeHeroCurator.isAnimeLibraryName(view.name)
+                    let fetchTopRated = (allowAnime || !isAnimeCollection) && topFetchCount < 4
+                    if fetchTopRated { topFetchCount += 1 }
                     group.addTask {
                         async let latestFetch = UHDStreamClient.shared.fetchCollectionItems(
                             server: targetSrv,
@@ -517,7 +517,7 @@ public final class UHDModuleManager: ObservableObject {
                                 mediaType: nil,
                                 sortBy: "rating",
                                 sortOrder: "desc",
-                                limit: 12
+                                limit: 24
                             ).items) ?? [])
                             : []
 
@@ -545,7 +545,9 @@ public final class UHDModuleManager: ObservableObject {
                 nextUpItems: states.nextUp,
                 favoriteItems: favs,
                 latestByLibrary: latestMap,
-                extraHeroCandidates: topRatedCandidates
+                extraHeroCandidates: topRatedCandidates,
+                serverName: workingServer.name,
+                explicitAnimeMode: allowAnime
             )
         } catch {
             guard isCurrentGeneration() else { return }

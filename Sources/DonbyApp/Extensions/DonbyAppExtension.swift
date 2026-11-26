@@ -143,6 +143,8 @@ public protocol DonbyAppUIExtensionPlugin: AnyObject {
     // AppState & Server Session Hooks
     func extraHomeItemLists() -> [[EmbyItem]]
     func resetHomeShelves()
+    /// Returns explicit anime-hall state (`true` = Anime Hall, `false` = Normal Hall) when this plugin owns the server, or `nil` for standard Emby auto-detection.
+    func isAnimeModeActive(for server: EmbyServerConfig) -> Bool?
     func authenticateAndConfigureServer(
         draft: EmbyServerConfig,
         loginCode: String?,

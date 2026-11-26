@@ -9,18 +9,16 @@ import Foundation
 public enum HomeHeroCurator {
     public struct AuditResult: Sendable, Equatable {
         public let score: Double
+        public let effectiveRating: Double
         public let isClassicMovie: Bool
         public let isForeignSeries: Bool
         public let isForeignMovie: Bool
         public let isDomesticSeries: Bool
         public let isCheapDomesticWebDrama: Bool
+        public let isAnimeOrAnimation: Bool
+        public let isAnimeExcluded: Bool
+        public let isSuspiciousPerfectRating: Bool
         public let reasons: [String]
-    }
-
-    private enum OriginClass {
-        case foreign
-        case domestic
-        case unknown
     }
 
     private struct EvaluatedCandidate {
@@ -29,55 +27,6 @@ public enum HomeHeroCurator {
         let sourceIndex: Int
         let audit: AuditResult
     }
-
-    // MARK: - Keyword Tables
-
-    private static let foreignLibraryKeywords: [String] = [
-        "欧美", "美剧", "英剧", "日剧", "韩剧", "日韩", "海外", "外剧", "外语",
-        "泰剧", "欧洲", "好莱坞", "hollywood", "foreign", "western",
-        "korean", "japanese", "kdrama", "jdrama", "us/uk", "uk/us", "anime", "日漫", "番剧"
-    ]
-
-    private static let domesticLibraryKeywords: [String] = [
-        "国产", "华语", "大陆", "内地", "国剧", "短剧", "微短剧", "网剧",
-        "国产剧", "内地剧", "中文剧", "国漫", "港台"
-    ]
-
-    private static let classicLibraryKeywords: [String] = [
-        "经典", "classic", "imdb", "top250", "top 250", "豆瓣", "高分",
-        "奥斯卡", "oscar", "影史", "masterpiece", "criterion", "必看"
-    ]
-
-    private static let cheapWebDramaKeywords: [String] = [
-        "短剧", "微短剧", "竖屏", "爽剧", "霸总", "赘婿", "战神", "龙王", "神医",
-        "闪婚", "甜宠", "虐恋", "重生之", "穿书", "攻略", "娇妻", "萌宝", "夫人她",
-        "离婚后", "替嫁", "总裁", "王爷", "皇叔", "偏宠", "独宠", "诱哄", "疯批",
-        "白月光", "黑莲花", "女配", "反派", "下山", "退婚", "签到", "系统",
-        "漫剧", "动态漫", "有声漫", "沙雕动画", "网大", "网络大电影", "网剧",
-        "一口气看完", "全集解说", "逆袭", "千金", "少爷", "大小姐", "小娇妻",
-        "真千金", "假千金", "闪婚后", "带球跑", "追妻", "火葬场", "团宠", "萌娃"
-    ]
-
-    private static let cheapWebDramaStudios: [String] = [
-        "横店", "快手", "抖音", "红果", "番茄", "九州", "点众", "容量", "麦芽", "微短剧"
-    ]
-
-    private static let domesticIdolGenres: [String] = [
-        "古偶", "仙侠", "甜宠", "都市", "爱情", "romance", "soap", "肥皂剧", "言情", "偶像"
-    ]
-
-    private static let prestigeGenres: [String] = [
-        "剧情", "drama", "科幻", "sci-fi", "science fiction", "悬疑", "mystery",
-        "惊悚", "thriller", "犯罪", "crime", "战争", "war", "历史", "history",
-        "传记", "biography", "纪录", "documentary", "冒险", "adventure", "奇幻", "fantasy"
-    ]
-
-    private static let varietyGenresAndKeywords: [String] = [
-        "综艺", "真人秀", "脱口秀", "晚会", "演唱会", "reality", "talk", "talk show", "news", "game show"
-    ]
-
-    /// 22 minutes in Emby ticks (1 tick = 100ns).
-    private static let shortEpisodeTicksThreshold: Int64 = 22 * 60 * 10_000_000
 
     // MARK: - Public API
 
@@ -89,10 +38,17 @@ public enum HomeHeroCurator {
         ratingsByItemId: [String: MultiPlatformRatings] = [:],
         fallbackResumes: [EmbyItem] = [],
         maxCount: Int = 8,
-        referenceYear: Int? = nil
+        referenceYear: Int? = nil,
+        serverName: String? = nil,
+        explicitAnimeMode: Bool? = nil
     ) -> [EmbyItem] {
         guard maxCount > 0 else { return [] }
         let refYear = referenceYear ?? Calendar.current.component(.year, from: Date())
+        let allowAnime = isAnimeFocusedServer(
+            serverName: serverName,
+            libraryViews: libraryViews,
+            explicitAnimeMode: explicitAnimeMode
+        )
 
         let viewNameById: [String: String] = Dictionary(
             uniqueKeysWithValues: libraryViews.map { ($0.id, $0.name) }
@@ -109,7 +65,6 @@ public enum HomeHeroCurator {
         var seq = 0
 
         func ingest(_ item: EmbyItem, libraryId: String?, libraryName: String?, libraryRank: Int) {
-            // Skip pure folder/collection entries that are not playable movies or series.
             if item.isFolder == true && !item.isSeries { return }
             let typeLower = item.type?.lowercased() ?? ""
             if typeLower == "collectionfolder" || typeLower == "folder" || typeLower == "boxset" || typeLower == "musicaudio" {
@@ -121,7 +76,8 @@ public enum HomeHeroCurator {
                 libraryName: libraryName,
                 referenceYear: refYear,
                 libraryRank: libraryRank,
-                multiPlatformRatings: ratingsByItemId[item.id]
+                multiPlatformRatings: ratingsByItemId[item.id],
+                allowAnime: allowAnime
             )
             let evaluated = EvaluatedCandidate(
                 item: item,
@@ -149,6 +105,7 @@ public enum HomeHeroCurator {
         for libId in orderedLibraryIds {
             guard let items = latestByLibrary[libId], !items.isEmpty else { continue }
             let libName = viewNameById[libId]
+            if !allowAnime && isAnimeLibraryName(libName) { continue }
             for (rank, item) in items.enumerated() {
                 ingest(item, libraryId: libId, libraryName: libName, libraryRank: rank)
             }
@@ -157,19 +114,23 @@ public enum HomeHeroCurator {
         for item in extraCandidates {
             let libId = item.parentId
             let libName = libId.flatMap { viewNameById[$0] }
+            if !allowAnime && isAnimeLibraryName(libName) { continue }
             ingest(item, libraryId: libId, libraryName: libName, libraryRank: .max)
         }
 
         // Deduplicated candidate pool from libraries.
         let libraryCandidates = Array(bestByDedupeKey.values)
+        let isHardExcluded: (EvaluatedCandidate) -> Bool = {
+            $0.audit.isCheapDomesticWebDrama || $0.audit.isAnimeExcluded
+        }
         let approved = libraryCandidates
-            .filter { !$0.audit.isCheapDomesticWebDrama && $0.audit.score >= 0 }
+            .filter { !isHardExcluded($0) && !$0.audit.isSuspiciousPerfectRating && $0.audit.score >= 0 }
             .sorted(by: candidateComparator)
         let secondary = libraryCandidates
-            .filter { !$0.audit.isCheapDomesticWebDrama && $0.audit.score < 0 }
+            .filter { !isHardExcluded($0) && ($0.audit.isSuspiciousPerfectRating || $0.audit.score < 0) }
             .sorted(by: candidateComparator)
         let rejected = libraryCandidates
-            .filter { $0.audit.isCheapDomesticWebDrama }
+            .filter { isHardExcluded($0) }
             .sorted(by: candidateComparator)
 
         var selected: [EmbyItem] = []
@@ -183,12 +144,8 @@ public enum HomeHeroCurator {
 
         // Pass 1: High-quality diverse picks from approved pool.
         for cand in approved where selected.count < maxCount {
-            if cand.audit.isDomesticSeries && domesticSeriesCount >= domesticSeriesSoftCap {
-                continue
-            }
-            if let libId = cand.libraryId, (perLibraryCount[libId] ?? 0) >= perLibrarySoftCap {
-                continue
-            }
+            if cand.audit.isDomesticSeries && domesticSeriesCount >= domesticSeriesSoftCap { continue }
+            if let libId = cand.libraryId, (perLibraryCount[libId] ?? 0) >= perLibrarySoftCap { continue }
             guard selectedIds.insert(cand.item.id).inserted else { continue }
             selected.append(cand.item)
             if let libId = cand.libraryId { perLibraryCount[libId, default: 0] += 1 }
@@ -198,37 +155,35 @@ public enum HomeHeroCurator {
         // Pass 2: Relax library cap on approved pool (keep domestic series capped at 2 if possible).
         for cand in approved where selected.count < maxCount {
             guard !selectedIds.contains(cand.item.id) else { continue }
-            if cand.audit.isDomesticSeries && domesticSeriesCount >= 2 {
-                continue
-            }
+            if cand.audit.isDomesticSeries && domesticSeriesCount >= 2 { continue }
             selectedIds.insert(cand.item.id)
             selected.append(cand.item)
             if cand.audit.isDomesticSeries { domesticSeriesCount += 1 }
         }
 
-        // Pass 3: Remaining approved items (including >2 acclaimed domestic series if needed).
+        // Pass 3: Remaining approved items.
         for cand in approved where selected.count < maxCount {
             guard selectedIds.insert(cand.item.id).inserted else { continue }
             selected.append(cand.item)
         }
 
-        // Pass 4: Non-rejected secondary items.
+        // Pass 4: Non-excluded secondary items.
         for cand in secondary where selected.count < maxCount {
             guard selectedIds.insert(cand.item.id).inserted else { continue }
             selected.append(cand.item)
         }
 
-        // Pass 5: Audited fallback resume items (avoiding cheap domestic web dramas).
+        // Pass 5: Audited fallback resume items (avoiding cheap domestic web dramas & excluded anime).
         if selected.count < maxCount && !fallbackResumes.isEmpty {
             let evaluatedResumes = fallbackResumes.enumerated().map { idx, item in
                 EvaluatedCandidate(
                     item: item,
                     libraryId: nil,
                     sourceIndex: seq + idx,
-                    audit: audit(item, libraryName: nil, referenceYear: refYear)
+                    audit: audit(item, libraryName: nil, referenceYear: refYear, allowAnime: allowAnime)
                 )
             }
-            for cand in evaluatedResumes.filter({ !$0.audit.isCheapDomesticWebDrama }).sorted(by: candidateComparator)
+            for cand in evaluatedResumes.filter({ !isHardExcluded($0) }).sorted(by: candidateComparator)
                 where selected.count < maxCount {
                 guard selectedIds.insert(cand.item.id).inserted else { continue }
                 selected.append(cand.item)
@@ -258,7 +213,8 @@ public enum HomeHeroCurator {
         libraryName: String? = nil,
         referenceYear: Int? = nil,
         libraryRank: Int = .max,
-        multiPlatformRatings: MultiPlatformRatings? = nil
+        multiPlatformRatings: MultiPlatformRatings? = nil,
+        allowAnime: Bool = false
     ) -> AuditResult {
         let refYear = referenceYear ?? Calendar.current.component(.year, from: Date())
         let typeLower = item.type?.lowercased() ?? ""
@@ -272,14 +228,17 @@ public enum HomeHeroCurator {
         let libLower = (libraryName ?? "").lowercased()
         let genresLower = (item.genres ?? []).map { $0.lowercased() }
 
+        let isAnime = isAnimeOrAnimation(item, libraryName: libraryName)
+        let isAnimeExcluded = isAnime && !allowAnime
+
         let origin = detectOrigin(item: item, libraryLower: libLower)
         let isForeignOrigin = (origin == .foreign)
         let isDomesticOrigin = (origin == .domestic)
         let isClassicLibrary = classicLibraryKeywords.contains { libLower.contains($0) }
 
-        let isForeignMovie = isMovie && isForeignOrigin
-        let isForeignSeries = isSeries && isForeignOrigin
-        let isDomesticSeries = isSeries && isDomesticOrigin
+        let isForeignMovie = isMovie && isForeignOrigin && !isAnime
+        let isForeignSeries = isSeries && isForeignOrigin && !isAnime
+        let isDomesticSeries = isSeries && isDomesticOrigin && !isAnime
 
         let hasImdbProvider = item.providerIds?.keys.contains(where: { $0.lowercased() == "imdb" }) == true
         let mpEval = MultiPlatformRatings.evaluate(
@@ -287,45 +246,68 @@ public enum HomeHeroCurator {
             fallbackTMDB: item.communityRating,
             fallbackCriticRating: item.criticRating,
             hasImdbProviderId: hasImdbProvider,
-            isDomesticSeries: isDomesticSeries
+            isDomesticSeries: isDomesticSeries,
+            isMovie: isMovie,
+            isAnime: isAnime
         )
-        let rating = mpEval.weightedScore ?? (item.communityRating ?? 0)
+        let rating = mpEval.weightedScore ?? 0
+        let trustAcclaimTier = !mpEval.isSuspiciousPerfectRating
 
         var score: Double = mpEval.consensusDelta
         var reasons: [String] = []
         if mpEval.consensusDelta != 0 {
             reasons.append("multi_platform_consensus(\(mpEval.authoritativePlatformCount)auth):\(Int(mpEval.consensusDelta))")
         }
+        if mpEval.isSuspiciousPerfectRating {
+            reasons.append("suspicious_perfect_rating_unverified")
+        }
+        if isAnimeExcluded {
+            score -= 120
+            reasons.append("anime_excluded_non_anime_home:-120")
+        }
         var isClassicMovie = false
         var isCheapDomesticWebDrama = false
 
         // 1. Media Type & Classic / Foreign Weighting
-        if isMovie {
+        if isAnime {
+            // Even when allowed (Anime server / Anime hall), avoid live-action foreign boosts;
+            // rely on deflated multi-platform quality + recency.
+            if allowAnime {
+                score += 12
+                if trustAcclaimTier && rating >= 7.8 {
+                    score += 18
+                    reasons.append("anime_acclaimed:+18")
+                } else if trustAcclaimTier && rating >= 7.2 {
+                    score += 10
+                    reasons.append("anime_good:+10")
+                }
+            }
+        } else if isMovie {
             score += 18
             reasons.append("movie:+18")
 
             if let age, age >= 5 {
-                if rating >= 8.0 {
+                if trustAcclaimTier && rating >= 8.0 {
                     isClassicMovie = true
                     score += 36
                     reasons.append("classic_movie_acclaimed:+36")
-                } else if rating >= 7.4 {
+                } else if trustAcclaimTier && rating >= 7.4 {
                     isClassicMovie = true
                     score += 26
                     reasons.append("classic_movie_high:+26")
-                } else if age >= 10 && rating >= 6.8 {
+                } else if age >= 10 && trustAcclaimTier && rating >= 6.8 {
                     isClassicMovie = true
                     score += 18
                     reasons.append("classic_movie_catalog:+18")
-                } else if isClassicLibrary && (rating == 0 || rating >= 6.5) {
+                } else if isClassicLibrary && trustAcclaimTier && (rating == 0 || rating >= 6.5) {
                     isClassicMovie = true
                     score += 20
                     reasons.append("classic_movie_library:+20")
                 }
-            } else if rating >= 7.8 {
+            } else if trustAcclaimTier && rating >= 7.8 {
                 score += 16
                 reasons.append("modern_movie_acclaimed:+16")
-            } else if rating >= 7.0 {
+            } else if trustAcclaimTier && rating >= 7.0 {
                 score += 8
                 reasons.append("modern_movie_good:+8")
             }
@@ -342,13 +324,13 @@ public enum HomeHeroCurator {
             score += 26
             reasons.append("foreign_series:+26")
 
-            if rating >= 8.2 {
+            if trustAcclaimTier && rating >= 8.2 {
                 score += 26
                 reasons.append("foreign_series_acclaimed:+26")
-            } else if rating >= 7.6 {
+            } else if trustAcclaimTier && rating >= 7.6 {
                 score += 18
                 reasons.append("foreign_series_high:+18")
-            } else if rating >= 7.0 {
+            } else if trustAcclaimTier && rating >= 7.0 {
                 score += 10
                 reasons.append("foreign_series_good:+10")
             } else if rating > 0 && rating < 6.0 {
@@ -356,36 +338,35 @@ public enum HomeHeroCurator {
                 reasons.append("foreign_series_low_rating:-14")
             }
 
-            if let age, age >= 5, rating >= 7.6 {
+            if let age, age >= 5, trustAcclaimTier, rating >= 7.6 {
                 score += 12
                 reasons.append("classic_foreign_series:+12")
             } else if let age, age <= 1 {
-                if rating >= 7.5 {
+                if trustAcclaimTier && rating >= 7.5 {
                     score += 20
                     reasons.append("hot_recent_foreign_series_high:+20")
-                } else if rating >= 6.8 || rating == 0 {
+                } else if trustAcclaimTier && (rating >= 6.8 || rating == 0) {
                     score += 14
                     reasons.append("hot_recent_foreign_series:+14")
                 }
-            } else if let age, age <= 3, rating >= 7.2 {
+            } else if let age, age <= 3, trustAcclaimTier, rating >= 7.2 {
                 score += 12
                 reasons.append("recent_foreign_series:+12")
             }
 
-            if item.status?.lowercased() == "continuing", (rating == 0 || rating >= 6.8) {
+            if item.status?.lowercased() == "continuing", trustAcclaimTier, (rating == 0 || rating >= 6.8) {
                 score += 8
                 reasons.append("continuing_foreign_series:+8")
             }
-            if libraryRank < 5, (age ?? 99) <= 2, (rating == 0 || rating >= 6.8) {
+            if libraryRank < 5, (age ?? 99) <= 2, trustAcclaimTier, (rating == 0 || rating >= 6.8) {
                 score += 8
                 reasons.append("fresh_hot_foreign_series:+8")
             }
-            if (item.childCount ?? 0) >= 2 && rating >= 7.0 {
+            if (item.childCount ?? 0) >= 2 && trustAcclaimTier && rating >= 7.0 {
                 score += 6
                 reasons.append("multi_season_foreign_series:+6")
             }
         } else if isSeries {
-            // Domestic or unknown-origin series
             if isDomesticSeries {
                 score -= 14
                 reasons.append("domestic_series_scrutiny:-14")
@@ -486,8 +467,9 @@ public enum HomeHeroCurator {
             reasons.append("has_overview:+3")
         }
 
-        if rating > 0 {
-            let ratingSlope = min(18.0, max(-24.0, (rating - 6.5) * 5.0))
+        if rating > 0 && !mpEval.isSuspiciousPerfectRating {
+            let cappedRating = mpEval.isStrongConsensus ? min(rating, 9.3) : min(rating, 8.9)
+            let ratingSlope = min(14.0, max(-24.0, (cappedRating - 6.5) * 4.5))
             score += ratingSlope
         }
 
@@ -521,11 +503,15 @@ public enum HomeHeroCurator {
 
         return AuditResult(
             score: score,
+            effectiveRating: rating,
             isClassicMovie: isClassicMovie,
             isForeignSeries: isForeignSeries,
             isForeignMovie: isForeignMovie,
             isDomesticSeries: isDomesticSeries,
             isCheapDomesticWebDrama: isCheapDomesticWebDrama,
+            isAnimeOrAnimation: isAnime,
+            isAnimeExcluded: isAnimeExcluded,
+            isSuspiciousPerfectRating: mpEval.isSuspiciousPerfectRating,
             reasons: reasons
         )
     }
@@ -536,186 +522,12 @@ public enum HomeHeroCurator {
         if lhs.audit.score != rhs.audit.score {
             return lhs.audit.score > rhs.audit.score
         }
-        let lRating = lhs.item.communityRating ?? 0
-        let rRating = rhs.item.communityRating ?? 0
-        if lRating != rRating {
-            return lRating > rRating
+        if lhs.audit.effectiveRating != rhs.audit.effectiveRating {
+            return lhs.audit.effectiveRating > rhs.audit.effectiveRating
         }
         if lhs.sourceIndex != rhs.sourceIndex {
             return lhs.sourceIndex < rhs.sourceIndex
         }
         return lhs.item.id < rhs.item.id
-    }
-
-    private static func normalizedDedupeKey(for item: EmbyItem) -> String {
-        let cleanName = item.name
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        let year = resolvedYear(for: item) ?? 0
-        let kind = item.isSeries ? "s" : (item.type?.lowercased() ?? "m")
-        return "\(kind)|\(cleanName)|\(year)"
-    }
-
-    private static func resolvedYear(for item: EmbyItem) -> Int? {
-        if let y = item.productionYear, y >= 1900 && y <= 2100 {
-            return y
-        }
-        if let premiere = item.premiereDate, premiere.count >= 4,
-           let y = Int(premiere.prefix(4)), y >= 1900 && y <= 2100 {
-            return y
-        }
-        return nil
-    }
-
-    private static func detectOrigin(item: EmbyItem, libraryLower: String) -> OriginClass {
-        let libIsForeign = foreignLibraryKeywords.contains { libraryLower.contains($0) }
-        let libIsDomestic = domesticLibraryKeywords.contains { libraryLower.contains($0) }
-
-        if let orig = item.originalTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !orig.isEmpty {
-            let origHasForeign = containsForeignScript(orig)
-            let origHasCJK = containsCJK(orig)
-            if origHasForeign && !origHasCJK {
-                return .foreign
-            }
-            if origHasForeign && origHasCJK {
-                // Mixed Japanese (Kanji + Kana) or foreign title with CJK subtitle -> foreign if Kana/Hangul present.
-                if containsKanaOrHangul(orig) || libIsForeign {
-                    return .foreign
-                }
-            }
-            if origHasCJK && !origHasForeign {
-                return libIsForeign ? .foreign : .domestic
-            }
-        }
-
-        if libIsForeign && !libIsDomestic {
-            return .foreign
-        }
-        if libIsDomestic && !libIsForeign {
-            return .domestic
-        }
-
-        let name = item.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if containsForeignScript(name) && !containsCJK(name) {
-            return .foreign
-        }
-        if containsCJK(name) && item.isSeries {
-            // Without foreign originalTitle or foreign library context, CJK-only series defaults to domestic scrutiny.
-            return .domestic
-        }
-        return .unknown
-    }
-
-    private static func countCheapWebDramaSignals(
-        item: EmbyItem,
-        libraryLower: String,
-        genresLower: [String]
-    ) -> Int {
-        var hits = 0
-        let nameLower = item.name.lowercased()
-        let taglineLower = (item.taglines ?? []).joined(separator: " ").lowercased()
-        let overviewPrefix = String((item.overview ?? "").prefix(160)).lowercased()
-        let studioLower = (item.studios ?? []).compactMap { $0.name?.lowercased() }.joined(separator: " ")
-
-        for kw in cheapWebDramaKeywords {
-            if nameLower.contains(kw) || libraryLower.contains(kw) || genresLower.contains(where: { $0.contains(kw) }) {
-                hits += 1
-            } else if taglineLower.contains(kw) || overviewPrefix.contains(kw) {
-                hits += 1
-            }
-        }
-
-        if !studioLower.isEmpty {
-            for studio in cheapWebDramaStudios where studioLower.contains(studio) {
-                hits += 1
-            }
-        }
-
-        return hits
-    }
-
-    private static func hasWideBackdrop(_ item: EmbyItem) -> Bool {
-        if let uhdBackdrop = item.uhdBackdropURL, !uhdBackdrop.isEmpty { return true }
-        if let tags = item.backdropImageTags, !tags.isEmpty { return true }
-        if let parentTags = item.parentBackdropImageTags, !parentTags.isEmpty { return true }
-        if let thumb = item.uhdThumbURL, !thumb.isEmpty { return true }
-        if let thumbTag = item.imageTags?["Thumb"], !thumbTag.isEmpty { return true }
-        return false
-    }
-
-    private static func hasPosterOrThumb(_ item: EmbyItem) -> Bool {
-        if let uhdPoster = item.uhdPosterURL, !uhdPoster.isEmpty { return true }
-        if let primary = item.imageTags?["Primary"], !primary.isEmpty { return true }
-        return false
-    }
-
-    private static func hasClearLogo(_ item: EmbyItem) -> Bool {
-        if let uhdLogo = item.uhdLogoURL, !uhdLogo.isEmpty { return true }
-        if let logo = item.imageTags?["Logo"], !logo.isEmpty { return true }
-        return false
-    }
-
-    private static func containsCJK(_ text: String) -> Bool {
-        for scalar in text.unicodeScalars {
-            let v = scalar.value
-            if (0x4E00...0x9FFF).contains(v) || (0x3400...0x4DBF).contains(v) {
-                return true
-            }
-        }
-        return false
-    }
-
-    private static func cjkCharacterCount(_ text: String) -> Int {
-        var count = 0
-        for scalar in text.unicodeScalars {
-            let v = scalar.value
-            if (0x4E00...0x9FFF).contains(v) || (0x3400...0x4DBF).contains(v) {
-                count += 1
-            }
-        }
-        return count
-    }
-
-    private static func containsKanaOrHangul(_ text: String) -> Bool {
-        for scalar in text.unicodeScalars {
-            let v = scalar.value
-            if (0x3040...0x30FF).contains(v) || (0xAC00...0xD7AF).contains(v) || (0x1100...0x11FF).contains(v) {
-                return true
-            }
-        }
-        return false
-    }
-
-    private static func containsForeignScript(_ text: String) -> Bool {
-        if containsKanaOrHangul(text) { return true }
-        var latinLetters = 0
-        for scalar in text.unicodeScalars {
-            let v = scalar.value
-            // Cyrillic, Greek, Arabic, Thai, Devanagari, Latin Extended
-            if (0x0400...0x04FF).contains(v)
-                || (0x0370...0x03FF).contains(v)
-                || (0x0600...0x06FF).contains(v)
-                || (0x0E00...0x0E7F).contains(v)
-                || (0x0900...0x097F).contains(v)
-                || (0x00C0...0x024F).contains(v) {
-                return true
-            }
-            if (0x0041...0x005A).contains(v) || (0x0061...0x007A).contains(v) {
-                latinLetters += 1
-            }
-        }
-        guard latinLetters >= 2 else { return false }
-        // Ignore pure technical / season / Roman numeral tokens like "4K", "HD", "S01", "TV", "II", "III".
-        let stripped = text
-            .replacingOccurrences(of: #"(?i)\b(4k|8k|hd|uhd|hdr|s\d{1,2}|e\d{1,3}|tv|ova|oad|sp|ii|iii|iv|vi|vii|viii|ix|x)\b"#, with: "", options: .regularExpression)
-        var meaningfulLatin = 0
-        for scalar in stripped.unicodeScalars {
-            let v = scalar.value
-            if (0x0041...0x005A).contains(v) || (0x0061...0x007A).contains(v) {
-                meaningfulLatin += 1
-                if meaningfulLatin >= 2 { return true }
-            }
-        }
-        return false
     }
 }

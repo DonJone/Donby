@@ -3,7 +3,7 @@
 > Parent: [app/INDEX.md](INDEX.md). Covers 7 files: `EmbyMainView.swift`, `MainCarouselView.swift`, `Views/MLibListView.swift`, and `DetailView.swift` + 3 extensions.
 
 ## 1. File Inventory & Responsibilities
-- `Sources/DonbyApp/EmbyMainView.swift` — Home root router (`selectedLibrary` -> `MLibListView`, unconfigured hero, error banner, inline debounced search, `NativeEmbyHomeView`), `homeShelves` builder (merges deduplicated `resumeItems` + `nextUpItems` into `继续观看`), `embyTopToolbar`, and shared `SectionHeaderView`.
+- `Sources/DonbyApp/EmbyMainView.swift` — Home root router (`selectedLibrary` -> `MLibListView`, unconfigured hero, error banner, inline debounced search, `NativeEmbyHomeView`), `homeShelves` builder (merges deduplicated `resumeItems` + `nextUpItems` into `继续观看` and excludes anime shelves/items on non-anime servers and UHD Normal Hall via `HomeHeroCurator.isAnimeFocusedServer`), `embyTopToolbar`, and shared `SectionHeaderView`.
 - `Sources/DonbyApp/Views/MLibListView.swift` — Library category grid page with sort/filter/genre popover, `DonbySearchPillField`, `NativePosterGridView`, and dual-path (`DonbyAppExtensionCenter` cursor vs `EmbyClient` offset) pagination.
 - `Sources/DonbyApp/MainCarouselView.swift` — Hero featured carousel (`365...540` responsive height, `swipePublisher`) and `CarouselHostingView: NSHostingView<AnyView>` (direct responder-chain `scrollWheel(with:)` two-finger horizontal swipe with per-gesture axis locking).
 - `Sources/DonbyApp/DetailView.swift` — Detail root container, `@State` properties, `body` `ZStack(alignment: .top)` with static `HeroTopEdgeBackdropView` + pinned `floatingTopNavBar` + `DetailScrollViewTopInsetFix`.

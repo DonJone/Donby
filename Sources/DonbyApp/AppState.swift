@@ -584,10 +584,13 @@ public final class AppState: ObservableObject {
             self.favoriteItems = snap.favoriteItems
             self.latestByLibrary = snap.latestByLibrary
             if !snap.latestByLibrary.isEmpty {
+                let explicitAnime = DonbyAppExtensionCenter.shared.plugin?.isAnimeModeActive(for: server)
                 self.carouselItems = HomeHeroCurator.selectHeroItems(
                     libraryViews: snap.libraryViews,
                     latestByLibrary: snap.latestByLibrary,
-                    fallbackResumes: snap.resumeItems
+                    fallbackResumes: snap.resumeItems,
+                    serverName: server.name,
+                    explicitAnimeMode: explicitAnime
                 )
             } else {
                 self.carouselItems = snap.carouselItems
