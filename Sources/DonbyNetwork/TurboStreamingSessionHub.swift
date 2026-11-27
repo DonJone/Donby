@@ -166,6 +166,7 @@ public enum DonbyNetworkSession {
 internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     static let shared = TurboStreamingSessionHub()
     static let streamLaneCount = 4
+    static let maxStreamLaneCount = 8
 
     struct StreamLaneTelemetry {
         var ewmaTTFB: TimeInterval = 0.65
@@ -207,8 +208,8 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
         self.apiURLSession = URLSession(configuration: apiCfg)
         super.init()
         var initialLanes: [StreamLane] = []
-        initialLanes.reserveCapacity(Self.streamLaneCount)
-        for idx in 0..<Self.streamLaneCount {
+        initialLanes.reserveCapacity(Self.maxStreamLaneCount)
+        for idx in 0..<Self.maxStreamLaneCount {
             initialLanes.append(StreamLane(session: makeStreamLaneSession(index: idx), generation: 1))
         }
         self.lanes = initialLanes
@@ -254,10 +255,16 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
         return ObjectIdentifier(lanes[index].session)
     }
 
-    func selectLaneLocked(forHost host: String?, isUrgent: Bool, excludeLane: Int?, now: TimeInterval) -> Int {
+    func selectLaneLocked(
+        forHost host: String?,
+        isUrgent: Bool,
+        excludeLane: Int?,
+        activeLaneCap: Int = TurboStreamingSessionHub.streamLaneCount,
+        now: TimeInterval
+    ) -> Int {
         var bestIdx = 0
         var bestScore = Double.greatestFiniteMagnitude
-        let count = lanes.count
+        let count = min(lanes.count, max(1, activeLaneCap))
         let normHost = host?.lowercased()
         for offset in 0..<count {
             let idx = (roundRobinCursor + offset) % count
@@ -319,13 +326,20 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
         request: URLRequest,
         context: StreamingChunkContext,
         priority: Float = 0.35,
-        excludeLane: Int? = nil
+        excludeLane: Int? = nil,
+        activeLaneCap: Int = TurboStreamingSessionHub.streamLaneCount
     ) -> (task: URLSessionDataTask, laneIndex: Int) {
         let now = ProcessInfo.processInfo.systemUptime
         let targetHost = request.url?.host?.lowercased()
         let urgentSelect = context.isUrgent || context.isRescue || context.isDirectRange || context.chunkIndex == 0
         lock.lock()
-        let chosenIdx = selectLaneLocked(forHost: targetHost, isUrgent: urgentSelect, excludeLane: excludeLane, now: now)
+        let chosenIdx = selectLaneLocked(
+            forHost: targetHost,
+            isUrgent: urgentSelect,
+            excludeLane: excludeLane,
+            activeLaneCap: activeLaneCap,
+            now: now
+        )
         let session = lanes[chosenIdx].session
         let generation = lanes[chosenIdx].generation
         lanes[chosenIdx].activeTasks += 1
@@ -487,7 +501,10 @@ internal final class TurboStreamingSessionHub: NSObject, URLSessionDataDelegate,
         if isDirect {
             owner?.appendDirectRangePartial(attemptId: attemptId, startOffset: startByte, delta: appendData)
         } else {
-            owner?.appendChunkPartialData(attemptId: attemptId, index: chunkIndex, delta: appendData)
+            appendData.withUnsafeBytes { raw in
+                guard let ptr = raw.baseAddress?.assumingMemoryBound(to: UInt8.self), !raw.isEmpty else { return }
+                owner?.appendChunkPartialBytes(attemptId: attemptId, index: chunkIndex, ptr: ptr, count: raw.count)
+            }
         }
 
         if shouldCancelAfter200Cap {

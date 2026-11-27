@@ -4,6 +4,7 @@ use crate::abi::{
 };
 use crate::clock::{load_f64, store_f64, ClockState, SpeedTracker};
 use crate::ffi::{dk_shim_avio_bytes_read, AvPacket, OwnedPixelBuffer};
+use crate::net::avio_bridge::DKStreamBridge;
 use crate::subtitle::SubtitleEngine;
 use crate::vad::VadAudioRing;
 use std::collections::VecDeque;
@@ -13,7 +14,7 @@ use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicI64, AtomicI8, AtomicPtr, AtomicU32, AtomicU64, AtomicU8,
     AtomicUsize, Ordering,
 };
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
 pub(crate) const MAX_CACHED_STREAM_TYPES: usize = 64;
@@ -237,8 +238,9 @@ pub struct DKPlayer {
     pub(crate) format_ctx: AtomicPtr<c_void>,
     pub(crate) custom_avio_ctx: AtomicPtr<c_void>,
     pub(crate) hw_fmt_ctx_opaque: AtomicPtr<c_void>,
-    /// Lock partial order: `LIVE_PLAYERS` -> `custom_io`. Never acquire `LIVE_PLAYERS` while holding `custom_io`.
+    /// Lock partial order: `LIVE_PLAYERS` -> `custom_io` -> `stream_bridge`. Never acquire `LIVE_PLAYERS` while holding `custom_io` or `stream_bridge`.
     pub(crate) custom_io: Mutex<CustomIoSlot>,
+    pub(crate) stream_bridge: Mutex<Option<Arc<DKStreamBridge>>>,
 
     pub(crate) video_stream_idx: AtomicI32,
     pub(crate) audio_stream_idx: AtomicI32,
@@ -350,6 +352,7 @@ impl DKPlayer {
             custom_avio_ctx: AtomicPtr::new(ptr::null_mut()),
             hw_fmt_ctx_opaque: AtomicPtr::new(ptr::null_mut()),
             custom_io: Mutex::new(CustomIoSlot::default()),
+            stream_bridge: Mutex::new(None),
             video_stream_idx: AtomicI32::new(-1),
             audio_stream_idx: AtomicI32::new(-1),
             sub_stream_idx: AtomicI32::new(-1),

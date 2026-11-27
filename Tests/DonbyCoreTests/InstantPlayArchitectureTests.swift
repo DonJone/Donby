@@ -3,6 +3,7 @@ import Darwin
 import Testing
 @testable import DonbyCore
 @testable import DonbyNetwork
+import DonbyKernelC
 
 // MARK: - Concurrent Loopback HTTP Range Harness for Turbo Engine v3 Verification
 
@@ -569,5 +570,84 @@ struct InstantPlayArchitectureTests {
         )
         #expect(hitAfter302?.streamURL == redirectURL)
         #expect(hitAfter302?.originStreamURL == originStream)
+    }
+
+    @Test func adaptiveEightLanePoolAndSteadyStateLargeRangeSpans() {
+        let hub = TurboStreamingSessionHub.shared
+        #expect(TurboStreamingSessionHub.maxStreamLaneCount == 8)
+        var laneIds: Set<ObjectIdentifier> = []
+        for idx in 0..<TurboStreamingSessionHub.maxStreamLaneCount {
+            if let sid = hub.laneSessionIdentifier(for: idx) {
+                laneIds.insert(sid)
+            }
+        }
+        #expect(laneIds.count == 8)
+
+        let chunkSize = 524_288
+        let totalSize = Int64(chunkSize * 200)
+        let key = "test_2a_large_span_\(UUID().uuidString)"
+        let store = DonbyTurboCacheEngine.shared.store(for: key, persistDisk: false)
+        store.setTotalSize(totalSize, sourceURL: "http://127.0.0.1:1/cdn/large.mkv")
+        for idx in 0..<18 {
+            store.storeChunk(index: idx, data: Data(repeating: UInt8(idx & 0xFF), count: chunkSize))
+        }
+
+        let handle = TurboStreamByteHandle(
+            assetKey: key,
+            streamURL: URL(string: "http://127.0.0.1:1/cdn/large.mkv")!,
+            headers: [:],
+            store: store,
+            knownTotalSize: totalSize,
+            connectionBudget: 8,
+            prefetchAheadChunks: 120
+        )
+        defer {
+            handle.close()
+            DonbyTurboCacheEngine.shared.removeAsset(assetKey: key, forceIncludePinned: true)
+        }
+        handle.markInitialOpenCompleted()
+        handle.markProtocolMultiplexed(true)
+
+        handle.condition.lock()
+        let maxSpan = handle.activeAttempts.values.map { $0.endChunkExclusive - $0.startChunkIndex }.max() ?? 0
+        handle.condition.unlock()
+
+        #expect(maxSpan >= 16)
+    }
+
+    @Test func unpinnedChunkStoreWritesDirectlyToSparseMediaBinAndCompanionPacerTransitions() throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("donby-unpinned-sparse-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let chunkSize = 65_536
+        let totalSize = Int64(chunkSize * 120)
+        let store = TieredAssetChunkStore(
+            assetKey: "unpinned_sparse",
+            rootDirectory: tmpDir,
+            chunkSize: chunkSize,
+            maxMemoryBytes: 32 * 1024 * 1024,
+            persistDisk: true
+        )
+        store.setTotalSize(totalSize, sourceURL: "https://example.invalid/sparse.mkv")
+        for idx in [0, 10, 80, 119] {
+            store.storeChunk(index: idx, data: Data(repeating: UInt8(idx + 3), count: chunkSize), cacheInMemory: false)
+        }
+        store.flushMeta()
+
+        let spillCount = (try? FileManager.default.contentsOfDirectory(atPath: store.chunksDirectoryURL.path).count) ?? 0
+        #expect(spillCount == 0)
+        #expect(FileManager.default.fileExists(atPath: store.assetDirectory.appendingPathComponent("chunks.bitmap").path))
+        #expect(store.cachedBytesFast() == Int64(4 * chunkSize))
+
+        var buf = [UInt8](repeating: 0, count: 1024)
+        let n = buf.withUnsafeMutableBufferPointer { ptr in
+            store.readChunkBytes(index: 80, offsetInChunk: 0, into: ptr.baseAddress!, count: 1024)
+        }
+        #expect(n == 1024)
+        #expect(buf[0] == 83)
+
+        // Companion pacer C ABI smoke check (exact 0 -> >0 -> -1 transitions are verified deterministically in Rust net::tests)
+        #expect(dk_net_get_download_companion_rate_limit_bps() >= -1)
     }
 }

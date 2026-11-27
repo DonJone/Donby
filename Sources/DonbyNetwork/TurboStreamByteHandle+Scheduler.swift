@@ -1,5 +1,6 @@
 import Foundation
 import DonbyCore
+import DonbyKernelC
 
 // MARK: - TurboStreamByteHandle Range Scheduling, Rescue & Delegate Callbacks
 
@@ -50,6 +51,10 @@ extension TurboStreamByteHandle {
             condition.unlock()
             return true
         }
+        if let rawBridge {
+            let nativeCursor = dk_net_bridge_get_cursor(rawBridge)
+            if nativeCursor > cursorOffset { cursorOffset = nativeCursor }
+        }
         let now = ProcessInfo.processInfo.systemUptime
         if inOpenProbePhase && (now - openedUptime > 6.0) {
             inOpenProbePhase = false
@@ -82,13 +87,32 @@ extension TurboStreamByteHandle {
                 break
             }
         }
+        var companionLead = leadCachedChunks
+        while companionLead < 64 && (totalChunks == 0 || currentChunk + companionLead < totalChunks) && store.hasChunk(currentChunk + companionLead) {
+            companionLead += 1
+        }
+        let recentSeek = lastSeekUptime > 0 && (now - lastSeekUptime) < 3.0
+        dk_net_update_playback_companion_state(
+            0,
+            Int32(companionLead),
+            inOpenProbePhase,
+            recentSeek,
+            !rescueChunks.isEmpty,
+            Int64(measuredWireSpeedMBs * 1_048_576.0),
+            store.currentMeta().estimatedBitrateBps
+        )
+        if companionLead >= 64 && !inOpenProbePhase && !recentSeek && rescueChunks.isEmpty && dk_net_get_download_companion_rate_limit_bps() > 0 {
+            Task { @MainActor in
+                DonbyDownloadManager.shared.resumeCompanionDownloadsIfHealthy()
+            }
+        }
 
         let playheadAttempt = activeAttempts.values.first {
             $0.currentChunkIndex >= 0 && $0.covers(currentChunk) && (currentChunk - $0.currentChunkIndex <= 3)
         }
         let playheadReceivingBytes: Bool = {
             guard let rec = playheadAttempt else { return leadCachedChunks > 0 }
-            let bufCount = attemptBuffers[rec.attemptId]?.count ?? 0
+            let bufCount = attemptBufferedCount(rec.attemptId)
             return bufCount > 0 || rec.currentChunkIndex > rec.startChunkIndex
         }()
 
@@ -102,8 +126,11 @@ extension TurboStreamByteHandle {
             // to prevent HTTP/2 RST_STREAM storms while letting single-click seeks immediately use warm lanes.
             effectiveCap = min(2, dynamicConcurrencyCap)
         } else if isMultiplexedProtocol {
-            let needsPerStreamBoost = (measuredWireSpeedMBs > 0.1 && measuredWireSpeedMBs < 4.5 && leadCachedChunks < 6)
-            effectiveCap = min(needsPerStreamBoost ? 5 : 4, dynamicConcurrencyCap)
+            let bitrateBps = max(12_000_000.0, Double(store.currentMeta().estimatedBitrateBps))
+            let wireBps = measuredWireSpeedMBs * 8_388_608.0
+            let needsMoreLanes = leadCachedChunks < 24 && (measuredWireSpeedMBs < 0.1 || wireBps < bitrateBps * 1.35)
+            let targetLanes = needsMoreLanes ? min(TurboStreamingSessionHub.maxStreamLaneCount, max(4, dynamicConcurrencyCap)) : 4
+            effectiveCap = min(targetLanes, dynamicConcurrencyCap)
         } else {
             let inPostSeekRamp = (lastSeekUptime > 0) && ((now - lastSeekUptime) < 3.5) && (leadCachedChunks < 6)
             effectiveCap = inPostSeekRamp ? min(4, dynamicConcurrencyCap) : dynamicConcurrencyCap
@@ -142,7 +169,7 @@ extension TurboStreamByteHandle {
                       rec.currentChunkIndex >= 0,
                       (rec.endChunkExclusive - rec.currentChunkIndex) >= 2,
                       focusChunk >= rec.currentChunkIndex - 2 else { continue }
-                let partialBytes = attemptBuffers[aid]?.count ?? 0
+                let partialBytes = attemptBufferedCount(aid)
                 let hasStartedBody = rec.responseHeadersReceived || partialBytes > 0 || rec.currentChunkIndex > rec.startChunkIndex
                 let elapsed = now - rec.chunkStartTimestamp
                 guard hasStartedBody && elapsed >= 0.22 else { continue }
@@ -164,7 +191,7 @@ extension TurboStreamByteHandle {
             let idx = rec.currentChunkIndex
             if !rescueChunks.contains(idx) {
                 let byteIdle = now - rec.lastByteTimestamp
-                let partialBytes = attemptBuffers[rec.attemptId]?.count ?? 0
+                let partialBytes = attemptBufferedCount(rec.attemptId)
                 let hasReceivedAny = rec.responseHeadersReceived || (rec.currentChunkIndex > rec.startChunkIndex) || (partialBytes > 0)
                 let isImmediatePlayhead = (idx <= currentChunk + 1)
                 let isReaderBlockedHere = (urgentWaitingChunk == idx)
@@ -280,6 +307,7 @@ extension TurboStreamByteHandle {
         rec.endChunkExclusive = keepEnd
         rec.trimmedEarly = true
         activeAttempts[attemptId] = rec
+        if let rawBridge { dk_net_bridge_update_attempt_end(rawBridge, attemptId, Int32(keepEnd)) }
         for relIdx in keepEnd..<(keepEnd + 64) {
             if inFlightChunks.contains(relIdx) && !activeAttempts.values.contains(where: { $0.covers(relIdx) }) {
                 inFlightChunks.remove(relIdx)
@@ -388,11 +416,15 @@ extension TurboStreamByteHandle {
                 return safeSkip >= 262_144 ? 3 : 2                            // 1 MiB fine-grained 2-chunk stripes across warm lanes on single seek
             }
             let shallowPlayhead = !(0..<4).allSatisfy { store.hasChunk(cursorChunk + $0) }
+            var leadProbe = 0
+            while leadProbe < 16 && store.hasChunk(cursorChunk + leadProbe) { leadProbe += 1 }
             let desired: Int
             if aheadFromCursor <= 1 {
                 desired = safeSkip >= 262_144 ? 5 : 4  // >= 2.0 MiB usable playhead sprint
             } else if aheadFromCursor <= 6 {
                 desired = (dynamicConcurrencyCap == 2 && !shallowPlayhead) ? 8 : 4
+            } else if !shallowPlayhead && leadProbe >= 16 {
+                desired = measuredWireSpeedMBs >= 10.0 ? 64 : (measuredWireSpeedMBs >= 4.0 ? 32 : 16)
             } else if aheadFromCursor <= 22 {
                 desired = shallowPlayhead ? 4 : 8   // 4 MiB near lookahead (compact while playhead is cold)
             } else {
@@ -460,8 +492,12 @@ extension TurboStreamByteHandle {
             request: req,
             context: ctx,
             priority: taskPriority,
-            excludeLane: excludeLane
+            excludeLane: excludeLane,
+            activeLaneCap: max(4, dynamicConcurrencyCap)
         )
+        if let rawBridge {
+            dk_net_bridge_register_attempt(rawBridge, attemptId, Int32(index), Int32(spanEnd), Int32(safeSkip), isRescue)
+        }
         activeAttempts[attemptId] = ActiveAttemptRecord(
             attemptId: attemptId,
             startChunkIndex: index,
@@ -744,22 +780,5 @@ extension TurboStreamByteHandle {
         for t in competingTasksToCancel {
             TurboStreamingSessionHub.shared.cancelTask(t, intentional: true)
         }
-    }
-
-    func appendDirectRangePartial(attemptId: UInt64, startOffset: Int64, delta: Data) {
-        guard !delta.isEmpty else { return }
-        let now = ProcessInfo.processInfo.systemUptime
-        condition.lock()
-        guard !isAborted && !isClosed, activeAttempts[attemptId] != nil else {
-            condition.unlock()
-            return
-        }
-        var buf = attemptBuffers[attemptId] ?? Data()
-        buf.append(delta)
-        attemptBuffers[attemptId] = buf
-        activeAttempts[attemptId]?.lastByteTimestamp = now
-        wireSpeedMeter.recordBytes(delta.count, at: now)
-        condition.broadcast()
-        condition.unlock()
     }
 }

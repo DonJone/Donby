@@ -200,6 +200,81 @@ void          dk_player_get_stats(DKPlayer* player, DKRuntimeStats* out_stats);
 
 CGImageRef    dk_extract_video_thumbnail(const char* file_path_or_url, double target_sec);
 
+// Zero-dependency Rust Media Data Plane (2A: GlobalSlabPool, sparse DKChunkStore, AVIO bridge & download assembler)
+typedef struct DKChunkStore DKChunkStore;
+typedef struct DKStreamBridge DKStreamBridge;
+typedef struct DKDownloadAssembler DKDownloadAssembler;
+
+void          dk_net_set_memory_budget_bytes(int64_t max_bytes);
+void          dk_net_update_playback_companion_state(
+    int32_t active_count_delta,
+    int32_t lead_cached_chunks,
+    bool in_open_probe,
+    bool recent_seek,
+    bool recent_rescue,
+    int64_t wire_speed_bps,
+    int64_t stream_bitrate_bps
+);
+int64_t       dk_net_get_download_companion_rate_limit_bps(void);
+
+DKChunkStore* dk_net_store_open(
+    const char* asset_dir_utf8,
+    int64_t total_size,
+    int32_t chunk_size,
+    bool persist_disk,
+    bool pinned,
+    const int32_t* legacy_seed,
+    int32_t legacy_seed_count
+);
+void          dk_net_store_update_config(DKChunkStore* store, int64_t max_memory_bytes, bool persist_disk);
+void          dk_net_store_set_pinned(DKChunkStore* store, bool pinned);
+void          dk_net_store_set_total_size(DKChunkStore* store, int64_t total_size);
+void          dk_net_store_retain_reader(DKChunkStore* store);
+int32_t       dk_net_store_release_reader(DKChunkStore* store);
+int32_t       dk_net_store_active_readers(DKChunkStore* store);
+bool          dk_net_store_has_chunk(DKChunkStore* store, int32_t chunk_index);
+void          dk_net_store_write_slice(DKChunkStore* store, int32_t chunk_index, const uint8_t* data, int32_t len, bool cache_in_l1);
+int32_t       dk_net_store_read_bytes(DKChunkStore* store, int32_t chunk_index, int32_t offset_in_chunk, uint8_t* dst, int32_t count);
+void          dk_net_store_get_progress(DKChunkStore* store, int64_t* out_cached_bytes, int64_t* out_total_bytes, bool* out_fully_cached);
+int32_t       dk_net_store_copy_completed_indices(DKChunkStore* store, int32_t* out_indices, int32_t max_count);
+void          dk_net_store_evict_behind_cursor(DKChunkStore* store, int32_t cursor_chunk, int32_t keep_back);
+void          dk_net_store_evict_distant_chunks(DKChunkStore* store, int32_t center_chunk, int32_t keep_back, int32_t keep_ahead);
+void          dk_net_store_trim_idle_keeping_pinned(DKChunkStore* store);
+void          dk_net_store_invalidate_probe_chunks(DKChunkStore* store);
+void          dk_net_store_flush(DKChunkStore* store);
+void          dk_net_store_close_handles(DKChunkStore* store);
+void          dk_net_store_invalidate_for_removal(DKChunkStore* store);
+void          dk_net_store_release(DKChunkStore* store);
+
+DKStreamBridge* dk_net_bridge_create(
+    DKChunkStore* store,
+    void* opaque,
+    DKCustomIOReadCallback miss_read_cb,
+    DKCustomIOSeekCallback seek_cb,
+    DKCustomIOAbortCallback abort_cb,
+    DKCustomIOCloseCallback close_cb
+);
+int64_t       dk_net_bridge_get_cursor(DKStreamBridge* bridge);
+void          dk_net_bridge_set_cursor(DKStreamBridge* bridge, int64_t offset);
+void          dk_net_bridge_set_in_open_probe(DKStreamBridge* bridge, bool in_probe);
+void          dk_net_bridge_register_attempt(DKStreamBridge* bridge, uint64_t attempt_id, int32_t start_chunk, int32_t end_chunk_exclusive, int32_t initial_byte_skip, bool is_rescue);
+void          dk_net_bridge_update_attempt_end(DKStreamBridge* bridge, uint64_t attempt_id, int32_t end_chunk_exclusive);
+void          dk_net_bridge_remove_attempt(DKStreamBridge* bridge, uint64_t attempt_id);
+int32_t       dk_net_bridge_attempt_buffered_bytes(DKStreamBridge* bridge, uint64_t attempt_id);
+int32_t       dk_net_bridge_try_read_partial_or_direct(DKStreamBridge* bridge, int64_t current_offset, int32_t target_chunk, int32_t offset_in_chunk, uint8_t* dst, int32_t count);
+bool          dk_net_bridge_flush_final_attempt(DKStreamBridge* bridge, uint64_t attempt_id, bool succeeded, int32_t* out_completed_chunk);
+int32_t       dk_net_bridge_ingest_partial(DKStreamBridge* bridge, uint64_t attempt_id, const uint8_t* bytes, int32_t len, int32_t* out_completed_chunks, int32_t max_completed);
+void          dk_net_bridge_ingest_direct(DKStreamBridge* bridge, int64_t start_offset, const uint8_t* bytes, int32_t len);
+void          dk_net_bridge_clear_direct_slices(DKStreamBridge* bridge);
+void          dk_net_bridge_release(DKStreamBridge* bridge);
+void          dk_player_attach_stream_bridge(DKPlayer* player, DKStreamBridge* bridge);
+
+DKDownloadAssembler* dk_net_assembler_create(DKChunkStore* store, int32_t start_chunk, int32_t end_chunk);
+void          dk_net_assembler_update_end(DKDownloadAssembler* asm_ptr, int32_t end_chunk);
+void          dk_net_assembler_ingest(DKDownloadAssembler* asm_ptr, const uint8_t* bytes, int32_t len, bool keep_in_l1, int32_t* out_committed_chunks, int64_t* out_committed_bytes, bool* out_hit_end);
+void          dk_net_assembler_finish(DKDownloadAssembler* asm_ptr, bool keep_in_l1, int32_t* out_committed_chunks, int64_t* out_committed_bytes);
+void          dk_net_assembler_destroy(DKDownloadAssembler* asm_ptr);
+
 #ifdef __cplusplus
 }
 #endif

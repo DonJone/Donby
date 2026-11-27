@@ -1,5 +1,21 @@
 import Foundation
 import DonbyCore
+import DonbyKernelC
+
+private func dkTurboBridgeReadCB(_ opaque: UnsafeMutableRawPointer?, _ buf: UnsafeMutablePointer<UInt8>?, _ size: Int32) -> Int32 {
+    guard let opaque, let buf, size > 0 else { return -1 }
+    return Int32(Unmanaged<TurboStreamByteHandle>.fromOpaque(opaque).takeUnretainedValue().read(into: buf, count: Int(size)))
+}
+
+private func dkTurboBridgeSeekCB(_ opaque: UnsafeMutableRawPointer?, _ offset: Int64, _ whence: Int32) -> Int64 {
+    guard let opaque else { return -1 }
+    return Unmanaged<TurboStreamByteHandle>.fromOpaque(opaque).takeUnretainedValue().seek(offset: offset, whence: whence)
+}
+
+private func dkTurboBridgeAbortCB(_ opaque: UnsafeMutableRawPointer?) {
+    guard let opaque else { return }
+    Unmanaged<TurboStreamByteHandle>.fromOpaque(opaque).takeUnretainedValue().abort()
+}
 
 // MARK: - Custom AVIO Byte-Stream Handle
 
@@ -91,6 +107,13 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
     var directNextRetryTime: [Int64: TimeInterval] = [:]
 
     var coordinatorTask: Task<Void, Never>?
+    public private(set) var rawBridge: OpaquePointer? = nil
+
+    func attemptBufferedCount(_ attemptId: UInt64) -> Int {
+        let swiftCount = attemptBuffers[attemptId]?.count ?? 0
+        guard let rawBridge else { return swiftCount }
+        return max(swiftCount, Int(dk_net_bridge_attempt_buffered_bytes(rawBridge, attemptId)))
+    }
 
     public init(
         assetKey: String,
@@ -123,7 +146,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         self.isMultiplexedProtocol = TurboStreamingSessionHub.shared.isHostKnownMultiplexed(initialRedirectedURL ?? streamURL)
         self.headers = headers
         self.store = store
-        let clampedBudget = max(1, min(8, connectionBudget))
+        let clampedBudget = max(1, min(TurboStreamingSessionHub.maxStreamLaneCount, connectionBudget))
         self.configuredConcurrencyBudget = clampedBudget
         self.dynamicConcurrencyCap = clampedBudget
         self.prefetchAheadChunks = max(4, min(360, prefetchAheadChunks))
@@ -138,6 +161,15 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             self.chunk0HeadersReceived = true
         }
         store.retainReader()
+        self.rawBridge = dk_net_bridge_create(
+            store.rawStore,
+            Unmanaged.passUnretained(self).toOpaque(),
+            dkTurboBridgeReadCB,
+            dkTurboBridgeSeekCB,
+            dkTurboBridgeAbortCB,
+            nil
+        )
+        dk_net_update_playback_companion_state(1, 0, true, false, false, 0, store.currentMeta().estimatedBitrateBps)
 
         // Immediately start Chunk 0 (or urgent Chunk 1 when Chunk 0 is already warm on disk/L1 so warm-header
         // opens don't stall after exhausting Chunk 0's ~1.5s payload on high-TTFB edges).
@@ -156,6 +188,10 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
 
     deinit {
         close()
+        if let rawBridge {
+            dk_net_bridge_release(rawBridge)
+            self.rawBridge = nil
+        }
     }
 
     public var currentWireSpeedMBs: Double {
@@ -211,6 +247,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             condition.broadcast()
         }
         condition.unlock()
+        if let rawBridge { dk_net_bridge_set_in_open_probe(rawBridge, false) }
         _ = stepBulkPrefetchSchedule()
     }
 
@@ -222,6 +259,10 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         if isAborted || isClosed {
             condition.unlock()
             return -1
+        }
+        if let rawBridge {
+            let nativeCursor = dk_net_bridge_get_cursor(rawBridge)
+            if nativeCursor > cursorOffset { cursorOffset = nativeCursor }
         }
         let currentOffset = cursorOffset
         condition.unlock()
@@ -235,9 +276,16 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         let targetChunk = Int(currentOffset / Int64(chunkSize))
         let offsetInChunk = Int(currentOffset % Int64(chunkSize))
 
-        // Fast path 1: completed chunk already in L1 memory or L2 disk
-        if let chunkData = store.readChunk(index: targetChunk) {
-            return copyOut(from: chunkData, offsetInChunk: offsetInChunk, into: buffer, count: count, targetChunk: targetChunk)
+        // Fast path 1: completed chunk already in L1 SlabPool or L2 media.bin (zero-alloc pread)
+        let nFast = store.readChunkBytes(index: targetChunk, offsetInChunk: offsetInChunk, into: buffer, count: count)
+        if nFast > 0 {
+            condition.lock()
+            cursorOffset += Int64(nFast)
+            let updatedCursor = cursorOffset
+            condition.unlock()
+            if let rawBridge { dk_net_bridge_set_cursor(rawBridge, updatedCursor) }
+            store.evictBehindCursor(cursorChunk: targetChunk)
+            return nFast
         }
 
         // Fast path 2: progressive bytes already streamed into active partial buffer or direct exact-offset slice
@@ -316,7 +364,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                 }
                 return activeAttempts.values.first { $0.covers(targetChunk, offsetInChunk: offsetInChunk) }
             }()
-            let partialBytes = coveringAttempt.flatMap { attemptBuffers[$0.attemptId]?.count } ?? 0
+            let partialBytes = coveringAttempt.map { attemptBufferedCount($0.attemptId) } ?? 0
             let headersArrived = coveringAttempt?.responseHeadersReceived ?? false
             let receivedAnyBytes = headersArrived || (partialBytes > 0) || (coveringAttempt.map { $0.currentChunkIndex > $0.startChunkIndex } ?? false)
             let stalledTime: TimeInterval = coveringAttempt.map { now - $0.lastByteTimestamp } ?? (chunkStartTime[targetChunk].map { now - $0 } ?? 0)
@@ -334,11 +382,15 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                 chunkStartTime[targetChunk] = now
                 spawnChunkFetchLocked(index: targetChunk, isUrgent: true, isRescue: false, initialByteSkip: desiredSkip)
                 condition.unlock()
-                if let chunkData = store.readChunk(index: targetChunk) {
+                let nFast1 = store.readChunkBytes(index: targetChunk, offsetInChunk: offsetInChunk, into: buffer, count: count)
+                if nFast1 > 0 {
                     condition.lock()
                     clearUrgentWaitLocked(for: targetChunk)
+                    cursorOffset += Int64(nFast1)
+                    let updated = cursorOffset
                     condition.unlock()
-                    return copyOut(from: chunkData, offsetInChunk: offsetInChunk, into: buffer, count: count, targetChunk: targetChunk)
+                    if let rawBridge { dk_net_bridge_set_cursor(rawBridge, updated) }
+                    return nFast1
                 }
                 condition.lock()
                 continue
@@ -398,14 +450,18 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
 
             condition.wait(until: Date().addingTimeInterval(0.025))
             condition.unlock()
-            if let chunkData = store.readChunk(index: targetChunk) {
+            let nFast2 = store.readChunkBytes(index: targetChunk, offsetInChunk: offsetInChunk, into: buffer, count: count)
+            if nFast2 > 0 {
                 condition.lock()
                 if ProcessInfo.processInfo.systemUptime - waitStart >= 1.0 {
                     logSlowReadIfNeededLocked(chunk: targetChunk, waitStart: waitStart)
                 }
                 clearUrgentWaitLocked(for: targetChunk)
+                cursorOffset += Int64(nFast2)
+                let updated = cursorOffset
                 condition.unlock()
-                return copyOut(from: chunkData, offsetInChunk: offsetInChunk, into: buffer, count: count, targetChunk: targetChunk)
+                if let rawBridge { dk_net_bridge_set_cursor(rawBridge, updated) }
+                return nFast2
             }
             let curMeta = store.currentMeta()
             if curMeta.totalSize > 0 && currentOffset >= curMeta.totalSize {
@@ -447,84 +503,13 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         return offsetInChunk
     }
 
-    private func copySlice(_ data: Data, offset: Int, into buffer: UnsafeMutablePointer<UInt8>, maxCount: Int) -> Int {
+    func copySlice(_ data: Data, offset: Int, into buffer: UnsafeMutablePointer<UInt8>, maxCount: Int) -> Int {
         let toCopy = min(maxCount, data.count - offset)
         guard toCopy > 0 else { return 0 }
         data.withUnsafeBytes { raw in
             if let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) {
                 buffer.update(from: base.advanced(by: offset), count: toCopy)
             }
-        }
-        return toCopy
-    }
-
-    private func tryCopyPartialOrDirectLockedOut(
-        currentOffset: Int64,
-        targetChunk: Int,
-        offsetInChunk: Int,
-        into buffer: UnsafeMutablePointer<UInt8>,
-        count: Int
-    ) -> Int? {
-        condition.lock()
-        defer { condition.unlock() }
-        if let copied = tryCopyPartialLocked(targetChunk: targetChunk, offsetInChunk: offsetInChunk, into: buffer, count: count) {
-            return copied
-        }
-        return tryCopyDirectTailLocked(at: currentOffset, into: buffer, count: count)
-    }
-
-    private func tryCopyPartialLocked(
-        targetChunk: Int,
-        offsetInChunk: Int,
-        into buffer: UnsafeMutablePointer<UInt8>,
-        count: Int
-    ) -> Int? {
-        func tryFromAttempt(_ aid: UInt64) -> Int? {
-            guard let rec = activeAttempts[aid],
-                  rec.currentChunkIndex == targetChunk,
-                  let partial = attemptBuffers[aid] else {
-                return nil
-            }
-            let skip = (rec.currentChunkIndex == rec.startChunkIndex) ? rec.initialByteSkip : 0
-            guard offsetInChunk >= skip else { return nil }
-            let rel = offsetInChunk - skip
-            guard rel < partial.count else { return nil }
-            let toCopy = copySlice(partial, offset: rel, into: buffer, maxCount: count)
-            cursorOffset += Int64(toCopy)
-            condition.broadcast()
-            return toCopy
-        }
-
-        if let dispAttempt = activeDisplayAttempt[targetChunk],
-           let copied = tryFromAttempt(dispAttempt) {
-            return copied
-        }
-        for (aid, rec) in activeAttempts where rec.currentChunkIndex == targetChunk {
-            if let copied = tryFromAttempt(aid) {
-                return copied
-            }
-        }
-        return nil
-    }
-
-    private func copyOut(
-        from chunkData: Data,
-        offsetInChunk: Int,
-        into buffer: UnsafeMutablePointer<UInt8>,
-        count: Int,
-        targetChunk: Int
-    ) -> Int {
-        guard offsetInChunk < chunkData.count else {
-            return 0
-        }
-        let toCopy = copySlice(chunkData, offset: offsetInChunk, into: buffer, maxCount: count)
-        condition.lock()
-        cursorOffset += Int64(toCopy)
-        condition.broadcast()
-        condition.unlock()
-
-        if targetChunk % 16 == 0 {
-            store.evictBehindCursor(cursorChunk: targetChunk, keepBackChunks: 16)
         }
         return toCopy
     }
@@ -579,7 +564,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         return -1
     }
 
-    private func tryCopyDirectTailLocked(
+    func tryCopyDirectTailLocked(
         at offset: Int64,
         into buffer: UnsafeMutablePointer<UInt8>,
         count: Int
@@ -655,6 +640,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             return -1
         }
         cursorOffset = (total > 0 && newPos > total) ? total : newPos
+        if let rawBridge { dk_net_bridge_set_cursor(rawBridge, cursorOffset) }
 
         let newChunk = Int(max(0, cursorOffset) / Int64(meta.chunkSize))
         var tasksToCancel: [URLSessionDataTask] = []
@@ -696,6 +682,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                         trimmed.endChunkExclusive = 1
                         trimmed.trimmedEarly = true
                         activeAttempts[aid] = trimmed
+                        if let rawBridge { dk_net_bridge_update_attempt_end(rawBridge, aid, 1) }
                     }
                     continue
                 }
@@ -714,6 +701,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                         tasksToCancel.append(task)
                     }
                     attemptBuffers.removeValue(forKey: aid)
+                    if let rawBridge { dk_net_bridge_remove_attempt(rawBridge, aid) }
                     if removed.currentChunkIndex < 0 {
                         let matchingStarts = directInFlightStarts.compactMap { $0.value == aid ? $0.key : nil }
                         for sOff in matchingStarts {

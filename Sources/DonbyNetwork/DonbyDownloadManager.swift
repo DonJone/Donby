@@ -1,5 +1,6 @@
 import Foundation
 import DonbyCore
+import DonbyKernelC
 
 // MARK: - Task D: Offline Download Coordinator (Shares Pinned ChunkStore & ~/Movies/Donby Library)
 
@@ -431,10 +432,18 @@ public final class DonbyDownloadManager: ObservableObject {
         }
     }
 
+    public func resumeCompanionDownloadsIfHealthy() {
+        guard !playbackPriorityTokens.isEmpty, dk_net_get_download_companion_rate_limit_bps() > 0 else { return }
+        scheduleQueue(connectionBudgetPerTask: 1)
+    }
+
     private func scheduleQueue(connectionBudgetPerTask: Int? = nil) {
         defer { syncDownloadActivityAssertion() }
-        guard playbackPriorityTokens.isEmpty else { return }
-        let maxTasks = max(1, maxConcurrentDownloads)
+        let isCompanionMode = !playbackPriorityTokens.isEmpty
+        if isCompanionMode && dk_net_get_download_companion_rate_limit_bps() <= 0 {
+            return
+        }
+        let maxTasks = isCompanionMode ? 1 : max(1, maxConcurrentDownloads)
         let activeCount = entries.filter { $0.status == .downloading }.count
         guard activeCount < maxTasks else { return }
 
@@ -445,7 +454,7 @@ public final class DonbyDownloadManager: ObservableObject {
             entries[idx].errorMessage = nil
             saveToDisk()
             let requestedBudget = connectionBudgetByAssetKey[entries[idx].assetKey] ?? connectionBudgetPerTask ?? 6
-            let effectiveBudget = maxTasks > 1 ? max(1, requestedBudget / maxTasks) : requestedBudget
+            let effectiveBudget = isCompanionMode ? 1 : (maxTasks > 1 ? max(1, requestedBudget / maxTasks) : requestedBudget)
             startDownloadWorker(for: entries[idx], connectionBudget: effectiveBudget)
         }
     }

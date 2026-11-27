@@ -1,5 +1,6 @@
 import Foundation
 import DonbyCore
+import DonbyKernelC
 
 // MARK: - TurboStreamByteHandle Attempt Completion, 429 Recovery & Header Size Parsing
 
@@ -67,6 +68,7 @@ extension TurboStreamByteHandle {
                 }
             }
             attemptBuffers.removeValue(forKey: cid)
+            if let rawBridge { dk_net_bridge_remove_attempt(rawBridge, cid) }
         }
     }
 
@@ -98,6 +100,12 @@ extension TurboStreamByteHandle {
         directSlices.append((startOffset: startOffset, data: data))
         if directSlices.count > 16 {
             directSlices.removeFirst()
+        }
+        if let rawBridge {
+            data.withUnsafeBytes { raw in
+                guard let ptr = raw.baseAddress?.assumingMemoryBound(to: UInt8.self), !raw.isEmpty else { return }
+                dk_net_bridge_ingest_direct(rawBridge, startOffset, ptr, Int32(raw.count))
+            }
         }
     }
 
@@ -199,6 +207,26 @@ extension TurboStreamByteHandle {
         let initialSkip = removedRec?.initialByteSkip ?? 0
         let storeChunkSize = store.currentMeta().chunkSize
         var completedAnyInFinish = false
+        if buf.isEmpty, let rawBridge {
+            var flushedChunk: Int32 = -1
+            if dk_net_bridge_flush_final_attempt(rawBridge, attemptId, succeeded, &flushedChunk), flushedChunk >= 0 {
+                let cIdx = Int(flushedChunk)
+                inFlightChunks.remove(cIdx)
+                rescueChunks.remove(cIdx)
+                chunkStartTime.removeValue(forKey: cIdx)
+                chunkFirstBlockedUptime.removeValue(forKey: cIdx)
+                chunkNextRetryTime.removeValue(forKey: cIdx)
+                chunk429Retries.removeValue(forKey: cIdx)
+                failedCount.removeValue(forKey: cIdx)
+                if activeDisplayAttempt[cIdx] == attemptId { activeDisplayAttempt.removeValue(forKey: cIdx) }
+                if cIdx == 0 { chunk0HeadersReceived = true }
+                recordCleanCompletionAndRecoverConcurrencyLocked(now: now)
+                cancelCompetingAttemptsLocked(forChunk: cIdx, winnerAttemptId: attemptId, winnerIsRescue: isRescue, now: now, competingTasksToCancel: &competingTasksToCancel)
+                curIdx = max(curIdx, cIdx + 1)
+                completedAnyInFinish = true
+                store.recordChunkCompletedFromNative(index: cIdx)
+            }
+        }
 
         while curIdx < endExcl && !buf.isEmpty {
             let skip = (curIdx == startIdx) ? initialSkip : 0
@@ -238,7 +266,7 @@ extension TurboStreamByteHandle {
                 if activeDisplayAttempt[remIdx] == attemptId {
                     let fallbackAttempt = activeAttempts.values
                         .filter { $0.currentChunkIndex == remIdx }
-                        .max { (attemptBuffers[$0.attemptId]?.count ?? 0) < (attemptBuffers[$1.attemptId]?.count ?? 0) }
+                        .max { attemptBufferedCount($0.attemptId) < attemptBufferedCount($1.attemptId) }
                     if let fallbackAttempt {
                         activeDisplayAttempt[remIdx] = fallbackAttempt.attemptId
                     } else {
@@ -285,6 +313,10 @@ extension TurboStreamByteHandle {
         scheduleNext = !isAborted && !isClosed && (completedAnyOverall || !wasCancelled)
         condition.broadcast()
         condition.unlock()
+
+        if let rawBridge {
+            dk_net_bridge_remove_attempt(rawBridge, attemptId)
+        }
 
         for t in competingTasksToCancel {
             TurboStreamingSessionHub.shared.cancelTask(t, intentional: true)
@@ -366,6 +398,7 @@ extension TurboStreamByteHandle {
         for task in tasksToCancel {
             TurboStreamingSessionHub.shared.cancelTask(task, intentional: true)
         }
+        dk_net_update_playback_companion_state(-1, 0, false, false, false, 0, 0)
 
         store.flushMeta()
         let remainingReaders = store.releaseReader()
@@ -376,5 +409,136 @@ extension TurboStreamByteHandle {
                 DonbyDownloadManager.shared.cleanupRedundantCacheIfMaterialized(assetKey: key)
             }
         }
+    }
+
+    func appendChunkPartialBytes(attemptId: UInt64, index: Int, ptr: UnsafePointer<UInt8>, count: Int) {
+        guard count > 0 else { return }
+        guard let rawBridge else {
+            appendChunkPartialData(attemptId: attemptId, index: index, delta: Data(bytes: ptr, count: count))
+            return
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        var completed = [Int32](repeating: -1, count: 64)
+        let nCompleted = completed.withUnsafeMutableBufferPointer { buf in
+            Int(dk_net_bridge_ingest_partial(rawBridge, attemptId, ptr, Int32(count), buf.baseAddress, Int32(buf.count)))
+        }
+        var competingTasksToCancel: [URLSessionDataTask] = []
+        condition.lock()
+        guard !isAborted && !isClosed, var rec = activeAttempts[attemptId] else {
+            condition.unlock()
+            return
+        }
+        rec.lastByteTimestamp = now
+        for i in 0..<nCompleted {
+            let cIdx = Int(completed[i])
+            guard cIdx >= 0 else { continue }
+            inFlightChunks.remove(cIdx)
+            rescueChunks.remove(cIdx)
+            chunkStartTime.removeValue(forKey: cIdx)
+            chunkFirstBlockedUptime.removeValue(forKey: cIdx)
+            chunkNextRetryTime.removeValue(forKey: cIdx)
+            chunk429Retries.removeValue(forKey: cIdx)
+            failedCount.removeValue(forKey: cIdx)
+            if activeDisplayAttempt[cIdx] == attemptId { activeDisplayAttempt.removeValue(forKey: cIdx) }
+            if cIdx == 0 { chunk0HeadersReceived = true }
+            recordCleanCompletionAndRecoverConcurrencyLocked(now: now)
+            cancelCompetingAttemptsLocked(forChunk: cIdx, winnerAttemptId: attemptId, winnerIsRescue: rec.isRescue, now: now, competingTasksToCancel: &competingTasksToCancel)
+            rec.currentChunkIndex = max(rec.currentChunkIndex, cIdx + 1)
+            rec.chunkStartTimestamp = now
+            if rec.currentChunkIndex < rec.endChunkExclusive { chunkStartTime[rec.currentChunkIndex] = now }
+        }
+        if rec.trimmedEarly && rec.currentChunkIndex >= rec.endChunkExclusive {
+            rec.trimmedEarly = false
+            if let t = rec.task { competingTasksToCancel.append(t) }
+        }
+        activeAttempts[attemptId] = rec
+        wireSpeedMeter.recordBytes(count, at: now)
+        let smoothWire = wireSpeedMeter.speedMBs(at: now)
+        if smoothWire > 0.05 { measuredWireSpeedMBs = smoothWire }
+        condition.broadcast()
+        condition.unlock()
+
+        for i in 0..<nCompleted {
+            let cIdx = Int(completed[i])
+            if cIdx >= 0 { store.recordChunkCompletedFromNative(index: cIdx) }
+        }
+        for t in competingTasksToCancel {
+            TurboStreamingSessionHub.shared.cancelTask(t, intentional: true)
+        }
+    }
+
+    func appendDirectRangePartial(attemptId: UInt64, startOffset: Int64, delta: Data) {
+        guard !delta.isEmpty else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        condition.lock()
+        guard !isAborted && !isClosed, activeAttempts[attemptId] != nil else {
+            condition.unlock()
+            return
+        }
+        var buf = attemptBuffers[attemptId] ?? Data()
+        buf.append(delta)
+        attemptBuffers[attemptId] = buf
+        activeAttempts[attemptId]?.lastByteTimestamp = now
+        wireSpeedMeter.recordBytes(delta.count, at: now)
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func tryCopyPartialOrDirectLockedOut(
+        currentOffset: Int64,
+        targetChunk: Int,
+        offsetInChunk: Int,
+        into buffer: UnsafeMutablePointer<UInt8>,
+        count: Int
+    ) -> Int? {
+        condition.lock()
+        defer { condition.unlock() }
+        if let copied = tryCopyPartialLocked(targetChunk: targetChunk, offsetInChunk: offsetInChunk, into: buffer, count: count) {
+            return copied
+        }
+        return tryCopyDirectTailLocked(at: currentOffset, into: buffer, count: count)
+    }
+
+    func tryCopyPartialLocked(
+        targetChunk: Int,
+        offsetInChunk: Int,
+        into buffer: UnsafeMutablePointer<UInt8>,
+        count: Int
+    ) -> Int? {
+        if let rawBridge {
+            let n = Int(dk_net_bridge_try_read_partial_or_direct(rawBridge, cursorOffset, Int32(targetChunk), Int32(offsetInChunk), buffer, Int32(count)))
+            if n > 0 {
+                cursorOffset += Int64(n)
+                dk_net_bridge_set_cursor(rawBridge, cursorOffset)
+                condition.broadcast()
+                return n
+            }
+        }
+        func tryFromAttempt(_ aid: UInt64) -> Int? {
+            guard let rec = activeAttempts[aid],
+                  rec.currentChunkIndex == targetChunk,
+                  let partial = attemptBuffers[aid] else {
+                return nil
+            }
+            let skip = (rec.currentChunkIndex == rec.startChunkIndex) ? rec.initialByteSkip : 0
+            guard offsetInChunk >= skip else { return nil }
+            let rel = offsetInChunk - skip
+            guard rel < partial.count else { return nil }
+            let toCopy = copySlice(partial, offset: rel, into: buffer, maxCount: count)
+            cursorOffset += Int64(toCopy)
+            condition.broadcast()
+            return toCopy
+        }
+
+        if let dispAttempt = activeDisplayAttempt[targetChunk],
+           let copied = tryFromAttempt(dispAttempt) {
+            return copied
+        }
+        for (aid, rec) in activeAttempts where rec.currentChunkIndex == targetChunk {
+            if let copied = tryFromAttempt(aid) {
+                return copied
+            }
+        }
+        return nil
     }
 }

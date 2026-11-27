@@ -224,6 +224,9 @@ internal final class DownloadRangeStreamDelegate: NSObject, URLSessionDataDelega
         let onRedirectResolved: (@Sendable (URL) -> Void)?
         var responseContinuation: CheckedContinuation<(HTTPURLResponse, AsyncThrowingStream<Data, Error>, @Sendable () -> Void), Error>?
         var dataContinuation: AsyncThrowingStream<Data, Error>.Continuation?
+        var directHeaderContinuation: CheckedContinuation<(HTTPURLResponse, @Sendable () -> Void), Error>?
+        var directBodyContinuation: CheckedContinuation<Void, Error>?
+        var directBytesHandler: (@Sendable (UnsafeRawBufferPointer) -> Bool)?
         var yieldedResponse = false
 
         init(allowStatus200: Bool, originHost: String?, onRedirectResolved: (@Sendable (URL) -> Void)?) {
@@ -260,6 +263,52 @@ internal final class DownloadRangeStreamDelegate: NSObject, URLSessionDataDelega
         } onCancel: {
             dataTask.cancel()
         }
+    }
+
+    func openDirectStream(
+        session: URLSession,
+        request: URLRequest,
+        allowStatus200: Bool,
+        onRedirectResolved: (@Sendable (URL) -> Void)? = nil,
+        onBytes: @escaping @Sendable (UnsafeRawBufferPointer) -> Bool
+    ) async throws -> (HTTPURLResponse, @Sendable () -> Void, Task<Void, Error>) {
+        let dataTask = session.dataTask(with: request)
+        let originHost = request.url?.host
+        let (http, cancelTask) = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (hdrCont: CheckedContinuation<(HTTPURLResponse, @Sendable () -> Void), Error>) in
+                let state = StreamTaskState(
+                    allowStatus200: allowStatus200,
+                    originHost: originHost,
+                    onRedirectResolved: onRedirectResolved
+                )
+                state.directHeaderContinuation = hdrCont
+                state.directBytesHandler = onBytes
+                lock.lock()
+                states[dataTask.taskIdentifier] = state
+                lock.unlock()
+                dataTask.resume()
+            }
+        } onCancel: {
+            dataTask.cancel()
+        }
+
+        let bodyTask = Task<Void, Error> {
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (bodyCont: CheckedContinuation<Void, Error>) in
+                    lock.lock()
+                    if let state = states[dataTask.taskIdentifier] {
+                        state.directBodyContinuation = bodyCont
+                        lock.unlock()
+                    } else {
+                        lock.unlock()
+                        bodyCont.resume(returning: ())
+                    }
+                }
+            } onCancel: {
+                dataTask.cancel()
+            }
+        }
+        return (http, cancelTask, bodyTask)
     }
 
     func urlSession(
@@ -301,12 +350,32 @@ internal final class DownloadRangeStreamDelegate: NSObject, URLSessionDataDelega
         state.yieldedResponse = true
         let respCont = state.responseContinuation
         state.responseContinuation = nil
+        let hdrCont = state.directHeaderContinuation
+        state.directHeaderContinuation = nil
 
         guard let http = response as? HTTPURLResponse else {
             states.removeValue(forKey: dataTask.taskIdentifier)
             lock.unlock()
             respCont?.resume(throwing: URLError(.badServerResponse))
+            hdrCont?.resume(throwing: URLError(.badServerResponse))
             completionHandler(.cancel)
+            return
+        }
+
+        let cancelTask: @Sendable () -> Void = {
+            dataTask.cancel()
+        }
+        let contentType = http.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
+        let isErrorDocument = TurboStreamingSessionHub.isLikelyNonMediaErrorContentType(contentType)
+        let accept = !isErrorDocument && ((http.statusCode == 206) || (http.statusCode == 200 && state.allowStatus200))
+
+        if hdrCont != nil {
+            if !accept {
+                states.removeValue(forKey: dataTask.taskIdentifier)
+            }
+            lock.unlock()
+            hdrCont?.resume(returning: (http, cancelTask))
+            completionHandler(accept ? .allow : .cancel)
             return
         }
 
@@ -314,16 +383,10 @@ internal final class DownloadRangeStreamDelegate: NSObject, URLSessionDataDelega
         let stream = AsyncThrowingStream<Data, Error> { cont in
             capturedCont = cont
         }
-        let cancelTask: @Sendable () -> Void = {
-            dataTask.cancel()
-        }
         capturedCont.onTermination = { _ in
             dataTask.cancel()
         }
 
-        let contentType = http.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
-        let isErrorDocument = TurboStreamingSessionHub.isLikelyNonMediaErrorContentType(contentType)
-        let accept = !isErrorDocument && ((http.statusCode == 206) || (http.statusCode == 200 && state.allowStatus200))
         if accept {
             state.dataContinuation = capturedCont
             lock.unlock()
@@ -341,9 +404,16 @@ internal final class DownloadRangeStreamDelegate: NSObject, URLSessionDataDelega
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         guard !data.isEmpty else { return }
         lock.lock()
-        let cont = states[dataTask.taskIdentifier]?.dataContinuation
+        let state = states[dataTask.taskIdentifier]
+        let cont = state?.dataContinuation
+        let directHandler = state?.directBytesHandler
         lock.unlock()
-        cont?.yield(data)
+        if let directHandler {
+            let keepGoing = data.withUnsafeBytes { directHandler($0) }
+            if !keepGoing { dataTask.cancel() }
+        } else {
+            cont?.yield(data)
+        }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
@@ -356,16 +426,25 @@ internal final class DownloadRangeStreamDelegate: NSObject, URLSessionDataDelega
         state.responseContinuation = nil
         let dataCont = state.dataContinuation
         state.dataContinuation = nil
+        let hdrCont = state.directHeaderContinuation
+        state.directHeaderContinuation = nil
+        let bodyCont = state.directBodyContinuation
+        state.directBodyContinuation = nil
+        state.directBytesHandler = nil
         let alreadyYielded = state.yieldedResponse
         state.yieldedResponse = true
         lock.unlock()
 
         if !alreadyYielded {
-            respCont?.resume(throwing: error ?? URLError(.unknown))
+            let err = error ?? URLError(.unknown)
+            respCont?.resume(throwing: err)
+            hdrCont?.resume(throwing: err)
         } else if let error {
             dataCont?.finish(throwing: error)
+            bodyCont?.resume(throwing: error)
         } else {
             dataCont?.finish()
+            bodyCont?.resume(returning: ())
         }
     }
 }

@@ -2,11 +2,13 @@ pub mod abi;
 pub mod clock;
 pub mod dovi;
 pub mod ffi;
+pub mod net;
 pub mod subtitle;
 pub mod vad;
 
 mod audio;
 mod c_api;
+mod c_api_net;
 mod demux;
 mod lifecycle;
 mod player;
@@ -14,6 +16,7 @@ mod tracks;
 mod video;
 
 pub use c_api::*;
+pub use c_api_net::*;
 pub use player::DKPlayer;
 
 use std::ffi::{c_char, c_int, c_void, CString};

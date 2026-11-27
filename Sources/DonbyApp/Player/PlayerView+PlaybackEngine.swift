@@ -330,6 +330,9 @@ extension PlayerView {
                 }
                 let opaque = Unmanaged.passRetained(turboHandle).toOpaque()
                 dk_player_set_custom_io(handle, opaque, dkTurboReadCB, dkTurboSeekCB, dkTurboAbortCB, dkTurboCloseCB)
+                if let rawBridge = turboHandle.rawBridge {
+                    dk_player_attach_stream_bridge(handle, rawBridge)
+                }
             }
             let ret = dk_player_open_with_tracks(handle, urlStr, headersStr, startSeconds, hwDecode, preAudioHint, preSubHint)
             if ret == 0 {

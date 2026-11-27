@@ -1,5 +1,107 @@
 import Foundation
 import DonbyCore
+import DonbyKernelC
+
+private final class DownloadAssemblerBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private let ptr: OpaquePointer
+    private let store: TieredAssetChunkStore
+    private let workerId: Int
+    private let bound: ActiveSegmentBound
+    private let monitor: WorkerTransferMonitor
+    private let speedMeter: SlidingWindowSpeedMeter
+    private let byteCounter: LiveDownloadByteCounter
+    private var currentChunkIdx: Int
+    private var hitDynamicBound = false
+
+    init?(
+        store: TieredAssetChunkStore,
+        startChunk: Int,
+        bound: ActiveSegmentBound,
+        workerId: Int,
+        monitor: WorkerTransferMonitor,
+        speedMeter: SlidingWindowSpeedMeter,
+        byteCounter: LiveDownloadByteCounter
+    ) {
+        guard let p = dk_net_assembler_create(store.rawStore, Int32(startChunk), Int32(bound.currentEnd())) else {
+            return nil
+        }
+        self.ptr = p
+        self.store = store
+        self.workerId = workerId
+        self.bound = bound
+        self.monitor = monitor
+        self.speedMeter = speedMeter
+        self.byteCounter = byteCounter
+        self.currentChunkIdx = startChunk
+    }
+
+    deinit {
+        dk_net_assembler_destroy(ptr)
+    }
+
+    func ingest(_ raw: UnsafeRawBufferPointer) -> Bool {
+        guard !raw.isEmpty, let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return true }
+        let now = ProcessInfo.processInfo.systemUptime
+        monitor.recordBytes(raw.count, at: now)
+        speedMeter.recordBytes(raw.count, at: now)
+        byteCounter.addInFlight(workerId: workerId, delta: raw.count)
+
+        lock.lock()
+        dk_net_assembler_update_end(ptr, Int32(bound.currentEnd()))
+        let keepInRam = (store.activeReaderCount > 0 || currentChunkIdx < 4)
+        var committedChunks: Int32 = 0
+        var committedBytes: Int64 = 0
+        var hitEnd = false
+        dk_net_assembler_ingest(ptr, base, Int32(raw.count), keepInRam, &committedChunks, &committedBytes, &hitEnd)
+        let prevChunk = currentChunkIdx
+        if committedChunks > 0 {
+            currentChunkIdx += Int(committedChunks)
+            bound.advanceCurrent(to: currentChunkIdx)
+            byteCounter.commitChunk(workerId: workerId, bytes: Int(committedBytes))
+        }
+        if hitEnd { hitDynamicBound = true }
+        let shouldContinue = !hitDynamicBound
+        lock.unlock()
+
+        if committedChunks > 0 {
+            for idx in prevChunk..<(prevChunk + Int(committedChunks)) {
+                store.recordChunkCompletedFromNative(index: idx)
+            }
+        }
+        let companionCapBps = dk_net_get_download_companion_rate_limit_bps()
+        if companionCapBps == 0 {
+            Thread.sleep(forTimeInterval: 0.05)
+        } else if companionCapBps > 0 {
+            let delaySec = min(0.15, Double(raw.count) / Double(companionCapBps))
+            if delaySec > 0.001 { Thread.sleep(forTimeInterval: delaySec) }
+        }
+        return shouldContinue
+    }
+
+    func finish() -> Int {
+        lock.lock()
+        let keepInRam = (store.activeReaderCount > 0 || currentChunkIdx < 4)
+        var committedChunks: Int32 = 0
+        var committedBytes: Int64 = 0
+        dk_net_assembler_finish(ptr, keepInRam, &committedChunks, &committedBytes)
+        let prevChunk = currentChunkIdx
+        if committedChunks > 0 {
+            currentChunkIdx += Int(committedChunks)
+            bound.advanceCurrent(to: currentChunkIdx)
+            byteCounter.commitChunk(workerId: workerId, bytes: Int(committedBytes))
+        }
+        let endChunk = currentChunkIdx
+        lock.unlock()
+
+        if committedChunks > 0 {
+            for idx in prevChunk..<(prevChunk + Int(committedChunks)) {
+                store.recordChunkCompletedFromNative(index: idx)
+            }
+        }
+        return endChunk
+    }
+}
 
 // MARK: - Download Batch Coordinator, Range Worker & Legacy Migration
 
@@ -506,7 +608,20 @@ extension DonbyDownloadManager {
                                 let monitor = WorkerTransferMonitor()
 
                                 do {
-                                    let (http, byteStream, cancelStream) = try await streamDelegate.openStream(
+                                    guard let assembler = DownloadAssemblerBox(
+                                        store: store,
+                                        startChunk: startChunk,
+                                        bound: bound,
+                                        workerId: workerId,
+                                        monitor: monitor,
+                                        speedMeter: speedMeter,
+                                        byteCounter: byteCounter
+                                    ) else {
+                                        await coordinator.requeueBatchFailure(workerId: workerId, startChunk: startChunk, resumeFromChunk: currentChunkIdx, endChunk: bound.currentEnd(), statusCode: -1, usedCDN: usedCDN, epoch: redirectEpoch, retryAfterHeader: nil)
+                                        return
+                                    }
+
+                                    let (http, cancelStream, bodyTask) = try await streamDelegate.openDirectStream(
                                         session: workerSession,
                                         request: req,
                                         allowStatus200: (startChunk == 0 && batchStartByte == 0),
@@ -514,6 +629,9 @@ extension DonbyDownloadManager {
                                             Task {
                                                 await coordinator.updateResolvedRedirectURL(finalURL, usedCDN: usedCDN, epoch: redirectEpoch)
                                             }
+                                        },
+                                        onBytes: { raw in
+                                            assembler.ingest(raw)
                                         }
                                     )
                                     statusCode = http.statusCode
@@ -555,59 +673,18 @@ extension DonbyDownloadManager {
                                         }
                                         defer { watchdog.cancel() }
 
-                                        var acc = Data()
-                                        acc.reserveCapacity(chunkSize * 2)
-                                        var readCursor = 0
-                                        var hitDynamicBound = false
-
-                                        func flushReadyChunks() {
-                                            while currentChunkIdx <= bound.currentEnd() {
-                                                let expectedLen = min(
-                                                    chunkSize,
-                                                    Int(max(0, totalSize - Int64(currentChunkIdx) * Int64(chunkSize)))
-                                                )
-                                                guard acc.count - readCursor >= expectedLen else { break }
-                                                let endPos = readCursor + expectedLen
-                                                let keepInRam = (store.activeReaderCount > 0 || currentChunkIdx < 4)
-                                                store.storeChunk(index: currentChunkIdx, data: Data(acc[readCursor..<endPos]), cacheInMemory: keepInRam)
-                                                byteCounter.commitChunk(workerId: workerId, bytes: expectedLen)
-                                                readCursor = endPos
-                                                currentChunkIdx += 1
-                                                bound.advanceCurrent(to: currentChunkIdx)
-                                            }
-                                            if currentChunkIdx > bound.currentEnd() {
-                                                hitDynamicBound = true
-                                            }
-                                        }
-
-                                        for try await netSlice in byteStream {
-                                            if Task.isCancelled { break }
-                                            acc.append(netSlice)
-                                            let now = ProcessInfo.processInfo.systemUptime
-                                            monitor.recordBytes(netSlice.count, at: now)
-                                            speedMeter.recordBytes(netSlice.count, at: now)
-                                            byteCounter.addInFlight(workerId: workerId, delta: netSlice.count)
-
-                                            flushReadyChunks()
-                                            if hitDynamicBound {
-                                                cancelStream()
-                                                break
-                                            }
-                                            if readCursor >= chunkSize {
-                                                acc.removeSubrange(0..<readCursor)
-                                                readCursor = 0
-                                            }
-                                        }
+                                        try await bodyTask.value
 
                                         watchdog.cancel()
                                         byteCounter.clearWorkerInFlight(workerId: workerId)
 
                                         if Task.isCancelled {
+                                            currentChunkIdx = assembler.finish()
                                             await coordinator.requeueBatchFailure(workerId: workerId, startChunk: startChunk, resumeFromChunk: currentChunkIdx, endChunk: bound.currentEnd(), statusCode: -1, usedCDN: usedCDN, epoch: redirectEpoch, retryAfterHeader: nil)
                                             return
                                         }
 
-                                        flushReadyChunks()
+                                        currentChunkIdx = assembler.finish()
                                         if currentChunkIdx > bound.currentEnd() {
                                             await coordinator.finishBatchSuccess(workerId: workerId)
                                         } else {

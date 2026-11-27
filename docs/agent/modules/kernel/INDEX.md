@@ -1,6 +1,6 @@
 # Module Map: Playback Kernel (`KernelRust` + `DonbyKernelC` ABI)
 
-> Last synced: `v2.0.25` (C++20 baseline archived on `legacy/cpp-kernel`). Read [../../decisions/003-rust-kernel-migration.md](../../decisions/003-rust-kernel-migration.md) and [../../decisions/004-zero-serial-rtt-instant-play-v3.md](../../decisions/004-zero-serial-rtt-instant-play-v3.md) for architecture rationale.
+> Last synced: `v2.1.1` (C++20 baseline archived on `legacy/cpp-kernel`). Read [../../decisions/003-rust-kernel-migration.md](../../decisions/003-rust-kernel-migration.md), [../../decisions/004-zero-serial-rtt-instant-play-v3.md](../../decisions/004-zero-serial-rtt-instant-play-v3.md), and [../../decisions/005-zero-crate-rust-media-data-plane-2a.md](../../decisions/005-zero-crate-rust-media-data-plane-2a.md) for architecture rationale.
 
 ## 1. Sub-Document Routing
 
@@ -27,6 +27,13 @@
   - `audio.rs` — AQ trampolines, `stop_reset_audio_queue`/`stop_dispose_audio_queue`, clock, `audio_decode_worker`, playback controls.
   - `tracks.rs` — Auto-subtitle scoring, subtitle packet history, track/chapter getters, `select_track`.
   - `c_api.rs` — 38 `#[no_mangle] extern "C" fn dk_*` thin ABI wrappers (including `dk_player_notify_metal_first_frame` `[StartupTiming]` emitter).
+  - `c_api_net.rs` — `#[no_mangle] extern "C" fn dk_net_*` & `dk_player_attach_stream_bridge` C ABI wrappers for the 2A media data plane.
+  - `net/` (zero-dependency 2A media data plane):
+    - `net/mod.rs` — Darwin `SEEK_DATA`/`SEEK_HOLE` sparse extent helpers, physical-RAM-tiered budget sizing, and `PlaybackCompanionPacer`.
+    - `net/slab.rs` — `GlobalSlabPool` fixed `512 KiB` page allocator with hard RAM cap and anchor pinning.
+    - `net/disk_store.rs` — `DKChunkStore` sparse `media.bin` POSIX `pread`/`pwrite` storage and bounded background disk writer.
+    - `net/disk_reconcile.rs` — `chunks.bitmap` binary codec, `SEEK_DATA` open-time reconciliation, legacy `.chk` folding, and tombstone removal.
+    - `net/avio_bridge.rs` — `DKStreamBridge` in-kernel `AVIO` fast path, partial slab ingestion, and `DKDownloadAssembler`.
   - `abi.rs` — `#[repr(C)]` ABI structs, `DKGpuColorUniforms::default_sdr()`, C-string helpers, `offset_of!` tests.
   - `ffi.rs` — `extern "C"` bindings + RAII `Drop` wrappers (`AvPacket`, `AvFrame`, `OwnedPixelBuffer`).
   - `clock.rs` — Monotonic ns clock helpers, `ClockState`, `SpeedTracker`.

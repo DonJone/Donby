@@ -42,6 +42,22 @@ pub(crate) unsafe extern "C" fn avio_read_thunk(
     if p.abort_requested.load(Ordering::Acquire) || p.is_closing.load(Ordering::Acquire) {
         return dk_shim_averror_exit();
     }
+    let bridge_opt = p.stream_bridge.lock().ok().and_then(|g| g.clone());
+    if let Some(bridge) = bridge_opt {
+        let n = bridge.avio_read(buf, buf_size);
+        if n > 0 {
+            p.total_bytes_read.fetch_add(n as i64, Ordering::Relaxed);
+            return n;
+        }
+        if n == 0 {
+            return dk_shim_averror_eof();
+        }
+        return if p.should_yield_read() {
+            dk_shim_averror_exit()
+        } else {
+            dk_shim_averror_eio()
+        };
+    }
     let (read_cb, io_opaque) = match p.custom_io.lock() {
         Ok(io) => (io.read_cb, io.opaque as *mut c_void),
         Err(_) => return dk_shim_averror_eof(),
@@ -71,6 +87,10 @@ pub(crate) unsafe extern "C" fn avio_seek_thunk(
         return dk_shim_averror_enosys() as i64;
     }
     let p = &*(opaque as *const DKPlayer);
+    let bridge_opt = p.stream_bridge.lock().ok().and_then(|g| g.clone());
+    if let Some(bridge) = bridge_opt {
+        return bridge.avio_seek(offset, whence);
+    }
     let (seek_cb, io_opaque) = match p.custom_io.lock() {
         Ok(io) => (io.seek_cb, io.opaque as *mut c_void),
         Err(_) => return dk_shim_averror_enosys() as i64,
@@ -140,6 +160,11 @@ pub(crate) unsafe fn request_abort_raw(player: *mut DKPlayer) {
 
 impl DKPlayer {
     pub(crate) unsafe fn abort_custom_io(&self) {
+        let bridge_opt = self.stream_bridge.lock().ok().and_then(|g| g.clone());
+        if let Some(bridge) = bridge_opt {
+            bridge.abort();
+            return;
+        }
         if let Ok(io) = self.custom_io.lock() {
             if let (Some(abort_cb), op) = (io.abort_cb, io.opaque as *mut c_void) {
                 if !op.is_null() {
@@ -150,6 +175,10 @@ impl DKPlayer {
     }
 
     pub(crate) unsafe fn close_custom_io(&self) {
+        let bridge_opt = self.stream_bridge.lock().ok().and_then(|mut g| g.take());
+        if let Some(bridge) = bridge_opt {
+            bridge.close();
+        }
         if let Ok(mut io) = self.custom_io.lock() {
             if let (Some(close_cb), op) = (io.close_cb, io.opaque as *mut c_void) {
                 if !op.is_null() {
@@ -157,6 +186,12 @@ impl DKPlayer {
                 }
             }
             *io = CustomIoSlot::default();
+        }
+    }
+
+    pub(crate) fn set_stream_bridge(&self, bridge: std::sync::Arc<crate::net::avio_bridge::DKStreamBridge>) {
+        if let Ok(mut g) = self.stream_bridge.lock() {
+            *g = Some(bridge);
         }
     }
 
@@ -191,11 +226,15 @@ impl DKPlayer {
             return -1;
         }
 
-        // Preserve any pending custom IO registered prior to open across close_session
+        // Preserve any pending custom IO or stream bridge registered prior to open across close_session
         let saved_io = self.custom_io.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
+        let saved_bridge = self.stream_bridge.lock().ok().and_then(|mut g| g.take());
         self.close_session();
         if let Ok(mut g) = self.custom_io.lock() {
             *g = saved_io;
+        }
+        if let Ok(mut g) = self.stream_bridge.lock() {
+            *g = saved_bridge;
         }
 
         if self.external_abort_requested.load(Ordering::SeqCst) {
@@ -207,11 +246,14 @@ impl DKPlayer {
         let normalized_url = normalize_path_or_url(raw_url);
         let Ok(open_target_c) = CString::new(normalized_url.as_str()) else { return -1 };
         let is_local_file = normalized_url.starts_with('/');
-        let (use_custom_io, has_seek_cb) = self
-            .custom_io
-            .lock()
-            .map(|io| (io.read_cb.is_some() && io.opaque != 0, io.seek_cb.is_some()))
-            .unwrap_or((false, false));
+        let (use_custom_io, has_seek_cb) = if let Some(bridge) = self.stream_bridge.lock().ok().and_then(|g| g.clone()) {
+            (true, bridge.has_seek_cb())
+        } else {
+            self.custom_io
+                .lock()
+                .map(|io| (io.read_cb.is_some() && io.opaque != 0, io.seek_cb.is_some()))
+                .unwrap_or((false, false))
+        };
 
         let safe_log_url = if is_local_file {
             normalized_url.clone()

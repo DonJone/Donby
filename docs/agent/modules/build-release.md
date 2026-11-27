@@ -1,9 +1,9 @@
 # Module Map: Build, Packaging & Release Pipeline
 
-> Last synced: `v2.0.5`. Load this doc for compiling Swift/Rust/C11, `DONBY_PURE=1` pure builds, bundling dylibs, signing `/Applications/Donby.app`, DMG/ZIP packaging, channel-aware local GitHub Releases, agent doc-sync gates, and CI.
+> Last synced: `v2.1.1`. Load this doc for compiling Swift/Rust/C11, `DONBY_PURE=1` pure builds, bundling dylibs, signing `/Applications/Donby.app`, DMG/ZIP packaging, channel-aware local GitHub Releases, agent doc-sync gates, and CI.
 
 ## 1. File Inventory
-- `Package.swift` — SwiftPM manifest compiling pure-C11 `DonbyKernelC/dk_ffi_shim.c` and linking `build_kernel/libdonby_kernel.a` (`KernelRust`), optional `DonbyUHDModule` (omitted alongside `Modules/UHD` when `DONBY_PURE=1` sets `-DDONBY_PURE_BUILD`), and `DonbyCoreTests`.
+- `Package.swift` — SwiftPM manifest compiling pure-C11 `DonbyKernelC` (`dk_ffi_shim*.c`), linking `build_kernel/libdonby_kernel.a` (`KernelRust`) into `DonbyKernelC` and `DonbyNetwork`, optional `DonbyUHDModule` (omitted alongside `Modules/UHD` when `DONBY_PURE=1` sets `-DDONBY_PURE_BUILD`), and `DonbyCoreTests`.
 - `build_kernel.sh` + `KernelRust/` — Builds zero-dependency Rust `staticlib` (`KernelRust/Cargo.toml`) into `build_kernel/libdonby_kernel.a` (only overwrites output when bytes change so SwiftPM skips redundant relinks).
 - `scripts/dev.sh` — Fast local CLI wrapper (`build` / `test` / `app` / `release`) that auto-wires `core.hooksPath=.githooks`, runs `scripts/check_agent_docs.py` on `test`, runs `./build_kernel.sh` (+ `cargo test` on `test`), auto-selects valid CLT SDK, uses `--build-system native` (avoiding Swift 6.4 `swiftbuild` 54s no-op cache-invalidation bug), and passes CLT `Testing.framework` search paths + isolated `DONBY_HOME`.
 - `build_app.sh` — Incremental Release build: uses `--build-system native` + multi-core incremental `-O` (`-no-whole-module-optimization -incremental`, opt-in `DONBY_WMO=1`), skips up-to-date `AppIcon.icns`, bundles `Resources/silero_vad_16k.safetensors` into `Contents/Resources/`, preserves `/Applications/Donby.app` inode and cached `Contents/Frameworks/` dylibs, signs app bundle (`codesign --force --sign -`), and verifies `--deep --strict`.

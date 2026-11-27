@@ -1,6 +1,6 @@
 # Kernel Sub-Module: Lifecycle, Demux, Tracks & C ABI
 
-> Last synced: `v2.0.25`
+> Last synced: `v2.1.1`
 
 ## 1. Module Responsibilities
 - `KernelRust/src/lib.rs`: Crate root, module declarations, `LOG_CALLBACK` / `LIVE_PLAYERS` registry, `dk_rust_forward_ffmpeg_log`, `ReaderGuard`, URL normalization/redaction (`normalize_path_or_url`, `redact_url_for_log`).
@@ -9,6 +9,12 @@
 - `KernelRust/src/demux.rs`: `demux_worker` packet loop (executes `initial_open_seek_pending` on first iteration in parallel with unlocked multi-lane Turbo prefetch and CoreAudio HAL setup), media-source-aware buffer caps (local `2.5s/12MB`, custom IO `16s/64MB`, direct HTTP `30s/96MB`), 4 MB sliding unselected-audio packet ring (`audio_hist_mtx`), lock-free `current_pos_bits` / `stream_types` hot path, EOF handling, DoVi NAL 62/63 probing, and `execute_pending_seek` (seek flush + `AVDISCARD_NONREF` accurate-seek arming + single `stop_reset_audio_queue`).
 - `KernelRust/src/tracks.rs`: `score_auto_subtitle_stream`, subtitle packet history (`record_sub_pkt_history`, `replay_sub_pkt_history`), track/chapter enumeration, `select_track` (zero-seek seamless audio track switching via `audio_hist_mtx` + sample-accurate `next_aq_pts` handoff with automatic seek fallback), `select_secondary_subtitle_track`.
 - `KernelRust/src/c_api.rs`: All 38 `#[no_mangle] pub unsafe extern "C" fn dk_*` entrypoints matching `Sources/DonbyKernelC/include/donby_kernel.h` (including `dk_player_notify_metal_first_frame` emitting `[StartupTiming]`).
+- `KernelRust/src/c_api_net.rs`: Thin `dk_net_*` and `dk_player_attach_stream_bridge` C ABI wrappers for `GlobalSlabPool`, `DKChunkStore`, `DKStreamBridge`, `DKDownloadAssembler`, and `PlaybackCompanionPacer`.
+- `KernelRust/src/net/mod.rs`: Darwin `SEEK_DATA`/`SEEK_HOLE` sparse extent validators, physical-RAM-tiered slab budget sizing (`96/160/256/384 MiB`), and `PlaybackCompanionPacer`.
+- `KernelRust/src/net/slab.rs`: `GlobalSlabPool` fixed `512 KiB` page pool with global hard byte cap, anchor protection (`0..3` + EOF tail), and LRU eviction.
+- `KernelRust/src/net/disk_store.rs`: `DKChunkStore` POSIX `pread`/`pwrite` sparse `media.bin` I/O and bounded background disk write worker.
+- `KernelRust/src/net/disk_reconcile.rs`: `chunks.bitmap` FNV-64 binary codec, open-time `SEEK_DATA` reconciliation, legacy `.chk` folding, and tombstone `invalidate_for_removal`.
+- `KernelRust/src/net/avio_bridge.rs`: `DKStreamBridge` in-kernel `AVIO` fast-path reader, zero-copy partial `SlabPage` ingestion, and `DKDownloadAssembler`.
 - `KernelRust/src/abi.rs`: Frozen C ABI `#[repr(C)]` structs/enums, compile-time size/align assertions, `offset_of!` tests, `DKGpuColorUniforms::default_sdr()`, and C-string helpers (`cchar_array_to_string`, `write_str_to_cchar`).
 - `KernelRust/src/ffi.rs`: `extern "C"` bindings for `dk_ffi_shim.c` and `libass`, plus RAII wrappers (`AvPacket`, `AvFrame`, `OwnedPixelBuffer`).
 - `Sources/DonbyKernelC/include/donby_kernel.h`: Frozen C ABI header declaring 7 `#[repr(C)]` structs/enums and 38 `dk_*` functions.
@@ -16,7 +22,8 @@
 - `Sources/DonbyKernelC/dk_ffi_shim.c`: Core pure C11 shim (`_Static_assert` ABI checks, `av_log` variadic bridge, packet/frame alloc, format open with PGS/DVD fast-probe bypass, zero-fps-probe & `container_headers_complete` 64-packet MKV/MP4 fast path, custom AVIO, stream/chapter metadata, seek/read, shared `AVCodecContext` helpers, `dk_shim_set_codec_skip_nonref`, `dk_shim_reclaim_memory`).
 
 ## 2. Mandatory Lock Partial Order
-1. `LIVE_PLAYERS` -> `custom_io` (never acquire `LIVE_PLAYERS` while holding `custom_io`).
+1. `LIVE_PLAYERS` -> `custom_io` -> `stream_bridge` (never acquire `LIVE_PLAYERS` while holding `custom_io` or `stream_bridge`).
+2. `DKStreamBridge::partials_mtx` -> `DKChunkStore::meta_mtx` -> `GlobalSlabPool::pool_mtx` (never invoke Swift C callbacks while holding any Rust mutex).
 2. `demux_mtx` -> `{video_pkt_mtx, audio_pkt_mtx, video_codec_mtx, audio_codec_mtx, sub_mtx, sub_hist_mtx, audio_hist_mtx, video_queue_mtx, audio_chunks_mtx, vad_mtx, speed_mtx}`.
 3. `audio_codec_mtx` -> `{vad_mtx, audio_chunks_mtx, video_queue_mtx, audio_buffers, audio_pkt_mtx, audio_hist_mtx, stats_mtx, workers_mtx}`.
 4. `video_codec_mtx` -> `stats_mtx`.

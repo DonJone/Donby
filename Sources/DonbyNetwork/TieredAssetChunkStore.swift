@@ -1,8 +1,9 @@
 import Foundation
 import Darwin
 import DonbyCore
+import DonbyKernelC
 
-// MARK: - Task C: ChunkStore Metadata & Disk/Memory Tiered Storage
+// MARK: - Task C: ChunkStore Metadata & KernelRust Slab/Sparse Storage Bridge
 
 public struct ChunkStoreMeta: Codable, Equatable, Sendable {
     public var assetKey: String
@@ -91,26 +92,15 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
     public let chunksDirectoryURL: URL
 
     internal let lock = NSLock()
-    internal let memoryLock = NSLock()
     internal let metaWriteLock = NSLock()
-    internal let diskQueue = DispatchQueue(label: "com.donby.chunkstore.disk", qos: .userInitiated)
     internal let metaWriteQueue = DispatchQueue(label: "com.donby.chunkstore.meta", qos: .utility)
     internal var meta: ChunkStoreMeta
-    internal var memoryChunks: [Int: Data] = [:]
-    internal var memoryOrder: [Int] = []
-    internal var memoryBytes: Int = 0
-    internal var pendingDiskChunks: [Int: Data] = [:]
-    internal var didEnsureChunksDir: Bool = false
     internal var isClosedForDisk: Bool = false
     internal var isRemovedFromDisk: Bool = false
     internal var maxMemoryBytes: Int
     internal var persistDisk: Bool
-    internal var readHandle: FileHandle?
-    internal var writeHandle: FileHandle?
-    internal var dirtyMetaOps: Int = 0
-    internal var activeReaders: Int = 0
     internal var didNotifyFullyCached: Bool = false
-    internal var contiguousPrefixCount: Int = 0
+    internal let rawStore: OpaquePointer
 
     public init(
         assetKey: String,
@@ -128,32 +118,64 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
         self.persistDisk = persistDisk
 
         try? FileManager.default.createDirectory(at: assetDirectory, withIntermediateDirectories: true)
+        let loadedMeta: ChunkStoreMeta
         if let data = try? Data(contentsOf: metaFileURL),
            let loaded = try? JSONDecoder().decode(ChunkStoreMeta.self, from: data) {
-            self.meta = loaded
-            self.didNotifyFullyCached = loaded.isFullyCached
+            loadedMeta = loaded
         } else {
-            self.meta = ChunkStoreMeta(assetKey: assetKey, chunkSize: chunkSize)
+            loadedMeta = ChunkStoreMeta(assetKey: assetKey, chunkSize: chunkSize)
         }
-        self.meta.lastAccess = Date()
-        self.reconcileAndCompactDiskStorageLocked()
+
+        let assetDirPath = self.assetDirectory.path
+        let seedIndices = loadedMeta.completedChunks.map { Int32($0) }
+        let openedStore: OpaquePointer? = seedIndices.withUnsafeBufferPointer { buf in
+            assetDirPath.withCString { cPath in
+                dk_net_store_open(
+                    cPath,
+                    loadedMeta.totalSize,
+                    Int32(loadedMeta.chunkSize),
+                    persistDisk || loadedMeta.pinned,
+                    loadedMeta.pinned,
+                    buf.baseAddress,
+                    Int32(buf.count)
+                )
+            }
+        }
+        guard let openedStore else {
+            fatalError("Failed to initialize KernelRust DKChunkStore")
+        }
+        self.rawStore = openedStore
+        dk_net_store_update_config(openedStore, Int64(self.maxMemoryBytes), persistDisk || loadedMeta.pinned)
+
+        var syncedMeta = loadedMeta
+        syncedMeta.lastAccess = Date()
+        let reconciled = Self.fetchCompletedIndices(from: openedStore)
+        let prunedCount = max(0, syncedMeta.completedChunks.count - reconciled.count)
+        syncedMeta.completedChunks = reconciled
+        self.meta = syncedMeta
+        self.didNotifyFullyCached = syncedMeta.isFullyCached
+
+        if prunedCount > 0 {
+            DonbyLogger.shared.log(
+                "检测到缓存索引与磁盘文件不一致，已自动清理 \(prunedCount) 个缺失/空洞分片 (\(assetKey))",
+                level: .warning,
+                subsystem: "TurboCache"
+            )
+            if persistDisk || syncedMeta.pinned {
+                writeMetaSnapshotToDisk(syncedMeta)
+            }
+        }
     }
 
     deinit {
-        // Never call `diskQueue.sync` / `metaWriteQueue.sync` inside `deinit`: if the last strong
-        // reference drops at the end of a `[weak self]` closure on `diskQueue` or `metaWriteQueue`,
-        // synchronous re-entry onto the same serial queue triggers a GCD SIGTRAP deadlock.
         lock.lock()
         let shouldPersist = (persistDisk || meta.pinned) && !isClosedForDisk && !isRemovedFromDisk
         let snapshot = shouldPersist ? meta : nil
-        try? readHandle?.close()
-        readHandle = nil
-        try? writeHandle?.close()
-        writeHandle = nil
         lock.unlock()
         if let snapshot {
             writeMetaSnapshotToDisk(snapshot)
         }
+        dk_net_store_release(rawStore)
     }
 
     public func currentMeta() -> ChunkStoreMeta {
@@ -163,31 +185,29 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
     }
 
     public func cachedBytesFast() -> Int64 {
-        lock.lock(); defer { lock.unlock() }; return meta.cachedBytes
+        var cached: Int64 = 0
+        var total: Int64 = 0
+        var full = false
+        dk_net_store_get_progress(rawStore, &cached, &total, &full)
+        return cached
     }
 
     public func totalSizeFast() -> Int64 {
-        lock.lock(); defer { lock.unlock() }; return meta.totalSize
+        lock.lock()
+        defer { lock.unlock() }
+        return meta.totalSize
     }
 
     public var activeReaderCount: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return activeReaders
+        Int(dk_net_store_active_readers(rawStore))
     }
 
     public func retainReader() {
-        lock.lock()
-        activeReaders += 1
-        lock.unlock()
+        dk_net_store_retain_reader(rawStore)
     }
 
     public func releaseReader() -> Int {
-        lock.lock()
-        activeReaders = max(0, activeReaders - 1)
-        let remaining = activeReaders
-        lock.unlock()
-        return remaining
+        Int(dk_net_store_release_reader(rawStore))
     }
 
     public func updateCachedMetadata(
@@ -224,19 +244,17 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
 
     public func updateConfiguration(maxMemoryBytes: Int, persistDisk: Bool) {
         let clampedMem = max(32 * 1024 * 1024, min(2_147_483_648, maxMemoryBytes))
-        memoryLock.lock()
-        self.maxMemoryBytes = clampedMem
-        evictMemoryLockedIfNeeded(incomingBytes: 0)
-        memoryLock.unlock()
-
         lock.lock()
         guard !isRemovedFromDisk else {
             lock.unlock()
             return
         }
-        self.persistDisk = persistDisk || meta.pinned
+        self.maxMemoryBytes = clampedMem
+        let effectivePersist = persistDisk || meta.pinned
+        self.persistDisk = effectivePersist
         self.isClosedForDisk = false
         lock.unlock()
+        dk_net_store_update_config(rawStore, Int64(clampedMem), effectivePersist)
     }
 
     public func setPinned(_ pinned: Bool) {
@@ -252,6 +270,7 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
         let shouldPersist = !isClosedForDisk && !isRemovedFromDisk
         let snapshot = meta
         lock.unlock()
+        dk_net_store_set_pinned(rawStore, pinned)
         if shouldPersist {
             writeMetaSnapshotToDisk(snapshot)
         }
@@ -259,9 +278,11 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
 
     public func setTotalSize(_ totalSize: Int64, sourceURL: String? = nil) {
         var snapshot: ChunkStoreMeta? = nil
+        var changedTotal = false
         lock.lock()
         if !isRemovedFromDisk && totalSize > 0 && meta.totalSize != totalSize {
             meta.totalSize = totalSize
+            changedTotal = true
             if let sourceURL, !sourceURL.isEmpty {
                 meta.sourceURLString = sourceURL
             }
@@ -270,21 +291,16 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
             }
         }
         lock.unlock()
+        if changedTotal {
+            dk_net_store_set_total_size(rawStore, totalSize)
+        }
         if let snapshot {
             writeMetaSnapshotToDisk(snapshot)
         }
     }
 
     public func hasChunk(_ index: Int) -> Bool {
-        memoryLock.lock()
-        let inMem = (memoryChunks[index] != nil)
-        memoryLock.unlock()
-        if inMem { return true }
-
-        lock.lock()
-        let inDisk = !isRemovedFromDisk && ((pendingDiskChunks[index] != nil) || meta.completedChunks.contains(index))
-        lock.unlock()
-        return inDisk
+        dk_net_store_has_chunk(rawStore, Int32(index))
     }
 
     public func expectedChunkLength(for index: Int) -> Int {
@@ -295,334 +311,92 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
 
     public func storeChunk(index: Int, data: Data, cacheInMemory: Bool = true) {
         guard !data.isEmpty else { return }
+        data.withUnsafeBytes { raw in
+            guard let ptr = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+            dk_net_store_write_slice(rawStore, Int32(index), ptr, Int32(raw.count), cacheInMemory)
+        }
+        recordChunkCompletedFromNative(index: index)
+    }
 
+    internal func recordChunkCompletedFromNative(index: Int) {
         lock.lock()
         guard !isRemovedFromDisk else {
             lock.unlock()
             return
         }
-        if meta.totalSize > 0 {
-            let expectedLen = expectedChunkLenLocked(index: index)
-            guard expectedLen > 0, data.count >= expectedLen else {
-                lock.unlock()
-                return
-            }
-        }
+        meta.completedChunks.insert(index)
         meta.lastAccess = Date()
-        let shouldPersist = (persistDisk || meta.pinned) && !isClosedForDisk && !isRemovedFromDisk
-        if shouldPersist {
-            pendingDiskChunks[index] = data
+        let shouldNotifyFull = meta.isFullyCached && !didNotifyFullyCached
+        if shouldNotifyFull {
+            didNotifyFullyCached = true
         }
-        let backpressureLimit = cacheInMemory ? 128 : 96
-        let needsBackpressure = shouldPersist && (pendingDiskChunks.count >= backpressureLimit)
+        let snapshot = shouldNotifyFull ? meta : nil
         lock.unlock()
 
-        // 1. Store in L1 Memory cache under fast memoryLock (skipped for background offline downloads
-        //    with zero active readers so downloading multi-GB files never bloats RAM to 500 MiB).
-        if cacheInMemory {
-            memoryLock.lock()
-            if let prev = memoryChunks.removeValue(forKey: index) {
-                memoryBytes = max(0, memoryBytes - prev.count)
-                memoryOrder.removeAll { $0 == index }
+        if let snapshot {
+            if persistDisk || snapshot.pinned {
+                metaWriteQueue.async { [weak self] in
+                    self?.writeMetaSnapshotToDisk(snapshot)
+                }
             }
-            evictMemoryLockedIfNeeded(incomingBytes: data.count)
-            if data.count <= maxMemoryBytes {
-                memoryChunks[index] = data
-                memoryOrder.append(index)
-                memoryBytes += data.count
-            }
-            memoryLock.unlock()
-        }
-
-        guard shouldPersist else { return }
-
-        // 2. Persist L2 Disk cache asynchronously on dedicated serial diskQueue so URLSession delegate
-        //    callbacks and AVIO demux reads are NEVER stalled by filesystem writes or JSON serialization.
-        diskQueue.async { [weak self] in
-            self?.persistChunkOnDiskQueue(index: index, data: data)
-        }
-        if needsBackpressure {
-            diskQueue.sync {}
+            DonbyTurboCacheEngine.shared.notifyAssetFullyCached(snapshot)
         }
     }
 
-    private func persistChunkOnDiskQueue(index: Int, data: Data) {
-        lock.lock()
-        guard (persistDisk || meta.pinned), !isClosedForDisk, !isRemovedFromDisk else {
-            pendingDiskChunks.removeValue(forKey: index)
-            lock.unlock()
-            return
+    public func readChunkBytes(index: Int, offsetInChunk: Int, into dst: UnsafeMutablePointer<UInt8>, count: Int) -> Int {
+        guard count > 0, offsetInChunk >= 0 else { return -1 }
+        let n = Int(dk_net_store_read_bytes(rawStore, Int32(index), Int32(offsetInChunk), dst, Int32(count)))
+        if n < 0 {
+            evictStaleCompletedChunk(index: index)
         }
-        let chunkSize = meta.chunkSize
-        // Pinned offline downloads write directly to sparse APFS offsets in `media.bin` (zero spill-file
-        // double-copy amplification and zero 3,000-file unlink storms); unpinned stream caches keep
-        // anti-sparse spill files so seek-streaming a 35 GB movie never bloats logical media.bin size.
-        let directWriteToMediaBin = meta.pinned || (index <= contiguousPrefixCount)
-        let shouldCreateDir = !directWriteToMediaBin && !didEnsureChunksDir
-        var whForDirect: FileHandle? = nil
-        if directWriteToMediaBin {
-            ensureFileHandlesLocked()
-            whForDirect = writeHandle
-        }
-        lock.unlock()
-
-        var wroteOK = false
-        var completedMetaForNotify: ChunkStoreMeta? = nil
-        var metaSnapshotToWrite: ChunkStoreMeta? = nil
-
-        if directWriteToMediaBin {
-            if let wh = whForDirect {
-                do {
-                    try wh.seek(toOffset: UInt64(index) * UInt64(chunkSize))
-                    try wh.write(contentsOf: data)
-                    wroteOK = true
-                } catch {
-                    wroteOK = false
-                }
-            }
-            var shouldFoldSpills = false
-            lock.lock()
-            if wroteOK && !isRemovedFromDisk {
-                meta.completedChunks.insert(index)
-                if index == contiguousPrefixCount {
-                    contiguousPrefixCount += 1
-                    shouldFoldSpills = (whForDirect != nil)
-                }
-                dirtyMetaOps += 1
-                let flushThreshold = meta.pinned ? 128 : 64
-                if dirtyMetaOps >= flushThreshold || meta.isFullyCached {
-                    dirtyMetaOps = 0
-                    metaSnapshotToWrite = meta
-                }
-                if meta.isFullyCached && !meta.pinned && !didNotifyFullyCached {
-                    didNotifyFullyCached = true
-                    completedMetaForNotify = meta
-                }
-            }
-            pendingDiskChunks.removeValue(forKey: index)
-            lock.unlock()
-
-            if shouldFoldSpills, let wh = whForDirect {
-                foldConsecutiveSpillChunksOnDiskQueue(wh: wh, chunkSize: chunkSize, maxChunksPerPass: 16)
-            }
-        } else {
-            if shouldCreateDir {
-                try? FileManager.default.createDirectory(at: chunksDirectoryURL, withIntermediateDirectories: true)
-            }
-            let spillURL = chunkSpillFileURL(for: index)
-            // Direct write without `.atomic` temp-file+rename overhead: spill chunks are only indexed
-            // in `meta.completedChunks` AFTER `data.write` returns cleanly, so partial writes on crash are ignored.
-            if (try? data.write(to: spillURL)) != nil {
-                wroteOK = true
-            } else {
-                try? FileManager.default.createDirectory(at: chunksDirectoryURL, withIntermediateDirectories: true)
-                wroteOK = (try? data.write(to: spillURL)) != nil
-            }
-
-            lock.lock()
-            if wroteOK && !isRemovedFromDisk {
-                didEnsureChunksDir = true
-                meta.completedChunks.insert(index)
-                dirtyMetaOps += 1
-                if dirtyMetaOps >= 64 || meta.isFullyCached {
-                    dirtyMetaOps = 0
-                    metaSnapshotToWrite = meta
-                }
-                if meta.isFullyCached && !meta.pinned && !didNotifyFullyCached {
-                    ensureFileHandlesLocked()
-                    if let wh = writeHandle {
-                        foldConsecutiveSpillChunksIntoMediaBinLocked(wh: wh)
-                    }
-                    didNotifyFullyCached = true
-                    completedMetaForNotify = meta
-                }
-            }
-            pendingDiskChunks.removeValue(forKey: index)
-            lock.unlock()
-        }
-
-        if let metaSnapshotToWrite {
-            metaWriteQueue.async { [weak self] in
-                self?.writeMetaSnapshotToDisk(metaSnapshotToWrite)
-            }
-        }
-        if let completedMetaForNotify {
-            DonbyTurboCacheEngine.shared.notifyAssetFullyCached(completedMetaForNotify)
-        }
+        return n
     }
 
     public func readChunk(index: Int) -> Data? {
-        memoryLock.lock()
-        if let mem = memoryChunks[index] {
-            memoryLock.unlock()
-            return mem
+        let len = expectedChunkLength(for: index)
+        guard len > 0 else { return nil }
+        var data = Data(count: len)
+        let n = data.withUnsafeMutableBytes { raw -> Int in
+            guard let ptr = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return -1 }
+            return Int(dk_net_store_read_bytes(rawStore, Int32(index), 0, ptr, Int32(len)))
         }
-        memoryLock.unlock()
-
-        lock.lock()
-        if let pending = pendingDiskChunks[index] {
-            lock.unlock()
-            return pending
-        }
-        guard !isRemovedFromDisk, meta.completedChunks.contains(index) else {
-            lock.unlock()
+        if n < 0 {
+            evictStaleCompletedChunk(index: index)
             return nil
         }
-        let len = expectedChunkLenLocked(index: index)
-        guard len > 0 else {
-            lock.unlock()
-            return nil
+        if n < len {
+            data.removeSubrange(n..<len)
         }
-        let isSpillCandidate = (index >= contiguousPrefixCount)
-        let chunkSize = meta.chunkSize
-        let hasKnownTotalSize = meta.totalSize > 0
-        lock.unlock()
-
-        var loadedSlice: Data? = nil
-        // Read out-of-order spill file outside `lock` so concurrent checks never block on disk I/O
-        if isSpillCandidate {
-            let spillURL = chunkSpillFileURL(for: index)
-            if let data = try? Data(contentsOf: spillURL),
-               (hasKnownTotalSize ? data.count >= len : !data.isEmpty) {
-                loadedSlice = data.count > len ? Data(data.prefix(len)) : data
-            }
-        }
-
-        if loadedSlice == nil {
-            var evictedSnapshot: ChunkStoreMeta? = nil
-            lock.lock()
-            // Re-check pendingDiskChunks in case a concurrent write arrived between unlocks.
-            if let pending = pendingDiskChunks[index] {
-                lock.unlock()
-                return pending
-            }
-            // NEVER create an empty `media.bin` during a read; only open if it already exists.
-            ensureReadHandleLocked()
-            if let rh = readHandle {
-                let offset = Int64(index) * Int64(chunkSize)
-                let requiredBytes = Int64(len)
-                let rangeValid: Bool
-                if hasKnownTotalSize {
-                    rangeValid = Self.isByteRangeAllocatedInFile(fd: rh.fileDescriptor, offset: offset, length: requiredBytes)
-                } else {
-                    var st = stat()
-                    let fileSize = (fstat(rh.fileDescriptor, &st) == 0) ? Int64(st.st_size) : 0
-                    let avail = min(requiredBytes, max(0, fileSize - offset))
-                    rangeValid = avail > 0 && Self.isByteRangeAllocatedInFile(fd: rh.fileDescriptor, offset: offset, length: avail)
-                }
-                if rangeValid {
-                    do {
-                        try rh.seek(toOffset: UInt64(offset))
-                        if let data = try rh.read(upToCount: len),
-                           (hasKnownTotalSize ? data.count == len : !data.isEmpty) {
-                            loadedSlice = data
-                        }
-                    } catch {
-                        loadedSlice = nil
-                    }
-                }
-            }
-            if loadedSlice == nil {
-                // Disk backing is missing, truncated, or an APFS sparse hole: immediately evict
-                // stale index so `hasChunk(index)` becomes false and Turbo/Download refetches cleanly.
-                if meta.completedChunks.remove(index) != nil {
-                    if index < contiguousPrefixCount {
-                        contiguousPrefixCount = index
-                    }
-                    didNotifyFullyCached = false
-                    if (persistDisk || meta.pinned) && !isClosedForDisk && !isRemovedFromDisk {
-                        evictedSnapshot = meta
-                    }
-                }
-            }
-            lock.unlock()
-
-            if let evictedSnapshot {
-                metaWriteQueue.async { [weak self] in
-                    self?.writeMetaSnapshotToDisk(evictedSnapshot)
-                }
-            }
-        }
-
-        guard let slice = loadedSlice else { return nil }
-        memoryLock.lock()
-        if memoryChunks[index] == nil {
-            evictMemoryLockedIfNeeded(incomingBytes: slice.count)
-            if slice.count <= maxMemoryBytes {
-                memoryChunks[index] = slice
-                memoryOrder.append(index)
-                memoryBytes += slice.count
-            }
-        }
-        memoryLock.unlock()
-        return slice
+        return data
     }
 
-    /// Sliding window eviction behind playhead cursor (keeps Chunk 0..3 + EOF Cues pinned and retains recent rewind window while under RAM cap).
+    private func evictStaleCompletedChunk(index: Int) {
+        var evictedSnapshot: ChunkStoreMeta? = nil
+        lock.lock()
+        if meta.completedChunks.remove(index) != nil {
+            didNotifyFullyCached = false
+            if (persistDisk || meta.pinned) && !isClosedForDisk && !isRemovedFromDisk {
+                evictedSnapshot = meta
+            }
+        }
+        lock.unlock()
+        if let evictedSnapshot {
+            metaWriteQueue.async { [weak self] in
+                self?.writeMetaSnapshotToDisk(evictedSnapshot)
+            }
+        }
+    }
+
     public func evictBehindCursor(cursorChunk: Int, keepBackChunks: Int = 8) {
-        let threshold = cursorChunk - max(2, keepBackChunks)
-        guard threshold > 0 else { return }
-
-        lock.lock()
-        let totalChunks = meta.totalChunks
-        let backedByDisk = persistDisk || meta.pinned
-        lock.unlock()
-        let protectedTailStart = totalChunks > 4 ? (totalChunks - 2) : Int.max
-
-        memoryLock.lock()
-        // When backed by L2 disk, trim stale chunks behind the rewind window once L1 exceeds 96 MiB
-        // (or 75% of maxMemoryBytes when lower) to keep active footprint compact across multi-seek sessions.
-        let softCap = backedByDisk ? min((maxMemoryBytes * 3) / 4, 96 * 1024 * 1024) : (maxMemoryBytes * 3) / 4
-        guard memoryBytes > softCap else {
-            memoryLock.unlock()
-            return
-        }
-        let keysToRemove = memoryOrder.filter { $0 >= 4 && $0 < threshold && $0 < protectedTailStart }
-        for k in keysToRemove {
-            if let removed = memoryChunks.removeValue(forKey: k) {
-                memoryBytes = max(0, memoryBytes - removed.count)
-            }
-        }
-        if !keysToRemove.isEmpty {
-            let removedSet = Set(keysToRemove)
-            memoryOrder.removeAll { removedSet.contains($0) }
-        }
-        memoryLock.unlock()
+        dk_net_store_evict_behind_cursor(rawStore, Int32(cursorChunk), Int32(keepBackChunks))
     }
 
-    /// Evicts distant L1 chunks outside `[center - keepBack, center + keepAhead]` on large jumps when backed by L2 disk.
     public func evictDistantChunks(aroundChunk centerChunk: Int, keepBackChunks: Int = 16, keepAheadChunks: Int = 48) {
-        lock.lock()
-        let totalChunks = meta.totalChunks
-        let backedByDisk = persistDisk || meta.pinned
-        lock.unlock()
-        guard backedByDisk else { return }
-
-        let protectedTailStart = totalChunks > 4 ? (totalChunks - 2) : Int.max
-        let keepLo = max(4, centerChunk - keepBackChunks)
-        let keepHi = centerChunk + keepAheadChunks
-
-        memoryLock.lock()
-        let softCap = min((maxMemoryBytes * 3) / 4, 96 * 1024 * 1024)
-        guard memoryBytes > softCap else {
-            memoryLock.unlock()
-            return
-        }
-        let keysToRemove = memoryOrder.filter { $0 >= 4 && $0 < protectedTailStart && ($0 < keepLo || $0 > keepHi) }
-        for k in keysToRemove {
-            if let removed = memoryChunks.removeValue(forKey: k) {
-                memoryBytes = max(0, memoryBytes - removed.count)
-            }
-        }
-        if !keysToRemove.isEmpty {
-            let removedSet = Set(keysToRemove)
-            memoryOrder.removeAll { removedSet.contains($0) }
-        }
-        memoryLock.unlock()
+        dk_net_store_evict_distant_chunks(rawStore, Int32(centerChunk), Int32(keepBackChunks), Int32(keepAheadChunks))
     }
 
     public func flushMeta() {
-        diskQueue.sync {}
+        dk_net_store_flush(rawStore)
         metaWriteQueue.sync {}
         lock.lock()
         let snapshot = meta
@@ -633,82 +407,32 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
         }
     }
 
-    /// Trims idle L1 RAM chunks once no active readers remain (preserving only Chunks 0..3 + final 2 EOF
-    /// chunks for <20ms warm reopens while all remaining chunks stay persisted in L2 disk cache).
     public func trimIdleMemoryKeepingPinned() {
-        lock.lock()
-        let hasReaders = activeReaders > 0
-        let backedByDisk = (persistDisk || meta.pinned) && !isRemovedFromDisk
-        let totalChunks = meta.totalChunks
-        lock.unlock()
-        guard !hasReaders && backedByDisk else { return }
-
-        let protectedTailStart = totalChunks > 4 ? (totalChunks - 2) : Int.max
-        memoryLock.lock()
-        let keysToDrop = memoryOrder.filter { $0 >= 4 && $0 < protectedTailStart }
-        for k in keysToDrop {
-            if let removed = memoryChunks.removeValue(forKey: k) {
-                memoryBytes = max(0, memoryBytes - removed.count)
-            }
-        }
-        if !keysToDrop.isEmpty {
-            let dropSet = Set(keysToDrop)
-            memoryOrder.removeAll { dropSet.contains($0) }
-        }
-        memoryLock.unlock()
-        if !keysToDrop.isEmpty {
-            malloc_zone_pressure_relief(nil, 0)
-        }
+        dk_net_store_trim_idle_keeping_pinned(rawStore)
+        malloc_zone_pressure_relief(nil, 0)
     }
 
     public func closeFileHandles() {
-        diskQueue.sync {}
+        dk_net_store_close_handles(rawStore)
         metaWriteQueue.sync {}
         lock.lock()
         let wasRemoved = isRemovedFromDisk
         isClosedForDisk = true
-        if !wasRemoved, let wh = writeHandle {
-            foldConsecutiveSpillChunksIntoMediaBinLocked(wh: wh)
-        }
         let snapshot = meta
         let shouldPersist = (persistDisk || meta.pinned) && !wasRemoved
-        try? readHandle?.close()
-        readHandle = nil
-        try? writeHandle?.close()
-        writeHandle = nil
-        pendingDiskChunks.removeAll()
         lock.unlock()
         if shouldPersist {
             writeMetaSnapshotToDisk(snapshot)
         }
     }
 
-    /// Permanently invalidates this store prior to deleting its on-disk asset directory.
-    /// Drains both `diskQueue` and `metaWriteQueue` and blocks all subsequent writes (including
-    /// `deinit -> flushMeta()` or cancelled worker `defer` blocks) from resurrecting a zombie `meta.json`.
     public func invalidateForRemoval() {
         lock.lock()
         isRemovedFromDisk = true
         isClosedForDisk = true
-        pendingDiskChunks.removeAll()
         lock.unlock()
-
-        diskQueue.sync {}
+        dk_net_store_invalidate_for_removal(rawStore)
         metaWriteQueue.sync {}
-
-        memoryLock.lock()
-        memoryChunks.removeAll()
-        memoryOrder.removeAll()
-        memoryBytes = 0
-        memoryLock.unlock()
-
-        lock.lock()
-        try? readHandle?.close()
-        readHandle = nil
-        try? writeHandle?.close()
-        writeHandle = nil
-        pendingDiskChunks.removeAll()
-        lock.unlock()
     }
 
     internal func expectedChunkLenLocked(index: Int) -> Int {
@@ -716,34 +440,6 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
         let start = Int64(index) * Int64(meta.chunkSize)
         if start >= meta.totalSize { return 0 }
         return Int(min(Int64(meta.chunkSize), meta.totalSize - start))
-    }
-
-    internal func evictMemoryLockedIfNeeded(incomingBytes: Int) {
-        while memoryBytes + incomingBytes > maxMemoryBytes && !memoryOrder.isEmpty {
-            let oldest = memoryOrder.removeFirst()
-            if let removed = memoryChunks.removeValue(forKey: oldest) {
-                memoryBytes = max(0, memoryBytes - removed.count)
-            }
-        }
-    }
-
-    internal func ensureReadHandleLocked() {
-        guard readHandle == nil, FileManager.default.fileExists(atPath: dataFileURL.path) else { return }
-        readHandle = try? FileHandle(forReadingFrom: dataFileURL)
-    }
-
-    internal func ensureFileHandlesLocked() {
-        guard !isRemovedFromDisk else { return }
-        if !FileManager.default.fileExists(atPath: dataFileURL.path) {
-            try? FileManager.default.createDirectory(at: assetDirectory, withIntermediateDirectories: true)
-            FileManager.default.createFile(atPath: dataFileURL.path, contents: nil)
-        }
-        if writeHandle == nil {
-            writeHandle = try? FileHandle(forWritingTo: dataFileURL)
-        }
-        if readHandle == nil {
-            readHandle = try? FileHandle(forReadingFrom: dataFileURL)
-        }
     }
 
     internal func writeMetaSnapshotToDisk(_ snapshot: ChunkStoreMeta) {
@@ -756,5 +452,15 @@ public final class TieredAssetChunkStore: @unchecked Sendable {
         guard !removed else { return }
         try? FileManager.default.createDirectory(at: assetDirectory, withIntermediateDirectories: true)
         try? encoded.write(to: metaFileURL, options: .atomic)
+    }
+
+    private static func fetchCompletedIndices(from store: OpaquePointer) -> Set<Int> {
+        let count = Int(dk_net_store_copy_completed_indices(store, nil, 0))
+        guard count > 0 else { return [] }
+        var buf = [Int32](repeating: 0, count: count)
+        let copied = buf.withUnsafeMutableBufferPointer { ptr in
+            Int(dk_net_store_copy_completed_indices(store, ptr.baseAddress, Int32(count)))
+        }
+        return Set(buf.prefix(min(count, copied)).map { Int($0) })
     }
 }

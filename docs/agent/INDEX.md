@@ -6,7 +6,7 @@
 ## 1. Repository Overview
 - **Product**: Donby — native macOS media player (macOS 14+, Apple Silicon) for Emby / Jellyfin / UHDNow / local media.
 - **Stack**: SwiftUI + AppKit (`DonbyApp`, `DonbyCore`, `DonbyNetwork`, optional `DonbyUHDModule`), Metal EDR renderer (`DonbyMetalRenderer`), Rust + FFmpeg/VideoToolbox/AudioToolbox/libass playback kernel (`KernelRust` + C11 header shim `DonbyKernelC`; legacy C++20 baseline archived on `legacy/cpp-kernel`).
-- **Current Version**: `2.1.0` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
+- **Current Version**: `2.1.1` (bound to every code commit + changelog entry + GitHub Release per `AGENTS.md`; default channel: `pre-release`).
 
 ## 2. Task-to-Module Routing Table
 
@@ -26,9 +26,10 @@
 - [decisions/002-h2-adaptive-concurrency-and-l2-cache.md](decisions/002-h2-adaptive-concurrency-and-l2-cache.md) — HTTP/2 concurrency tuning, EWMA TTFB rescue, async L2 persistence, and rejected approaches.
 - [decisions/003-rust-kernel-migration.md](decisions/003-rust-kernel-migration.md) — Zero-dependency `KernelRust` rewrite architecture, C11 header shim rationale, and 4-phase parity plan (`legacy/cpp-kernel` -> `feat/rust-kernel` -> `v1.5.0`).
 - [decisions/004-zero-serial-rtt-instant-play-v3.md](decisions/004-zero-serial-rtt-instant-play-v3.md) — Turbo Engine v3: 1-RTT 4-lane open fan-out, Tail-First 512 KiB Cues bypass, non-blocking kernel initial seek, tail-trim & blocked-reader micro-hedge, and `PlaybackIntentCoordinator`.
+- [decisions/005-zero-crate-rust-media-data-plane-2a.md](decisions/005-zero-crate-rust-media-data-plane-2a.md) — Architecture 2A: `URLSession` thin transport + zero-crate `KernelRust` `GlobalSlabPool`, full APFS sparse `media.bin` store, `4..8`-lane BDP scheduler, and companion pacer.
 
 ## 4. Changelog Shards (L2)
-- [changelog/v2.1.md](changelog/v2.1.md) — Active shard (`v2.1.0` onward: Stable milestone release & README visual showcase refresh).
+- [changelog/v2.1.md](changelog/v2.1.md) — Active shard (`v2.1.0` onward: Stable milestone release & Architecture 2A zero-crate Rust media data plane).
 - [changelog/v2.0.md](changelog/v2.0.md) — Archived shard (`v2.0.24`–`v2.0.25`: Turbo Engine v3 zero-serial-RTT instant-play, multi-lane streaming, playback-priority downloads).
 - [changelog/v2.0.0-v2.0.23.md](changelog/v2.0.0-v2.0.23.md) — Archived shard (`v2.0.0`–`v2.0.23`: zero-dependency Rust playback kernel, C11 ABI shim, rating consensus, offline engine overhaul).
 - [changelog/v1.4.md](changelog/v1.4.md) — Archived shard (`v1.4.22`–`v1.4.38`: frontend overhaul, `#03` hero strip, UHDNow module, GPU danmu, non-blue Liquid Glass).
