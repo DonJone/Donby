@@ -1,9 +1,109 @@
 import Foundation
 
 public enum DonbyAppInfo {
-    public static let fallbackVersion = "2.1.2"
+    public static let fallbackVersion = "2.1.3"
     public static var version: String {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? fallbackVersion
+    }
+
+    public static var compiledArchitecture: String {
+        #if arch(arm64)
+        return "arm64"
+        #elseif arch(x86_64)
+        return "x86_64"
+        #else
+        return "unknown"
+        #endif
+    }
+
+    public static var isRunningUnderRosetta: Bool {
+        var translated: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        if sysctlbyname("sysctl.proc_translated", &translated, &size, nil, 0) == 0 {
+            return translated == 1
+        }
+        return false
+    }
+
+    public static var preferredUpdateArchitecture: String {
+        #if arch(arm64)
+        return "arm64"
+        #else
+        return isRunningUnderRosetta ? "arm64" : "x86_64"
+        #endif
+    }
+
+    public static var architectureDisplayName: String {
+        #if arch(arm64)
+        return "Apple Silicon"
+        #else
+        return isRunningUnderRosetta ? "Intel x64 (Rosetta 2)" : "Intel x64"
+        #endif
+    }
+
+    public static func machOBinarySupportsArchitecture(at url: URL, requiredArch: String) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let header = try? handle.read(upToCount: 4096) else { return false }
+        return machOHeaderSupportsArchitecture(headerBytes: header, requiredArch: requiredArch)
+    }
+
+    public static func machOHeaderSupportsArchitecture(headerBytes data: Data, requiredArch: String) -> Bool {
+        let targetArch = requiredArch.lowercased()
+        let requiredCPUType: UInt32
+        switch targetArch {
+        case "arm64", "aarch64":
+            requiredCPUType = 0x0100_000c // CPU_TYPE_ARM64
+        case "x86_64", "x64":
+            requiredCPUType = 0x0100_0007 // CPU_TYPE_X86_64
+        default:
+            return false
+        }
+
+        guard data.count >= 8 else { return false }
+        func readU32LE(_ offset: Int) -> UInt32? {
+            guard offset + 4 <= data.count else { return nil }
+            return UInt32(data[offset])
+                | (UInt32(data[offset + 1]) << 8)
+                | (UInt32(data[offset + 2]) << 16)
+                | (UInt32(data[offset + 3]) << 24)
+        }
+        func readU32BE(_ offset: Int) -> UInt32? {
+            guard offset + 4 <= data.count else { return nil }
+            return (UInt32(data[offset]) << 24)
+                | (UInt32(data[offset + 1]) << 16)
+                | (UInt32(data[offset + 2]) << 8)
+                | UInt32(data[offset + 3])
+        }
+
+        let magicLE = readU32LE(0) ?? 0
+        let magicBE = readU32BE(0) ?? 0
+        if magicLE == 0xfeed_facf { // MH_MAGIC_64
+            return readU32LE(4) == requiredCPUType
+        }
+        if magicBE == 0xcafe_babe { // FAT_MAGIC (big-endian)
+            let count = Int(readU32BE(4) ?? 0)
+            guard count > 0, count <= 16 else { return false }
+            for idx in 0..<count {
+                let offset = 8 + idx * 20
+                if readU32BE(offset) == requiredCPUType {
+                    return true
+                }
+            }
+            return false
+        }
+        if magicBE == 0xcafe_babf { // FAT_MAGIC_64 (big-endian)
+            let count = Int(readU32BE(4) ?? 0)
+            guard count > 0, count <= 16 else { return false }
+            for idx in 0..<count {
+                let offset = 8 + idx * 32
+                if readU32BE(offset) == requiredCPUType {
+                    return true
+                }
+            }
+            return false
+        }
+        return false
     }
 }
 
@@ -154,7 +254,10 @@ public enum AppVersionComparator {
         return false
     }
 
-    public static func parseGitHubLatestRelease(data: Data, preferredArch: String = "arm64") throws -> AppReleaseInfo {
+    public static func parseGitHubLatestRelease(
+        data: Data,
+        preferredArch: String = DonbyAppInfo.preferredUpdateArchitecture
+    ) throws -> AppReleaseInfo {
         let decoder = JSONDecoder()
         guard let dto = try? decoder.decode(GitHubReleaseDTO.self, from: data),
               let info = buildReleaseInfo(from: dto, preferredArch: preferredArch) else {
@@ -165,7 +268,7 @@ public enum AppVersionComparator {
 
     public static func parseGitHubReleasesList(
         data: Data,
-        preferredArch: String = "arm64",
+        preferredArch: String = DonbyAppInfo.preferredUpdateArchitecture,
         includePrereleases: Bool
     ) throws -> AppReleaseInfo? {
         let decoder = JSONDecoder()
@@ -180,6 +283,8 @@ public enum AppVersionComparator {
         var best: AppReleaseInfo? = nil
         for dto in filtered {
             guard let info = buildReleaseInfo(from: dto, preferredArch: preferredArch) else { continue }
+            let hasIncompatibleOnlyAssets = !(dto.assets ?? []).isEmpty && info.preferredUpdateAsset == nil
+            if hasIncompatibleOnlyAssets { continue }
             if let currentBest = best {
                 if isVersion(info.version, newerThan: currentBest.version) {
                     best = info
@@ -189,6 +294,35 @@ public enum AppVersionComparator {
             }
         }
         return best
+    }
+
+    public static func classifyAssetArchitecture(_ fileName: String) -> String? {
+        let lower = fileName.lowercased()
+        if lower.contains("universal2") || lower.contains("universal") {
+            return "universal"
+        }
+        if lower.contains("arm64") || lower.contains("aarch64") || lower.contains("apple-silicon") {
+            return "arm64"
+        }
+        if lower.contains("x86_64") || lower.contains("x64") || lower.contains("amd64") || lower.contains("intel") {
+            return "x86_64"
+        }
+        return nil
+    }
+
+    private static func selectCompatibleAsset(from candidates: [AppReleaseAsset], preferredArch: String) -> AppReleaseAsset? {
+        let archLower = preferredArch.lowercased()
+        if let exact = candidates.first(where: { classifyAssetArchitecture($0.name) == archLower }) {
+            return exact
+        }
+        if let universal = candidates.first(where: { classifyAssetArchitecture($0.name) == "universal" }) {
+            return universal
+        }
+        // Historical untyped Donby releases before dual-arch CI were arm64-only.
+        if archLower == "arm64" {
+            return candidates.first(where: { classifyAssetArchitecture($0.name) == nil })
+        }
+        return nil
     }
 
     private static func buildReleaseInfo(from dto: GitHubReleaseDTO, preferredArch: String) -> AppReleaseInfo? {
@@ -202,14 +336,12 @@ public enum AppVersionComparator {
             let lower = $0.name.lowercased()
             return lower.hasSuffix(".app.zip") || lower.hasSuffix(".zip")
         }
-        let archLower = preferredArch.lowercased()
-        let selectedZip = zipCandidates.first(where: { $0.name.lowercased().contains(archLower) && $0.name.lowercased().hasSuffix(".app.zip") })
-            ?? zipCandidates.first(where: { $0.name.lowercased().hasSuffix(".app.zip") })
-            ?? zipCandidates.first
+        let appZipCandidates = zipCandidates.filter { $0.name.lowercased().hasSuffix(".app.zip") }
+        let selectedZip = selectCompatibleAsset(from: appZipCandidates, preferredArch: preferredArch)
+            ?? selectCompatibleAsset(from: zipCandidates, preferredArch: preferredArch)
 
         let dmgCandidates = assets.filter { $0.name.lowercased().hasSuffix(".dmg") }
-        let selectedDmg = dmgCandidates.first(where: { $0.name.lowercased().contains(archLower) })
-            ?? dmgCandidates.first
+        let selectedDmg = selectCompatibleAsset(from: dmgCandidates, preferredArch: preferredArch)
 
         let checksumAsset = assets.first {
             let lower = $0.name.lowercased()
@@ -250,21 +382,33 @@ public enum AppVersionComparator {
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private struct StaticManifestDTO: Decodable {
-        let version: String
-        let tag_name: String
-        let published_at: String?
+    private struct PlatformManifestEntryDTO: Decodable {
         let dmg_name: String?
         let dmg_sha256: String?
         let dmg_size: Int64?
         let zip_name: String?
         let zip_sha256: String?
         let zip_size: Int64?
+    }
+
+    private struct StaticManifestDTO: Decodable {
+        let version: String
+        let tag_name: String
+        let published_at: String?
+        let arch: String?
+        let dmg_name: String?
+        let dmg_sha256: String?
+        let dmg_size: Int64?
+        let zip_name: String?
+        let zip_sha256: String?
+        let zip_size: Int64?
+        let platforms: [String: PlatformManifestEntryDTO]?
         let notes: String?
     }
 
     public static func parseStaticManifestJSON(
         data: Data,
+        preferredArch: String = DonbyAppInfo.preferredUpdateArchitecture,
         releaseBaseURL: URL = URL(string: "https://github.com/DonJone/Donby/releases")!
     ) throws -> AppReleaseInfo {
         guard let dto = try? JSONDecoder().decode(StaticManifestDTO.self, from: data) else {
@@ -275,20 +419,62 @@ public enum AppVersionComparator {
         let downloadBase = releaseBaseURL.appendingPathComponent("download").appendingPathComponent(tag)
         let htmlURL = releaseBaseURL.appendingPathComponent("tag").appendingPathComponent(tag)
 
-        let zipAsset: AppReleaseAsset? = dto.zip_name.flatMap { name in
+        let archLower = preferredArch.lowercased()
+        let selectedPlatform: PlatformManifestEntryDTO? = dto.platforms?[archLower] ?? dto.platforms?["universal"]
+
+        let rawZipName: String?
+        let rawZipSha: String?
+        let rawZipSize: Int64?
+        let rawDmgName: String?
+        let rawDmgSha: String?
+        let rawDmgSize: Int64?
+
+        if let p = selectedPlatform {
+            rawZipName = p.zip_name
+            rawZipSha = p.zip_sha256
+            rawZipSize = p.zip_size
+            rawDmgName = p.dmg_name
+            rawDmgSha = p.dmg_sha256
+            rawDmgSize = p.dmg_size
+        } else {
+            let topArch = dto.arch?.lowercased()
+            let topCompatible: Bool = {
+                if let topArch {
+                    return topArch == archLower || topArch == "universal"
+                }
+                if let candidateName = dto.zip_name ?? dto.dmg_name,
+                   let nameArch = classifyAssetArchitecture(candidateName) {
+                    return nameArch == archLower || nameArch == "universal"
+                }
+                return archLower == "arm64"
+            }()
+            if topCompatible {
+                rawZipName = dto.zip_name
+                rawZipSha = dto.zip_sha256
+                rawZipSize = dto.zip_size
+                rawDmgName = dto.dmg_name
+                rawDmgSha = dto.dmg_sha256
+                rawDmgSize = dto.dmg_size
+            } else {
+                rawZipName = nil; rawZipSha = nil; rawZipSize = nil
+                rawDmgName = nil; rawDmgSha = nil; rawDmgSize = nil
+            }
+        }
+
+        let zipAsset: AppReleaseAsset? = rawZipName.flatMap { name in
             AppReleaseAsset(
                 name: name,
                 browserDownloadURL: downloadBase.appendingPathComponent(name),
-                size: max(0, dto.zip_size ?? 0),
-                expectedSHA256: dto.zip_sha256
+                size: max(0, rawZipSize ?? 0),
+                expectedSHA256: rawZipSha
             )
         }
-        let dmgAsset: AppReleaseAsset? = dto.dmg_name.flatMap { name in
+        let dmgAsset: AppReleaseAsset? = rawDmgName.flatMap { name in
             AppReleaseAsset(
                 name: name,
                 browserDownloadURL: downloadBase.appendingPathComponent(name),
-                size: max(0, dto.dmg_size ?? 0),
-                expectedSHA256: dto.dmg_sha256
+                size: max(0, rawDmgSize ?? 0),
+                expectedSHA256: rawDmgSha
             )
         }
         return AppReleaseInfo(

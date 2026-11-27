@@ -173,7 +173,7 @@ public struct DetailView: View {
                 .preferredColorScheme(appState.colorScheme)
             }
         }
-        .onChange(of: selectedSourceId) { _, _ in
+        .donbyOnChange(of: selectedSourceId) { _ in
             syncStreamsForSelectedSource()
         }
         .task(id: initialItem.id) {

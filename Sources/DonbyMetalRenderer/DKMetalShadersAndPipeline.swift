@@ -460,7 +460,8 @@ extension DKMetalLayerView {
     """
 
     nonisolated public static func prewarmPipelines() {
-        guard let dev = MTLCreateSystemDefaultDevice() else { return }
-        _ = DKMetalPipelineSet.cached(device: dev, shaderSource: Self.metalShaderSource, pixelFormat: .rgba16Float)
+        guard let dev = DKMetalLayerView.preferredMetalDevice(for: nil) ?? MTLCreateSystemDefaultDevice() else { return }
+        let targetFormat = DKMetalLayerView.preferredLayerFormat(device: dev, screen: nil).pixelFormat
+        _ = DKMetalPipelineSet.cached(device: dev, shaderSource: Self.metalShaderSource, pixelFormat: targetFormat)
     }
 }

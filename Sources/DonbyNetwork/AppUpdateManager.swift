@@ -108,13 +108,7 @@ public final class AppUpdateManager: ObservableObject {
     }
 
     private func fetchLatestReleaseInfo() async throws -> AppReleaseInfo? {
-        let preferredArch: String = {
-            #if arch(arm64)
-            return "arm64"
-            #else
-            return "x86_64"
-            #endif
-        }()
+        let preferredArch = DonbyAppInfo.preferredUpdateArchitecture
 
         let channel = updateChannel
         if channel == .prerelease {
@@ -133,7 +127,8 @@ public final class AppUpdateManager: ObservableObject {
                        data: data,
                        preferredArch: preferredArch,
                        includePrereleases: true
-                   ) {
+                   ),
+                   parsed.preferredUpdateAsset != nil {
                     return parsed
                 }
             }
@@ -150,7 +145,8 @@ public final class AppUpdateManager: ObservableObject {
                 return nil
             }
             if (200...299).contains(http.statusCode),
-               let parsed = try? AppVersionComparator.parseGitHubLatestRelease(data: data, preferredArch: preferredArch) {
+               let parsed = try? AppVersionComparator.parseGitHubLatestRelease(data: data, preferredArch: preferredArch),
+               parsed.preferredUpdateAsset != nil {
                 return parsed
             }
         }
@@ -170,7 +166,8 @@ public final class AppUpdateManager: ObservableObject {
                 NSLocalizedDescriptionKey: "GitHub 更新源返回状态码 \(http.statusCode)"
             ])
         }
-        return try AppVersionComparator.parseStaticManifestJSON(data: manifestData)
+        let parsedStatic = try AppVersionComparator.parseStaticManifestJSON(data: manifestData, preferredArch: preferredArch)
+        return parsedStatic.preferredUpdateAsset != nil ? parsedStatic : nil
     }
 
     public func skipVersion(_ release: AppReleaseInfo) {
@@ -290,6 +287,14 @@ public final class AppUpdateManager: ObservableObject {
                 if isZipPackage {
                     let stageDir = packageURL.deletingLastPathComponent().appendingPathComponent("extracted", isDirectory: true)
                     let extractedApp = try Self.extractAppBundleWithDitto(zipURL: packageURL, into: stageDir)
+                    let execURL = extractedApp.appendingPathComponent("Contents/MacOS/Donby")
+                    let reqArch = DonbyAppInfo.preferredUpdateArchitecture
+                    guard DonbyAppInfo.machOBinarySupportsArchitecture(at: execURL, requiredArch: reqArch) else {
+                        try? FileManager.default.removeItem(at: stageDir)
+                        throw NSError(domain: "DonbyUpdater", code: -6, userInfo: [
+                            NSLocalizedDescriptionKey: "更新包架构不匹配，缺少 \(reqArch) 切片"
+                        ])
+                    }
                     try Self.spawnDetachedAppReplacer(
                         sourceAppURL: extractedApp,
                         mountPointToDetach: nil,
@@ -304,6 +309,14 @@ public final class AppUpdateManager: ObservableObject {
                         Self.detachDMG(mountPoint: mountPoint)
                         throw NSError(domain: "DonbyUpdater", code: -3, userInfo: [
                             NSLocalizedDescriptionKey: "DMG 镜像中未找到 Donby.app"
+                        ])
+                    }
+                    let execURL = mountedApp.appendingPathComponent("Contents/MacOS/Donby")
+                    let reqArch = DonbyAppInfo.preferredUpdateArchitecture
+                    guard DonbyAppInfo.machOBinarySupportsArchitecture(at: execURL, requiredArch: reqArch) else {
+                        Self.detachDMG(mountPoint: mountPoint)
+                        throw NSError(domain: "DonbyUpdater", code: -6, userInfo: [
+                            NSLocalizedDescriptionKey: "更新镜像架构不匹配，缺少 \(reqArch) 切片"
                         ])
                     }
                     try Self.spawnDetachedAppReplacer(

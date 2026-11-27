@@ -143,7 +143,7 @@ extension DetailView {
                             }
                         }
                     }
-                    .onChange(of: focusedEpisodeId) { _, newId in
+                    .donbyOnChange(of: focusedEpisodeId) { newId in
                         if let newId {
                             withAnimation(.easeInOut(duration: 0.25)) {
                                 proxy.scrollTo(newId, anchor: .center)
@@ -153,7 +153,7 @@ extension DetailView {
                             }
                         }
                     }
-                    .onChange(of: episodes.map(\.id)) { _, _ in
+                    .donbyOnChange(of: episodes.map(\.id)) { _ in
                         if let target = focusedEpisodeId ?? episodes.first?.id {
                             DispatchQueue.main.async {
                                 withAnimation(.easeInOut(duration: 0.25)) {

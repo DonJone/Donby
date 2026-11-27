@@ -4,8 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DEFAULT_VERSION="$(sed -n 's/^APP_VERSION="\${DONBY_VERSION:-\(.*\)}"$/\1/p' build_app.sh | head -n 1)"
-VERSION="${DONBY_VERSION:-${DEFAULT_VERSION:-2.1.2}}"
-ARCH="$(uname -m)"
+VERSION="${DONBY_VERSION:-${DEFAULT_VERSION:-2.1.3}}"
+ARCH="${DONBY_ARCH:-$(uname -m)}"
 APP_NAME="Donby"
 DIST_DIR="dist"
 DMG_NAME="${APP_NAME}-${VERSION}-macOS-${ARCH}.dmg"
@@ -23,7 +23,7 @@ else
 fi
 
 echo "==> [1/4] Building standalone ${APP_DIR} (v${VERSION}, ${ARCH})..."
-DONBY_VERSION="$VERSION" DONBY_APP_DIR="$APP_DIR" BUNDLE_DYLIBS=1 ./build_app.sh
+DONBY_ARCH="$ARCH" DONBY_VERSION="$VERSION" DONBY_APP_DIR="$APP_DIR" BUNDLE_DYLIBS=1 ./build_app.sh
 
 echo "==> [1.5/4] Verifying standalone dylib closure & signature..."
 codesign --verify --deep --strict "$APP_DIR"
@@ -117,17 +117,23 @@ def file_info(p):
 
 dmg_sha, dmg_size = file_info(dmg_path)
 zip_sha, zip_size = file_info(zip_path)
-manifest = {
-    "version": version,
-    "tag_name": f"v{version}",
-    "published_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "arch": arch,
+platform_entry = {
     "dmg_name": os.path.basename(dmg_path),
     "dmg_sha256": dmg_sha,
     "dmg_size": dmg_size,
     "zip_name": os.path.basename(zip_path),
     "zip_sha256": zip_sha,
     "zip_size": zip_size,
+}
+manifest = {
+    "version": version,
+    "tag_name": f"v{version}",
+    "published_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "arch": arch,
+    **platform_entry,
+    "platforms": {
+        arch: platform_entry,
+    },
 }
 with open(out_path, "w", encoding="utf-8") as f:
     json.dump(manifest, f, ensure_ascii=False, indent=2)

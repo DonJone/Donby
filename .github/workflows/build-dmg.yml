@@ -29,14 +29,16 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.decide.outputs.should_build }}
+      matrix: ${{ steps.decide.outputs.matrix }}
     steps:
-      - name: Decide build necessity
+      - name: Decide build necessity & target matrix
         id: decide
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "pull_request" ]; then
             echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo 'matrix=[{"arch":"arm64","os":"macos-15"},{"arch":"x86_64","os":"macos-15-intel"}]' >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -44,15 +46,28 @@ jobs:
             TAG="${GITHUB_REF_NAME}"
             VER="${TAG#v}"
             ASSETS_JSON="$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '[.assets[].name]' 2>/dev/null || echo '[]')"
-            if echo "$ASSETS_JSON" | grep -q "Donby-${VER}-macOS-arm64.dmg" && \
-               echo "$ASSETS_JSON" | grep -q "Donby-${VER}-macOS-arm64.app.zip" && \
-               echo "$ASSETS_JSON" | grep -q "latest.json" && \
-               echo "$ASSETS_JSON" | grep -q "SHA256SUMS.txt"; then
-              echo "Release ${TAG} already contains all local macOS build artifacts. Skipping cloud macOS build."
+            MATRIX_JSON="$(python3 - "$VER" "$ASSETS_JSON" <<'PY'
+          import json, sys
+          ver = sys.argv[1]
+          assets = set(json.loads(sys.argv[2]))
+          targets = []
+          for arch, runner in (("arm64", "macos-15"), ("x86_64", "macos-15-intel")):
+              dmg = f"Donby-{ver}-macOS-{arch}.dmg"
+              zip_name = f"Donby-{ver}-macOS-{arch}.app.zip"
+              if dmg not in assets or zip_name not in assets:
+                  targets.append({"arch": arch, "os": runner})
+          print(json.dumps(targets))
+          PY
+          )"
+            if [ "$MATRIX_JSON" = "[]" ]; then
+              echo "Release ${TAG} already contains both arm64 and x86_64 artifacts. Skipping cloud macOS build."
               echo "should_build=false" >> "$GITHUB_OUTPUT"
+              echo "matrix=[]" >> "$GITHUB_OUTPUT"
               exit 0
             fi
+            echo "Building missing release architectures: ${MATRIX_JSON}"
             echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "matrix=${MATRIX_JSON}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -60,16 +75,22 @@ jobs:
           if echo "$MSG" | grep -qE '\[(local-release|skip dmg)\]'; then
             echo "Local-release marker found on commit. Skipping redundant cloud macOS build."
             echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "matrix=[]" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           echo "should_build=true" >> "$GITHUB_OUTPUT"
+          echo 'matrix=[{"arch":"arm64","os":"macos-15"},{"arch":"x86_64","os":"macos-15-intel"}]' >> "$GITHUB_OUTPUT"
 
   build-macos-dmg:
-    name: Build & Package DMG (macOS arm64)
+    name: Build & Package DMG (macOS ${{ matrix.arch }})
     needs: preflight
     if: needs.preflight.outputs.should_build == 'true'
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.preflight.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
 
     steps:
@@ -96,21 +117,23 @@ jobs:
             VER="${GITHUB_REF_NAME#v}"
           else
             BASE_VER="$(sed -n 's/^APP_VERSION="\${DONBY_VERSION:-\(.*\)}"$/\1/p' build_app.sh | head -n 1)"
-            VER="${BASE_VER:-1.4.12}-${GITHUB_SHA::7}"
+            VER="${BASE_VER:-2.1.3}-${GITHUB_SHA::7}"
           fi
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "Resolved Donby version: ${VER}"
 
-      - name: Package self-contained Donby.app & DMG
+      - name: Package self-contained Donby.app & DMG (${{ matrix.arch }})
         env:
+          DONBY_ARCH: ${{ matrix.arch }}
           DONBY_VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          chmod +x build_app.sh scripts/package_dmg.sh
+          chmod +x build_app.sh build_kernel.sh scripts/package_dmg.sh
           ./scripts/package_dmg.sh
 
-      - name: Verify standalone dylib closure & bundle signature
+      - name: Verify standalone dylib closure, arch slice & bundle signature
         run: |
           codesign --verify --deep --strict Donby.app
+          lipo -archs Donby.app/Contents/MacOS/Donby | grep -q "${{ matrix.arch }}"
           echo "=== Main Executable Dynamic Links ==="
           otool -L Donby.app/Contents/MacOS/Donby
           if otool -L Donby.app/Contents/MacOS/Donby Donby.app/Contents/Frameworks/*.dylib | grep -E "(/opt/homebrew|/usr/local)"; then
@@ -122,7 +145,7 @@ jobs:
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Donby-${{ steps.meta.outputs.version }}-macOS-arm64
+          name: Donby-${{ steps.meta.outputs.version }}-macOS-${{ matrix.arch }}
           path: |
             dist/*.dmg
             dist/*.app.zip
@@ -131,21 +154,101 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish GitHub Release (on Tag push)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+  publish-release:
+    name: Merge Multi-Arch Assets & Publish GitHub Release
+    needs: [preflight, build-macos-dmg]
+    if: startsWith(github.ref, 'refs/tags/v') && needs.preflight.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download built architecture artifacts
+        uses: actions/download-artifact@v4
         with:
-          files: |
-            dist/*.dmg
-            dist/*.app.zip
-            dist/latest.json
-            dist/SHA256SUMS.txt
-          generate_release_notes: true
-          body: |
-            ### 安装说明 (macOS 14.0+ Apple Silicon)
-            1. 下载下方 `Donby-*.dmg` 并双击挂载，将 `Donby.app` 拖入 `Applications`（应用程序）。
-            2. 安装包已内嵌全部 `FFmpeg` / `libass` 运行库，无需额外部署 Homebrew 环境。
-            3. 由于开源构建采用本地 Ad-hoc 签名（未接入付费 Apple Developer 公证），首次打开如提示“无法验证开发者”或“已损坏”，请在终端执行一次：
-               ```bash
-               sudo xattr -rd com.apple.quarantine /Applications/Donby.app
-               ```
+          path: incoming
+
+      - name: Merge manifests & upload/create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VER="${TAG#v}"
+          mkdir -p merged existing
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            RELEASE_EXISTS=1
+            gh release download "$TAG" --repo "${{ github.repository }}" -D existing -p "SHA256SUMS.txt" -p "latest.json" 2>/dev/null || true
+          else
+            RELEASE_EXISTS=0
+          fi
+
+          python3 - "$VER" "$TAG" <<'PY'
+          import glob, json, os, shutil, sys
+
+          ver, tag = sys.argv[1], sys.argv[2]
+          os.makedirs("merged", exist_ok=True)
+
+          # Collect built .dmg and .app.zip binaries
+          for pattern in ("incoming/**/*.dmg", "incoming/**/*.app.zip"):
+              for path in glob.glob(pattern, recursive=True):
+                  shutil.copy2(path, os.path.join("merged", os.path.basename(path)))
+
+          # Merge SHA256SUMS.txt keyed by filename (preserving existing hashes, e.g. local arm64)
+          sums = {}
+          for sum_path in ["existing/SHA256SUMS.txt"] + sorted(glob.glob("incoming/**/SHA256SUMS.txt", recursive=True)):
+              if not os.path.isfile(sum_path):
+                  continue
+              with open(sum_path, encoding="utf-8") as f:
+                  for line in f:
+                      parts = line.strip().split()
+                      if len(parts) >= 2:
+                          sums[os.path.basename(parts[-1])] = f"{parts[0]}  {os.path.basename(parts[-1])}"
+          with open("merged/SHA256SUMS.txt", "w", encoding="utf-8") as f:
+              for name in sorted(sums):
+                  f.write(sums[name] + "\n")
+
+          # Merge latest.json platforms dictionary
+          merged_platforms = {}
+          published_at = None
+          for mf_path in ["existing/latest.json"] + sorted(glob.glob("incoming/**/latest.json", recursive=True)):
+              if not os.path.isfile(mf_path):
+                  continue
+              with open(mf_path, encoding="utf-8") as f:
+                  data = json.load(f)
+              if data.get("published_at"):
+                  published_at = data["published_at"]
+              if isinstance(data.get("platforms"), dict):
+                  for k, v in data["platforms"].items():
+                      if isinstance(v, dict):
+                          merged_platforms[k] = v
+              elif data.get("arch") and data.get("dmg_name"):
+                  merged_platforms[data["arch"]] = {
+                      "dmg_name": data.get("dmg_name"),
+                      "dmg_sha256": data.get("dmg_sha256"),
+                      "dmg_size": data.get("dmg_size"),
+                      "zip_name": data.get("zip_name"),
+                      "zip_sha256": data.get("zip_sha256"),
+                      "zip_size": data.get("zip_size"),
+                  }
+
+          primary_arch = "arm64" if "arm64" in merged_platforms else next(iter(merged_platforms), "x86_64")
+          primary_entry = merged_platforms.get(primary_arch, {})
+          out_manifest = {
+              "version": ver,
+              "tag_name": tag,
+              "published_at": published_at or "",
+              "arch": primary_arch,
+              **primary_entry,
+              "platforms": merged_platforms,
+          }
+          with open("merged/latest.json", "w", encoding="utf-8") as f:
+              json.dump(out_manifest, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+          PY
+
+          if [ "$RELEASE_EXISTS" = "1" ]; then
+            gh release upload "$TAG" merged/* --repo "${{ github.repository }}" --clobber
+          else
+            gh release create "$TAG" merged/* \
+              --repo "${{ github.repository }}" \
+              --title "$TAG" \
+              --generate-notes \
+              --notes $'### 安装说明 (macOS 13.0+ · Apple Silicon & Intel x64)\n1. 请按设备架构下载对应 `Donby-*.dmg`（`arm64` 适用于 Apple Silicon，`x86_64` 适用于 Intel Mac 与 x64 黑苹果）。\n2. 安装包已内嵌全部 `FFmpeg` / `libass` 运行库，无需额外部署 Homebrew 环境。\n3. 由于开源构建采用本地 Ad-hoc 签名（未接入付费 Apple Developer 公证），首次打开如提示“无法验证开发者”或“已损坏”，请在终端执行一次：\n   ```bash\n   sudo xattr -rd com.apple.quarantine /Applications/Donby.app\n   ```'
+          fi

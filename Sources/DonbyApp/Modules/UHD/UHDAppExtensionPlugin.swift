@@ -156,7 +156,7 @@ public struct UHDSettingsModuleCard: View {
                             accentTextColor: appState.accentTextColor
                         )
                     )
-                    .onChange(of: uhd.isEnabled) { _, _ in
+                    .donbyOnChange(of: uhd.isEnabled) { _ in
                         appState.reloadAfterModuleToggle()
                     }
             }

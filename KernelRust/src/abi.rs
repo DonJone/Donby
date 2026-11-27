@@ -218,7 +218,7 @@ mod tests {
     use std::mem::offset_of;
 
     #[test]
-    fn c_abi_field_offsets_match_clang_arm64() {
+    fn c_abi_field_offsets_match_clang_darwin64() {
         assert_eq!(offset_of!(DKRuntimeStats, fps), 16);
         assert_eq!(offset_of!(DKRuntimeStats, is_hdr), 32);
         assert_eq!(offset_of!(DKRuntimeStats, video_codec), 35);

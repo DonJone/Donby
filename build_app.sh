@@ -24,6 +24,17 @@ if [ ! -d "$SDK_PATH" ]; then
     exit 1
 fi
 
+HOST_ARCH="$(uname -m)"
+export DONBY_ARCH="${DONBY_ARCH:-$HOST_ARCH}"
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
+
+SWIFT_ARCH_ARGS=()
+if [ "$DONBY_ARCH" = "universal" ]; then
+    SWIFT_ARCH_ARGS=(--arch arm64 --arch x86_64)
+elif [ "$DONBY_ARCH" != "$HOST_ARCH" ]; then
+    SWIFT_ARCH_ARGS=(--arch "$DONBY_ARCH")
+fi
+
 BUILD_CONFIG="${DONBY_BUILD_CONFIG:-release}"
 BUILD_SYS_ARGS=()
 if swift build --help 2>/dev/null | grep -q -- '--build-system'; then
@@ -36,13 +47,13 @@ if [ "$BUILD_CONFIG" = "release" ] && [ "${DONBY_WMO:-0}" != "1" ]; then
     SWIFT_OPT_ARGS=(-Xswiftc -no-whole-module-optimization -Xswiftc -incremental)
 fi
 
-echo "==> Building Rust playback kernel (libdonby_kernel.a)..."
+echo "==> Building Rust playback kernel (libdonby_kernel.a, arch=${DONBY_ARCH})..."
 ./build_kernel.sh
 
-echo "==> Building Donby (${BUILD_CONFIG}) binary..."
-swift build "${BUILD_SYS_ARGS[@]}" --sdk "$SDK_PATH" -c "$BUILD_CONFIG" "${SWIFT_OPT_ARGS[@]}"
+echo "==> Building Donby (${BUILD_CONFIG}, arch=${DONBY_ARCH}) binary..."
+swift build "${BUILD_SYS_ARGS[@]}" "${SWIFT_ARCH_ARGS[@]}" --sdk "$SDK_PATH" -c "$BUILD_CONFIG" "${SWIFT_OPT_ARGS[@]}"
 
-BIN_PATH="$(swift build "${BUILD_SYS_ARGS[@]}" --sdk "$SDK_PATH" -c "$BUILD_CONFIG" --show-bin-path)/Donby"
+BIN_PATH="$(swift build "${BUILD_SYS_ARGS[@]}" "${SWIFT_ARCH_ARGS[@]}" --sdk "$SDK_PATH" -c "$BUILD_CONFIG" --show-bin-path)/Donby"
 APP_DIR="${DONBY_APP_DIR:-/Applications/Donby.app}"
 
 # Always remove any stray workspace ./Donby.app so LaunchServices & Dock never see two Donby.app bundles
@@ -77,8 +88,9 @@ if [ -f "Resources/silero_vad_16k.safetensors" ]; then
     cp "Resources/silero_vad_16k.safetensors" "$APP_DIR/Contents/Resources/silero_vad_16k.safetensors"
 fi
 
-APP_VERSION="${DONBY_VERSION:-2.1.2}"
+APP_VERSION="${DONBY_VERSION:-2.1.3}"
 BUILD_NUMBER="${DONBY_BUILD_NUMBER:-$(date -u +%Y%m%d%H%M)}"
+MIN_MACOS="${DONBY_MIN_MACOS:-13.0}"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -106,7 +118,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <key>CFBundleVersion</key>
     <string>${BUILD_NUMBER}</string>
     <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
+    <string>${MIN_MACOS}</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSAppTransportSecurity</key>

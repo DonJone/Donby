@@ -1,6 +1,6 @@
 # Module Map: Turbo Cache, Streaming & Network (`DonbyNetwork`)
 
-> Last synced: `v2.1.1`. Load this doc for `DonbyNetwork` streaming, seek latency, HTTP/2 Range, Architecture 2A `KernelRust` slab/sparse caching, intent-aware preloading (`PlaybackIntentCoordinator`), route warm store (`NetworkRouteWarmStore`), Emby API (including standard Emby fallback when UHD extension is disabled), offline downloads, and channel-aware auto-updates. For optional `DonbyUHDModule` & `Modules/UHD`, load [uhd-module.md](uhd-module.md).
+> Last synced: `v2.1.3`. Load this doc for `DonbyNetwork` streaming, seek latency, HTTP/2 Range, Architecture 2A `KernelRust` slab/sparse caching, intent-aware preloading (`PlaybackIntentCoordinator`), route warm store (`NetworkRouteWarmStore`), Emby API (including standard Emby fallback when UHD extension is disabled), offline downloads, and channel-aware auto-updates. For optional `DonbyUHDModule` & `Modules/UHD`, load [uhd-module.md](uhd-module.md).
 
 | If your task involves... | File | Entry Symbols |
 | :--- | :--- | :--- |

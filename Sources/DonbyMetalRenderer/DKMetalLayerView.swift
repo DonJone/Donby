@@ -195,6 +195,7 @@ public final class DKMetalLayerView: NSView {
             queue: .main
         ) { [weak self] _ in
             guard let self = self else { return }
+            self.reconfigureMetalIfNeeded(for: self.window?.screen)
             let prevHeadroom = self.currentEDRHeadroom
             self.updateScreenHeadroom()
             let headroomChanged = abs(self.currentEDRHeadroom - prevHeadroom) > 0.001
@@ -239,6 +240,7 @@ public final class DKMetalLayerView: NSView {
         if window != nil {
             Self.activeInstance = self
         }
+        reconfigureMetalIfNeeded(for: window?.screen)
         updateDrawableSize()
         updateScreenHeadroom()
     }
@@ -289,25 +291,99 @@ public final class DKMetalLayerView: NSView {
         sizeLock.unlock()
     }
 
+    nonisolated public static func preferredMetalDevice(for screen: NSScreen?) -> MTLDevice? {
+        let targetScreen = screen ?? NSScreen.main
+        if let num = targetScreen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+            let displayID = CGDirectDisplayID(num.uint32Value)
+            if let displayDev = CGDirectDisplayCopyCurrentMetalDevice(displayID) {
+                return displayDev
+            }
+        }
+        return MTLCreateSystemDefaultDevice() ?? MTLCopyAllDevices().first
+    }
+
+    nonisolated static func preferredLayerFormat(
+        device: MTLDevice,
+        screen: NSScreen?
+    ) -> (pixelFormat: MTLPixelFormat, edr: Bool, colorSpace: CGColorSpace?) {
+        let sdrColorSpace = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpace(name: CGColorSpace.sRGB)
+        let edrColorSpace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
+            ?? CGColorSpace(name: CGColorSpace.extendedLinearSRGB)
+        let potentialEDR = Float(
+            screen?.maximumPotentialExtendedDynamicRangeColorComponentValue
+                ?? screen?.maximumExtendedDynamicRangeColorComponentValue
+                ?? 1.0
+        )
+
+        #if arch(x86_64)
+        if device.isLowPower && potentialEDR <= 1.01 {
+            return (.bgra8Unorm_srgb, false, sdrColorSpace)
+        }
+        #endif
+
+        if DKMetalPipelineSet.cached(device: device, shaderSource: Self.metalShaderSource, pixelFormat: .rgba16Float) != nil {
+            return (.rgba16Float, true, edrColorSpace)
+        }
+        return (.bgra8Unorm_srgb, false, sdrColorSpace)
+    }
+
     private func setupMetal() {
-        guard let dev = MTLCreateSystemDefaultDevice() else { return }
         assert(MemoryLayout<DKGpuColorUniforms>.stride == 3088, "Swift DKGpuColorUniforms stride mismatch")
+        reconfigureMetalIfNeeded(for: window?.screen ?? NSScreen.main)
+    }
+
+    private func reconfigureMetalIfNeeded(for screen: NSScreen?) {
+        let targetScreen = screen ?? NSScreen.main
+        guard let dev = Self.preferredMetalDevice(for: targetScreen) else { return }
+        let targetFormat = Self.preferredLayerFormat(device: dev, screen: targetScreen)
+
+        if let currentDev = self.device,
+           currentDev.registryID == dev.registryID,
+           self.metalLayer.pixelFormat == targetFormat.pixelFormat,
+           self.pipelineVideoMaster != nil {
+            return
+        }
+
+        renderLock.lock()
+        defer { renderLock.unlock() }
+
+        if let currentDev = self.device,
+           currentDev.registryID == dev.registryID,
+           self.metalLayer.pixelFormat == targetFormat.pixelFormat,
+           self.pipelineVideoMaster != nil {
+            return
+        }
+
+        let deviceChanged = (self.device?.registryID != dev.registryID)
         self.device = dev
         self.metalLayer.device = dev
-        self.metalLayer.pixelFormat = .rgba16Float
-        self.metalLayer.wantsExtendedDynamicRangeContent = true
-        self.metalLayer.colorspace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
-            ?? CGColorSpace(name: CGColorSpace.extendedLinearSRGB)
+        self.metalLayer.pixelFormat = targetFormat.pixelFormat
+        self.metalLayer.wantsExtendedDynamicRangeContent = targetFormat.edr
+        self.metalLayer.colorspace = targetFormat.colorSpace
         self.metalLayer.framebufferOnly = true
-        self.commandQueue = dev.makeCommandQueue()
-        CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, dev, nil, &textureCache)
 
-        if let pipelines = DKMetalPipelineSet.cached(device: dev, shaderSource: Self.metalShaderSource, pixelFormat: .rgba16Float) {
+        if deviceChanged || self.commandQueue == nil {
+            self.commandQueue = dev.makeCommandQueue()
+            var newCache: CVMetalTextureCache?
+            CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, dev, nil, &newCache)
+            self.textureCache = newCache
+            self.subtitleTextures = [nil, nil, nil]
+            self.subtitleTexture = nil
+            self.subtitleTextureWriteIdx = 0
+            self.hasActiveSubtitle = false
+        }
+
+        if let pipelines = DKMetalPipelineSet.cached(
+            device: dev,
+            shaderSource: Self.metalShaderSource,
+            pixelFormat: targetFormat.pixelFormat
+        ) {
             self.pipelineVideoMaster = pipelines.videoPipeline
             self.pipelineBGRA = pipelines.bgraPipeline
             self.pipelineSubtitle = pipelines.subPipeline
         } else {
-            print("[DonbyMetal] Pipeline create failed")
+            print("[DonbyMetal] Pipeline create failed for format \(targetFormat.pixelFormat.rawValue)")
         }
+        needsRedrawOnSameFrame = true
     }
 }

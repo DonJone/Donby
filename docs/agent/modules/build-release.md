@@ -1,6 +1,6 @@
 # Module Map: Build, Packaging & Release Pipeline
 
-> Last synced: `v2.1.1`. Load this doc for compiling Swift/Rust/C11, `DONBY_PURE=1` pure builds, bundling dylibs, signing `/Applications/Donby.app`, DMG/ZIP packaging, channel-aware local GitHub Releases, agent doc-sync gates, and CI.
+> Last synced: `v2.1.3`. Load this doc for compiling Swift/Rust/C11 (`arm64`, `x86_64`, `universal`), `DONBY_PURE=1` pure builds, bundling dylibs, signing `/Applications/Donby.app`, DMG/ZIP packaging, channel-aware local GitHub Releases, agent doc-sync gates, and dual-arch CI.
 
 ## 1. File Inventory
 - `Package.swift` — SwiftPM manifest compiling pure-C11 `DonbyKernelC` (`dk_ffi_shim*.c`), linking `build_kernel/libdonby_kernel.a` (`KernelRust`) into `DonbyKernelC` and `DonbyNetwork`, optional `DonbyUHDModule` (omitted alongside `Modules/UHD` when `DONBY_PURE=1` sets `-DDONBY_PURE_BUILD`), and `DonbyCoreTests`.
@@ -13,7 +13,7 @@
 - `scripts/release_local.sh` — Local-first release: runs `scripts/check_agent_docs.py`, packages artifacts, syncs `/Applications/Donby.app` in-place (disable via `--no-install`), pushes branch, creates/updates GitHub Release via `gh`, syncs tag.
 - `scripts/check_agent_docs.py` — Zero-dependency mechanical gate enforcing the `<= 800L` source ratchet (`LEGACY_LINE_CAPS`), `1:1` module-doc inventory bijection, link/version/emoji hygiene, and staged domain co-change checks.
 - `.githooks/pre-commit` & `.githooks/commit-msg` — Tracked Git hooks invoking `scripts/check_agent_docs.py --staged` and `--commit-msg`.
-- `.github/workflows/build-dmg.yml` — GitHub Actions CI triggered on tag push `v*` (runs `scripts/check_agent_docs.py`, skips DMG build if `[local-release]` workflow already published or builds DMG/ZIP in CI).
+- `.github/workflows/build-dmg.yml` — GitHub Actions CI triggered on tag push `v*` (runs `scripts/check_agent_docs.py`, inspects existing release assets to build missing `arm64` on `macos-15` and `x86_64` on `macos-15-intel`, and merges multi-arch `SHA256SUMS.txt` + `latest.json` into the Release).
 
 ## 2. macOS CLT SDK & Swift 6.4 Build System Workaround (IMPORTANT)
 - On macOS with CommandLineTools (`xcode-select -p` == `/Library/Developer/CommandLineTools`), the default SDK may reference `SwiftUIMacros` without `libSwiftUIMacros.dylib`, and Swift 6.4's default `swiftbuild` engine invalidates explicit SDK module caches on every run (~54s no-op).

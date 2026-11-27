@@ -3,7 +3,19 @@ import PackageDescription
 import Foundation
 
 let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
-let homebrewPrefix = FileManager.default.fileExists(atPath: "/opt/homebrew") ? "/opt/homebrew" : "/usr/local"
+let env = ProcessInfo.processInfo.environment
+let targetArch = env["DONBY_ARCH"] ?? ""
+let homebrewPrefix: String = {
+    if let explicit = env["DONBY_DEPS_PREFIX"] ?? env["HOMEBREW_PREFIX"],
+       !explicit.isEmpty,
+       FileManager.default.fileExists(atPath: explicit) {
+        return explicit
+    }
+    if targetArch == "x86_64" && FileManager.default.fileExists(atPath: "/usr/local/include") {
+        return "/usr/local"
+    }
+    return FileManager.default.fileExists(atPath: "/opt/homebrew") ? "/opt/homebrew" : "/usr/local"
+}()
 let isPureBuild = ProcessInfo.processInfo.environment["DONBY_PURE"] == "1"
 
 var packageProducts: [Product] = [
@@ -119,7 +131,7 @@ if !isPureBuild {
 let package = Package(
     name: "Donby",
     platforms: [
-        .macOS(.v14)
+        .macOS(.v13)
     ],
     products: packageProducts,
     targets: packageTargets

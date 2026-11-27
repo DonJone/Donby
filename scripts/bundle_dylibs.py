@@ -52,7 +52,35 @@ def get_dependencies(binary_path: str, is_dylib: bool) -> list[str]:
     return deps
 
 
-def resolve_dep_path(raw_dep: str, loader_path: str, exec_dir: str, rpaths: list[str]) -> str:
+def detect_binary_arch(binary_path: str) -> str:
+    try:
+        out = run_cmd(["file", binary_path])
+        if "x86_64" in out and "arm64" not in out:
+            return "x86_64"
+    except Exception:
+        pass
+    return "arm64"
+
+
+def get_fallback_lib_dirs(main_bin: str) -> tuple[str, ...]:
+    dirs: list[str] = []
+    explicit = os.environ.get("DONBY_DEPS_PREFIX") or os.environ.get("HOMEBREW_PREFIX")
+    if explicit:
+        dirs.append(os.path.join(explicit, "lib"))
+    if detect_binary_arch(main_bin) == "x86_64":
+        dirs.extend(["/usr/local/lib", "/opt/homebrew/lib"])
+    else:
+        dirs.extend(["/opt/homebrew/lib", "/usr/local/lib"])
+    return tuple(dict.fromkeys(dirs))
+
+
+def resolve_dep_path(
+    raw_dep: str,
+    loader_path: str,
+    exec_dir: str,
+    rpaths: list[str],
+    fallback_lib_dirs: tuple[str, ...] = FALLBACK_LIB_DIRS,
+) -> str:
     if raw_dep.startswith("/"):
         if os.path.exists(raw_dep):
             return os.path.realpath(raw_dep)
@@ -76,7 +104,7 @@ def resolve_dep_path(raw_dep: str, loader_path: str, exec_dir: str, rpaths: list
             elif rp.startswith("@executable_path"):
                 rp = rp.replace("@executable_path", exec_dir, 1)
             search_dirs.append(rp)
-        search_dirs.extend([loader_dir, *FALLBACK_LIB_DIRS])
+        search_dirs.extend([loader_dir, *fallback_lib_dirs])
         for d in search_dirs:
             cand = os.path.join(d, sub)
             if os.path.exists(cand):
@@ -128,6 +156,7 @@ def bundle_app(app_path: str) -> None:
     if not os.path.isfile(main_bin):
         raise FileNotFoundError(f"Executable not found: {main_bin}")
 
+    fallback_lib_dirs = get_fallback_lib_dirs(main_bin)
     os.makedirs(frameworks_dir, exist_ok=True)
 
     # real_source_path -> bundled filename inside Contents/Frameworks
@@ -168,7 +197,7 @@ def bundle_app(app_path: str) -> None:
                         queue.append((cand_in_fw, cand_in_fw, True))
                     continue
 
-            real_src = resolve_dep_path(raw_dep, origin_bin, exec_dir, origin_rpaths)
+            real_src = resolve_dep_path(raw_dep, origin_bin, exec_dir, origin_rpaths, fallback_lib_dirs)
             canonical_name = bundled_by_realpath.get(real_src)
             if canonical_name is None:
                 canonical_name = os.path.basename(real_src)

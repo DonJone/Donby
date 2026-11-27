@@ -95,6 +95,17 @@ int dk_shim_open_video_decoder(
 
     AVBufferRef* hw_dev = NULL;
     bool using_hw = false;
+#if defined(__x86_64__)
+    // Intel/AMD x86_64 Macs lack hardware AV1 and 10-bit H.264 VideoToolbox decode;
+    // bypass VT immediately to avoid startup probe stalls or green/corrupt frames.
+    if (hw_decode) {
+        if (st->codecpar->codec_id == AV_CODEC_ID_AV1 ||
+            (st->codecpar->codec_id == AV_CODEC_ID_H264 &&
+             (st->codecpar->bits_per_raw_sample > 8 || st->codecpar->profile == AV_PROFILE_H264_HIGH_10))) {
+            hw_decode = false;
+        }
+    }
+#endif
     if (hw_decode) {
         if (av_hwdevice_ctx_create(&hw_dev, AV_HWDEVICE_TYPE_VIDEOTOOLBOX, NULL, NULL, 0) == 0 && hw_dev) {
             ctx->hw_device_ctx = av_buffer_ref(hw_dev);
@@ -106,7 +117,7 @@ int dk_shim_open_video_decoder(
         }
     }
     if (!using_hw) {
-        ctx->thread_count = sw_threads < 2 ? 2 : (sw_threads > 8 ? 8 : sw_threads);
+        ctx->thread_count = sw_threads < 2 ? 2 : (sw_threads > 12 ? 12 : sw_threads);
         ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
     }
 
@@ -542,13 +553,22 @@ CVPixelBufferRef dk_shim_process_video_frame(
             ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
             : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
 
+        bool can_direct_yuv420p = (frame->format == AV_PIX_FMT_YUV420P) &&
+                                  (width & 1) == 0 && (height & 1) == 0 &&
+                                  frame->linesize[0] > 0 && frame->linesize[1] > 0 && frame->linesize[2] > 0;
+        bool can_direct_p010 = (frame->format == AV_PIX_FMT_YUV420P10LE) &&
+                               (width & 1) == 0 && (height & 1) == 0 &&
+                               frame->linesize[0] > 0 && frame->linesize[1] > 0 && frame->linesize[2] > 0;
+
         struct SwsContext* sws = (struct SwsContext*)(*inout_sws);
-        sws = sws_getCachedContext(
-            sws, width, height, (enum AVPixelFormat)frame->format,
-            width, height, dst_av_fmt, SWS_BILINEAR, NULL, NULL, NULL
-        );
-        *inout_sws = sws;
-        if (!sws) return NULL;
+        if (!can_direct_yuv420p && !can_direct_p010) {
+            sws = sws_getCachedContext(
+                sws, width, height, (enum AVPixelFormat)frame->format,
+                width, height, dst_av_fmt, SWS_FAST_BILINEAR, NULL, NULL, NULL
+            );
+            *inout_sws = sws;
+            if (!sws) return NULL;
+        }
 
         CVPixelBufferPoolRef pool = (CVPixelBufferPoolRef)(*inout_pool);
         if (!dk_shim_ensure_sw_pool(&pool, inout_pool_w, inout_pool_h, inout_pool_fmt, width, height, dst_cv_fmt)) {
@@ -562,17 +582,50 @@ CVPixelBufferRef dk_shim_process_video_frame(
         }
 
         CVPixelBufferLockBaseAddress(pixbuf, 0);
-        uint8_t* dst_data[4] = {
-            (uint8_t*)CVPixelBufferGetBaseAddressOfPlane(pixbuf, 0),
-            (uint8_t*)CVPixelBufferGetBaseAddressOfPlane(pixbuf, 1),
-            NULL, NULL
-        };
-        int dst_linesize[4] = {
-            (int)CVPixelBufferGetBytesPerRowOfPlane(pixbuf, 0),
-            (int)CVPixelBufferGetBytesPerRowOfPlane(pixbuf, 1),
-            0, 0
-        };
-        sws_scale(sws, (const uint8_t* const*)frame->data, frame->linesize, 0, height, dst_data, dst_linesize);
+        uint8_t* dst_y = (uint8_t*)CVPixelBufferGetBaseAddressOfPlane(pixbuf, 0);
+        uint8_t* dst_uv = (uint8_t*)CVPixelBufferGetBaseAddressOfPlane(pixbuf, 1);
+        int dst_y_stride = (int)CVPixelBufferGetBytesPerRowOfPlane(pixbuf, 0);
+        int dst_uv_stride = (int)CVPixelBufferGetBytesPerRowOfPlane(pixbuf, 1);
+
+        if (can_direct_yuv420p) {
+            for (int y = 0; y < height; y++) {
+                memcpy(dst_y + (size_t)y * (size_t)dst_y_stride, frame->data[0] + (size_t)y * (size_t)frame->linesize[0], (size_t)width);
+            }
+            int cw = width >> 1;
+            int ch = height >> 1;
+            for (int y = 0; y < ch; y++) {
+                const uint8_t* u = frame->data[1] + (size_t)y * (size_t)frame->linesize[1];
+                const uint8_t* v = frame->data[2] + (size_t)y * (size_t)frame->linesize[2];
+                uint8_t* uv = dst_uv + (size_t)y * (size_t)dst_uv_stride;
+                for (int x = 0; x < cw; x++) {
+                    uv[2 * x] = u[x];
+                    uv[2 * x + 1] = v[x];
+                }
+            }
+        } else if (can_direct_p010) {
+            for (int y = 0; y < height; y++) {
+                const uint16_t* sy = (const uint16_t*)(frame->data[0] + (size_t)y * (size_t)frame->linesize[0]);
+                uint16_t* dy = (uint16_t*)(dst_y + (size_t)y * (size_t)dst_y_stride);
+                for (int x = 0; x < width; x++) {
+                    dy[x] = (uint16_t)(sy[x] << 6);
+                }
+            }
+            int cw = width >> 1;
+            int ch = height >> 1;
+            for (int y = 0; y < ch; y++) {
+                const uint16_t* su = (const uint16_t*)(frame->data[1] + (size_t)y * (size_t)frame->linesize[1]);
+                const uint16_t* sv = (const uint16_t*)(frame->data[2] + (size_t)y * (size_t)frame->linesize[2]);
+                uint16_t* duv = (uint16_t*)(dst_uv + (size_t)y * (size_t)dst_uv_stride);
+                for (int x = 0; x < cw; x++) {
+                    duv[2 * x] = (uint16_t)(su[x] << 6);
+                    duv[2 * x + 1] = (uint16_t)(sv[x] << 6);
+                }
+            }
+        } else {
+            uint8_t* dst_data[4] = { dst_y, dst_uv, NULL, NULL };
+            int dst_linesize[4] = { dst_y_stride, dst_uv_stride, 0, 0 };
+            sws_scale(sws, (const uint8_t* const*)frame->data, frame->linesize, 0, height, dst_data, dst_linesize);
+        }
         CVPixelBufferUnlockBaseAddress(pixbuf, 0);
     }
 

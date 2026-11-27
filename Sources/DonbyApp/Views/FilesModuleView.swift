@@ -101,7 +101,7 @@ public struct FilesModuleView: View {
         .sheet(isPresented: $showDirectURLSheet) {
             directURLSheetContent
         }
-        .onChange(of: appState.browsingFolder?.id) { _, _ in
+        .donbyOnChange(of: appState.browsingFolder?.id) { _ in
             folderNavStack = []
         }
         .task(id: downloadManager.statusIndex) {
@@ -237,7 +237,7 @@ public struct FilesModuleView: View {
 
                 TextField("检索已下载影视海报库、本地文件夹或最近播放流...", text: $searchQuery)
                     .textFieldStyle(.plain)
-                    .focusEffectDisabled()
+                    .donbyFocusEffectDisabled()
                     .font(.system(size: 14.5))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
 

@@ -41,7 +41,12 @@ public final class EncryptedFileVaultBackend: ServerCredentialVaultBackend {
         self.fileURL = fileURL ?? DonbyStoragePaths.applicationSupportDirectoryURL
             .appendingPathComponent("Donby", isDirectory: true)
             .appendingPathComponent("credentials.vault")
-        let hardwareId = machineSalt ?? Self.hardwarePlatformUUID() ?? "donby-fallback-host"
+        let hardwareId: String = {
+            if let salt = machineSalt?.trimmingCharacters(in: .whitespacesAndNewlines), !salt.isEmpty {
+                return salt
+            }
+            return Self.hardwarePlatformUUID() ?? "donby-fallback-host"
+        }()
         let ikm = SymmetricKey(data: Data("com.don.Donby.vault.v1|\(hardwareId)".utf8))
         self.key = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: ikm,
@@ -106,15 +111,20 @@ public final class EncryptedFileVaultBackend: ServerCredentialVaultBackend {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, matching)
         guard service != 0 else { return nil }
         defer { IOObjectRelease(service) }
-        guard let raw = IORegistryEntryCreateCFProperty(
-            service,
-            "IOPlatformUUID" as CFString,
-            kCFAllocatorDefault,
-            0
-        )?.takeRetainedValue() else {
-            return nil
+        for key in ["IOPlatformUUID", "IOPlatformSerialNumber"] {
+            if let raw = IORegistryEntryCreateCFProperty(
+                service,
+                key as CFString,
+                kCFAllocatorDefault,
+                0
+            )?.takeRetainedValue() as? String {
+                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    return trimmed
+                }
+            }
         }
-        return raw as? String
+        return nil
     }
 }
 

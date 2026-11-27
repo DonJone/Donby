@@ -1,6 +1,6 @@
 # Kernel Sub-Module: Lifecycle, Demux, Tracks & C ABI
 
-> Last synced: `v2.1.1`
+> Last synced: `v2.1.3`
 
 ## 1. Module Responsibilities
 - `KernelRust/src/lib.rs`: Crate root, module declarations, `LOG_CALLBACK` / `LIVE_PLAYERS` registry, `dk_rust_forward_ffmpeg_log`, `ReaderGuard`, URL normalization/redaction (`normalize_path_or_url`, `redact_url_for_log`).

@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://github.com/DonJone/Donby/actions/workflows/build-dmg.yml"><img src="https://github.com/DonJone/Donby/actions/workflows/build-dmg.yml/badge.svg" alt="Build macOS DMG" /></a>
   <a href="https://github.com/DonJone/Donby/releases"><img src="https://img.shields.io/github/v/release/DonJone/Donby?style=flat-square&color=FA2D48" alt="Release" /></a>
-  <img src="https://img.shields.io/badge/Platform-macOS%2014%2B-111827?style=flat-square&logo=apple" alt="Platform" />
+  <img src="https://img.shields.io/badge/Platform-macOS%2013%2B%20(Apple%20Silicon%20%26%20Intel%20x64)-111827?style=flat-square&logo=apple" alt="Platform" />
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0%20%2B%20Commons%20Clause-4B5563?style=flat-square" alt="License" /></a>
 </p>
 
@@ -33,7 +33,7 @@ Donby 是一款为 macOS 设计的原生流媒体与本地播放器，支持连�
 
 - **原生界面设计**：深度适配 macOS，提供浅色、深色与纯黑白极简主题，支持触控板手势操作与内置版本更新。
 - **多源媒体接入**：原生支持 Emby、Jellyfin、UHDNow API、IPTV 及本地文件夹，支持多线程分片缓存、离线影库归档与跨设备观看进度同步。
-- **硬件加速播放**：基于自研 C++ 播放内核、VideoToolbox 硬件解码与 Metal EDR 渲染，流畅支持 4K HDR10、Dolby Vision 及主流视频编码。
+- **硬件加速播放**：基于自研 Rust/C11 播放内核、VideoToolbox 硬件解码（不支持时自动无感回退多线程软解）与 Metal EDR 渲染，流畅支持 4K HDR10、Dolby Vision 及主流视频编码。
 - **字幕与音轨管理**：支持 ASS/SSA、SRT、PGS 等内嵌与外挂字幕实时切换、双语同步渲染及基于 Silero VAD 的音轨自动时间轴对齐，多音轨无缝选择。
 
 <p align="center">
@@ -44,7 +44,7 @@ Donby 是一款为 macOS 设计的原生流媒体与本地播放器，支持连�
 
 ## 下载与安装
 
-前往 [Releases](https://github.com/DonJone/Donby/releases) 下载最新 DMG 安装包，打开后将 `Donby.app` 拖移至 `Applications` 目录即可。
+前往 [Releases](https://github.com/DonJone/Donby/releases) 下载对应架构的最新 DMG 安装包（`arm64` 适用于 Apple Silicon，`x86_64` 适用于 Intel Mac 与 x64 黑苹果，要求 macOS 13.0+），打开后将 `Donby.app` 拖移至 `Applications` 目录即可。
 
 > 若首次打开提示未受信任，可在终端执行以下命令解除限制：
 > ```bash

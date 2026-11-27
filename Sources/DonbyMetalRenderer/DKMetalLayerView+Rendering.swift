@@ -35,6 +35,7 @@ extension DKMetalLayerView {
                 mipmapped: false
             )
             texDesc.usage = [.shaderRead]
+            texDesc.storageMode = dev.hasUnifiedMemory ? .shared : .managed
             subtitleTextures[slot] = dev.makeTexture(descriptor: texDesc)
         }
 
@@ -442,9 +443,10 @@ extension DKMetalLayerView {
         let subPipeline: MTLRenderPipelineState?
         var stagingTexture: MTLTexture?
         var stagingSize: (width: Int, height: Int) = (0, 0)
+        var stagingDeviceID: UInt64 = 0
 
         private init() {
-            guard let dev = MTLCreateSystemDefaultDevice(),
+            guard let dev = DKMetalLayerView.preferredMetalDevice(for: nil) ?? MTLCreateSystemDefaultDevice(),
                   let q = dev.makeCommandQueue() else {
                 self.device = nil; self.queue = nil; self.texCache = nil
                 self.videoPipeline = nil; self.bgraPipeline = nil; self.subPipeline = nil
@@ -501,7 +503,7 @@ extension DKMetalLayerView {
         }
         guard outW > 0, outH > 0 else { return nil }
 
-        if ctx.stagingTexture == nil || ctx.stagingSize.width != outW || ctx.stagingSize.height != outH {
+        if ctx.stagingTexture == nil || ctx.stagingSize.width != outW || ctx.stagingSize.height != outH || ctx.stagingDeviceID != dev.registryID {
             let outDesc = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: .rgba8Unorm_srgb,
                 width: outW,
@@ -509,9 +511,10 @@ extension DKMetalLayerView {
                 mipmapped: false
             )
             outDesc.usage = [.renderTarget, .shaderRead]
-            outDesc.storageMode = .shared
+            outDesc.storageMode = dev.hasUnifiedMemory ? .shared : .managed
             ctx.stagingTexture = dev.makeTexture(descriptor: outDesc)
             ctx.stagingSize = (outW, outH)
+            ctx.stagingDeviceID = dev.registryID
         }
         guard let outTex = ctx.stagingTexture else { return nil }
 
@@ -573,6 +576,8 @@ extension DKMetalLayerView {
         if let subPtr = subtitleRGBA, subtitleWidth > 0, subtitleHeight > 0,
            let subPipe = ctx.subPipeline {
             let sDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: subtitleWidth, height: subtitleHeight, mipmapped: false)
+            sDesc.usage = [.shaderRead]
+            sDesc.storageMode = dev.hasUnifiedMemory ? .shared : .managed
             if let sTex = dev.makeTexture(descriptor: sDesc) {
                 sTex.replace(region: MTLRegionMake2D(0, 0, subtitleWidth, subtitleHeight), mipmapLevel: 0, withBytes: subPtr, bytesPerRow: subtitleWidth * 4)
                 var svu = DKVertexUniforms(scale: SIMD2<Float>(1, 1), uvRect: SIMD4<Float>(0, 0, 1, 1))
@@ -585,6 +590,10 @@ extension DKMetalLayerView {
         }
 
         enc.endEncoding()
+        if outTex.storageMode == .managed, let blit = cmd.makeBlitCommandEncoder() {
+            blit.synchronize(resource: outTex)
+            blit.endEncoding()
+        }
         cmd.commit()
         cmd.waitUntilCompleted()
         CVMetalTextureCacheFlush(texCache, 0)

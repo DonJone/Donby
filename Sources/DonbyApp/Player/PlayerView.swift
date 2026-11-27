@@ -200,7 +200,7 @@ public struct PlayerView: View {
                                 GeometryReader { geo in
                                     Color.clear
                                         .onAppear { bottomControlBarHeight = geo.size.height }
-                                        .onChange(of: geo.size.height) { _, newH in
+                                        .donbyOnChange(of: geo.size.height) { newH in
                                             if abs(bottomControlBarHeight - newH) > 0.5 {
                                                 bottomControlBarHeight = newH
                                             }
@@ -232,17 +232,15 @@ public struct PlayerView: View {
                 .tint(appState.accentColor)
         }
         .focusable()
-        .focusEffectDisabled()
-        .onKeyPress(.space) { togglePlayPause(); return .handled }
-        .onKeyPress(.leftArrow) { seekRelative(-10); return .handled }
-        .onKeyPress(.rightArrow) { seekRelative(10); return .handled }
-        .onKeyPress(.upArrow) { adjustVolume(delta: 0.05); return .handled }
-        .onKeyPress(.downArrow) { adjustVolume(delta: -0.05); return .handled }
-        .onKeyPress(KeyEquivalent("f")) { toggleFullScreen(); return .handled }
-        .onKeyPress(KeyEquivalent("F")) { toggleFullScreen(); return .handled }
-        .onKeyPress(KeyEquivalent("l")) { showLogSheet.toggle(); return .handled }
-        .onKeyPress(KeyEquivalent("L")) { showLogSheet.toggle(); return .handled }
-        .onKeyPress(.escape) { exitPlayer(); return .handled }
+        .donbyFocusEffectDisabled()
+        .modifier(DonbyPlayerKeyPressModifier(
+            togglePlayPause: togglePlayPause,
+            seekRelative: seekRelative,
+            adjustVolume: adjustVolume,
+            toggleFullScreen: toggleFullScreen,
+            toggleLogSheet: { showLogSheet.toggle() },
+            exitPlayer: exitPlayer
+        ))
         .onExitCommand { exitPlayer() }
         .onAppear {
             playbackSpeed = Float(appState.defaultPlaySpeed)
@@ -333,15 +331,15 @@ public struct PlayerView: View {
         .onReceive(progressTimer) { _ in
             handleProgressTimerTick()
         }
-        .onChange(of: appState.cachePoolSizeMB) { _, newValue in
+        .donbyOnChange(of: appState.cachePoolSizeMB) { newValue in
             if let handle = playerHandle {
                 dk_player_set_buffer_limit_mb(handle, Int32(newValue))
             }
         }
-        .onChange(of: appState.subtitleStyle) { _, _ in
+        .donbyOnChange(of: appState.subtitleStyle) { _ in
             applyKernelSubtitleStyle()
         }
-        .onChange(of: appState.turboConnectionBudget) { _, _ in
+        .donbyOnChange(of: appState.turboConnectionBudget) { _ in
             let budget = appState.effectiveConnectionBudget(for: session.server)
             activeTurboHandle?.updateTuning(
                 connectionBudget: budget,
@@ -421,5 +419,32 @@ public struct PlayerView: View {
         }
         appState.showToast("音量: \(Int(newVol * 100))%", icon: newVol == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill")
         showControlsAndResetTimer()
+    }
+}
+
+private struct DonbyPlayerKeyPressModifier: ViewModifier {
+    let togglePlayPause: () -> Void
+    let seekRelative: (Double) -> Void
+    let adjustVolume: (Float) -> Void
+    let toggleFullScreen: () -> Void
+    let toggleLogSheet: () -> Void
+    let exitPlayer: () -> Void
+
+    func body(content: Content) -> some View {
+        if #available(macOS 14.0, *) {
+            content
+                .onKeyPress(.space) { togglePlayPause(); return .handled }
+                .onKeyPress(.leftArrow) { seekRelative(-10); return .handled }
+                .onKeyPress(.rightArrow) { seekRelative(10); return .handled }
+                .onKeyPress(.upArrow) { adjustVolume(0.05); return .handled }
+                .onKeyPress(.downArrow) { adjustVolume(-0.05); return .handled }
+                .onKeyPress(KeyEquivalent("f")) { toggleFullScreen(); return .handled }
+                .onKeyPress(KeyEquivalent("F")) { toggleFullScreen(); return .handled }
+                .onKeyPress(KeyEquivalent("l")) { toggleLogSheet(); return .handled }
+                .onKeyPress(KeyEquivalent("L")) { toggleLogSheet(); return .handled }
+                .onKeyPress(.escape) { exitPlayer(); return .handled }
+        } else {
+            content
+        }
     }
 }

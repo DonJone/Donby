@@ -197,7 +197,7 @@ public struct LogViewerSheet: View {
                 )
                 .padding(.horizontal, isModal ? 18 : 24)
                 .padding(.bottom, 4)
-                .onChange(of: logger.entries.count) { _, _ in
+                .donbyOnChange(of: logger.entries.count) { _ in
                     if autoScroll, let last = filteredEntries.last {
                         proxy.scrollTo(last.id, anchor: .bottom)
                     }
@@ -282,7 +282,7 @@ public struct LogViewerSheet: View {
                 .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLight))
             TextField("筛选日志关键词…", text: $searchText)
                 .textFieldStyle(.plain)
-                .focusEffectDisabled()
+                .donbyFocusEffectDisabled()
                 .font(.system(size: 12))
                 .foregroundStyle(DonbyGlassPalette.primaryText(isLight: isLight))
             if !searchText.isEmpty {

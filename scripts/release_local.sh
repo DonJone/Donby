@@ -48,7 +48,7 @@ if [ -z "$VERSION" ]; then
 fi
 
 TAG="v${VERSION}"
-ARCH="$(uname -m)"
+ARCH="${DONBY_ARCH:-$(uname -m)}"
 DIST_DIR="dist"
 DMG_PATH="${DIST_DIR}/Donby-${VERSION}-macOS-${ARCH}.dmg"
 ZIP_PATH="${DIST_DIR}/Donby-${VERSION}-macOS-${ARCH}.app.zip"
@@ -94,8 +94,10 @@ fi
 NOTES_FILE="$(mktemp "${TMPDIR:-/tmp}/donby-release-notes.XXXXXX")"
 trap 'rm -f "$NOTES_FILE"' EXIT
 cat > "$NOTES_FILE" <<'MD'
-### 安装说明 (macOS Apple Silicon)
-1. 下载下方 `Donby-*.dmg` 并双击挂载，将 `Donby.app` 拖入 `Applications`（应用程序），或直接通过应用内“关于 -> 检查更新”一键升级。
+### 安装说明 (macOS 13.0+ · Apple Silicon & Intel x64)
+1. 请按设备架构选择下载下方安装包（或通过应用内“关于 -> 检查更新”自动匹配升级）：
+   - **Apple Silicon (`arm64`)**：`Donby-*-macOS-arm64.dmg`（M1 / M2 / M3 / M4 及更新机型）
+   - **Intel Mac / x64 黑苹果 (`x86_64`)**：`Donby-*-macOS-x86_64.dmg`（由 GitHub Actions 自动构建并附加到同一 Release）
 2. 安装包已内嵌全部 `FFmpeg` / `libass` 运行库，无需额外部署 Homebrew 环境。
 3. 由于开源构建采用本地 Ad-hoc 签名（未接入付费 Apple Developer 公证），首次打开如提示“无法验证开发者”或“已损坏”，请在终端执行一次：
    ```bash

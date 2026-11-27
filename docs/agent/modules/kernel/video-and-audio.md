@@ -1,6 +1,6 @@
 # Kernel Sub-Module: Video, Audio, Clock, DoVi & VAD
 
-> Last synced: `v2.0.25`
+> Last synced: `v2.1.3`
 
 ## 1. Module Responsibilities
 - `KernelRust/src/video.rs`: VideoToolbox failure callbacks (`is_vt_failed_thunk`, `on_sw_format_selected_thunk`), `fallback_video_to_software`, `video_decode_worker` (resolution-aware `max_video_frames` 3 for >=1440p / 5 for <=1080p, `AVDISCARD_NONREF` fast-forward accurate seek until `target - 0.18s`, batched codec lock, lock-free `last_decoded_pts_bits`), `acquire_frame` (`CVDisplayLink` presentation path), `extract_video_thumbnail`.

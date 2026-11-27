@@ -305,7 +305,7 @@ public extension View {
     func donbyFlatTextField(isLight: Bool, cornerRadius: CGFloat = 9, horizontalPadding: CGFloat = 11, verticalPadding: CGFloat = 8) -> some View {
         self
             .textFieldStyle(.plain)
-            .focusEffectDisabled()
+            .donbyFocusEffectDisabled()
             .padding(.horizontal, horizontalPadding)
             .padding(.vertical, verticalPadding)
             .background(isLight ? Color.black.opacity(0.03) : Color.white.opacity(0.06))
@@ -314,5 +314,25 @@ public extension View {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .strokeBorder(DonbyGlassPalette.separator(isLight: isLight), lineWidth: 0.65)
             )
+    }
+
+    @ViewBuilder
+    func donbyFocusEffectDisabled() -> some View {
+        if #available(macOS 14.0, *) {
+            self.focusEffectDisabled()
+        } else {
+            self
+        }
+    }
+
+    @ViewBuilder
+    func donbyOnChange<V: Equatable>(of value: V, perform action: @escaping (V) -> Void) -> some View {
+        if #available(macOS 14.0, *) {
+            self.onChange(of: value) { _, newValue in
+                action(newValue)
+            }
+        } else {
+            self.onChange(of: value, perform: action)
+        }
     }
 }

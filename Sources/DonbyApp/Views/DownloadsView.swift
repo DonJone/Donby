@@ -95,16 +95,16 @@ public struct DownloadsView: View {
         .onAppear {
             refreshDiskUsage(runMigration: true)
         }
-        .onChange(of: downloadManager.statusIndex) { _, _ in
+        .donbyOnChange(of: downloadManager.statusIndex) { _ in
             refreshDiskUsage(runMigration: false)
         }
-        .onChange(of: downloadManager.entries.count) { _, _ in
+        .donbyOnChange(of: downloadManager.entries.count) { _ in
             refreshDiskUsage(runMigration: false)
         }
-        .onChange(of: searchQuery) { _, _ in recomputeDisplayedItems() }
-        .onChange(of: sortField) { _, _ in recomputeDisplayedItems() }
-        .onChange(of: sortAscending) { _, _ in recomputeDisplayedItems() }
-        .onChange(of: mediaFilter) { _, _ in recomputeDisplayedItems() }
+        .donbyOnChange(of: searchQuery) { _ in recomputeDisplayedItems() }
+        .donbyOnChange(of: sortField) { _ in recomputeDisplayedItems() }
+        .donbyOnChange(of: sortAscending) { _ in recomputeDisplayedItems() }
+        .donbyOnChange(of: mediaFilter) { _ in recomputeDisplayedItems() }
     }
 
     // MARK: - 54px Top Header (Matches MLibListView Resource Library Aesthetic)

@@ -465,14 +465,14 @@ public struct ServerConfigSheet: View {
             VStack(alignment: .leading, spacing: 6) {
                 TextField("8 位数字登录码", text: $uhdLoginCode)
                     .textFieldStyle(.plain)
-                    .focusEffectDisabled()
+                    .donbyFocusEffectDisabled()
                     .font(.system(size: 15.5, weight: .semibold, design: .monospaced))
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
                     .background(fieldBackground)
                     .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                     .overlay(fieldBorder)
-                    .onChange(of: uhdLoginCode) { _, next in
+                    .donbyOnChange(of: uhdLoginCode) { next in
                         if let ext = extCenter.plugin {
                             let formatted = ext.formatLoginCodeDisplay(next)
                             if formatted != next { uhdLoginCode = formatted }
@@ -486,7 +486,7 @@ public struct ServerConfigSheet: View {
             VStack(alignment: .leading, spacing: 6) {
                 TextField("粘贴 API Key 或 Stream Token", text: $draft.accessToken)
                     .textFieldStyle(.plain)
-                    .focusEffectDisabled()
+                    .donbyFocusEffectDisabled()
                     .font(.system(size: 12.5, design: .monospaced))
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
@@ -514,7 +514,7 @@ public struct ServerConfigSheet: View {
                 verticalPadding: 6,
                 title: { $0 ? "HTTPS" : "HTTP" }
             )
-            .onChange(of: draft.isHttps) { _, isHttps in
+            .donbyOnChange(of: draft.isHttps) { isHttps in
                 if isHttps && (portText == "80" || portText.isEmpty) {
                     portText = "443"; draft.port = 443
                 } else if !isHttps && (portText == "443" || portText.isEmpty) {
@@ -524,14 +524,14 @@ public struct ServerConfigSheet: View {
 
             TextField("服务器地址", text: $draft.host)
                 .textFieldStyle(.plain)
-                .focusEffectDisabled()
+                .donbyFocusEffectDisabled()
                 .font(.system(size: 13))
                 .padding(.horizontal, 11)
                 .padding(.vertical, 8)
                 .background(fieldBackground)
                 .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 .overlay(fieldBorder)
-                .onChange(of: draft.host) { _, newVal in
+                .donbyOnChange(of: draft.host) { newVal in
                     if newVal.contains("://") {
                         var parsed = ParsedServerImportResult()
                         parsed.isHttps = draft.isHttps
@@ -548,7 +548,7 @@ public struct ServerConfigSheet: View {
 
             TextField("端口", text: $portText)
                 .textFieldStyle(.plain)
-                .focusEffectDisabled()
+                .donbyFocusEffectDisabled()
                 .font(.system(size: 12.5, design: .monospaced))
                 .multilineTextAlignment(.center)
                 .frame(width: 64)
@@ -557,7 +557,7 @@ public struct ServerConfigSheet: View {
                 .background(fieldBackground)
                 .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 .overlay(fieldBorder)
-                .onChange(of: portText) { _, newVal in
+                .donbyOnChange(of: portText) { newVal in
                     let digits = newVal.filter(\.isNumber)
                     if digits != newVal { portText = digits }
                     if let p = Int(digits), p > 0 && p <= 65535 {
@@ -612,7 +612,7 @@ public struct ServerConfigSheet: View {
         VStack(spacing: 10) {
             TextField("用户名", text: $draft.username)
                 .textFieldStyle(.plain)
-                .focusEffectDisabled()
+                .donbyFocusEffectDisabled()
                 .font(.system(size: 13))
                 .padding(.horizontal, 11)
                 .padding(.vertical, 8.5)
@@ -629,7 +629,7 @@ public struct ServerConfigSheet: View {
                     }
                 }
                 .textFieldStyle(.plain)
-                .focusEffectDisabled()
+                .donbyFocusEffectDisabled()
                 .font(.system(size: 13))
 
                 Button {

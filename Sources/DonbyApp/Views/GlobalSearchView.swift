@@ -85,7 +85,7 @@ public struct GlobalSearchView: View {
 
                     TextField("搜索电影、电视剧、演员、本地视频或 IPTV 频道...", text: $appState.globalSearchQuery)
                         .textFieldStyle(.plain)
-                        .focusEffectDisabled()
+                        .donbyFocusEffectDisabled()
                         .font(.system(size: 15))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                         .onSubmit {

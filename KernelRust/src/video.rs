@@ -56,7 +56,7 @@ impl DKPlayer {
         vc.0 = 0;
         vc.1 = 0;
 
-        let threads = thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4).clamp(2, 8);
+        let threads = thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4).clamp(2, 12);
         let mut new_ctx: *mut c_void = ptr::null_mut();
         let mut new_hw: *mut c_void = ptr::null_mut();
         let mut is_hw = false;
@@ -92,7 +92,8 @@ impl DKPlayer {
 
     pub(crate) fn video_decode_worker(&self) {
         let Some(mut frame) = AvFrame::alloc() else { return };
-        let mut got_any_frame = false;
+        let mut hw_decoded_frames: u32 = 0;
+        let mut consecutive_hw_errors: u32 = 0;
         let mut reported_stats_init = false;
         let mut last_reported_hw = false;
         let mut last_reported_hdr = false;
@@ -195,10 +196,11 @@ impl DKPlayer {
                             let sret = unsafe { dk_shim_send_packet(codec_ctx, p.0) };
                             if !unsafe { dk_shim_is_eagain(sret) } {
                                 if sret < 0
-                                    && !got_any_frame
                                     && !self.vt_failed.load(Ordering::Acquire)
                                     && self.hw_decode_enabled.load(Ordering::Acquire)
+                                    && (hw_decoded_frames < 4 || consecutive_hw_errors >= 1)
                                 {
+                                    consecutive_hw_errors = consecutive_hw_errors.saturating_add(1);
                                     need_sw_fallback = true;
                                 } else {
                                     cur_pkt = None;
@@ -217,20 +219,40 @@ impl DKPlayer {
                     }
                 };
 
+                if !need_sw_fallback
+                    && rret < 0
+                    && !unsafe { dk_shim_is_eagain(rret) }
+                    && !unsafe { dk_shim_is_eof(rret) }
+                    && !self.vt_failed.load(Ordering::Acquire)
+                    && self.hw_decode_enabled.load(Ordering::Acquire)
+                {
+                    consecutive_hw_errors = consecutive_hw_errors.saturating_add(1);
+                    if hw_decoded_frames < 4 || consecutive_hw_errors >= 2 {
+                        need_sw_fallback = true;
+                    }
+                }
+
                 if need_sw_fallback {
+                    let had_unconsumed_pkt = cur_pkt.is_some();
                     let mut final_sret = -1;
                     if self.fallback_video_to_software() {
+                        consecutive_hw_errors = 0;
                         if let Some(ref p) = cur_pkt {
                             if let Ok(vc) = self.video_codec_mtx.lock() {
                                 if vc.0 != 0 {
                                     final_sret = unsafe { dk_shim_send_packet(vc.0 as *mut c_void, p.0) };
                                 }
                             }
+                        } else if !had_unconsumed_pkt && !self.is_seeking() {
+                            // send_packet succeeded on the IDR packet before receive_frame failed asynchronously;
+                            // request a keyframe resync so the new software decoder starts cleanly without waiting for the next GOP.
+                            self.signal_seek_request(self.get_master_clock().max(0.0), false);
+                            break;
                         }
                     }
                     cur_pkt = None;
                     pkt_consumed = true;
-                    if final_sret < 0 {
+                    if had_unconsumed_pkt && final_sret < 0 {
                         break;
                     }
                     continue;
@@ -251,7 +273,6 @@ impl DKPlayer {
                     break;
                 }
 
-                got_any_frame = true;
                 let fallback_fps = load_f64(&self.atomic_video_fps_bits);
                 let prev_pts = load_f64(&self.last_decoded_pts_bits);
                 let drop_target = load_f64(&self.video_seek_drop_bits);
@@ -323,6 +344,10 @@ impl DKPlayer {
                 }
 
                 if !raw_pb.is_null() {
+                    if is_hw {
+                        hw_decoded_frames = hw_decoded_frames.saturating_add(1);
+                    }
+                    consecutive_hw_errors = 0;
                     if !reported_stats_init
                         || is_hw != last_reported_hw
                         || (is_hdr && !last_reported_hdr)
@@ -377,6 +402,16 @@ impl DKPlayer {
                         frame.unref();
                         break;
                     }
+                } else if is_hw
+                    && !self.vt_failed.load(Ordering::Acquire)
+                    && self.hw_decode_enabled.load(Ordering::Acquire)
+                    && hw_decoded_frames < 4
+                {
+                    frame.unref();
+                    if self.fallback_video_to_software() && !self.is_seeking() {
+                        self.signal_seek_request(self.get_master_clock().max(0.0), false);
+                    }
+                    break;
                 }
                 frame.unref();
             }

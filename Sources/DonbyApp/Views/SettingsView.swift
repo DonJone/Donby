@@ -120,7 +120,7 @@ public struct SettingsView: View {
                 currentTab = matched
             }
         }
-        .onChange(of: appState.preferredSettingsTabRaw) { _, newRaw in
+        .donbyOnChange(of: appState.preferredSettingsTabRaw) { newRaw in
             if let matched = SettingsSectionTab(rawValue: newRaw), currentTab != matched {
                 currentTab = matched
             }

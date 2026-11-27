@@ -16,7 +16,7 @@ extension SettingsView {
                     Text("Donby")
                         .font(.system(size: 20, weight: .heavy, design: .rounded))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                    Text("版本 \(DonbyAppInfo.version) · macOS (Apple Silicon)")
+                    Text("版本 \(DonbyAppInfo.version) · macOS (\(DonbyAppInfo.architectureDisplayName))")
                         .font(.system(size: 12))
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
@@ -214,7 +214,7 @@ extension SettingsView {
                 }
                 .pickerStyle(.menu)
                 .frame(width: 175)
-                .onChange(of: updater.updateChannelRaw) { _, _ in
+                .donbyOnChange(of: updater.updateChannelRaw) { _ in
                     Task { await updater.checkForUpdates(manual: true) }
                 }
             }

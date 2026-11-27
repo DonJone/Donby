@@ -437,7 +437,7 @@ impl DKPlayer {
             }
         }
 
-        let sw_threads = thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4).clamp(2, 8);
+        let sw_threads = thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4).clamp(2, 12);
         let mut opened_video_w = 0;
         let mut opened_video_h = 0;
 

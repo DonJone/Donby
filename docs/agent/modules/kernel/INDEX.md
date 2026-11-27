@@ -1,6 +1,6 @@
 # Module Map: Playback Kernel (`KernelRust` + `DonbyKernelC` ABI)
 
-> Last synced: `v2.1.1` (C++20 baseline archived on `legacy/cpp-kernel`). Read [../../decisions/003-rust-kernel-migration.md](../../decisions/003-rust-kernel-migration.md), [../../decisions/004-zero-serial-rtt-instant-play-v3.md](../../decisions/004-zero-serial-rtt-instant-play-v3.md), and [../../decisions/005-zero-crate-rust-media-data-plane-2a.md](../../decisions/005-zero-crate-rust-media-data-plane-2a.md) for architecture rationale.
+> Last synced: `v2.1.3` (C++20 baseline archived on `legacy/cpp-kernel`). Read [../../decisions/003-rust-kernel-migration.md](../../decisions/003-rust-kernel-migration.md), [../../decisions/004-zero-serial-rtt-instant-play-v3.md](../../decisions/004-zero-serial-rtt-instant-play-v3.md), [../../decisions/005-zero-crate-rust-media-data-plane-2a.md](../../decisions/005-zero-crate-rust-media-data-plane-2a.md), and [../../decisions/006-intel-x64-and-hackintosh-support.md](../../decisions/006-intel-x64-and-hackintosh-support.md) for architecture rationale.
 
 ## 1. Sub-Document Routing
 
