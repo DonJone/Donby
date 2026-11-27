@@ -28,6 +28,17 @@ public struct SettingsView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject var updater = AppUpdateManager.shared
     @State private var currentTab: SettingsSectionTab = .general
+    @State private var unpinnedCacheBytes: Int64 = 0
+    @State private var pinnedDownloadBytes: Int64 = 0
+    @State private var hasLoadedCacheUsage: Bool = false
+    @State private var isClearingCache: Bool = false
+    @State private var cacheRefreshToken: Int = 0
+
+    private static let cacheByteFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter
+    }()
 
     public init() {}
 
@@ -44,6 +55,7 @@ public struct SettingsView: View {
                             }
                         } label: {
                             DonbyToolbarCircleView(systemName: "sidebar.left")
+                                .contentShape(Circle())
                         }
                         .buttonStyle(.plain)
                         .focusable(false)
@@ -143,14 +155,21 @@ public struct SettingsView: View {
                         .font(.system(size: 13))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
-                    Picker("", selection: $appState.defaultStartupModule) {
-                        Text("服务器 (Emby / Jellyfin)").tag("servers")
-                        Text("本地文件").tag("files")
-                        Text("IPTV 直播").tag("iptv")
-                        Text("观看记录").tag("records")
+                    DonbyGlassMenuPicker(
+                        options: ["servers", "files", "iptv", "records"],
+                        selection: $appState.defaultStartupModule,
+                        isLightMode: appState.isLightMode,
+                        accentColor: appState.accentColor,
+                        width: 220
+                    ) { mod in
+                        switch mod {
+                        case "servers": return "服务器 (Emby / Jellyfin)"
+                        case "files": return "本地文件"
+                        case "iptv": return "IPTV 直播"
+                        case "records": return "观看记录"
+                        default: return mod
+                        }
                     }
-                    .pickerStyle(.menu)
-                    .frame(width: 220)
                 }
 
                 if appState.defaultStartupModule == "servers" {
@@ -165,14 +184,17 @@ public struct SettingsView: View {
                                 .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                         }
                         Spacer()
-                        Picker("", selection: $appState.defaultStartupServerId) {
-                            Text("服务器列表").tag("")
-                            ForEach(appState.servers) { s in
-                                Text(s.name.isEmpty ? "未命名服务器" : s.name).tag(s.id.uuidString)
-                            }
+                        DonbyGlassMenuPicker(
+                            options: [""] + appState.servers.map { $0.id.uuidString },
+                            selection: $appState.defaultStartupServerId,
+                            isLightMode: appState.isLightMode,
+                            accentColor: appState.accentColor,
+                            width: 220
+                        ) { idStr in
+                            if idStr.isEmpty { return "服务器列表" }
+                            guard let srv = appState.servers.first(where: { $0.id.uuidString == idStr }) else { return "服务器列表" }
+                            return srv.name.isEmpty ? "未命名服务器" : srv.name
                         }
-                        .pickerStyle(.menu)
-                        .frame(width: 220)
                     }
                 }
 
@@ -187,14 +209,16 @@ public struct SettingsView: View {
                             .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     }
                     Spacer()
-                    Picker("", selection: $appState.defaultFilesFolderId) {
-                        Text("全部文件夹").tag("")
-                        ForEach(appState.localFolders) { f in
-                            Text(f.name).tag(f.id.uuidString)
-                        }
+                    DonbyGlassMenuPicker(
+                        options: [""] + appState.localFolders.map { $0.id.uuidString },
+                        selection: $appState.defaultFilesFolderId,
+                        isLightMode: appState.isLightMode,
+                        accentColor: appState.accentColor,
+                        width: 220
+                    ) { idStr in
+                        if idStr.isEmpty { return "全部文件夹" }
+                        return appState.localFolders.first(where: { $0.id.uuidString == idStr })?.name ?? "全部文件夹"
                     }
-                    .pickerStyle(.menu)
-                    .frame(width: 220)
                 }
                 Divider().opacity(0.12)
                 VStack(alignment: .leading, spacing: 6) {
@@ -360,13 +384,15 @@ public struct SettingsView: View {
                         .font(.system(size: 13))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
-                    Picker("", selection: $appState.defaultPlaySpeed) {
-                        ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { spd in
-                            Text(String(format: "%.2gx", spd)).tag(spd)
-                        }
+                    DonbyGlassMenuPicker(
+                        options: [0.5, 0.75, 1.0, 1.25, 1.5, 2.0],
+                        selection: $appState.defaultPlaySpeed,
+                        isLightMode: appState.isLightMode,
+                        accentColor: appState.accentColor,
+                        width: 100
+                    ) { spd in
+                        String(format: "%.2gx", spd)
                     }
-                    .pickerStyle(.menu)
-                    .frame(width: 100)
                 }
 
                 Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
@@ -420,13 +446,13 @@ public struct SettingsView: View {
                         .font(.system(size: 13))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
-                    Picker("", selection: $appState.subtitleStyle.hdrPeakNits) {
-                        ForEach(SubtitleHDRPeakNits.allCases) { nits in
-                            Text(nits.title).tag(nits)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .frame(width: 170)
+                    DonbyGlassMenuPicker(
+                        options: SubtitleHDRPeakNits.allCases,
+                        selection: $appState.subtitleStyle.hdrPeakNits,
+                        isLightMode: appState.isLightMode,
+                        accentColor: appState.accentColor,
+                        width: 170
+                    ) { $0.title }
                 }
 
                 HStack(spacing: 12) {
@@ -500,13 +526,15 @@ public struct SettingsView: View {
                         .font(.system(size: 13))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
-                    Picker("", selection: $appState.turboMemoryCacheMB) {
-                        Text("250 MB").tag(250)
-                        Text("500 MB (推荐)").tag(500)
-                        Text("1024 MB").tag(1024)
+                    DonbyGlassMenuPicker(
+                        options: [250, 500, 1024],
+                        selection: $appState.turboMemoryCacheMB,
+                        isLightMode: appState.isLightMode,
+                        accentColor: appState.accentColor,
+                        width: 150
+                    ) { mb in
+                        mb == 500 ? "500 MB (推荐)" : "\(mb) MB"
                     }
-                    .pickerStyle(.menu)
-                    .frame(width: 150)
                 }
 
                 HStack {
@@ -514,14 +542,21 @@ public struct SettingsView: View {
                         .font(.system(size: 13))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
-                    Picker("", selection: $appState.turboDiskCacheMB) {
-                        Text("512 MB").tag(512)
-                        Text("2048 MB (2 GB · 推荐)").tag(2048)
-                        Text("4096 MB (4 GB)").tag(4096)
-                        Text("8192 MB (8 GB)").tag(8192)
+                    DonbyGlassMenuPicker(
+                        options: [512, 2048, 4096, 8192],
+                        selection: $appState.turboDiskCacheMB,
+                        isLightMode: appState.isLightMode,
+                        accentColor: appState.accentColor,
+                        width: 185
+                    ) { mb in
+                        switch mb {
+                        case 512: return "512 MB"
+                        case 2048: return "2048 MB (2 GB · 推荐)"
+                        case 4096: return "4096 MB (4 GB)"
+                        case 8192: return "8192 MB (8 GB)"
+                        default: return "\(mb) MB"
+                        }
                     }
-                    .pickerStyle(.menu)
-                    .frame(width: 185)
                 }
 
                 Toggle("进入详情页自动预加载", isOn: $appState.detailPreloadEnabled)
@@ -534,14 +569,19 @@ public struct SettingsView: View {
                         .font(.system(size: 13))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
-                    Picker("", selection: $appState.detailPreloadSeconds) {
-                        Text("15 秒 (默认)").tag(15)
-                        Text("30 秒").tag(30)
-                        Text("60 秒").tag(60)
-                        Text("5 分钟").tag(300)
+                    DonbyGlassMenuPicker(
+                        options: [15, 30, 60, 300],
+                        selection: $appState.detailPreloadSeconds,
+                        isLightMode: appState.isLightMode,
+                        accentColor: appState.accentColor,
+                        width: 150
+                    ) { sec in
+                        switch sec {
+                        case 15: return "15 秒 (默认)"
+                        case 300: return "5 分钟"
+                        default: return "\(sec) 秒"
+                        }
                     }
-                    .pickerStyle(.menu)
-                    .frame(width: 150)
                     .disabled(!appState.detailPreloadEnabled)
                 }
                 .padding(.leading, 22)
@@ -563,17 +603,46 @@ public struct SettingsView: View {
                 .opacity(appState.autoSaveFullCacheToOffline ? 1.0 : 0.55)
 
                 HStack {
-                    let usage = DonbyTurboCacheEngine.shared.calculateDiskUsage()
-                    Text("临时缓存：\(ByteCountFormatter.string(fromByteCount: usage.unpinnedCacheBytes, countStyle: .file)) · 离线文件：\(ByteCountFormatter.string(fromByteCount: usage.pinnedDownloadBytes, countStyle: .file))")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                    Spacer()
-                    Button("清理临时缓存") {
-                        DonbyTurboCacheEngine.shared.clearAllUnpinnedCache()
-                        appState.showToast("已清理临时缓存", icon: "checkmark.circle.fill")
+                    Group {
+                        if hasLoadedCacheUsage {
+                            let unpinnedText = Self.cacheByteFormatter.string(fromByteCount: max(0, unpinnedCacheBytes))
+                            let pinnedText = Self.cacheByteFormatter.string(fromByteCount: max(0, pinnedDownloadBytes))
+                            Text("临时缓存：\(unpinnedText) · 离线文件：\(pinnedText)")
+                        } else {
+                            Text("临时缓存：计算中... · 离线文件：计算中...")
+                        }
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    Spacer()
+                    Button {
+                        guard !isClearingCache else { return }
+                        isClearingCache = true
+                        Task {
+                            await DonbyTurboCacheEngine.shared.clearAllUnpinnedCacheAsync()
+                            isClearingCache = false
+                            cacheRefreshToken &+= 1
+                            appState.showToast("已清理临时缓存", icon: "checkmark.circle.fill")
+                        }
+                    } label: {
+                        Text("清理临时缓存")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .frame(minHeight: 24)
+                            .donbyLiquidGlassCapsule()
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isClearingCache)
+                }
+                .task(id: cacheRefreshToken) {
+                    let usage = await DonbyTurboCacheEngine.shared.calculateDiskUsageAsync()
+                    guard !Task.isCancelled else { return }
+                    unpinnedCacheBytes = usage.unpinnedCacheBytes
+                    pinnedDownloadBytes = usage.pinnedDownloadBytes
+                    hasLoadedCacheUsage = true
                 }
 
                 Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
@@ -583,14 +652,15 @@ public struct SettingsView: View {
                         .font(.system(size: 13))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     Spacer()
-                    Picker("", selection: $appState.cachePoolSizeMB) {
-                        Text("128 MB").tag(128)
-                        Text("256 MB (推荐)").tag(256)
-                        Text("512 MB").tag(512)
-                        Text("1024 MB").tag(1024)
+                    DonbyGlassMenuPicker(
+                        options: [128, 256, 512, 1024],
+                        selection: $appState.cachePoolSizeMB,
+                        isLightMode: appState.isLightMode,
+                        accentColor: appState.accentColor,
+                        width: 150
+                    ) { mb in
+                        mb == 256 ? "256 MB (推荐)" : "\(mb) MB"
                     }
-                    .pickerStyle(.menu)
-                    .frame(width: 150)
                 }
                 Text("播放期间的前向码流预读内存大小")
                     .font(.system(size: 11.5))

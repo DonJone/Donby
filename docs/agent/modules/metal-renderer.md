@@ -1,6 +1,6 @@
 # Module Map: Metal EDR Video Renderer (`DonbyMetalRenderer`)
 
-> Last synced: `v2.1.4`. Load this doc for CVDisplayLink presentation, Metal shaders, HDR10/Dolby Vision EDR tone mapping, discrete/dual-GPU display routing, GPU snapshots, first-frame callbacks, and subtitle overlay rendering.
+> Last synced: `v2.1.5`. Load this doc for CVDisplayLink presentation, Metal shaders, HDR10/Dolby Vision EDR tone mapping, discrete/dual-GPU display routing, GPU snapshots, first-frame callbacks, and subtitle overlay rendering.
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyMetalRenderer/DKMetalShadersAndPipeline.swift`
@@ -9,12 +9,13 @@
   - `DKMetalPipelineSet` — compiled & cached Metal render pipelines (`videoPipeline` for NV12/P010/DoVi -> linear EDR `.rgba16Float`, `bgraPipeline` fallback, and `subPipeline` for linear-space alpha-blended subtitles).
   - `DKMetalLayerView.metalShaderSource` & `prewarmPipelines()` — embedded MSL shaders (`vertex_main`, `fragment_video_master`, `fragment_bgra`, `fragment_subtitle`) and startup pipeline prewarming.
 - `Sources/DonbyMetalRenderer/DKMetalLayerView.swift`
-  - `DKMetalLayerView` — `NSView` hosting `CAMetalLayer` (`pixelFormat = .rgba16Float`, `wantsExtendedDynamicRangeContent = true`, `colorspace = extendedLinearDisplayP3` / SDR fallback), stored state (`hasExternalDisplayLink`, `lastRenderSkipReason`), EDR headroom observer, layout/drawable sizing (with size-diff guards in `layout()`/`updateDrawableSize()`), subtitle lift/occlusion controls (`subtitleLiftDirty` fast-path), and `setupMetal()`.
+  - `DKMetalLayerView` — `NSView` hosting `CAMetalLayer` (`pixelFormat = .rgba16Float`, `wantsExtendedDynamicRangeContent = true`, `colorspace = extendedLinearDisplayP3` / SDR fallback, `contentsGravity = .resizeAspect`), stored state (`hasExternalDisplayLink`, `lastRenderSkipReason`), monotonic `requestRedraw()` (`_redrawRequestGeneration` / `_renderedRedrawGeneration`), EDR headroom observer, `inLiveResize` coalesced `drawableSize` updates, `CGDirectDisplayID` + `potentialEDR` fast-path `reconfigureMetalIfNeeded` (non-blocking `PendingMetalConfig` consumed on render thread), `viewDidChangeBackingProperties` metal reconfiguration, and `setupMetal()`.
 - `Sources/DonbyMetalRenderer/DKMetalLayerView+Rendering.swift`
-  - `DKMetalLayerView` rendering extension — `CVMetalTextureCache` frame upload (`renderLocked`, `renderBiPlanar`, `renderBGRA`), skip diagnostics (`_lastRenderSkipReason`), 3-slot subtitle `MTLTexture` ring (`updateSubtitleOverlay`), `subtitleViewportMetrics`, and `OffscreenMetalContext` / `renderOffscreenCGImage` for GPU sRGB snapshot/thumbnail rendering.
+  - `DKMetalLayerView` rendering extension — `CVMetalTextureCache` frame upload (`renderLocked` using `drawable.texture` dimensions for `calculateScale`, `renderBiPlanar`, `renderBGRA`), non-blocking `clearDisplayedFrame()` (submitting an explicit clear-black render pass + `malloc_zone_pressure_relief`), `releasePlaybackResourcesOnExit()`, skip diagnostics (`_lastRenderSkipReason`), 3-slot subtitle `MTLTexture` ring (`updateSubtitleOverlay` with non-blocking nil-clear), `subtitleViewportMetrics`, and `OffscreenMetalContext` / `renderOffscreenCGImage` for GPU sRGB snapshot/thumbnail rendering.
 - `Sources/DonbyMetalRenderer/DKMetalVideoView.swift`
-  - `DisplayLinkDriver` — manages `CVDisplayLink` callbacks and `.common`-mode 60Hz timer fallback.
-  - `DKMetalVideoView` + `Coordinator` (cached viewport metrics, reusable `SubtitleSyncBox`) + `SubtitleSyncBox` — SwiftUI `NSViewRepresentable` bridge, `onRenderDiagnostic` startup stall logger, and `dk_player_notify_metal_first_frame` dispatch.
+  - `DisplayLinkDriver` — manages `CVDisplayLink` callbacks and `.common`-mode 60Hz timer fallback (only started when `playerHandle != nil`).
+  - `MetalSubtitleRedrawTrigger` — `@unchecked Sendable` monotonic paused-redraw trigger (`requestPausedRedraw()`).
+  - `DKMetalVideoView` + `Coordinator` (cached viewport metrics, stack-isolated `SubtitleSyncState`, `DonbyMetalRequestPausedSubtitleRedraw` notification observer, immediate `lastSubSerial` advance after texture upload) — SwiftUI `NSViewRepresentable` bridge, `onRenderDiagnostic` startup stall logger, and `dk_player_notify_metal_first_frame` dispatch.
 
 ## 2. Key Rendering Behaviors
 - **HDR10 & Dolby Vision EDR Pipeline**:
@@ -27,11 +28,11 @@
   - `DKMetalVideoView.subtitleStyleRevision` flags `needsRedrawOnSameFrame = true` in `updateNSView`, bypassing paused DisplayLink throttling so dragging scale/position sliders updates subtitles at 60fps while paused.
   - `DKMetalLayerView` rotates subtitle uploads across a 3-slot `MTLTexture` ring (`subtitleTextures`, `v1.4.21`) so CPU `replace(region:)` never mutates an in-flight GPU texture on 120Hz ProMotion displays.
 - **Clean Player Detach & First-Frame Signal (`v1.4.0`+)**:
-  - `clearDisplayedFrame()` clears stale drawable content immediately when player detaches or becomes `nil` (no ghost frame from previous video).
+  - `clearDisplayedFrame()` clears stale drawable content immediately via an off-MainActor clear-black render pass when player detaches, becomes `nil`, or switches handles (no ghost frame from previous video).
   - `onFirstFrameRendered` fires on `MainActor` once the first real video frame is presented on screen, and `dk_player_notify_metal_first_frame` emits the single-line `[StartupTiming]` summary once per open.
   - `hasExternalDisplayLink` prevents `layout()`, `subtitleHDRPeakNits`, and `didChangeScreenParametersNotification` from calling `renderLastPixelBuffer()` (`metalLayer.nextDrawable()`) synchronously on the main thread while `CVDisplayLink` is active — avoiding 1-second `tryLockBusy` starvation during macOS's 60Hz EDR headroom ramp on initial process launch.
 
 ## 3. Critical Invariants & Pitfalls (DO NOT BREAK)
-1. **Zero Main-Thread / Render-Thread Blocking & Coordinator Lock Hygiene**: `renderLocked(_:colorUniforms:)` runs on the DisplayLink path; never invoke synchronous `renderLastPixelBuffer()` from main-thread notifications/layout while `hasExternalDisplayLink` is `true` (set `needsRedrawOnSameFrame = true` instead), and never perform synchronous SwiftUI state mutations there. All cross-thread `Coordinator` state (`_player`, `onFirstFrameRendered`, `onRenderDiagnostic`, `lastPts`, `lastBufferPtr`, `lastSubSerial`, `didNotifyFirstFrame`) MUST be synchronized with `playerLock`.
+1. **Zero Main-Thread / Render-Thread Blocking & Coordinator Lock Hygiene**: `renderLocked(_:colorUniforms:)` runs on the DisplayLink path; never invoke synchronous `renderLastPixelBuffer()` from main-thread notifications/layout while `hasExternalDisplayLink` is `true`, and never call blocking `renderLock.lock()` on MainActor (`reconfigureMetalIfNeeded`, `clearDisplayedFrame`, and `updateSubtitleOverlay(nil)` must use `sizeLock` dirty flags consumed on the render thread/queue). All cross-thread `Coordinator` state (`_player`, `onFirstFrameRendered`, `onRenderDiagnostic`, `lastPts`, `lastBufferPtr`, `lastSubSerial`, `didNotifyFirstFrame`) MUST be synchronized with `playerLock`.
 2. **Stale Frame Cleanup**: Always invoke `clearDisplayedFrame()` when switching/closing players so the previous item's last frame never flashes during new item startup.
 3. **sRGB Snapshot Color Accuracy**: `OffscreenMetalContext` must convert HDR/EDR frames to sRGB for saved watch-record thumbnails (`v1.3.17` fix).

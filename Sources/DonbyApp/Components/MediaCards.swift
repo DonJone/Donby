@@ -53,6 +53,38 @@ public struct DonbyCardAppearance: Equatable, Sendable {
         lhs.matchesVisualTheme(of: rhs) &&
         lhs.downloadStatusIndex == rhs.downloadStatusIndex
     }
+
+    public func withDownloadStatusIndex(_ nextIndex: DonbyDownloadStatusIndex) -> DonbyCardAppearance {
+        DonbyCardAppearance(
+            server: server,
+            isLightMode: isLightMode,
+            accentColor: accentColor,
+            accentTextColor: accentTextColor,
+            showResolutionBadge: showResolutionBadge,
+            showRatingBadge: showRatingBadge,
+            isMonochromeTheme: isMonochromeTheme,
+            downloadStatusIndex: nextIndex
+        )
+    }
+}
+
+/// Scopes `@ObservedObject` subscription to `DonbyDownloadStatusStore` around SwiftUI card grids
+/// so download progress ticks never trigger parent view or root `AppState` redraws.
+public struct DonbyDownloadStatusObserver<Content: View>: View {
+    @ObservedObject private var store: DonbyDownloadStatusStore
+    private let content: (DonbyDownloadStatusIndex) -> Content
+
+    public init(
+        store: DonbyDownloadStatusStore,
+        @ViewBuilder content: @escaping (DonbyDownloadStatusIndex) -> Content
+    ) {
+        self.store = store
+        self.content = content
+    }
+
+    public var body: some View {
+        content(store.statusIndex)
+    }
 }
 
 private struct PosterHoverOverlay: View {

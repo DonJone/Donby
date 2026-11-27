@@ -16,33 +16,58 @@ struct AsyncAppStateHydrationPayload: Sendable {
     let watchHistory: [WatchRecordItem]?
 }
 
+struct HomeShelvesComputationInput: Sendable {
+    let showMyMedia: Bool
+    let showContinueWatching: Bool
+    let showFavorites: Bool
+    let libraryViews: [EmbyItem]
+    let resumeItems: [EmbyItem]
+    let nextUpItems: [EmbyItem]
+    let favoriteItems: [EmbyItem]
+    let latestByLibrary: [String: [EmbyItem]]
+    let serverName: String?
+    let explicitAnimeMode: Bool?
+}
+
+struct HomeShelfDraft: Sendable {
+    let id: String
+    let title: String
+    let kind: HomeShelfSection.Kind
+    let items: [EmbyItem]
+    let library: EmbyItem?
+    let countsByLibrary: [String: Int]
+    let isLibraryShelf: Bool
+}
+
 extension AppState {
-    func computeHomeShelves() -> [HomeShelfSection] {
-        var result: [HomeShelfSection] = []
-        if showMyMedia && !libraryViews.isEmpty {
+    private nonisolated static func computeHomeShelfDrafts(input: HomeShelvesComputationInput) -> [HomeShelfDraft] {
+        var result: [HomeShelfDraft] = []
+        if input.showMyMedia && !input.libraryViews.isEmpty {
             var counts: [String: Int] = [:]
-            for lib in libraryViews {
-                if let count = lib.childCount ?? latestByLibrary[lib.id]?.count {
+            for lib in input.libraryViews {
+                if let count = lib.childCount ?? input.latestByLibrary[lib.id]?.count {
                     counts[lib.id] = count
                 }
             }
-            result.append(HomeShelfSection(
+            result.append(HomeShelfDraft(
                 id: "my_media",
                 title: "我的媒体",
                 kind: .library,
-                items: libraryViews,
-                countsByLibrary: counts
+                items: input.libraryViews,
+                library: nil,
+                countsByLibrary: counts,
+                isLibraryShelf: false
             ))
         }
-        if showContinueWatching {
-            var continueItems = resumeItems
-            if !nextUpItems.isEmpty {
+        if input.showContinueWatching {
+            var continueItems = input.resumeItems
+            if !input.nextUpItems.isEmpty {
                 var seenIds = Set(continueItems.map(\.id))
                 var seenSeriesIds = Set(continueItems.compactMap { item -> String? in
                     if let sid = item.seriesId, !sid.isEmpty { return sid }
                     return item.isSeries ? item.id : nil
                 })
-                for candidate in nextUpItems {
+                for candidate in input.nextUpItems {
                     guard seenIds.insert(candidate.id).inserted else { continue }
                     if let sid = candidate.seriesId, !sid.isEmpty {
                         guard seenSeriesIds.insert(sid).inserted else { continue }
@@ -51,56 +76,268 @@ extension AppState {
                 }
             }
             if !continueItems.isEmpty {
-                result.append(HomeShelfSection(
+                result.append(HomeShelfDraft(
                     id: "continue_watching",
                     title: "继续观看",
                     kind: .landscape,
-                    items: continueItems
+                    items: continueItems,
+                    library: nil,
+                    countsByLibrary: [:],
+                    isLibraryShelf: false
                 ))
             }
         }
-        if showFavorites && !favoriteItems.isEmpty {
-            result.append(HomeShelfSection(
+        if input.showFavorites && !input.favoriteItems.isEmpty {
+            result.append(HomeShelfDraft(
                 id: "my_favorites",
                 title: "我的收藏",
                 kind: .poster,
-                items: favoriteItems
+                items: input.favoriteItems,
+                library: nil,
+                countsByLibrary: [:],
+                isLibraryShelf: false
             ))
         }
-        if let extShelves = DonbyAppExtensionCenter.shared.plugin?.homeShelves(for: activeServer) {
-            result.append(contentsOf: extShelves)
-        }
         let allowAnimeOnHome = HomeHeroCurator.isAnimeFocusedServer(
-            serverName: activeServer?.name,
-            libraryViews: libraryViews,
-            explicitAnimeMode: activeServer.flatMap { DonbyAppExtensionCenter.shared.plugin?.isAnimeModeActive(for: $0) }
+            serverName: input.serverName,
+            libraryViews: input.libraryViews,
+            explicitAnimeMode: input.explicitAnimeMode
         )
-        for lib in libraryViews {
+        for lib in input.libraryViews {
             if !allowAnimeOnHome && HomeHeroCurator.isAnimeLibraryName(lib.name) {
                 continue
             }
-            if let items = latestByLibrary[lib.id], !items.isEmpty {
+            if let items = input.latestByLibrary[lib.id], !items.isEmpty {
                 let displayItems = allowAnimeOnHome
                     ? items
                     : items.filter { !HomeHeroCurator.isAnimeOrAnimation($0, libraryName: lib.name) }
                 guard !displayItems.isEmpty else { continue }
-                result.append(HomeShelfSection(
+                result.append(HomeShelfDraft(
                     id: "lib_\(lib.id)",
                     title: lib.name,
                     kind: .poster,
                     items: displayItems,
-                    library: lib
+                    library: lib,
+                    countsByLibrary: [:],
+                    isLibraryShelf: true
                 ))
             }
         }
         return result
     }
 
+    private nonisolated static func materializeHomeShelves(
+        drafts: [HomeShelfDraft],
+        extShelves: [HomeShelfSection]
+    ) -> [HomeShelfSection] {
+        var result: [HomeShelfSection] = []
+        result.reserveCapacity(drafts.count + extShelves.count)
+        var insertedExt = false
+        for draft in drafts {
+            if draft.isLibraryShelf && !insertedExt {
+                result.append(contentsOf: extShelves)
+                insertedExt = true
+            }
+            result.append(HomeShelfSection(
+                id: draft.id,
+                title: draft.title,
+                kind: draft.kind,
+                items: draft.items,
+                library: draft.library,
+                countsByLibrary: draft.countsByLibrary
+            ))
+        }
+        if !insertedExt {
+            result.append(contentsOf: extShelves)
+        }
+        return result
+    }
+
+    private func makeHomeShelvesComputationInput() -> (input: HomeShelvesComputationInput, extShelves: [HomeShelfSection]) {
+        let srv = activeServer
+        let extShelves = DonbyAppExtensionCenter.shared.plugin?.homeShelves(for: srv) ?? []
+        let explicitAnimeMode = srv.flatMap { DonbyAppExtensionCenter.shared.plugin?.isAnimeModeActive(for: $0) }
+        let input = HomeShelvesComputationInput(
+            showMyMedia: showMyMedia,
+            showContinueWatching: showContinueWatching,
+            showFavorites: showFavorites,
+            libraryViews: libraryViews,
+            resumeItems: resumeItems,
+            nextUpItems: nextUpItems,
+            favoriteItems: favoriteItems,
+            latestByLibrary: latestByLibrary,
+            serverName: srv?.name,
+            explicitAnimeMode: explicitAnimeMode
+        )
+        return (input, extShelves)
+    }
+
+    func computeHomeShelves() -> [HomeShelfSection] {
+        let (input, extShelves) = makeHomeShelvesComputationInput()
+        let drafts = Self.computeHomeShelfDrafts(input: input)
+        return Self.materializeHomeShelves(drafts: drafts, extShelves: extShelves)
+    }
+
     func refreshCachedHomeShelvesIfNeeded() {
-        let next = computeHomeShelves()
-        if cachedHomeShelves != next {
-            cachedHomeShelves = next
-            homeRevision &+= 1
+        guard !isLoadingFromDisk,
+              !isBatchUpdatingHomeShelves,
+              !isSuppressingHomeShelfRefresh,
+              openedServerId != nil else { return }
+
+        homeShelvesComputeTask?.cancel()
+        homeShelvesGeneration &+= 1
+        let generation = homeShelvesGeneration
+        let targetOpenedId = openedServerId
+        let targetActiveId = activeServer?.id
+        let (input, extShelves) = makeHomeShelvesComputationInput()
+
+        if input.libraryViews.isEmpty
+            && input.resumeItems.isEmpty
+            && input.nextUpItems.isEmpty
+            && input.favoriteItems.isEmpty
+            && extShelves.isEmpty {
+            if !cachedHomeShelves.isEmpty {
+                cachedHomeShelves = []
+                homeRevision &+= 1
+            }
+            return
+        }
+
+        homeShelvesComputeTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let drafts = Self.computeHomeShelfDrafts(input: input)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self,
+                      !Task.isCancelled,
+                      self.homeShelvesGeneration == generation,
+                      self.openedServerId == targetOpenedId,
+                      self.activeServer?.id == targetActiveId else { return }
+                let next = Self.materializeHomeShelves(drafts: drafts, extShelves: extShelves)
+                if self.cachedHomeShelves != next {
+                    self.cachedHomeShelves = next
+                    self.homeRevision &+= 1
+                }
+            }
+        }
+    }
+
+    func resolvePluginImdbIds(for items: [EmbyItem], server: EmbyServerConfig) async -> [String: String] {
+        guard let plugin = DonbyAppExtensionCenter.shared.plugin, plugin.isActive(for: server) else {
+            return [:]
+        }
+        return await plugin.resolveImdbIds(for: items, server: server, maxCount: 16)
+    }
+
+    func scheduleHomeCurationAndRatingsEnrichment(
+        for serverId: UUID,
+        curationGeneration: UInt64,
+        loadGeneration: UInt64,
+        libraryViews: [EmbyItem],
+        resumeItems: [EmbyItem],
+        nextUpItems: [EmbyItem],
+        favoriteItems: [EmbyItem],
+        latestByLibrary: [String: [EmbyItem]],
+        extraHeroCandidates: [EmbyItem],
+        serverName: String?,
+        explicitAnimeMode: Bool?,
+        apiKey: String,
+        targetServer: EmbyServerConfig?
+    ) {
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let nextCarousel = HomeHeroCurator.selectHeroItems(
+                libraryViews: libraryViews,
+                latestByLibrary: latestByLibrary,
+                extraCandidates: extraHeroCandidates,
+                fallbackResumes: resumeItems,
+                serverName: serverName,
+                explicitAnimeMode: explicitAnimeMode
+            )
+            let snapshot = ServerHomeCacheStore.ServerHomeSnapshot(
+                libraryViews: libraryViews,
+                resumeItems: resumeItems,
+                nextUpItems: nextUpItems,
+                favoriteItems: favoriteItems,
+                latestByLibrary: latestByLibrary,
+                carouselItems: nextCarousel,
+                cachedAt: Date()
+            )
+            let cachedRatings = await MultiPlatformRatingService.shared.cachedRatingsByItemId(for: nextCarousel)
+
+            let shouldEnrich: Bool = await MainActor.run {
+                guard let self,
+                      self.homeCurationGeneration == curationGeneration,
+                      self.homeLoadGeneration == loadGeneration,
+                      self.activeServer?.id == serverId else {
+                    return false
+                }
+                if self.carouselItems != nextCarousel {
+                    self.carouselItems = nextCarousel
+                }
+                if !cachedRatings.isEmpty {
+                    self.mergeRatingsBatch(cachedRatings)
+                }
+                ServerHomeCacheStore.shared.save(snapshot, for: serverId, explicitAnimeMode: explicitAnimeMode)
+                return true
+            }
+            guard shouldEnrich else { return }
+
+            let poolForEnrichment: [EmbyItem] = {
+                var seen = Set<String>()
+                var pool: [EmbyItem] = []
+                for item in nextCarousel where seen.insert(item.id).inserted {
+                    pool.append(item)
+                }
+                for item in extraHeroCandidates where seen.insert(item.id).inserted {
+                    pool.append(item)
+                }
+                for view in libraryViews {
+                    for item in (latestByLibrary[view.id] ?? []).prefix(8) where seen.insert(item.id).inserted {
+                        pool.append(item)
+                    }
+                }
+                return Array(pool.prefix(48))
+            }()
+            guard !poolForEnrichment.isEmpty else { return }
+
+            var bridgedImdbIds: [String: String] = [:]
+            if let srv = targetServer, let self {
+                bridgedImdbIds = await self.resolvePluginImdbIds(for: poolForEnrichment, server: srv)
+            }
+            let enriched = await MultiPlatformRatingService.shared.enrichRatings(
+                for: poolForEnrichment,
+                mdblistAPIKey: apiKey,
+                resolvedImdbIds: bridgedImdbIds
+            )
+            guard !enriched.isEmpty else { return }
+            let curated = HomeHeroCurator.selectHeroItems(
+                libraryViews: libraryViews,
+                latestByLibrary: latestByLibrary,
+                extraCandidates: extraHeroCandidates,
+                ratingsByItemId: enriched,
+                fallbackResumes: resumeItems,
+                serverName: serverName,
+                explicitAnimeMode: explicitAnimeMode
+            )
+            await MainActor.run {
+                guard let self,
+                      self.homeCurationGeneration == curationGeneration,
+                      self.homeLoadGeneration == loadGeneration,
+                      self.activeServer?.id == serverId else { return }
+                self.mergeRatingsBatch(enriched)
+                if self.carouselItems != curated {
+                    self.carouselItems = curated
+                    let updatedSnapshot = ServerHomeCacheStore.ServerHomeSnapshot(
+                        libraryViews: libraryViews,
+                        resumeItems: resumeItems,
+                        nextUpItems: nextUpItems,
+                        favoriteItems: favoriteItems,
+                        latestByLibrary: latestByLibrary,
+                        carouselItems: curated,
+                        cachedAt: Date()
+                    )
+                    ServerHomeCacheStore.shared.save(updatedSnapshot, for: serverId, explicitAnimeMode: explicitAnimeMode)
+                }
+            }
         }
     }
 
@@ -245,39 +482,105 @@ extension AppState {
     }
 }
 
+@MainActor
+private final class ServerHomeModeCacheBox {
+    static let shared = ServerHomeModeCacheBox()
+    var snapshotsByCompositeKey: [String: ServerHomeCacheStore.ServerHomeSnapshot] = [:]
+}
+
 extension ServerHomeCacheStore {
-    public func cachedSnapshotInMemory(for serverId: UUID) -> ServerHomeSnapshot? {
-        inMemorySnapshots[serverId]
+    private static func modeKey(for explicitAnimeMode: Bool?) -> String {
+        switch explicitAnimeMode {
+        case .some(true): return "anime"
+        case .some(false): return "normal"
+        case .none: return "default"
+        }
     }
 
+    @MainActor
+    private static func resolveModeKey(for serverId: UUID) -> String {
+        guard let server = AppState.sharedInstance?.servers.first(where: { $0.id == serverId }),
+              let isAnime = DonbyAppExtensionCenter.shared.plugin?.isAnimeModeActive(for: server) else {
+            return "default"
+        }
+        return modeKey(for: isAnime)
+    }
+
+    private static func compositeKey(serverId: UUID, modeKey: String) -> String {
+        "\(serverId.uuidString)|\(modeKey)"
+    }
+
+    private func diskFileURL(serverId: UUID, modeKey: String) -> URL {
+        let filename = modeKey == "default"
+            ? "home_\(serverId.uuidString).json"
+            : "home_\(serverId.uuidString)_\(modeKey).json"
+        return cacheDirectoryURL.appendingPathComponent(filename)
+    }
+
+    @MainActor
+    public func save(_ snapshot: ServerHomeSnapshot, for serverId: UUID, explicitAnimeMode: Bool?) {
+        let key = Self.modeKey(for: explicitAnimeMode)
+        let cKey = Self.compositeKey(serverId: serverId, modeKey: key)
+        ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] = snapshot
+        if key == "default" {
+            inMemorySnapshots[serverId] = snapshot
+        }
+        let file = diskFileURL(serverId: serverId, modeKey: key)
+        DispatchQueue.global(qos: .utility).async {
+            if let data = try? JSONEncoder().encode(snapshot) {
+                try? data.write(to: file, options: .atomic)
+            }
+        }
+    }
+
+    @MainActor
+    public func cachedSnapshotInMemory(for serverId: UUID) -> ServerHomeSnapshot? {
+        let key = Self.resolveModeKey(for: serverId)
+        let cKey = Self.compositeKey(serverId: serverId, modeKey: key)
+        if let scoped = ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] {
+            return scoped
+        }
+        return key == "default" ? inMemorySnapshots[serverId] : nil
+    }
+
+    @MainActor
     public func loadSnapshotFromDiskAsync(for serverId: UUID) async -> ServerHomeSnapshot? {
-        if let mem = inMemorySnapshots[serverId] {
+        let key = Self.resolveModeKey(for: serverId)
+        let cKey = Self.compositeKey(serverId: serverId, modeKey: key)
+        if let mem = ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] {
             return mem
         }
-        let dir = cacheDirectoryURL
+        let file = diskFileURL(serverId: serverId, modeKey: key)
         let decoded = await Task.detached(priority: .userInitiated) { () -> ServerHomeSnapshot? in
-            let file = dir.appendingPathComponent("home_\(serverId.uuidString).json")
             guard let data = try? Data(contentsOf: file) else { return nil }
             return try? JSONDecoder().decode(ServerHomeSnapshot.self, from: data)
         }.value
         if let decoded {
-            inMemorySnapshots[serverId] = decoded
+            ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] = decoded
+            if key == "default" {
+                inMemorySnapshots[serverId] = decoded
+            }
         }
         return decoded
     }
 
+    @MainActor
     public func preload(serverId: UUID) {
-        guard inMemorySnapshots[serverId] == nil else { return }
-        let dir = cacheDirectoryURL
+        let key = Self.resolveModeKey(for: serverId)
+        let cKey = Self.compositeKey(serverId: serverId, modeKey: key)
+        guard ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] == nil else { return }
+        let file = diskFileURL(serverId: serverId, modeKey: key)
         Task.detached(priority: .utility) { [weak self] in
-            let file = dir.appendingPathComponent("home_\(serverId.uuidString).json")
             guard let data = try? Data(contentsOf: file),
                   let snap = try? JSONDecoder().decode(ServerHomeSnapshot.self, from: data) else {
                 return
             }
             await MainActor.run {
-                if self?.inMemorySnapshots[serverId] == nil {
-                    self?.inMemorySnapshots[serverId] = snap
+                if ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] == nil {
+                    ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] = snap
+                    if key == "default" {
+                        self?.inMemorySnapshots[serverId] = snap
+                    }
                 }
             }
         }

@@ -15,6 +15,7 @@ public struct MLibListView: View {
     @State private var startIndex: Int = 0
     @State private var nextCursor: String? = nil
     @State private var loadGeneration: Int = 0
+    @State private var loadErrorMessage: String? = nil
     @State private var seenIds: Set<String> = []
     @State private var sortField: EmbySortField = .dateCreated
     @State private var ascending: Bool = false
@@ -47,6 +48,19 @@ public struct MLibListView: View {
         let appearance = appState.cardAppearance
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
+                if appState.isSidebarCollapsed {
+                    Button {
+                        withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                            appState.isSidebarCollapsed = false
+                        }
+                    } label: {
+                        DonbyToolbarCircleView(systemName: "sidebar.left")
+                    }
+                    .buttonStyle(.plain)
+                    .focusable(false)
+                    .padding(.leading, appState.collapsedSidebarLeadingPadding)
+                }
+
                 ToolbarVectorButton(
                     tooltip: "返回媒体库首页",
                     action: {
@@ -59,7 +73,6 @@ public struct MLibListView: View {
                         .font(.system(size: 13.5, weight: .semibold))
                         .foregroundStyle(iconColor)
                 }
-                .padding(.leading, appState.isSidebarCollapsed ? appState.collapsedSidebarLeadingPadding : 0)
 
                 Text(library.name)
                     .font(.system(size: 16, weight: .bold))
@@ -148,6 +161,37 @@ public struct MLibListView: View {
 
             if isLoading && items.isEmpty {
                 VStack { Spacer(); ProgressView(); Spacer() }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let errMsg = loadErrorMessage, items.isEmpty {
+                VStack(spacing: 12) {
+                    Spacer()
+                    Image(systemName: "wifi.exclamationmark")
+                        .font(.system(size: 32, weight: .medium))
+                        .foregroundStyle(.orange)
+                    Text("加载媒体库失败")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    Text(errMsg)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 360)
+                    HStack(spacing: 10) {
+                        if let srv = appState.activeServer {
+                            Button("切换线路") {
+                                appState.linePickerServer = srv
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        Button("重试") {
+                            Task { await loadLibraryItems(reset: true) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(appState.accentColor)
+                    }
+                    .padding(.top, 4)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 NativePosterGridView(
                     items: items,
@@ -156,6 +200,7 @@ public struct MLibListView: View {
                     hasMoreItems: hasMoreItems,
                     isLoadingMore: isLoadingMore,
                     appearance: appearance,
+                    downloadStatusStore: appState.downloadStatusStore,
                     onSelect: { item in
                         appState.recordSearchHistory(searchQuery)
                         appState.openDetail(for: item)
@@ -186,9 +231,13 @@ public struct MLibListView: View {
     }
 
     private func loadLibraryItems(reset: Bool) async {
-        guard let server = appState.activeServer, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard let server = appState.activeServer, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            loadErrorMessage = "未配置可用服务器"
+            return
+        }
         if reset {
             loadGeneration &+= 1
+            loadErrorMessage = nil
             isLoading = true
             isLoadingMore = false
         } else {
@@ -198,10 +247,12 @@ public struct MLibListView: View {
         let currentGen = loadGeneration
         let requestStart = reset ? 0 : startIndex
         defer {
-            if reset {
-                isLoading = false
-            } else {
-                isLoadingMore = false
+            if currentGen == loadGeneration {
+                if reset {
+                    isLoading = false
+                } else {
+                    isLoadingMore = false
+                }
             }
         }
 
@@ -269,12 +320,21 @@ public struct MLibListView: View {
             }
         } catch {
             if Task.isCancelled || currentGen != loadGeneration { return }
-            if reset && self.items.isEmpty && q.isEmpty && !filterUnwatchedOnly && !filterFavoritesOnly {
-                self.items = appState.latestByLibrary[library.id] ?? []
-                self.seenIds = Set(self.items.map(\.id))
-                self.itemsRevision &+= 1
-                self.totalCount = self.items.count
-                self.hasMoreItems = false
+            if reset && self.items.isEmpty && q.isEmpty && !filterUnwatchedOnly && !filterFavoritesOnly && selectedGenreFilter.isEmpty {
+                let cached = appState.latestByLibrary[library.id] ?? []
+                if !cached.isEmpty {
+                    self.items = cached
+                    self.seenIds = Set(cached.map(\.id))
+                    self.itemsRevision &+= 1
+                    self.totalCount = cached.count
+                    self.hasMoreItems = false
+                    return
+                }
+            }
+            if self.items.isEmpty {
+                self.loadErrorMessage = error.localizedDescription
+            } else {
+                appState.showToast("加载列表失败: \(error.localizedDescription)", icon: "exclamationmark.triangle.fill", isError: true)
             }
         }
     }

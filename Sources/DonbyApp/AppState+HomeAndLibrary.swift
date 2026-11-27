@@ -279,13 +279,17 @@ extension AppState {
                         updated.selectedLineId = nil
                     }
                     if let idx = self.servers.firstIndex(where: { $0.id == target.id }) {
-                        self.servers[idx].accessToken = updated.accessToken
-                        if !updated.userId.isEmpty { self.servers[idx].userId = updated.userId }
-                        if !updated.serverId.isEmpty { self.servers[idx].serverId = updated.serverId }
-                        self.servers[idx].selectedLineId = updated.selectedLineId
-                        self.servers[idx].host = updated.host
-                        self.servers[idx].port = updated.port
-                        self.servers[idx].isHttps = updated.isHttps
+                        var patched = self.servers[idx]
+                        patched.accessToken = updated.accessToken
+                        if !updated.userId.isEmpty { patched.userId = updated.userId }
+                        if !updated.serverId.isEmpty { patched.serverId = updated.serverId }
+                        patched.selectedLineId = updated.selectedLineId
+                        patched.host = updated.host
+                        patched.port = updated.port
+                        patched.isHttps = updated.isHttps
+                        self.performWithoutHomeShelfRefresh {
+                            self.servers[idx] = patched
+                        }
                     }
                     return updated
                 }
@@ -330,8 +334,12 @@ extension AppState {
                 let newMovies = counts.movieCount ?? self.servers[idx].movieCount
                 let newEpisodes = counts.episodeCount ?? counts.seriesCount ?? self.servers[idx].episodeCount
                 if self.servers[idx].movieCount != newMovies || self.servers[idx].episodeCount != newEpisodes {
-                    self.servers[idx].movieCount = newMovies
-                    self.servers[idx].episodeCount = newEpisodes
+                    var patched = self.servers[idx]
+                    patched.movieCount = newMovies
+                    patched.episodeCount = newEpisodes
+                    self.performWithoutHomeShelfRefresh {
+                        self.servers[idx] = patched
+                    }
                 }
             }
         }
@@ -365,9 +373,11 @@ extension AppState {
             let favs = (try? await favTask)?.items ?? []
 
             guard currentGen == homeLoadGeneration else { return }
-            if self.resumeItems != resumes { self.resumeItems = resumes }
-            if !self.nextUpItems.isEmpty { self.nextUpItems = [] }
-            if self.favoriteItems != favs { self.favoriteItems = favs }
+            performBatchedHomeShelfUpdate {
+                if self.resumeItems != resumes { self.resumeItems = resumes }
+                if !self.nextUpItems.isEmpty { self.nextUpItems = [] }
+                if self.favoriteItems != favs { self.favoriteItems = favs }
+            }
 
             var latestMap: [String: [EmbyItem]] = [:]
             let hadCachedLatest = !self.latestByLibrary.isEmpty
@@ -429,125 +439,52 @@ extension AppState {
         serverName: String? = nil,
         explicitAnimeMode: Bool? = nil
     ) {
-        if self.latestByLibrary != latestByLibrary {
-            self.latestByLibrary = latestByLibrary
+        homeCurationGeneration &+= 1
+        let curationGeneration = homeCurationGeneration
+        let loadGeneration = homeLoadGeneration
+
+        performBatchedHomeShelfUpdate {
+            if self.libraryViews != libraryViews { self.libraryViews = libraryViews }
+            if self.resumeItems != resumeItems { self.resumeItems = resumeItems }
+            if self.nextUpItems != nextUpItems { self.nextUpItems = nextUpItems }
+            if self.favoriteItems != favoriteItems { self.favoriteItems = favoriteItems }
+            if self.latestByLibrary != latestByLibrary { self.latestByLibrary = latestByLibrary }
         }
-        let resolvedServerName = serverName ?? self.servers.first(where: { $0.id == serverId })?.name
-        let nextCarousel = HomeHeroCurator.selectHeroItems(
-            libraryViews: libraryViews,
-            latestByLibrary: latestByLibrary,
-            extraCandidates: extraHeroCandidates,
-            fallbackResumes: resumeItems,
-            serverName: resolvedServerName,
-            explicitAnimeMode: explicitAnimeMode
-        )
-        if self.carouselItems != nextCarousel {
-            self.carouselItems = nextCarousel
-        }
-        let snapshot = ServerHomeCacheStore.ServerHomeSnapshot(
-            libraryViews: libraryViews,
-            resumeItems: resumeItems,
-            nextUpItems: nextUpItems,
-            favoriteItems: favoriteItems,
-            latestByLibrary: latestByLibrary,
-            carouselItems: self.carouselItems,
-            cachedAt: Date()
-        )
-        ServerHomeCacheStore.shared.save(snapshot, for: serverId)
+
+        let targetServer = self.servers.first(where: { $0.id == serverId })
+        let resolvedServerName = serverName ?? targetServer?.name
+        let apiKey = self.mdblistAPIKey
+        let preset = self.preferredVersionPreset
+        let cache302 = self.enable302Cache
         self.isLoadingHome = false
 
-        if let activeSrv = self.servers.first(where: { $0.id == serverId }) {
+        if let activeSrv = targetServer {
             PlaybackIntentCoordinator.shared.warmServerOnConnectOrLaunch(server: activeSrv)
             var seenContinue = Set<String>()
             let continueCandidates = (resumeItems + nextUpItems).filter { seenContinue.insert($0.id).inserted }
             PlaybackIntentCoordinator.shared.warmShelfCandidates(
                 server: activeSrv,
                 items: continueCandidates,
-                preferredPreset: preferredVersionPreset,
-                enable302Cache: enable302Cache
+                preferredPreset: preset,
+                enable302Cache: cache302
             )
         }
 
-        // Seed any already-cached multi-platform ratings immediately so hero badges appear without delay.
-        let initialCarousel = self.carouselItems
-        Task { [weak self] in
-            let cached = await MultiPlatformRatingService.shared.cachedRatingsByItemId(for: initialCarousel)
-            guard !cached.isEmpty else { return }
-            await MainActor.run {
-                guard let self else { return }
-                for (itemId, rating) in cached {
-                    self.multiPlatformRatingsByItemId[itemId] = rating
-                }
-            }
-        }
-
-        // Background multi-platform rating enrichment (MDBList 8-platform batch if API key configured,
-        // or zero-key IMDb Official + Cinemeta fallback) — re-curates hero carousel without blocking initial paint.
-        let generation = self.homeLoadGeneration
-        let apiKey = self.mdblistAPIKey
-        let poolForEnrichment: [EmbyItem] = {
-            var seen = Set<String>()
-            var pool: [EmbyItem] = []
-            for item in initialCarousel where seen.insert(item.id).inserted {
-                pool.append(item)
-            }
-            for item in extraHeroCandidates where seen.insert(item.id).inserted {
-                pool.append(item)
-            }
-            for view in libraryViews {
-                for item in (latestByLibrary[view.id] ?? []).prefix(8) where seen.insert(item.id).inserted {
-                    pool.append(item)
-                }
-            }
-            return Array(pool.prefix(48))
-        }()
-
-        guard !poolForEnrichment.isEmpty else { return }
-        let targetServer = self.servers.first(where: { $0.id == serverId })
-        Task { [weak self] in
-            var bridgedImdbIds: [String: String] = [:]
-            if let srv = targetServer,
-               let plugin = DonbyAppExtensionCenter.shared.plugin,
-               plugin.isActive(for: srv) {
-                bridgedImdbIds = await plugin.resolveImdbIds(for: poolForEnrichment, server: srv, maxCount: 16)
-            }
-            let enriched = await MultiPlatformRatingService.shared.enrichRatings(
-                for: poolForEnrichment,
-                mdblistAPIKey: apiKey,
-                resolvedImdbIds: bridgedImdbIds
-            )
-            guard !enriched.isEmpty else { return }
-            await MainActor.run {
-                guard let self,
-                      self.homeLoadGeneration == generation,
-                      self.activeServer?.id == serverId else { return }
-                for (itemId, rating) in enriched {
-                    self.multiPlatformRatingsByItemId[itemId] = rating
-                }
-                let curated = HomeHeroCurator.selectHeroItems(
-                    libraryViews: libraryViews,
-                    latestByLibrary: latestByLibrary,
-                    extraCandidates: extraHeroCandidates,
-                    ratingsByItemId: enriched,
-                    fallbackResumes: resumeItems,
-                    serverName: resolvedServerName,
-                    explicitAnimeMode: explicitAnimeMode
-                )
-                if self.carouselItems != curated {
-                    self.carouselItems = curated
-                    let updatedSnapshot = ServerHomeCacheStore.ServerHomeSnapshot(
-                        libraryViews: libraryViews,
-                        resumeItems: resumeItems,
-                        nextUpItems: nextUpItems,
-                        favoriteItems: favoriteItems,
-                        latestByLibrary: latestByLibrary,
-                        carouselItems: curated,
-                        cachedAt: Date()
-                    )
-                    ServerHomeCacheStore.shared.save(updatedSnapshot, for: serverId)
-                }
-            }
-        }
+        scheduleHomeCurationAndRatingsEnrichment(
+            for: serverId,
+            curationGeneration: curationGeneration,
+            loadGeneration: loadGeneration,
+            libraryViews: libraryViews,
+            resumeItems: resumeItems,
+            nextUpItems: nextUpItems,
+            favoriteItems: favoriteItems,
+            latestByLibrary: latestByLibrary,
+            extraHeroCandidates: extraHeroCandidates,
+            serverName: resolvedServerName,
+            explicitAnimeMode: explicitAnimeMode,
+            apiKey: apiKey,
+            targetServer: targetServer
+        )
     }
 
     /// Loads (from disk/memory cache or remote enrichment) multi-platform ratings for a single hero item

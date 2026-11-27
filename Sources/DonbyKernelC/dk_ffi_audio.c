@@ -332,8 +332,9 @@ void dk_shim_aq_pause(void* aq_raw) {
 
 void dk_shim_aq_stop_reset(void* aq_raw) {
     if (aq_raw) {
-        AudioQueueStop((AudioQueueRef)aq_raw, true);
-        AudioQueueReset((AudioQueueRef)aq_raw);
+        AudioQueueRef aq = (AudioQueueRef)aq_raw;
+        AudioQueuePause(aq);
+        AudioQueueReset(aq);
     }
 }
 

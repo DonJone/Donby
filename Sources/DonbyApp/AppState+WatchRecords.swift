@@ -74,8 +74,12 @@ extension AppState {
     }
 
     private func saveWatchHistoryToDisk() {
-        if let data = try? jsonEncoder.encode(watchHistory) {
-            UserDefaults.standard.set(data, forKey: watchHistoryStorageKey)
+        scheduleSaveWatchHistory(immediate: true)
+    }
+
+    private nonisolated static func persistWatchHistorySnapshot(_ snapshot: [WatchRecordItem], storageKey: String) {
+        if let data = try? JSONEncoder().encode(snapshot) {
+            UserDefaults.standard.set(data, forKey: storageKey)
         }
     }
 
@@ -144,11 +148,13 @@ extension AppState {
     }
 
     public func updateRecordTitles(id: String, newTitle: String, newSubtitle: String?) {
-        guard let idx = watchHistory.firstIndex(where: { $0.id == id }) else { return }
-        watchHistory[idx].title = newTitle
+        var updated = watchHistory
+        guard let idx = updated.firstIndex(where: { $0.id == id }) else { return }
+        updated[idx].title = newTitle
         if let newSubtitle {
-            watchHistory[idx].subtitle = newSubtitle
+            updated[idx].subtitle = newSubtitle
         }
+        watchHistory = updated
         scheduleSaveWatchHistory(immediate: true)
     }
 
@@ -184,7 +190,23 @@ extension AppState {
     public func flushWatchHistory() {
         saveWatchHistoryTask?.cancel()
         saveWatchHistoryTask = nil
-        saveWatchHistoryToDisk()
+        dispatchWatchHistoryWriteOffMainActor()
+    }
+
+    func flushWatchHistorySync() {
+        saveWatchHistoryTask?.cancel()
+        saveWatchHistoryTask = nil
+        Self.persistWatchHistorySnapshot(watchHistory, storageKey: watchHistoryStorageKey)
+    }
+
+    private func dispatchWatchHistoryWriteOffMainActor() {
+        let snapshot = watchHistory
+        let key = watchHistoryStorageKey
+        let previousTask = inFlightWatchHistorySaveTask
+        inFlightWatchHistorySaveTask = Task.detached(priority: .utility) {
+            _ = await previousTask?.value
+            Self.persistWatchHistorySnapshot(snapshot, storageKey: key)
+        }
     }
 
     public func scheduleSaveWatchHistory(immediate: Bool = false) {
@@ -195,10 +217,9 @@ extension AppState {
         if saveWatchHistoryTask != nil { return }
         saveWatchHistoryTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 3_000_000_000)
-            guard !Task.isCancelled, let self = self else { return }
-            await MainActor.run {
-                self.flushWatchHistory()
-            }
+            guard !Task.isCancelled, let self else { return }
+            self.saveWatchHistoryTask = nil
+            self.dispatchWatchHistoryWriteOffMainActor()
         }
     }
 
@@ -266,8 +287,9 @@ extension AppState {
             return false
         }
 
-        let previousMatch = watchHistory.first(where: matchesExisting)
-        watchHistory.removeAll(where: matchesExisting)
+        var updatedHistory = watchHistory
+        let previousMatch = updatedHistory.first(where: matchesExisting)
+        updatedHistory.removeAll(where: matchesExisting)
 
         let record = WatchRecordItem(
             id: recId,
@@ -285,10 +307,11 @@ extension AppState {
             mediaType: mediaType ?? previousMatch?.mediaType,
             seriesId: seriesId ?? previousMatch?.seriesId
         )
-        watchHistory.insert(record, at: 0)
-        if watchHistory.count > Self.maxWatchHistoryCount {
-            watchHistory.removeLast(watchHistory.count - Self.maxWatchHistoryCount)
+        updatedHistory.insert(record, at: 0)
+        if updatedHistory.count > Self.maxWatchHistoryCount {
+            updatedHistory.removeLast(updatedHistory.count - Self.maxWatchHistoryCount)
         }
+        watchHistory = updatedHistory
         scheduleSaveWatchHistory(immediate: false)
         let thumbKey = "record_thumb_\(recId)_\(posterURL ?? "")"
         if ArtworkImageCache.shared.imageFromMemory(for: thumbKey) == nil {

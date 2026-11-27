@@ -1,57 +1,8 @@
 import SwiftUI
 import Foundation
+import AppKit
 import DonbyCore
 import DonbyKernelC
-
-@MainActor
-final class PlayerHUDTelemetry: ObservableObject {
-    @Published var currentTime: Double = 0
-    @Published var bufferedAheadSeconds: Double = 0
-    @Published var duration: Double = 1
-    @Published var displayDownloadSpeedMBs: Double = 0
-    @Published var kernelStats = DKRuntimeStats()
-
-    func updateCurrentTime(_ value: Double, force: Bool = false) {
-        if force ? (currentTime != value) : (abs(currentTime - value) > 0.05) {
-            currentTime = value
-        }
-    }
-
-    func updateBufferedAhead(_ value: Double) {
-        if abs(bufferedAheadSeconds - value) > 0.25 {
-            bufferedAheadSeconds = value
-        }
-    }
-
-    func updateDuration(_ value: Double) {
-        if abs(duration - value) > 0.01 {
-            duration = value
-        }
-    }
-
-    func updateDownloadSpeed(_ value: Double) {
-        if value == 0.0 {
-            if displayDownloadSpeedMBs != 0.0 {
-                displayDownloadSpeedMBs = 0.0
-            }
-        } else if abs(displayDownloadSpeedMBs - value) > 0.05 || (value < 0.01 && displayDownloadSpeedMBs > 0) {
-            displayDownloadSpeedMBs = value
-        }
-    }
-
-    func updateKernelStats(_ freshStats: DKRuntimeStats, forceUpdate: Bool = false) {
-        if forceUpdate ||
-            kernelStats.width != freshStats.width ||
-            kernelStats.height != freshStats.height ||
-            kernelStats.is_hw_accelerated != freshStats.is_hw_accelerated ||
-            kernelStats.is_hdr != freshStats.is_hdr ||
-            kernelStats.is_dolby_vision != freshStats.is_dolby_vision ||
-            abs(kernelStats.fps - freshStats.fps) > 0.05 ||
-            abs(kernelStats.video_bitrate_mbps - freshStats.video_bitrate_mbps) > 0.1 {
-            kernelStats = freshStats
-        }
-    }
-}
 
 public enum PlayerDrawerTab: String, CaseIterable, Identifiable {
     case playlist = "播放列表"
@@ -167,11 +118,16 @@ struct MiniVolumeSlider: View {
     @Binding var volume: Float
     @Binding var isMuted: Bool
     let onChange: (Float) -> Void
+    var onDragStateChanged: (Bool) -> Void = { _ in }
+
+    @State private var draftVolume: Float? = nil
+    @State private var isDragging: Bool = false
 
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
-            let ratio = CGFloat(isMuted ? 0 : max(0, min(1, volume)))
+            let activeVolume = draftVolume ?? volume
+            let ratio = CGFloat((isMuted && draftVolume == nil) ? 0 : max(0, min(1, activeVolume)))
             let filledW = w * ratio
             ZStack(alignment: .leading) {
                 Capsule()
@@ -193,10 +149,22 @@ struct MiniVolumeSlider: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { val in
-                        let r = Float(max(0.0, min(1.0, val.location.x / w)))
+                        if !isDragging {
+                            isDragging = true
+                            onDragStateChanged(true)
+                        }
+                        let r = Float(max(0.0, min(1.0, val.location.x / max(1.0, w))))
+                        draftVolume = r
+                        onChange(r)
+                    }
+                    .onEnded { val in
+                        let r = Float(max(0.0, min(1.0, val.location.x / max(1.0, w))))
                         volume = r
                         isMuted = (r == 0)
+                        draftVolume = nil
+                        isDragging = false
                         onChange(r)
+                        onDragStateChanged(false)
                     }
             )
         }
@@ -214,6 +182,36 @@ final class PlayerAutoHideBox {
     var liveBufferedAheadSeconds: Double = 0
     var lastObservedPos: Double = -1.0
     var lastObservedPosUptime: TimeInterval = 0
+    var lastRecordedPosition: Double = -10
+    var healthPolicy = PlaybackHealthPolicy()
+    var isHoveringTopBar: Bool = false
+    var isHoveringBottomBar: Bool = false
+    var isHoveringDrawer: Bool = false
+    var isScrubbing: Bool = false
+    var isDraggingVolume: Bool = false
+    var subtitleRedrawGeneration: UInt64 = 0
+    var pendingCoalescedSeekTarget: Double? = nil
+    var coalescedSeekTask: Task<Void, Never>? = nil
+    var lineReloadTask: Task<Void, Never>? = nil
+    weak var hostWindow: NSWindow? = nil
+}
+
+struct PlayerHostWindowFinder: NSViewRepresentable {
+    let onWindow: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async { [weak view] in
+            onWindow(view?.window)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        if let win = nsView.window {
+            onWindow(win)
+        }
+    }
 }
 
 struct PlayerConsoleIconButton: View {
@@ -321,9 +319,13 @@ struct PlayerTimelineScrubberView: View {
     let accentColor: Color
     @Binding var isScrubbing: Bool
     @Binding var scrubTime: Double
+    let formatTime: (Double) -> String
+    let onScrubbingChanged: (Bool) -> Void
     let onCommitSeek: (Double) -> Void
 
     @State private var isHovered: Bool = false
+    @State private var hoverTime: Double? = nil
+    @State private var hoverX: CGFloat = 0
 
     private var safeDuration: Double { max(1.0, duration) }
     private var displayedTime: Double { isScrubbing ? scrubTime : currentTime }
@@ -377,17 +379,48 @@ struct PlayerTimelineScrubberView: View {
                     .offset(x: knobOffset)
             }
             .frame(width: width, height: geo.size.height)
+            .overlay(alignment: .topLeading) {
+                if let previewTime = isScrubbing ? scrubTime : hoverTime {
+                    let previewX = isScrubbing ? knobCenter : hoverX
+                    Text(formatTime(previewTime))
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(
+                            Capsule()
+                                .fill(Color(red: 0.06, green: 0.065, blue: 0.08).opacity(0.92))
+                                .overlay(Capsule().strokeBorder(Color.white.opacity(0.20), lineWidth: 0.6))
+                        )
+                        .position(x: min(max(26, previewX), max(26, width - 26)), y: -14)
+                        .allowsHitTesting(false)
+                }
+            }
             .contentShape(Rectangle())
-            .onHover { hovering in
-                withAnimation(.easeOut(duration: 0.14)) {
-                    isHovered = hovering
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let loc):
+                    if !isHovered {
+                        withAnimation(.easeOut(duration: 0.14)) { isHovered = true }
+                    }
+                    let ratio = travelWidth > 0 ? max(0.0, min(1.0, Double((loc.x - knobRadius) / travelWidth))) : 0.0
+                    hoverX = loc.x
+                    hoverTime = ratio * safeDuration
+                case .ended:
+                    if isHovered {
+                        withAnimation(.easeOut(duration: 0.14)) { isHovered = false }
+                    }
+                    hoverTime = nil
                 }
             }
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
+                        if !isScrubbing {
+                            isScrubbing = true
+                            onScrubbingChanged(true)
+                        }
                         let ratio = travelWidth > 0 ? max(0.0, min(1.0, Double((value.location.x - knobRadius) / travelWidth))) : 0.0
-                        isScrubbing = true
                         scrubTime = ratio * safeDuration
                     }
                     .onEnded { value in
@@ -395,6 +428,7 @@ struct PlayerTimelineScrubberView: View {
                         let target = ratio * safeDuration
                         scrubTime = target
                         isScrubbing = false
+                        onScrubbingChanged(false)
                         onCommitSeek(target)
                     }
             )

@@ -158,11 +158,19 @@ extension SettingsView {
                 Spacer()
 
                 if case .downloading = updater.state {
-                    Button("取消下载") {
+                    Button {
                         updater.cancelDownload()
+                    } label: {
+                        Text("取消下载")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .frame(minHeight: 24)
+                            .donbyLiquidGlassCapsule()
+                            .contentShape(Capsule())
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .buttonStyle(.plain)
                 } else {
                     Button {
                         Task { await updater.checkForUpdates(manual: true) }
@@ -181,8 +189,10 @@ extension SettingsView {
                         .foregroundStyle(appState.accentTextColor)
                         .padding(.horizontal, 13)
                         .padding(.vertical, 6)
+                        .frame(minHeight: 24)
                         .background(appState.accentColor)
                         .clipShape(Capsule())
+                        .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
                     .disabled(updater.isBusy)
@@ -207,13 +217,15 @@ extension SettingsView {
                         .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
                 Spacer()
-                Picker("", selection: $updater.updateChannelRaw) {
-                    ForEach(AppUpdateChannel.allCases) { ch in
-                        Text(ch.displayTitle).tag(ch.rawValue)
-                    }
+                DonbyGlassMenuPicker(
+                    options: AppUpdateChannel.allCases.map(\.rawValue),
+                    selection: $updater.updateChannelRaw,
+                    isLightMode: appState.isLightMode,
+                    accentColor: appState.accentColor,
+                    width: 175
+                ) { raw in
+                    AppUpdateChannel(rawValue: raw)?.displayTitle ?? raw
                 }
-                .pickerStyle(.menu)
-                .frame(width: 175)
                 .donbyOnChange(of: updater.updateChannelRaw) { _ in
                     Task { await updater.checkForUpdates(manual: true) }
                 }
@@ -296,22 +308,40 @@ extension SettingsView {
                             .foregroundStyle(appState.accentTextColor)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
+                            .frame(minHeight: 24)
                             .background(appState.accentColor)
                             .clipShape(Capsule())
+                            .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
 
-                    Button("跳过此版本") {
+                    Button {
                         updater.skipVersion(release)
+                    } label: {
+                        Text("跳过此版本")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .frame(minHeight: 24)
+                            .donbyLiquidGlassCapsule()
+                            .contentShape(Capsule())
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .buttonStyle(.plain)
 
-                    Button("查看发行说明") {
+                    Button {
                         NSWorkspace.shared.open(release.htmlURL)
+                    } label: {
+                        Text("查看发行说明")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .frame(minHeight: 24)
+                            .donbyLiquidGlassCapsule()
+                            .contentShape(Capsule())
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .buttonStyle(.plain)
                 }
             }
             .padding(12)
@@ -373,11 +403,19 @@ extension SettingsView {
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                     .lineLimit(2)
                 Spacer()
-                Button("前往 Releases") {
+                Button {
                     NSWorkspace.shared.open(AppUpdateManager.githubReleasesPageURL)
+                } label: {
+                    Text("前往 Releases")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .frame(minHeight: 24)
+                        .donbyLiquidGlassCapsule()
+                        .contentShape(Capsule())
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .buttonStyle(.plain)
             }
         }
     }

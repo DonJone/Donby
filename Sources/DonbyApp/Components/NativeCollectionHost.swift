@@ -41,13 +41,22 @@ final class HorizontalShelfScrollView: NSScrollView {
     private var accumulatedAbsY: CGFloat = 0
     private var pendingBeganEvent: NSEvent?
 
+    private var lastTiledBoundsSize: CGSize = .zero
+    private var lastTiledDocSize: CGSize = .zero
+
     override var mouseDownCanMoveWindow: Bool { false }
 
     override func tile() {
+        let docSize = documentView?.frame.size ?? .zero
+        if bounds.size == lastTiledBoundsSize && docSize == lastTiledDocSize {
+            return
+        }
+        lastTiledBoundsSize = bounds.size
+        lastTiledDocSize = docSize
         super.tile()
         if let scroller = horizontalScroller {
-            scroller.isHidden = true
-            scroller.alphaValue = 0
+            if !scroller.isHidden { scroller.isHidden = true }
+            if scroller.alphaValue != 0 { scroller.alphaValue = 0 }
         }
     }
 
@@ -276,9 +285,23 @@ final class InteractiveCollectionView: NSCollectionView {
     }
 }
 
+private enum ScrollHoverGateCounter {
+    private static let lock = NSLock()
+    private static var activeCount: Int = 0
+
+    static func adjust(delta: Int) {
+        lock.lock()
+        activeCount = max(0, activeCount + delta)
+        let anyActive = activeCount > 0
+        lock.unlock()
+        ScrollActivityTracker.setScrolling(anyActive)
+    }
+}
+
 @MainActor
 final class ScrollHoverGate {
     private(set) var isActivelyScrolling = false
+    private var hasActiveScrollToken = false
     private var lastScrollActivityTime: CFTimeInterval = 0
     private var hasPendingIdleCheck = false
     private let idleDelay: TimeInterval
@@ -295,6 +318,12 @@ final class ScrollHoverGate {
         self.onScrollEnded = onScrollEnded
     }
 
+    deinit {
+        if hasActiveScrollToken {
+            ScrollHoverGateCounter.adjust(delta: -1)
+        }
+    }
+
     var canHover: Bool {
         !isActivelyScrolling && (CACurrentMediaTime() - lastScrollActivityTime >= idleDelay)
     }
@@ -303,7 +332,10 @@ final class ScrollHoverGate {
         lastScrollActivityTime = CACurrentMediaTime()
         if !isActivelyScrolling {
             isActivelyScrolling = true
-            ScrollActivityTracker.setScrolling(true)
+            if !hasActiveScrollToken {
+                hasActiveScrollToken = true
+                ScrollHoverGateCounter.adjust(delta: 1)
+            }
             onScrollBegan()
         }
         scheduleIdleEvaluation()
@@ -327,10 +359,30 @@ final class ScrollHoverGate {
             }
         } else {
             isActivelyScrolling = false
-            ScrollActivityTracker.setScrolling(false)
+            if hasActiveScrollToken {
+                hasActiveScrollToken = false
+                ScrollHoverGateCounter.adjust(delta: -1)
+            }
             onScrollEnded?()
         }
     }
+}
+
+final class FixedShelfFlowLayout: NSCollectionViewFlowLayout {
+    override func shouldInvalidateLayout(forBoundsChange newBounds: NSRect) -> Bool {
+        guard let cv = collectionView else { return false }
+        return abs(newBounds.height - cv.bounds.height) > 0.5
+    }
+}
+
+@MainActor
+public final class CarouselStateBox: ObservableObject {
+    @Published public var items: [EmbyItem] = []
+    @Published public var height: CGFloat = 365
+    @Published public var isLightMode: Bool = false
+    public var isScrolling: Bool = false
+
+    public init() {}
 }
 
 @MainActor

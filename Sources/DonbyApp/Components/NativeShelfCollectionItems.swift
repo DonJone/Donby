@@ -327,7 +327,9 @@ final class NativeLandscapeCollectionItem: NSCollectionViewItem, HoverableCollec
         let targetId = item.id
         loadTask = Task { @MainActor [weak self] in
             let cgImage = await MediaArtworkView.loadOrFetchCGImage(server: server, item: item, kind: .thumb, maxWidth: 500, priority: .high)
-            guard let self, !Task.isCancelled, self.currentItem?.id == targetId, let cgImage else { return }
+            guard let self, !Task.isCancelled, self.currentItem?.id == targetId else { return }
+            self.loadTask = nil
+            guard let cgImage else { return }
             self.artworkLayer.contents = cgImage
             self.artworkLayer.isOpaque = NativeCardLayerCache.isOpaqueCGImage(cgImage)
             self.placeholderIconLayer.isHidden = true
@@ -553,7 +555,9 @@ final class NativeLibraryCollectionItem: NSCollectionViewItem, HoverableCollecti
         let targetId = library.id
         loadTask = Task { @MainActor [weak self] in
             let cgImage = await MediaArtworkView.loadOrFetchCGImage(server: server, item: library, kind: artworkKind, maxWidth: 440, priority: .veryHigh)
-            guard let self, !Task.isCancelled, self.currentLibrary?.id == targetId, let cgImage else { return }
+            guard let self, !Task.isCancelled, self.currentLibrary?.id == targetId else { return }
+            self.loadTask = nil
+            guard let cgImage else { return }
             self.artworkLayer.contents = cgImage
             self.artworkLayer.isOpaque = NativeCardLayerCache.isOpaqueCGImage(cgImage)
             self.placeholderIconLayer.isHidden = true

@@ -7,7 +7,6 @@ import DonbyNetwork
 // MARK: - Files Module View
 public struct FilesModuleView: View {
     @EnvironmentObject var appState: AppState
-    @ObservedObject var downloadManager = DonbyDownloadManager.shared
     @State var isDropTargeted: Bool = false
     @State var showDirectURLSheet: Bool = false
     @State var directURLInput: String = ""
@@ -15,7 +14,11 @@ public struct FilesModuleView: View {
     @State var folderHierarchyByPath: [String: (subfolders: [LocalMediaFolder], videos: [LocalVideoFileInfo])] = [:]
     @State var folderCountsById: [UUID: Int] = [:]
     @State var folderNavStack: [LocalMediaFolder] = []
+    @State var completedDownloadByVideoPath: [String: DownloadEntry] = [:]
 
+    @State private var completedAssetKeys: [String] = DonbyDownloadManager.shared.entries.compactMap {
+        $0.status == .completed ? $0.assetKey : nil
+    }
     @State private var searchQuery: String = ""
     @State private var filterChip: String = "全部"
     @State private var offlineGroups: [OfflineLibraryGroup] = []
@@ -117,12 +120,31 @@ public struct FilesModuleView: View {
         .donbyOnChange(of: appState.browsingFolder?.id) { _ in
             folderNavStack = []
         }
-        .task(id: downloadManager.statusIndex) {
-            let entries = downloadManager.entries
-            let scanned = await Task.detached(priority: .userInitiated) {
-                DonbyOfflineLibraryStorage.scanOfflineLibrary(entries: entries)
+        .onReceive(
+            DonbyDownloadManager.shared.$entries
+                .map { entries in
+                    entries.compactMap { $0.status == .completed ? $0.assetKey : nil }
+                }
+                .removeDuplicates()
+        ) { keys in
+            completedAssetKeys = keys
+        }
+        .task(id: completedAssetKeys) {
+            let entries = DonbyDownloadManager.shared.entries
+            let result = await Task.detached(priority: .userInitiated) {
+                let scanned = DonbyOfflineLibraryStorage.scanOfflineLibrary(entries: entries)
+                var byPath: [String: DownloadEntry] = [:]
+                byPath.reserveCapacity(entries.count)
+                for entry in entries where entry.status == .completed {
+                    if let path = entry.localVideoFilePath, !path.isEmpty, byPath[path] == nil {
+                        byPath[path] = entry
+                    }
+                }
+                return (scanned, byPath)
             }.value
-            self.offlineGroups = scanned
+            guard !Task.isCancelled else { return }
+            self.offlineGroups = result.0
+            self.completedDownloadByVideoPath = result.1
             recomputeFilteredOfflineGroups()
         }
         .task(id: appState.localFolders.map(\.id)) {
@@ -381,31 +403,34 @@ public struct FilesModuleView: View {
                                     .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.7)
                             )
                         } else {
-                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 16)], spacing: 16) {
-                                ForEach(filteredOfflineGroups) { group in
-                                    PosterCardView(
-                                        item: group.displayItem,
-                                        width: 150,
-                                        appearance: appState.cardAppearance,
-                                        onSelect: { appState.openDetail(for: group.displayItem) },
-                                        onPlay: { Task { await appState.startPlayback(item: group.displayItem) } }
-                                    )
-                                    .equatable()
-                                    .contextMenu {
-                                        Button {
-                                            appState.openDetail(for: group.displayItem)
-                                        } label: {
-                                            Label("打开详情与选集", systemImage: "info.circle")
-                                        }
-                                        Button {
-                                            Task { await appState.startPlayback(item: group.displayItem) }
-                                        } label: {
-                                            Label("离线播放", systemImage: "play.fill")
-                                        }
-                                        Button {
-                                            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: group.folderURL.path)
-                                        } label: {
-                                            Label("在访达中打开所在目录", systemImage: "folder")
+                            DonbyDownloadStatusObserver(store: appState.downloadStatusStore) { statusIndex in
+                                let appearance = appState.cardAppearance(downloadStatusIndex: statusIndex)
+                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 16)], spacing: 16) {
+                                    ForEach(filteredOfflineGroups) { group in
+                                        PosterCardView(
+                                            item: group.displayItem,
+                                            width: 150,
+                                            appearance: appearance,
+                                            onSelect: { appState.openDetail(for: group.displayItem) },
+                                            onPlay: { Task { await appState.startPlayback(item: group.displayItem) } }
+                                        )
+                                        .equatable()
+                                        .contextMenu {
+                                            Button {
+                                                appState.openDetail(for: group.displayItem)
+                                            } label: {
+                                                Label("打开详情与选集", systemImage: "info.circle")
+                                            }
+                                            Button {
+                                                Task { await appState.startPlayback(item: group.displayItem) }
+                                            } label: {
+                                                Label("离线播放", systemImage: "play.fill")
+                                            }
+                                            Button {
+                                                NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: group.folderURL.path)
+                                            } label: {
+                                                Label("在访达中打开所在目录", systemImage: "folder")
+                                            }
                                         }
                                     }
                                 }

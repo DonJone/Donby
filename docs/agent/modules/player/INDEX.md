@@ -1,20 +1,21 @@
 # Module Map: Player Surface & Playback UI (`Sources/DonbyApp/Player/*`)
 
-> Last synced: `v2.1.4`. Load this index for any task inside `Sources/DonbyApp/Player/`, then load ONLY the relevant sub-doc below.
+> Last synced: `v2.1.5`. Load this index for any task inside `Sources/DonbyApp/Player/`, then load ONLY the relevant sub-doc below.
 
 ## 1. Sub-Doc Routing
 
 | If your task involves... | Read Next | Source Files |
 | :--- | :--- | :--- |
-| HUD bars, overlays, dropdown menus, menu flicker, right drawer, subtitle style panel, controls | [hud-and-drawers.md](hud-and-drawers.md) | `PlayerView.swift`, `PlayerOverlays.swift`, `PlayerView+HUD.swift`, `PlayerView+Drawers.swift`, `PlayerSubtitleStyleDrawerView.swift`, `PlayerControls.swift` |
+| HUD bars, overlays, dropdown menus, menu flicker, right drawer, subtitle style panel, controls | [hud-and-drawers.md](hud-and-drawers.md) | `PlayerView.swift`, `PlayerOverlays.swift`, `PlayerView+HUD.swift`, `PlayerView+Drawers.swift`, `PlayerSubtitleStyleDrawerView.swift`, `PlayerControls.swift`, `PlayerHUDTelemetryStores.swift` |
 | Native kernel open/stop/seek, Turbo handle setup & C-ABI callbacks, progress/sync timers, health recovery, episode prefetch/switch, Watch Party/Danmu companion | [playback-and-lifecycle.md](playback-and-lifecycle.md) | `PlayerView+PlaybackEngine.swift`, `PlayerView+TurboSetup.swift`, `PlayerView+LifecycleAndSession.swift` |
 | FFmpeg/Emby track mapping, audio/subtitle switching, external subtitles, kernel subtitle style config, AI auto-alignment & undo | [subtitles-and-tracks.md](subtitles-and-tracks.md) | `PlayerView+TrackSelection.swift`, `PlayerView+SubtitlesAndAlignment.swift` |
 
-## 2. File Inventory (`Sources/DonbyApp/Player/`, 11 files)
-- `PlayerView.swift` — `PlayerView` stored properties, `init(session:)`, `body` shell, gesture/`NSEvent` monitor wiring, `showControlsAndResetTimer()`, `syncVisiblePlaybackStateFromBox()`, `adjustVolume()`.
-- `PlayerControls.swift` — `PlayerDrawerTab`, `TracksDrawerSection`, `SubtitleAlignUndoState`, `PlayerSubtitleSelection`, track option models, `PlayerAutoHideBox`, `OpeningPlayerBox`, `MiniVolumeSlider`, `PlayerConsoleIconButton`, `PlayerCircleMenu`, `PlayerTimelineScrubberView`.
+## 2. File Inventory (`Sources/DonbyApp/Player/`, 12 files)
+- `PlayerView.swift` — `PlayerView` stored properties (`autoHideBox`, `telemetryBox` non-observable containers), `init(session:)`, `body` shell, gesture/`NSEvent` monitor wiring, `showControlsAndResetTimer()`, `syncVisiblePlaybackStateFromBox()`, `adjustVolume()`.
+- `PlayerControls.swift` — `PlayerDrawerTab`, `TracksDrawerSection`, `SubtitleAlignUndoState`, `PlayerSubtitleSelection`, track option models, `PlayerAutoHideBox` (holding `healthPolicy` & `lastRecordedPosition`), `OpeningPlayerBox`, `MiniVolumeSlider`, `PlayerConsoleIconButton`, `PlayerCircleMenu`, `PlayerTimelineScrubberView`.
+- `PlayerHUDTelemetryStores.swift` — Narrow `ObservableObject` slices (`PlayerTimelineClockStore`, `PlayerWireSpeedStore`, `PlayerMediaStatsStore`), compatibility `PlayerHUDTelemetry`, non-observable `PlayerTelemetryBox` with track-option snapshot caches, and `PlayerMediaSpecFormatter`.
 - `PlayerOverlays.swift` — stateless overlays: `PlayerLoadingOverlayView`, `PlayerBufferingOverlayView`, `PlayerErrorOverlayView`, `PlayerSkipBannerView`.
-- `PlayerView+HUD.swift` — `topBarTitleString`, `topOSDBar`, `playerSpecBadge` + `spec*String`, `bottomControlBar`, 5 circular dropdown menus (`audio`, `subtitle`, `decoder`, `speed`, `more`).
+- `PlayerView+HUD.swift` — `topBarTitleString`, `topOSDBar`, `cachedAudioOptions`/`cachedSubtitleOptions`, `bottomControlBar`, isolated `PlayerTimelineClockSectionView`, `PlayerTopSpeedView`, `PlayerSpecBadgeHostView`, `PlayerDecoderCircleMenu`, and 5 circular dropdown menus (`audio`, `subtitle`, `decoder`, `speed`, `more`).
 - `PlayerView+Drawers.swift` — `rightDrawerPanel(tab:)`, drawer chrome helpers, `PlayerDrawerSegmentedPill`, `.playlist`, `.tracks` (track-picker tab), `.mediaInfo`, `.watchParty`, `osdInfoRow`.
 - `PlayerSubtitleStyleDrawerView.swift` — standalone `.tracks` -> `"样式与对齐"` view (owns `@State private var showMoreSubtitleOptions`, AI alignment buttons, delay steppers, style sliders).
 - `PlayerView+PlaybackEngine.swift` — file-private `dkTurbo*CB` C-ABI callbacks, `handleProgressTimerTick()` (live `TurboStreamByteHandle.currentWireSpeedMBs` refresh including `isWaitingForSeekOrBuffer` overlay without falling back to local AVIO cache read speed), `startNativeKernelPlayback`, `releasePlaybackNetworkPriority`, `stopNativeKernel`, `togglePlayPause`, `seekRelative`, `seekTo`, `queryKernelChapters`, `cString(from:)`.

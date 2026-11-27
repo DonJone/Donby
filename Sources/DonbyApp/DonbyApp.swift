@@ -182,17 +182,28 @@ public struct DonbyApp: App {
     public init() {}
 
     public var body: some Scene {
-        WindowGroup("服务器") {
+        Window("服务器", id: "main") {
             MainWindowView()
                 .environmentObject(appState)
                 .frame(minWidth: 920, minHeight: 640)
-                .preferredColorScheme(appState.activePlayback != nil ? .dark : appState.colorScheme)
+                .preferredColorScheme(appState.colorScheme)
                 .tint(appState.accentColor)
                 .onOpenURL { url in appState.handleIncomingURL(url) }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 960, height: 690)
         .commands {
+            CommandGroup(replacing: .newItem) {}
+
+            CommandGroup(replacing: .appSettings) {
+                Button("设置…") {
+                    guard appState.activePlayback == nil else { return }
+                    appState.selectSidebarModule(.settings)
+                }
+                .keyboardShortcut(",", modifiers: [.command])
+                .disabled(appState.activePlayback != nil)
+            }
+
             CommandGroup(after: .appInfo) {
                 Button("检查更新…") {
                     appState.preferredSettingsTabRaw = "关于"
@@ -203,11 +214,22 @@ public struct DonbyApp: App {
                 }
             }
 
+            CommandGroup(after: .textEditing) {
+                Button("全局搜索…") {
+                    guard appState.activePlayback == nil else { return }
+                    appState.selectSidebarModule(.search)
+                }
+                .keyboardShortcut("f", modifiers: [.command])
+                .disabled(appState.activePlayback != nil)
+            }
+
             CommandMenu("服务器与线路") {
                 Button("添加服务…") {
+                    guard appState.activePlayback == nil else { return }
                     appState.presentServerEditor()
                 }
                 .keyboardShortcut("n", modifiers: [.command])
+                .disabled(appState.activePlayback != nil)
 
                 Button("切换当前服务器线路…") {
                     appState.linePickerServer = appState.activeServer
@@ -224,9 +246,11 @@ public struct DonbyApp: App {
                 Divider()
 
                 Button("刷新首页") {
+                    guard appState.activePlayback == nil else { return }
                     Task { await appState.loadActiveServerHome(syncDomains: true) }
                 }
                 .keyboardShortcut("r", modifiers: [.command])
+                .disabled(appState.activePlayback != nil)
             }
 
             CommandMenu("诊断与日志") {

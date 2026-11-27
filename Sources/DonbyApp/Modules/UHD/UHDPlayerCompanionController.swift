@@ -13,16 +13,28 @@ final class UHDPlayerCompanionController: ObservableObject, DonbyPlayerCompanion
     weak var appState: AppState?
     private let notifyHost: () -> Void
 
-    @Published var uhdDanmuTrack: UHDDanmuTrack? = nil { didSet { notifyHost() } }
-    @Published var uhdDanmuMatchedTitle: String = "" { didSet { notifyHost() } }
-    @Published var isLoadingUHDDanmu: Bool = false { didSet { notifyHost() } }
-    @Published var showUHDDanmuPickerSheet: Bool = false { didSet { notifyHost() } }
-    @Published var showWatchPartyCreateSheetInPlayer: Bool = false { didSet { notifyHost() } }
+    @Published var uhdDanmuTrack: UHDDanmuTrack? = nil {
+        didSet { if oldValue?.revision != uhdDanmuTrack?.revision { notifyHost() } }
+    }
+    @Published var uhdDanmuMatchedTitle: String = "" {
+        didSet { if oldValue != uhdDanmuMatchedTitle { notifyHost() } }
+    }
+    @Published var isLoadingUHDDanmu: Bool = false {
+        didSet { if oldValue != isLoadingUHDDanmu { notifyHost() } }
+    }
+    @Published var showUHDDanmuPickerSheet: Bool = false {
+        didSet { if oldValue != showUHDDanmuPickerSheet { notifyHost() } }
+    }
+    @Published var showWatchPartyCreateSheetInPlayer: Bool = false {
+        didSet { if oldValue != showWatchPartyCreateSheetInPlayer { notifyHost() } }
+    }
 
     private var isApplyingWatchPartyRemoteState: Bool = false
     private var lastWatchPartyEpoch: Int = -1
     private var lastWatchPartyHostReportUptime: TimeInterval = 0
     private var lastWatchPartyMemberStatus: String = ""
+    private var lastFollowSeekUptime: TimeInterval = 0
+    private var lastHostAlignToastRevision: Int = -1
     private var boundRoomId: String? = nil
     private var uhdSub: AnyCancellable?
 
@@ -38,7 +50,12 @@ final class UHDPlayerCompanionController: ObservableObject, DonbyPlayerCompanion
         self.server = server
         self.appState = appState
         self.notifyHost = notifyHost
-        self.uhdSub = UHDModuleManager.shared.objectWillChange.sink { [weak self] _ in
+        self.uhdSub = Publishers.CombineLatest(
+            UHDModuleManager.shared.$isEnabled.removeDuplicates(),
+            UHDModuleManager.shared.$activeWatchPartySession.map { $0?.roomId }.removeDuplicates()
+        )
+        .dropFirst()
+        .sink { [weak self] _, _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.notifyHost()
@@ -204,7 +221,10 @@ final class UHDPlayerCompanionController: ObservableObject, DonbyPlayerCompanion
                 let exactPos = pauseAndPos()
                 isApplyingWatchPartyRemoteState = false
                 wp.sendPlayback(state: "paused", positionSeconds: exactPos, rate: Double(snap.playbackSpeed))
-                appState?.showToast("新成员加入，已暂停等待对齐", icon: "person.2.wave.2")
+                if lastHostAlignToastRevision != room.revision {
+                    lastHostAlignToastRevision = room.revision
+                    appState?.showToast("新成员加入，已暂停等待对齐", icon: "person.2.wave.2")
+                }
             } else if room.phase == "preparing" && snap.hasRenderedFirstFrame && !snap.isOpeningMedia {
                 wp.sendPlayback(
                     state: snap.isPlaying ? "playing" : "paused",
@@ -255,7 +275,9 @@ final class UHDPlayerCompanionController: ObservableObject, DonbyPlayerCompanion
         }
 
         let targetPos = room.extrapolatedPositionSeconds(estimatedServerNowMs: wp.estimatedServerNowMs)
-        if abs(targetPos - snap.liveCurrentTime) > 1.25 {
+        let nowUptime = ProcessInfo.processInfo.systemUptime
+        if abs(targetPos - snap.liveCurrentTime) > 1.25 && (nowUptime - lastFollowSeekUptime) >= 2.0 {
+            lastFollowSeekUptime = nowUptime
             seekAccurateDriver?(targetPos)
         }
 

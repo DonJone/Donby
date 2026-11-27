@@ -1,13 +1,15 @@
+#[path = "audio_control.rs"]
+mod audio_control;
+
 use crate::abi::DKPlayerState;
 use crate::clock::{elapsed_since_ns, load_f64, steady_now_ns, store_f64};
 use crate::emit_log;
 use crate::ffi::{
     dk_shim_aq_commit_and_enqueue, dk_shim_aq_create, dk_shim_aq_fill_and_enqueue,
-    dk_shim_aq_get_sample_time, dk_shim_aq_pause, dk_shim_aq_prime_and_start,
-    dk_shim_aq_reset_only, dk_shim_aq_set_rate, dk_shim_aq_set_volume, dk_shim_aq_start_only,
-    dk_shim_aq_stop_dispose, dk_shim_aq_stop_reset, dk_shim_audio_frame_convert,
-    dk_shim_audio_frame_prepare, dk_shim_is_eagain, dk_shim_is_eof, dk_shim_receive_frame,
-    dk_shim_send_packet, AvFrame,
+    dk_shim_aq_get_sample_time, dk_shim_aq_prime_and_start, dk_shim_aq_reset_only,
+    dk_shim_aq_set_rate, dk_shim_aq_set_volume, dk_shim_aq_stop_dispose, dk_shim_aq_stop_reset,
+    dk_shim_audio_frame_convert, dk_shim_audio_frame_prepare, dk_shim_is_eagain, dk_shim_is_eof,
+    dk_shim_receive_frame, dk_shim_send_packet, AvFrame,
 };
 use crate::player::{AudioChunk, AudioStartingGuard, DKPlayer};
 use std::ffi::c_void;
@@ -35,7 +37,11 @@ unsafe extern "C" fn aq_callback_trampoline(
         return;
     }
     let p = &*(rust_ctx as *const DKPlayer);
-    if p.abort_requested.load(Ordering::Acquire) || p.is_closing.load(Ordering::Acquire) {
+    if p.abort_requested.load(Ordering::Acquire)
+        || p.is_closing.load(Ordering::Acquire)
+        || !p.audio_queue_started.load(Ordering::Acquire)
+        || p.is_seeking()
+    {
         return;
     }
     let slice = std::slice::from_raw_parts_mut(dst_floats, cap_floats as usize);
@@ -49,6 +55,7 @@ impl DKPlayer {
         while self.audio_queue_starting.load(Ordering::Acquire) {
             std::thread::yield_now();
         }
+        audio_control::barrier(self);
         if self.audio_queue_started.swap(false, Ordering::AcqRel) {
             let aq = self.audio_queue_ptr.load(Ordering::Acquire);
             if !aq.is_null() {
@@ -58,6 +65,7 @@ impl DKPlayer {
     }
 
     pub(crate) unsafe fn stop_dispose_audio_queue(&self) {
+        audio_control::shutdown(self);
         let mut aq = self.audio_queue_ptr.swap(ptr::null_mut(), Ordering::AcqRel);
         let mut tr = self.audio_trampoline_ptr.swap(ptr::null_mut(), Ordering::AcqRel);
         if !aq.is_null() || !tr.is_null() {
@@ -79,6 +87,9 @@ impl DKPlayer {
         if !self.audio_queue_started.load(Ordering::Acquire) {
             let base = load_f64(&self.clock.audio_clock_base_pts_bits);
             return if base >= 0.0 { base } else { load_f64(&self.clock.current_pos_bits) };
+        }
+        if self.get_state() == DKPlayerState::Paused && self.clock.audio_clock_calibrated.load(Ordering::Acquire) {
+            return load_f64(&self.clock.fallback_audio_clock_bits);
         }
         let mut hw_sample_time = 0i64;
         if unsafe { dk_shim_aq_get_sample_time(aq, &mut hw_sample_time) } {
@@ -352,6 +363,7 @@ impl DKPlayer {
         }
 
         if self.get_state() == DKPlayerState::Playing && !self.is_seeking() {
+            self.audio_queue_started.store(true, Ordering::Release);
             let status = unsafe { dk_shim_aq_prime_and_start(aq) };
             if status == 0 {
                 if self.is_seeking()
@@ -359,6 +371,7 @@ impl DKPlayer {
                     || self.is_closing.load(Ordering::Acquire)
                     || self.get_state() != DKPlayerState::Playing
                 {
+                    self.audio_queue_started.store(false, Ordering::Release);
                     unsafe { dk_shim_aq_stop_reset(aq) };
                     return;
                 }
@@ -380,7 +393,6 @@ impl DKPlayer {
                     }
                 }
                 self.clock.fallback_clock_ns.store(started_ns, Ordering::Relaxed);
-                self.audio_queue_started.store(true, Ordering::Release);
                 emit_log(
                     0,
                     &format!(
@@ -694,13 +706,13 @@ impl DKPlayer {
         let st = self.get_state();
         if matches!(st, DKPlayerState::Paused | DKPlayerState::Ended) {
             self.state.store(DKPlayerState::Playing as i32, Ordering::Release);
-            let aq = self.audio_queue_ptr.load(Ordering::Acquire);
-            if !aq.is_null() && self.audio_queue_started.load(Ordering::Acquire) {
-                let _ = dk_shim_aq_start_only(aq);
-            }
             let now_ns = steady_now_ns();
             self.clock.ext_clock_start_ns.store(now_ns, Ordering::Relaxed);
             self.clock.fallback_clock_ns.store(now_ns, Ordering::Relaxed);
+            let aq = self.audio_queue_ptr.load(Ordering::Acquire);
+            if !aq.is_null() && self.audio_queue_started.load(Ordering::Acquire) {
+                audio_control::enqueue_resume(self);
+            }
             self.video_decode_cv.notify_all();
             self.audio_decode_cv.notify_all();
         }
@@ -710,12 +722,12 @@ impl DKPlayer {
         if self.get_state() == DKPlayerState::Playing {
             let cur = self.get_master_clock();
             self.state.store(DKPlayerState::Paused as i32, Ordering::Release);
-            let aq = self.audio_queue_ptr.load(Ordering::Acquire);
-            if !aq.is_null() && self.audio_queue_started.load(Ordering::Acquire) {
-                dk_shim_aq_pause(aq);
-            }
             store_f64(&self.clock.ext_clock_base_pts_bits, cur);
             store_f64(&self.clock.fallback_audio_clock_bits, cur);
+            let aq = self.audio_queue_ptr.load(Ordering::Acquire);
+            if !aq.is_null() && self.audio_queue_started.load(Ordering::Acquire) {
+                audio_control::enqueue_pause(self);
+            }
         }
     }
 

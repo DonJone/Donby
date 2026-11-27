@@ -14,6 +14,7 @@ public struct LogViewerSheet: View {
     @State private var cachedFilteredEntries: [DonbyLogEntry] = []
     @State private var autoScroll: Bool = true
     @State private var copiedFeedback: Bool = false
+    @State private var copyTask: Task<Void, Never>?
 
     private var isLight: Bool { appState.isLightMode }
 
@@ -199,13 +200,7 @@ public struct LogViewerSheet: View {
                 )
                 .padding(.horizontal, isModal ? 18 : 24)
                 .padding(.bottom, 4)
-                .donbyOnChange(of: logger.entries.count) { _ in
-                    recomputeFilteredEntries()
-                    if autoScroll, let last = cachedFilteredEntries.last {
-                        proxy.scrollTo(last.id, anchor: .bottom)
-                    }
-                }
-                .donbyOnChange(of: logger.entries.last?.id) { _ in
+                .donbyOnChange(of: logger.entriesRevision) { _ in
                     recomputeFilteredEntries()
                     if autoScroll, let last = cachedFilteredEntries.last {
                         proxy.scrollTo(last.id, anchor: .bottom)
@@ -223,7 +218,7 @@ public struct LogViewerSheet: View {
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLight))
                     .fixedSize()
                 Spacer(minLength: 8)
-                Text("路径: ~/Library/Logs/Donby/donby.log")
+                Text("路径: \(logger.logFileURL.path)")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLight))
                     .lineLimit(1)
@@ -235,6 +230,9 @@ public struct LogViewerSheet: View {
         }
         .onAppear {
             recomputeFilteredEntries()
+        }
+        .onDisappear {
+            copyTask?.cancel()
         }
         .donbyOnChange(of: selectedFilter) { _ in
             recomputeFilteredEntries()
@@ -376,12 +374,16 @@ public struct LogViewerSheet: View {
     }
 
     private func copyAllLogs() {
-        let text = logger.exportAllText()
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(text, forType: .string)
-        withAnimation { copiedFeedback = true }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+        copyTask?.cancel()
+        copyTask = Task {
+            let text = await logger.exportAllTextAsync()
+            guard !Task.isCancelled else { return }
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString(text, forType: .string)
+            withAnimation { copiedFeedback = true }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled else { return }
             copiedFeedback = false
         }
     }

@@ -106,9 +106,22 @@ public final class DanmuSpriteHostView: NSView {
     private var activeSprites: [ActiveSprite] = []
     private var recycledLayers: [CATextLayer] = []
     private let maxConcurrentSprites: Int = 36
+    private var lastLayoutSize: CGSize = .zero
 
     private static let danmuFont = NSFont.systemFont(ofSize: 19, weight: .semibold)
-    private static let measureAttrs: [NSAttributedString.Key: Any] = [.font: danmuFont]
+    private static let danmuShadow: NSShadow = {
+        let s = NSShadow()
+        s.shadowColor = NSColor.black.withAlphaComponent(0.88)
+        s.shadowBlurRadius = 1.6
+        s.shadowOffset = NSSize(width: 1.0, height: -1.0)
+        return s
+    }()
+    private static let measureAttrs: [NSAttributedString.Key: Any] = [
+        .font: danmuFont,
+        .strokeColor: NSColor.black.withAlphaComponent(0.75),
+        .strokeWidth: -2.5,
+        .shadow: danmuShadow
+    ]
     private static let laneHeight: CGFloat = 30
     private static let topMargin: CGFloat = 46
     private static let scrollDuration: Double = 9.0
@@ -132,6 +145,17 @@ public final class DanmuSpriteHostView: NSView {
         nil
     }
 
+    public override func layout() {
+        super.layout()
+        let size = bounds.size
+        if lastLayoutSize != .zero,
+           (abs(lastLayoutSize.width - size.width) > 4 || abs(lastLayoutSize.height - size.height) > 4) {
+            clearAllSprites()
+            lastObservedTime = -1
+        }
+        lastLayoutSize = size
+    }
+
     public func configure(
         track: UHDDanmuTrack?,
         isEnabled: Bool,
@@ -147,7 +171,7 @@ public final class DanmuSpriteHostView: NSView {
         self.isDanmuEnabled = isEnabled
         self.isPlaying = isPlaying
         self.playbackRate = max(0.25, playbackRate)
-        self.danmuOpacity = opacity
+        self.danmuOpacity = max(0.0, min(1.0, opacity))
         self.timeProvider = timeProvider
 
         if !isEnabled || track == nil || (track?.comments.isEmpty ?? true) {
@@ -158,6 +182,7 @@ public final class DanmuSpriteHostView: NSView {
         }
 
         isHidden = false
+        layer?.opacity = Float(self.danmuOpacity)
         if trackChanged {
             clearAllSprites()
             lastObservedTime = -1
@@ -169,6 +194,11 @@ public final class DanmuSpriteHostView: NSView {
         } else {
             pauseHostLayerIfNeeded()
             stopTimer()
+            let now = currentPlaybackTime()
+            if lastObservedTime >= 0, (now < lastObservedTime - 0.25 || (now - lastObservedTime) > 1.8) {
+                clearAllSprites()
+                lastObservedTime = -1
+            }
         }
     }
 
@@ -188,14 +218,19 @@ public final class DanmuSpriteHostView: NSView {
 
     private func resumeHostLayerIfNeeded() {
         guard let hostLayer = layer else { return }
+        let targetSpeed = Float(playbackRate)
         if isLayerPaused {
             let pausedTime = hostLayer.timeOffset
-            hostLayer.speed = 1.0
+            hostLayer.speed = targetSpeed
             hostLayer.timeOffset = 0.0
             hostLayer.beginTime = 0.0
             let timeSincePause = hostLayer.convertTime(CACurrentMediaTime(), from: nil) - pausedTime
             hostLayer.beginTime = timeSincePause
             isLayerPaused = false
+        } else if abs(hostLayer.speed - targetSpeed) > 0.001 {
+            let currentLayerTime = hostLayer.convertTime(CACurrentMediaTime(), from: nil)
+            hostLayer.speed = targetSpeed
+            hostLayer.beginTime = CACurrentMediaTime() - (currentLayerTime / Double(targetSpeed))
         }
     }
 
@@ -221,15 +256,10 @@ public final class DanmuSpriteHostView: NSView {
             return reused
         }
         let l = CATextLayer()
-        l.font = Self.danmuFont
-        l.fontSize = 19
         l.alignmentMode = .left
         l.isWrapped = false
         l.truncationMode = .none
-        l.shadowColor = NSColor.black.cgColor
-        l.shadowOpacity = 0.88
-        l.shadowRadius = 1.6
-        l.shadowOffset = CGSize(width: 1.0, height: 1.0)
+        l.shadowOpacity = 0
         return l
     }
 
@@ -321,8 +351,7 @@ public final class DanmuSpriteHostView: NSView {
 
             let age = now - c.timeSeconds
             let isStatic = (c.mode == 4 || c.mode == 5)
-            let baseLife = isStatic ? Self.staticDuration : Self.scrollDuration
-            let effectiveLife = baseLife / max(0.5, min(2.0, playbackRate))
+            let effectiveLife = isStatic ? Self.staticDuration : Self.scrollDuration
             guard age >= -0.25 && age <= 0.6 else { continue }
             guard activeSprites.count < maxConcurrentSprites, spawnedThisTick < maxSpawnPerTick else { continue }
 
@@ -360,10 +389,11 @@ public final class DanmuSpriteHostView: NSView {
 
             let textLayer = dequeueLayer()
             textLayer.contentsScale = scale
-            textLayer.string = c.text
-            textLayer.foregroundColor = NSColor(srgbRed: r, green: g, blue: b, alpha: 1.0).cgColor
+            var attrs = Self.measureAttrs
+            attrs[.foregroundColor] = NSColor(srgbRed: r, green: g, blue: b, alpha: 1.0)
+            textLayer.string = NSAttributedString(string: c.text, attributes: attrs)
             textLayer.bounds = CGRect(origin: .zero, size: itemSize)
-            textLayer.opacity = Float(danmuOpacity)
+            textLayer.opacity = 1.0
 
             if isStatic {
                 let isBottom = (c.mode == 4)
@@ -418,7 +448,7 @@ public struct UHDDanmuPickerSheet: View {
     @State private var selectedAnime: UHDDanmuAnimeMatch? = nil
     @State private var episodes: [UHDDanmuEpisodeOption] = []
     @State private var isSearching: Bool = false
-    @State private var isLoadingComments: Bool = false
+    @State private var loadingEpisodeId: Int? = nil
     @State private var errorMessage: String? = nil
 
     public init(
@@ -489,7 +519,6 @@ public struct UHDDanmuPickerSheet: View {
                                 let isSel = selectedAnime?.animeId == anime.animeId
                                 Button {
                                     selectedAnime = anime
-                                    Task { await loadEpisodes(animeId: anime.animeId) }
                                 } label: {
                                     HStack {
                                         Text(anime.animeTitle)
@@ -526,7 +555,7 @@ public struct UHDDanmuPickerSheet: View {
                                             .foregroundStyle(.white)
                                             .lineLimit(2)
                                         Spacer()
-                                        if isLoadingComments {
+                                        if loadingEpisodeId == ep.episodeId {
                                             ProgressView().controlSize(.mini)
                                         }
                                     }
@@ -535,7 +564,7 @@ public struct UHDDanmuPickerSheet: View {
                                     .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
-                                .disabled(isLoadingComments)
+                                .disabled(loadingEpisodeId != nil)
                             }
                         }
                     }
@@ -553,6 +582,13 @@ public struct UHDDanmuPickerSheet: View {
                 await runSearch()
             }
         }
+        .task(id: selectedAnime?.animeId) {
+            guard let animeId = selectedAnime?.animeId else {
+                episodes = []
+                return
+            }
+            await loadEpisodes(animeId: animeId)
+        }
     }
 
     private func runSearch() async {
@@ -561,13 +597,14 @@ public struct UHDDanmuPickerSheet: View {
         defer { isSearching = false }
         do {
             let found = try await UHDDanmuClient.shared.searchAnime(server: server, keyword: keyword)
+            guard !Task.isCancelled else { return }
             animes = found
-            if let first = found.first {
-                selectedAnime = first
-                await loadEpisodes(animeId: first.animeId)
-            } else {
+            selectedAnime = found.first
+            if found.isEmpty {
                 episodes = []
             }
+        } catch is CancellationError {
+            return
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -576,21 +613,27 @@ public struct UHDDanmuPickerSheet: View {
     private func loadEpisodes(animeId: Int) async {
         errorMessage = nil
         do {
-            episodes = try await UHDDanmuClient.shared.fetchBangumiEpisodes(server: server, animeId: animeId)
+            let fetched = try await UHDDanmuClient.shared.fetchBangumiEpisodes(server: server, animeId: animeId)
+            guard !Task.isCancelled else { return }
+            episodes = fetched
+        } catch is CancellationError {
+            return
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
     private func pickEpisode(_ ep: UHDDanmuEpisodeOption) async {
-        isLoadingComments = true
+        loadingEpisodeId = ep.episodeId
         errorMessage = nil
-        defer { isLoadingComments = false }
+        defer { loadingEpisodeId = nil }
         do {
             let list = try await UHDDanmuClient.shared.fetchComments(server: server, commentId: ep.episodeId)
             let label = [selectedAnime?.animeTitle, ep.episodeTitle].compactMap { $0 }.joined(separator: " · ")
             onSelectEpisode(label, ep.episodeId, list)
             dismiss()
+        } catch is CancellationError {
+            return
         } catch {
             errorMessage = error.localizedDescription
         }

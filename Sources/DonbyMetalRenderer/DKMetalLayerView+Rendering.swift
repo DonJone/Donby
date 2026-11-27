@@ -7,11 +7,39 @@ import DonbyKernelC
 // MARK: - Onscreen Rendering, Subtitle Texture Ring & Offscreen Snapshot Context
 
 extension DKMetalLayerView {
+    private func consumePendingSubtitleClearLocked() {
+        sizeLock.lock()
+        let shouldClear = _pendingSubtitleClear
+        _pendingSubtitleClear = false
+        sizeLock.unlock()
+        if shouldClear {
+            hasActiveSubtitle = false
+            subtitleTexture = nil
+        }
+    }
+
     public func updateSubtitleOverlay(rgbaPtr: UnsafePointer<UInt8>?, width: Int, height: Int) {
+        guard let ptr = rgbaPtr, width > 0, height > 0 else {
+            sizeLock.lock()
+            _pendingSubtitleClear = true
+            _redrawRequestGeneration &+= 1
+            sizeLock.unlock()
+            if renderLock.try() {
+                consumePendingSubtitleClearLocked()
+                renderLock.unlock()
+            }
+            return
+        }
+
         renderLock.lock()
         defer { renderLock.unlock() }
+        applyPendingMetalConfigLocked()
 
-        guard let ptr = rgbaPtr, width > 0, height > 0, let dev = device else {
+        sizeLock.lock()
+        _pendingSubtitleClear = false
+        sizeLock.unlock()
+
+        guard let dev = device else {
             hasActiveSubtitle = false
             return
         }
@@ -47,27 +75,140 @@ extension DKMetalLayerView {
         }
     }
 
+    private func submitClearBlackPassLocked() {
+        guard let queue = commandQueue,
+              let drawable = metalLayer.nextDrawable() else { return }
+        let passDesc = MTLRenderPassDescriptor()
+        passDesc.colorAttachments[0].texture = drawable.texture
+        passDesc.colorAttachments[0].loadAction = .clear
+        passDesc.colorAttachments[0].storeAction = .store
+        passDesc.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
+        if let buffer = queue.makeCommandBuffer(),
+           let encoder = buffer.makeRenderCommandEncoder(descriptor: passDesc) {
+            encoder.endEncoding()
+            buffer.present(drawable)
+            buffer.commit()
+        }
+    }
+
     public func clearDisplayedFrame() {
-        renderLock.lock()
-        lastPixelBuffer = nil
-        renderLock.unlock()
         snapshotLock.lock()
         snapshotPixelBuffer = nil
         snapshotLock.unlock()
+
+        sizeLock.lock()
+        _pendingClearFrame = true
+        _pendingSubtitleClear = true
+        _clearEpoch &+= 1
+        let epoch = _clearEpoch
+        _renderedRedrawGeneration = _redrawRequestGeneration
+        sizeLock.unlock()
+
+        metalWorkQueue.async { [weak self] in
+            guard let self else { return }
+            self.renderLock.lock()
+            defer { self.renderLock.unlock() }
+
+            self.sizeLock.lock()
+            let stillPending = (self._clearEpoch == epoch && self._pendingClearFrame)
+            if stillPending {
+                self._pendingClearFrame = false
+                self._pendingSubtitleClear = false
+            }
+            let drawableSize = self.cachedDrawableSize
+            self.sizeLock.unlock()
+
+            guard stillPending else { return }
+
+            self.applyPendingMetalConfigLocked()
+            self.lastPixelBuffer = nil
+            self.hasActiveSubtitle = false
+            self.subtitleTexture = nil
+            self.subtitleTextures = [nil, nil, nil]
+            self.subtitleTexWidth = 0
+            self.subtitleTexHeight = 0
+            if let cache = self.textureCache {
+                CVMetalTextureCacheFlush(cache, 0)
+            }
+            OffscreenMetalContext.releaseStagingIfIdle()
+
+            if drawableSize.width > 0, drawableSize.height > 0 {
+                self.submitClearBlackPassLocked()
+            }
+            malloc_zone_pressure_relief(nil, 0)
+        }
+    }
+
+    public func releasePlaybackResourcesOnExit() {
+        snapshotLock.lock()
+        snapshotPixelBuffer = nil
+        snapshotLock.unlock()
+
+        let shrinkLayer: @MainActor () -> Void = { [weak self] in
+            guard let self else { return }
+            self.liveResizeWorkItem?.cancel()
+            self.liveResizeWorkItem = nil
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            self.metalLayer.drawableSize = CGSize(width: 1, height: 1)
+            CATransaction.commit()
+            self.sizeLock.lock()
+            self.cachedDrawableSize = .zero
+            self.sizeLock.unlock()
+        }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { shrinkLayer() }
+        } else {
+            DispatchQueue.main.async { shrinkLayer() }
+        }
+
+        metalWorkQueue.async { [weak self] in
+            guard let self else { return }
+            self.renderLock.lock()
+            self.lastPixelBuffer = nil
+            self.hasActiveSubtitle = false
+            self.subtitleTexture = nil
+            self.subtitleTextures = [nil, nil, nil]
+            self.subtitleTexWidth = 0
+            self.subtitleTexHeight = 0
+            if let cache = self.textureCache {
+                CVMetalTextureCacheFlush(cache, 0)
+            }
+            self.submitClearBlackPassLocked()
+            self.renderLock.unlock()
+
+            OffscreenMetalContext.releaseStagingIfIdle()
+            malloc_zone_pressure_relief(nil, 0)
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.30) {
+                malloc_zone_pressure_relief(nil, 0)
+            }
+        }
     }
 
     public func renderLastPixelBuffer() {
         guard renderLock.try() else { return }
         defer { renderLock.unlock() }
+        applyPendingMetalConfigLocked()
+        consumePendingSubtitleClearLocked()
         guard let pixbuf = lastPixelBuffer else { return }
         _ = renderLocked(pixbuf, colorUniforms: lastColorUniforms)
     }
 
-    private func calculateScale(videoWidth: Double, videoHeight: Double) -> SIMD2<Float> {
-        sizeLock.lock()
-        var viewWidth = Double(cachedDrawableSize.width)
-        var viewHeight = Double(cachedDrawableSize.height)
-        sizeLock.unlock()
+    private func calculateScale(
+        videoWidth: Double,
+        videoHeight: Double,
+        drawableWidth: Int,
+        drawableHeight: Int
+    ) -> SIMD2<Float> {
+        var viewWidth = Double(drawableWidth)
+        var viewHeight = Double(drawableHeight)
+
+        if viewWidth <= 0 || viewHeight <= 0 {
+            sizeLock.lock()
+            viewWidth = Double(cachedDrawableSize.width)
+            viewHeight = Double(cachedDrawableSize.height)
+            sizeLock.unlock()
+        }
 
         if viewWidth <= 0 || viewHeight <= 0 {
             viewWidth = Double(bounds.width)
@@ -120,9 +261,13 @@ extension DKMetalLayerView {
     }
 
     private func renderLocked(_ pixelBuffer: CVPixelBuffer, colorUniforms: DKGpuColorUniforms?) -> Bool {
+        applyPendingMetalConfigLocked()
+        consumePendingSubtitleClearLocked()
+
         sizeLock.lock()
         let drawableSize = cachedDrawableSize
-        let gen = layoutGeneration
+        let requestGenAtStart = _redrawRequestGeneration
+        let entryClearEpoch = _clearEpoch
         sizeLock.unlock()
         guard drawableSize.width > 0, drawableSize.height > 0 else {
             setRenderSkipReason("zeroDrawable")
@@ -147,7 +292,12 @@ extension DKMetalLayerView {
         let sar = Double(uniforms.ycc_offset.3 > 0.05 ? uniforms.ycc_offset.3 : 1.0)
         let videoWidth = Double(cleanWidth) * sar
         let videoHeight = Double(cleanHeight)
-        var scale = calculateScale(videoWidth: videoWidth, videoHeight: videoHeight)
+        var scale = calculateScale(
+            videoWidth: videoWidth,
+            videoHeight: videoHeight,
+            drawableWidth: drawable.texture.width,
+            drawableHeight: drawable.texture.height
+        )
 
         let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
         let rendered: Bool
@@ -233,8 +383,10 @@ extension DKMetalLayerView {
             self.snapshotColorUniforms = uniforms
             snapshotLock.unlock()
             sizeLock.lock()
-            if layoutGeneration == gen {
-                _needsRedrawOnSameFrame = false
+            _renderedRedrawGeneration = requestGenAtStart
+            if _clearEpoch == entryClearEpoch && _pendingClearFrame {
+                _pendingClearFrame = false
+                _clearEpoch &+= 1
             }
             sizeLock.unlock()
         }
@@ -446,6 +598,16 @@ extension DKMetalLayerView {
         var stagingTexture: MTLTexture?
         var stagingSize: (width: Int, height: Int) = (0, 0)
         var stagingDeviceID: UInt64 = 0
+
+        static func releaseStagingIfIdle() {
+            guard shared.lock.try() else { return }
+            shared.stagingTexture = nil
+            shared.stagingSize = (0, 0)
+            if let cache = shared.texCache {
+                CVMetalTextureCacheFlush(cache, 0)
+            }
+            shared.lock.unlock()
+        }
 
         private init() {
             guard let dev = DKMetalLayerView.preferredMetalDevice(for: nil) ?? MTLCreateSystemDefaultDevice(),

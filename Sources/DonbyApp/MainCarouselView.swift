@@ -165,13 +165,14 @@ final class CarouselHostingView: NSHostingView<AnyView> {
 
 public struct MainCarouselView: View {
     @EnvironmentObject private var appState: AppState
-    public let items: [EmbyItem]
-    public var height: CGFloat = 365
-    public var isScrollPaused: (() -> Bool)? = nil
+    @ObservedObject public var stateBox: CarouselStateBox
     public var swipePublisher: AnyPublisher<Int, Never>? = nil
     public let onPlay: (EmbyItem) -> Void
     public let onSelectDetail: (EmbyItem) -> Void
 
+    @State private var displayedItems: [EmbyItem] = []
+    @State private var pendingReorderedItems: [EmbyItem]? = nil
+    @State private var currentItemId: String? = nil
     @State private var currentIndex: Int = 0
     @State private var hoverBox = HoverStateBox()
     @State private var slideDirection: Int = 1
@@ -181,228 +182,288 @@ public struct MainCarouselView: View {
         var isHovering: Bool = false
     }
 
-    private let timer = Timer.publish(every: 6.0, on: .main, in: .default).autoconnect()
-
     public init(
-        items: [EmbyItem],
-        height: CGFloat = 365,
-        isScrollPaused: (() -> Bool)? = nil,
+        stateBox: CarouselStateBox,
         swipePublisher: AnyPublisher<Int, Never>? = nil,
         onPlay: @escaping (EmbyItem) -> Void,
         onSelectDetail: @escaping (EmbyItem) -> Void
     ) {
-        self.items = items
-        self.height = height
-        self.isScrollPaused = isScrollPaused
+        self.stateBox = stateBox
         self.swipePublisher = swipePublisher
         self.onPlay = onPlay
         self.onSelectDetail = onSelectDetail
     }
 
     private var currentItem: EmbyItem? {
-        guard !items.isEmpty else { return nil }
-        let safeIdx = max(0, min(currentIndex, items.count - 1))
-        return items[safeIdx]
+        guard !displayedItems.isEmpty else { return nil }
+        let safeIdx = max(0, min(currentIndex, displayedItems.count - 1))
+        return displayedItems[safeIdx]
+    }
+
+    private func syncDisplayedItems(_ newItems: [EmbyItem], forceImmediate: Bool = false) {
+        if !forceImmediate && !displayedItems.isEmpty && Date().timeIntervalSince(lastManualInteraction) < 6.0 {
+            pendingReorderedItems = newItems
+            return
+        }
+        pendingReorderedItems = nil
+        let targetId = currentItemId ?? currentItem?.id
+        displayedItems = newItems
+        if let targetId, let preservedIdx = newItems.firstIndex(where: { $0.id == targetId }) {
+            currentIndex = preservedIdx
+            currentItemId = targetId
+        } else {
+            let clamped = newItems.isEmpty ? 0 : max(0, min(currentIndex, newItems.count - 1))
+            currentIndex = clamped
+            currentItemId = newItems.isEmpty ? nil : newItems[clamped].id
+        }
     }
 
     private func stepSlide(_ delta: Int) {
-        guard items.count > 1 else { return }
+        guard displayedItems.count > 1 else { return }
         slideDirection = delta >= 0 ? 1 : -1
         lastManualInteraction = Date()
+        let nextIdx = (currentIndex + delta + displayedItems.count) % displayedItems.count
+        currentItemId = displayedItems[nextIdx].id
         withAnimation(.spring(response: 0.36, dampingFraction: 0.86)) {
-            currentIndex = (currentIndex + delta + items.count) % items.count
+            currentIndex = nextIdx
         }
     }
 
     public var body: some View {
-        if let item = currentItem {
-            ZStack(alignment: .bottomLeading) {
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.12, green: 0.13, blue: 0.16),
-                        Color(red: 0.06, green: 0.07, blue: 0.09)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-
-                MediaArtworkView(
-                    server: appState.activeServer,
-                    item: item,
-                    kind: .backdrop,
-                    maxWidth: 2200,
-                    alignment: .top
-                )
-                .id(item.id)
-                .frame(maxWidth: .infinity)
-                .frame(height: height)
-                .clipped()
-                .transition(
-                    .asymmetric(
-                        insertion: .opacity.combined(with: .offset(x: CGFloat(slideDirection) * 28)),
-                        removal: .opacity
+        Group {
+            if let item = currentItem {
+                ZStack(alignment: .bottomLeading) {
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.12, green: 0.13, blue: 0.16),
+                            Color(red: 0.06, green: 0.07, blue: 0.09)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
                     )
-                )
 
-                LinearGradient(
-                    colors: [Color.black.opacity(0.86), Color.black.opacity(0.42), Color.clear],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-
-                LinearGradient(
-                    colors: [Color.clear, Color.black.opacity(0.34), Color.black.opacity(0.90)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-
-                VStack(alignment: .leading, spacing: 11) {
-                    HStack(spacing: 8) {
-                        if let audioTag = item.audioSummaryTag {
-                            Text(audioTag)
-                                .font(.system(size: 11, weight: .semibold, design: .rounded))
-                                .foregroundStyle(.white.opacity(0.92))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(Color.white.opacity(0.16))
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                        }
-                        if let year = item.productionYear {
-                            Text(String(year)).font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.82))
-                        }
-                        if let genres = item.genres, !genres.isEmpty {
-                            Text(genres.prefix(2).joined(separator: " · "))
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.75))
-                                .lineLimit(1)
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(item.name)
-                            .font(.system(size: 32, weight: .heavy, design: .rounded))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-
-                        if let tagline = item.taglines?.first, !tagline.isEmpty {
-                            Text(tagline).font(.system(size: 13, weight: .semibold)).foregroundStyle(appState.accentColor).lineLimit(1)
-                        }
-                    }
-
-                    HeroRatingBadgesRow(
+                    MediaArtworkView(
+                        server: appState.activeServer,
                         item: item,
-                        ratings: appState.multiPlatformRatingsByItemId[item.id],
-                        isLightSurface: false,
-                        fontSize: 13.5,
-                        iconHeight: 17
+                        kind: .backdrop,
+                        maxWidth: 2200,
+                        alignment: .top
+                    )
+                    .id(item.id)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: stateBox.height)
+                    .clipped()
+                    .transition(
+                        .asymmetric(
+                            insertion: .opacity.combined(with: .offset(x: CGFloat(slideDirection) * 28)),
+                            removal: .opacity
+                        )
                     )
 
-                    if let overview = item.overview, !overview.isEmpty {
-                        Text(overview)
-                            .font(.system(size: 13))
-                            .foregroundStyle(.white.opacity(0.84))
-                            .lineLimit(2)
-                            .frame(maxWidth: 580, alignment: .leading)
-                    }
+                    LinearGradient(
+                        colors: [Color.black.opacity(0.86), Color.black.opacity(0.42), Color.clear],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
 
-                    DonbyGlassContainer(spacing: 12) {
-                        HStack(spacing: 12) {
-                            LiquidGlassCapsuleButton(
-                                title: item.resumePositionSeconds > 0 ? "继续播放" : "立即播放",
-                                systemImage: "play.fill",
-                                tint: appState.isMonochromeTheme ? (appState.isLightMode ? Color(white: 0.12) : Color.white) : appState.accentColor,
-                                textColorOverride: appState.isMonochromeTheme ? (appState.isLightMode ? .white : Color(red: 0.10, green: 0.10, blue: 0.12)) : appState.accentTextColor,
-                                horizontalPadding: 24,
-                                verticalPadding: 11,
-                                fontSize: 14
-                            ) {
-                                onPlay(item)
+                    LinearGradient(
+                        colors: [Color.clear, Color.black.opacity(0.34), Color.black.opacity(0.90)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+
+                    VStack(alignment: .leading, spacing: 11) {
+                        HStack(spacing: 8) {
+                            if let audioTag = item.audioSummaryTag {
+                                Text(audioTag)
+                                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.white.opacity(0.92))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(Color.white.opacity(0.16))
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
                             }
+                            if let year = item.productionYear {
+                                Text(String(year)).font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.82))
+                            }
+                            if let genres = item.genres, !genres.isEmpty {
+                                Text(genres.prefix(2).joined(separator: " · "))
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.white.opacity(0.75))
+                                    .lineLimit(1)
+                            }
+                        }
 
-                            LiquidGlassCapsuleButton(
-                                title: "详情",
-                                systemImage: "info.circle.fill",
-                                tint: nil,
-                                horizontalPadding: 20,
-                                verticalPadding: 11,
-                                fontSize: 14
-                            ) {
-                                onSelectDetail(item)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.name)
+                                .font(.system(size: 32, weight: .heavy, design: .rounded))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+
+                            if let tagline = item.taglines?.first, !tagline.isEmpty {
+                                Text(tagline).font(.system(size: 13, weight: .semibold)).foregroundStyle(appState.overlayAccentColor).lineLimit(1)
+                            }
+                        }
+
+                        CarouselHeroRatingsView(
+                            ratingsStore: appState.ratingsStore,
+                            item: item
+                        )
+
+                        if let overview = item.overview, !overview.isEmpty {
+                            Text(overview)
+                                .font(.system(size: 13))
+                                .foregroundStyle(.white.opacity(0.84))
+                                .lineLimit(2)
+                                .frame(maxWidth: 580, alignment: .leading)
+                        }
+
+                        DonbyGlassContainer(spacing: 12) {
+                            HStack(spacing: 12) {
+                                LiquidGlassCapsuleButton(
+                                    title: item.resumePositionSeconds > 0 ? "继续播放" : "立即播放",
+                                    systemImage: "play.fill",
+                                    tint: appState.isMonochromeTheme ? Color.white : appState.accentColor,
+                                    textColorOverride: appState.isMonochromeTheme ? Color(red: 0.10, green: 0.10, blue: 0.12) : appState.accentTextColor,
+                                    horizontalPadding: 24,
+                                    verticalPadding: 11,
+                                    fontSize: 14
+                                ) {
+                                    onPlay(item)
+                                }
+
+                                LiquidGlassCapsuleButton(
+                                    title: "详情",
+                                    systemImage: "info.circle.fill",
+                                    tint: nil,
+                                    horizontalPadding: 20,
+                                    verticalPadding: 11,
+                                    fontSize: 14
+                                ) {
+                                    onSelectDetail(item)
+                                }
                             }
                         }
                     }
+                    .padding(.horizontal, 28)
+                    .padding(.bottom, 24)
+                    .padding(.trailing, 160) // reserve room for indicators
                 }
-                .padding(.horizontal, 28)
-                .padding(.bottom, 24)
-                .padding(.trailing, 160) // reserve room for indicators
-            }
-            .frame(height: height)
-            .onReceive(swipePublisher ?? Empty<Int, Never>().eraseToAnyPublisher()) { delta in
-                stepSlide(delta)
-            }
-            .gesture(
-                DragGesture(minimumDistance: 28)
-                    .onEnded { val in
-                        guard abs(val.translation.width) > abs(val.translation.height) else { return }
-                        if val.translation.width < -32 {
-                            stepSlide(1)
-                        } else if val.translation.width > 32 {
-                            stepSlide(-1)
-                        }
-                    }
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(
-                HStack(spacing: 7.5) {
-                    ForEach(Array(items.enumerated()), id: \.element.id) { idx, _ in
-                        Circle()
-                            .fill(idx == currentIndex ? Color.white : Color.white.opacity(0.36))
-                            .frame(width: 7, height: 7)
-                            .contentShape(Circle())
-                            .onTapGesture {
-                                slideDirection = idx >= currentIndex ? 1 : -1
-                                lastManualInteraction = Date()
-                                withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { currentIndex = idx }
+                .frame(height: stateBox.height)
+                .onReceive(swipePublisher ?? Empty<Int, Never>().eraseToAnyPublisher()) { delta in
+                    stepSlide(delta)
+                }
+                .gesture(
+                    DragGesture(minimumDistance: 28)
+                        .onEnded { val in
+                            guard abs(val.translation.width) > abs(val.translation.height) else { return }
+                            if val.translation.width < -32 {
+                                stepSlide(1)
+                            } else if val.translation.width > 32 {
+                                stepSlide(-1)
                             }
-                    }
-                }
-                .padding(.trailing, 26)
-                .padding(.bottom, 26),
-                alignment: .bottomTrailing
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(
-                        appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.06),
-                        lineWidth: 0.65
-                    )
-            )
-            .onHover { hoverBox.isHovering = $0 }
-            .onReceive(timer) { _ in
-                guard appState.currentDetailItem == nil && appState.activePlayback == nil else { return }
-                guard !(isScrollPaused?() ?? false) else { return }
-                guard !hoverBox.isHovering && items.count > 1 && Date().timeIntervalSince(lastManualInteraction) > 5.0 else { return }
-                slideDirection = 1
-                withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) { currentIndex = (currentIndex + 1) % items.count }
-            }
-            .task(id: "\(item.id)|\(appState.mdblistAPIKey)") {
-                _ = await appState.ensureMultiPlatformRating(for: item, server: appState.activeServer)
-            }
-            .task(id: "\(appState.activeServer?.activeBaseURL ?? "")|\(currentIndex)|\(items.count)") {
-                guard items.count > 1 else { return }
-                let nextIdx = (currentIndex + 1) % items.count
-                let nextItem = items[nextIdx]
-                let server = appState.activeServer
-                try? await Task.sleep(nanoseconds: 800_000_000)
-                guard !Task.isCancelled else { return }
-                _ = await MediaArtworkView.loadOrFetchCGImage(
-                    server: server,
-                    item: nextItem,
-                    kind: .backdrop,
-                    maxWidth: 1600,
-                    priority: .low
+                        }
                 )
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay(
+                    HStack(spacing: 7.5) {
+                        ForEach(Array(displayedItems.enumerated()), id: \.element.id) { idx, dotItem in
+                            Circle()
+                                .fill(idx == currentIndex ? Color.white : Color.white.opacity(0.36))
+                                .frame(width: 7, height: 7)
+                                .contentShape(Circle())
+                                .onTapGesture {
+                                    slideDirection = idx >= currentIndex ? 1 : -1
+                                    lastManualInteraction = Date()
+                                    currentItemId = dotItem.id
+                                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { currentIndex = idx }
+                                }
+                        }
+                    }
+                    .padding(.trailing, 26)
+                    .padding(.bottom, 26),
+                    alignment: .bottomTrailing
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .strokeBorder(
+                            appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.06),
+                            lineWidth: 0.65
+                        )
+                )
+                .onHover { hoverBox.isHovering = $0 }
+                .task(id: "\(item.id)|\(appState.mdblistAPIKey)") {
+                    _ = await appState.ensureMultiPlatformRating(for: item, server: appState.activeServer)
+                }
+                .task(id: "\(appState.activeServer?.activeBaseURL ?? "")|\(currentIndex)|\(displayedItems.count)") {
+                    guard displayedItems.count > 1 else { return }
+                    let nextIdx = (currentIndex + 1) % displayedItems.count
+                    let nextItem = displayedItems[nextIdx]
+                    let server = appState.activeServer
+                    try? await Task.sleep(nanoseconds: 800_000_000)
+                    guard !Task.isCancelled else { return }
+                    _ = await MediaArtworkView.loadOrFetchCGImage(
+                        server: server,
+                        item: nextItem,
+                        kind: .backdrop,
+                        maxWidth: 1600,
+                        priority: .low
+                    )
+                }
             }
         }
+        .preferredColorScheme(stateBox.isLightMode ? .light : .dark)
+        .onAppear {
+            syncDisplayedItems(stateBox.items, forceImmediate: true)
+        }
+        .onChange(of: stateBox.items) { newItems in
+            syncDisplayedItems(newItems)
+        }
+        .task(id: "\(appState.currentDetailItem != nil)|\(appState.activePlayback != nil)|\(appState.selectedLibrary != nil)|\(displayedItems.count)") {
+            guard appState.currentDetailItem == nil,
+                  appState.activePlayback == nil,
+                  appState.selectedLibrary == nil,
+                  displayedItems.count > 1 else {
+                return
+            }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
+                guard !Task.isCancelled else { break }
+                if let pending = pendingReorderedItems,
+                   Date().timeIntervalSince(lastManualInteraction) > 5.0 {
+                    syncDisplayedItems(pending, forceImmediate: true)
+                }
+                guard appState.currentDetailItem == nil,
+                      appState.activePlayback == nil,
+                      appState.selectedLibrary == nil,
+                      !stateBox.isScrolling,
+                      !hoverBox.isHovering,
+                      displayedItems.count > 1,
+                      Date().timeIntervalSince(lastManualInteraction) > 5.0 else {
+                    continue
+                }
+                slideDirection = 1
+                let nextIdx = (currentIndex + 1) % displayedItems.count
+                currentItemId = displayedItems[nextIdx].id
+                withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
+                    currentIndex = nextIdx
+                }
+            }
+        }
+    }
+}
+
+private struct CarouselHeroRatingsView: View {
+    @ObservedObject var ratingsStore: DonbyRatingsStore
+    let item: EmbyItem
+
+    var body: some View {
+        HeroRatingBadgesRow(
+            item: item,
+            ratings: ratingsStore.multiPlatformRatingsByItemId[item.id],
+            isLightSurface: false,
+            fontSize: 13.5,
+            iconHeight: 17
+        )
     }
 }

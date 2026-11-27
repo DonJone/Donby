@@ -45,6 +45,7 @@ private struct WPServerFrame: Decodable {
 
 public final class UHDWatchPartyClient: Sendable {
     public static let shared = UHDWatchPartyClient()
+    private static let sharedDecoder = JSONDecoder()
     private let session: URLSession
 
     private init() {
@@ -91,10 +92,10 @@ public final class UHDWatchPartyClient: Sendable {
         )
         let (data, resp) = try await session.data(for: req)
         if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            let msg = (try? JSONDecoder().decode(WPOkEnvelope.self, from: data))?.msg ?? "创建同看房间失败 (HTTP \(http.statusCode))"
+            let msg = (try? Self.sharedDecoder.decode(WPOkEnvelope.self, from: data))?.msg ?? "创建同看房间失败 (HTTP \(http.statusCode))"
             throw EmbyClientError.httpStatus(http.statusCode, msg)
         }
-        let env = try JSONDecoder().decode(WPCreateEnvelope.self, from: data)
+        let env = try Self.sharedDecoder.decode(WPCreateEnvelope.self, from: data)
         guard env.ok, let d = env.data else {
             throw EmbyClientError.httpStatus(500, env.msg ?? "创建同看房间失败")
         }
@@ -113,7 +114,7 @@ public final class UHDWatchPartyClient: Sendable {
         )
         let (data, resp) = try await session.data(for: req)
         if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            let msg = (try? JSONDecoder().decode(WPOkEnvelope.self, from: data))?.msg ?? {
+            let msg = (try? Self.sharedDecoder.decode(WPOkEnvelope.self, from: data))?.msg ?? {
                 switch http.statusCode {
                 case 404: return "房间已结束或邀请码无效"
                 case 409: return "房间已满、已锁定或当前账号已在其他同看房间"
@@ -122,7 +123,7 @@ public final class UHDWatchPartyClient: Sendable {
             }()
             throw EmbyClientError.httpStatus(http.statusCode, msg)
         }
-        let env = try JSONDecoder().decode(WPJoinEnvelope.self, from: data)
+        let env = try Self.sharedDecoder.decode(WPJoinEnvelope.self, from: data)
         guard env.ok, let d = env.data else {
             throw EmbyClientError.httpStatus(500, env.msg ?? "加入同看失败")
         }
@@ -157,7 +158,7 @@ public final class UHDWatchPartyClient: Sendable {
     private func performVoid(_ req: URLRequest) async throws {
         let (data, resp) = try await session.data(for: req)
         if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            let msg = (try? JSONDecoder().decode(WPOkEnvelope.self, from: data))?.msg ?? "同看操作失败 (HTTP \(http.statusCode))"
+            let msg = (try? Self.sharedDecoder.decode(WPOkEnvelope.self, from: data))?.msg ?? "同看操作失败 (HTTP \(http.statusCode))"
             throw EmbyClientError.httpStatus(http.statusCode, msg)
         }
     }
@@ -180,6 +181,8 @@ public final class UHDWatchPartySession: ObservableObject {
     @Published public private(set) var snapshot: UHDWatchPartyRoomSnapshot?
     @Published public private(set) var connectionState: UHDWatchPartyConnectionState = .idle
     @Published public private(set) var lastErrorMessage: String?
+
+    private static let sharedDecoder = JSONDecoder()
 
     /// Estimated `(serverTimeMs - localUnixTimeMs)` updated via heartbeat/pong RTT estimation.
     public private(set) var serverClockOffsetMs: Double = 0
@@ -214,7 +217,7 @@ public final class UHDWatchPartySession: ObservableObject {
     }
 
     public func updateCurrentUserId(_ uid: String) {
-        if !uid.isEmpty {
+        if !uid.isEmpty, currentUserId != uid {
             currentUserId = uid
         }
     }
@@ -273,7 +276,10 @@ public final class UHDWatchPartySession: ObservableObject {
         let task = urlSession.webSocketTask(with: req)
         self.wsSession = urlSession
         self.wsTask = task
-        self.connectionState = (reconnectAttempt == 0) ? .connecting : .reconnecting
+        let nextConnState: UHDWatchPartyConnectionState = (reconnectAttempt == 0) ? .connecting : .reconnecting
+        if self.connectionState != nextConnState {
+            self.connectionState = nextConnState
+        }
         task.resume()
 
         startHeartbeatLoop()
@@ -323,11 +329,16 @@ public final class UHDWatchPartySession: ObservableObject {
         reconnectAttempt += 1
         if reconnectAttempt > 12 {
             let reason = "同看连接断开，已停止自动重连"
-            connectionState = .terminated(reason: reason)
+            let nextState: UHDWatchPartyConnectionState = .terminated(reason: reason)
+            if connectionState != nextState {
+                connectionState = nextState
+            }
             onTerminated?(reason)
             return
         }
-        connectionState = .reconnecting
+        if connectionState != .reconnecting {
+            connectionState = .reconnecting
+        }
         let delaySec = min(6.0, Double(reconnectAttempt) * 0.8)
         reconnectTask?.cancel()
         reconnectTask = Task { [weak self] in
@@ -339,18 +350,22 @@ public final class UHDWatchPartySession: ObservableObject {
 
     private func handleServerText(_ text: String) {
         guard let data = text.data(using: .utf8),
-              let frame = try? JSONDecoder().decode(WPServerFrame.self, from: data) else {
+              let frame = try? Self.sharedDecoder.decode(WPServerFrame.self, from: data) else {
             return
         }
         switch frame.type {
         case "snapshot", "ack":
             if let room = frame.room {
-                connectionState = .connected
+                if connectionState != .connected {
+                    connectionState = .connected
+                }
                 reconnectAttempt = 0
-                if let inv = room.invite, !inv.isEmpty {
+                if let inv = room.invite, !inv.isEmpty, inviteCode != inv {
                     inviteCode = inv
                 }
-                snapshot = room
+                if snapshot != room {
+                    snapshot = room
+                }
                 onRoomSnapshot?(room)
             }
         case "pong":
@@ -365,24 +380,36 @@ public final class UHDWatchPartySession: ObservableObject {
                 }
             }
         case "error":
-            lastErrorMessage = frame.message ?? frame.code ?? "同看同步错误"
+            let nextErr = frame.message ?? frame.code ?? "同看同步错误"
+            if lastErrorMessage != nextErr {
+                lastErrorMessage = nextErr
+            }
             if frame.code == "PARTY_STALE" {
                 onStaleRevision?(snapshot)
             }
         case "closed":
             let reason = "房主已结束本次同看房间"
             disconnect(permanently: true)
-            connectionState = .terminated(reason: reason)
+            let nextState: UHDWatchPartyConnectionState = .terminated(reason: reason)
+            if connectionState != nextState {
+                connectionState = nextState
+            }
             onTerminated?(reason)
         case "removed":
             let reason = "你已离开或被移出同看房间"
             disconnect(permanently: true)
-            connectionState = .terminated(reason: reason)
+            let nextState: UHDWatchPartyConnectionState = .terminated(reason: reason)
+            if connectionState != nextState {
+                connectionState = nextState
+            }
             onTerminated?(reason)
         case "replaced":
             let reason = "当前账号已在其他设备加入同看，本端已断开"
             disconnect(permanently: true)
-            connectionState = .terminated(reason: reason)
+            let nextState: UHDWatchPartyConnectionState = .terminated(reason: reason)
+            if connectionState != nextState {
+                connectionState = nextState
+            }
             onTerminated?(reason)
         default:
             break

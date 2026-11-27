@@ -23,7 +23,6 @@ public struct UHDAnimeCalendarSheet: View {
     }
 
     public var body: some View {
-        let appearance = appState.cardAppearance
         let todayWD = UHDAnimeCalendarDay.todayShanghaiWeekday()
         VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -50,9 +49,11 @@ public struct UHDAnimeCalendarSheet: View {
                             .foregroundStyle(isSelected ? appState.accentTextColor : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
+                            .frame(minHeight: 24)
                             .background(
                                 Capsule().fill(isSelected ? appState.accentColor : Color.clear)
                             )
+                            .contentShape(Capsule())
                         }
                         .buttonStyle(.plain)
                     }
@@ -126,37 +127,40 @@ public struct UHDAnimeCalendarSheet: View {
                 .frame(maxWidth: .infinity, minHeight: 340)
             } else {
                 ScrollView(showsIndicators: false) {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 146, maximum: 165), spacing: 14)], alignment: .leading, spacing: 16) {
-                        ForEach(entries) { entry in
-                            ZStack(alignment: .topTrailing) {
-                                PosterCardView(
-                                    item: entry.item,
-                                    width: 148,
-                                    appearance: appearance,
-                                    onSelect: {
-                                        dismiss()
-                                        appState.openDetail(for: entry.item)
-                                    },
-                                    onPlay: {
-                                        dismiss()
-                                        Task { await appState.startPlayback(item: entry.item) }
-                                    }
-                                )
-                                .equatable()
+                    DonbyDownloadStatusObserver(store: appState.downloadStatusStore) { statusIndex in
+                        let appearance = appState.cardAppearance(downloadStatusIndex: statusIndex)
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 146, maximum: 165), spacing: 14)], alignment: .leading, spacing: 16) {
+                            ForEach(entries) { entry in
+                                ZStack(alignment: .topTrailing) {
+                                    PosterCardView(
+                                        item: entry.item,
+                                        width: 148,
+                                        appearance: appearance,
+                                        onSelect: {
+                                            dismiss()
+                                            appState.openDetail(for: entry.item)
+                                        },
+                                        onPlay: {
+                                            dismiss()
+                                            Task { await appState.startPlayback(item: entry.item) }
+                                        }
+                                    )
+                                    .equatable()
 
-                                Text(entry.schedule.badgeText)
-                                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2.5)
-                                    .background(Color.black.opacity(0.72))
-                                    .clipShape(Capsule())
-                                    .padding(6)
-                                    .allowsHitTesting(false)
+                                    Text(entry.schedule.badgeText)
+                                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2.5)
+                                        .background(Color.black.opacity(0.72))
+                                        .clipShape(Capsule())
+                                        .padding(6)
+                                        .allowsHitTesting(false)
+                                }
                             }
                         }
+                        .padding(.vertical, 4)
                     }
-                    .padding(.vertical, 4)
                 }
                 .frame(minHeight: 360, maxHeight: 480)
             }
@@ -181,7 +185,13 @@ public struct UHDAnimeCalendarSheet: View {
             errorMessage = nil
             defer { isLoading = false }
             do {
-                entries = try await UHDStreamClient.shared.fetchAnimeCalendarItems(server: server, weekday: selectedWeekday, mode: mode)
+                let fetched = try await UHDStreamClient.shared.fetchAnimeCalendarItems(server: server, weekday: selectedWeekday, mode: mode)
+                guard !Task.isCancelled else { return }
+                entries = fetched
+            } catch is CancellationError {
+                return
+            } catch let urlErr as URLError where urlErr.code == .cancelled {
+                return
             } catch {
                 errorMessage = "加载失败: \(error.localizedDescription)"
             }
@@ -217,13 +227,13 @@ public struct UHDFavoritesSheet: View {
     @State private var nextCursor: String? = nil
     @State private var isLoading: Bool = false
     @State private var isLoadingMore: Bool = false
+    @State private var loadGeneration: UInt64 = 0
 
     public init(server: EmbyServerConfig) {
         self.server = server
     }
 
     public var body: some View {
-        let appearance = appState.cardAppearance
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 HStack(spacing: 8) {
@@ -297,25 +307,28 @@ public struct UHDFavoritesSheet: View {
                     emptyPlaceholder("暂无收藏\(tab.rawValue)")
                 } else {
                     ScrollView(showsIndicators: false) {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 146, maximum: 165), spacing: 14)], alignment: .leading, spacing: 16) {
-                            ForEach(mediaItems) { item in
-                                PosterCardView(
-                                    item: item,
-                                    width: 148,
-                                    appearance: appearance,
-                                    onSelect: {
-                                        dismiss()
-                                        appState.openDetail(for: item)
-                                    },
-                                    onPlay: {
-                                        dismiss()
-                                        Task { await appState.startPlayback(item: item) }
-                                    }
-                                )
-                                .equatable()
+                        DonbyDownloadStatusObserver(store: appState.downloadStatusStore) { statusIndex in
+                            let appearance = appState.cardAppearance(downloadStatusIndex: statusIndex)
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 146, maximum: 165), spacing: 14)], alignment: .leading, spacing: 16) {
+                                ForEach(mediaItems) { item in
+                                    PosterCardView(
+                                        item: item,
+                                        width: 148,
+                                        appearance: appearance,
+                                        onSelect: {
+                                            dismiss()
+                                            appState.openDetail(for: item)
+                                        },
+                                        onPlay: {
+                                            dismiss()
+                                            Task { await appState.startPlayback(item: item) }
+                                        }
+                                    )
+                                    .equatable()
+                                }
                             }
+                            .padding(.vertical, 4)
                         }
-                        .padding(.vertical, 4)
                         loadMoreFooter
                     }
                     .frame(minHeight: 360, maxHeight: 470)
@@ -377,25 +390,37 @@ public struct UHDFavoritesSheet: View {
     }
 
     private func loadPage(reset: Bool) async {
+        let gen: UInt64
+        let cursorSnapshot: String?
         if reset {
+            loadGeneration &+= 1
+            gen = loadGeneration
+            cursorSnapshot = nil
             isLoading = true
+            isLoadingMore = false
             nextCursor = nil
         } else {
-            guard !isLoadingMore, nextCursor != nil else { return }
+            guard !isLoadingMore, let currentCursor = nextCursor, !currentCursor.isEmpty else { return }
+            gen = loadGeneration
+            cursorSnapshot = currentCursor
             isLoadingMore = true
         }
         defer {
-            isLoading = false
-            isLoadingMore = false
+            if gen == loadGeneration {
+                isLoading = false
+                isLoadingMore = false
+            }
         }
         if tab == .person {
-            if let res = try? await UHDStreamClient.shared.fetchFavoritePersons(server: server, limit: 40, cursor: reset ? nil : nextCursor) {
+            if let res = try? await UHDStreamClient.shared.fetchFavoritePersons(server: server, limit: 40, cursor: cursorSnapshot) {
+                guard gen == loadGeneration, !Task.isCancelled else { return }
                 if reset { persons = res.items } else { persons.append(contentsOf: res.items) }
                 totalCount = res.total
                 nextCursor = res.nextCursor
             }
         } else {
-            if let res = try? await UHDStreamClient.shared.fetchFavorites(server: server, type: tab.apiType, limit: 36, cursor: reset ? nil : nextCursor) {
+            if let res = try? await UHDStreamClient.shared.fetchFavorites(server: server, type: tab.apiType, limit: 36, cursor: cursorSnapshot) {
+                guard gen == loadGeneration, !Task.isCancelled else { return }
                 if reset { mediaItems = res.items } else { mediaItems.append(contentsOf: res.items) }
                 totalCount = res.total
                 nextCursor = res.nextCursor
@@ -418,6 +443,7 @@ public struct UHDPersonDetailSheet: View {
     @State private var sortBy: String = "release_date"
     @State private var isLoading: Bool = false
     @State private var isLoadingMore: Bool = false
+    @State private var worksGeneration: UInt64 = 0
     @State private var isTogglingFav: Bool = false
 
     public init(target: UHDPersonSheetTarget) {
@@ -425,7 +451,6 @@ public struct UHDPersonDetailSheet: View {
     }
 
     public var body: some View {
-        let appearance = appState.cardAppearance
         let isFav = detail?.favorite ?? false
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 14) {
@@ -516,14 +541,21 @@ public struct UHDPersonDetailSheet: View {
 
                 Spacer()
 
-                Picker("排序", selection: $sortBy) {
-                    Text("发行日期").tag("release_date")
-                    Text("热门").tag("hot")
-                    Text("评分").tag("rating")
-                    Text("最新").tag("asset_updated_at")
-                    Text("名称").tag("title")
+                DonbyGlassMenuPicker(
+                    options: ["release_date", "hot", "rating", "asset_updated_at", "title"],
+                    selection: $sortBy,
+                    isLightMode: appState.isLightMode,
+                    accentColor: appState.accentColor,
+                    width: 140
+                ) { key in
+                    switch key {
+                    case "hot": return "热门"
+                    case "rating": return "评分"
+                    case "asset_updated_at": return "最新"
+                    case "title": return "名称"
+                    default: return "发行日期"
+                    }
                 }
-                .frame(width: 140)
             }
 
             Divider().opacity(appState.isLightMode ? 0.30 : 0.12)
@@ -542,25 +574,28 @@ public struct UHDPersonDetailSheet: View {
                 .frame(maxWidth: .infinity, minHeight: 330)
             } else {
                 ScrollView(showsIndicators: false) {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 146, maximum: 165), spacing: 14)], alignment: .leading, spacing: 16) {
-                        ForEach(works) { item in
-                            PosterCardView(
-                                item: item,
-                                width: 148,
-                                appearance: appearance,
-                                onSelect: {
-                                    dismiss()
-                                    appState.openDetail(for: item)
-                                },
-                                onPlay: {
-                                    dismiss()
-                                    Task { await appState.startPlayback(item: item) }
-                                }
-                            )
-                            .equatable()
+                    DonbyDownloadStatusObserver(store: appState.downloadStatusStore) { statusIndex in
+                        let appearance = appState.cardAppearance(downloadStatusIndex: statusIndex)
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 146, maximum: 165), spacing: 14)], alignment: .leading, spacing: 16) {
+                            ForEach(works) { item in
+                                PosterCardView(
+                                    item: item,
+                                    width: 148,
+                                    appearance: appearance,
+                                    onSelect: {
+                                        dismiss()
+                                        appState.openDetail(for: item)
+                                    },
+                                    onPlay: {
+                                        dismiss()
+                                        Task { await appState.startPlayback(item: item) }
+                                    }
+                                )
+                                .equatable()
+                            }
                         }
+                        .padding(.vertical, 4)
                     }
-                    .padding(.vertical, 4)
 
                     if let cursor = nextCursor, !cursor.isEmpty {
                         HStack {
@@ -608,16 +643,26 @@ public struct UHDPersonDetailSheet: View {
     }
 
     private func loadWorks(reset: Bool) async {
+        let gen: UInt64
+        let cursorSnapshot: String?
         if reset {
+            worksGeneration &+= 1
+            gen = worksGeneration
+            cursorSnapshot = nil
             isLoading = true
+            isLoadingMore = false
             nextCursor = nil
         } else {
-            guard !isLoadingMore, nextCursor != nil else { return }
+            guard !isLoadingMore, let currentCursor = nextCursor, !currentCursor.isEmpty else { return }
+            gen = worksGeneration
+            cursorSnapshot = currentCursor
             isLoadingMore = true
         }
         defer {
-            isLoading = false
-            isLoadingMore = false
+            if gen == worksGeneration {
+                isLoading = false
+                isLoadingMore = false
+            }
         }
         let order = (sortBy == "title") ? "asc" : "desc"
         if let res = try? await UHDStreamClient.shared.fetchPersonWorks(
@@ -627,8 +672,9 @@ public struct UHDPersonDetailSheet: View {
             sortBy: sortBy,
             sortOrder: order,
             limit: 36,
-            cursor: reset ? nil : nextCursor
+            cursor: cursorSnapshot
         ) {
+            guard gen == worksGeneration, !Task.isCancelled else { return }
             if reset {
                 works = res.items
             } else {

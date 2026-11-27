@@ -7,6 +7,7 @@ import DonbyKernelC
 
 // MARK: - High-Resolution Media Artwork View (Real Bundled Posters + Live Emby Server Artwork)
 public struct MediaArtworkView: View {
+    @Environment(\.colorScheme) private var colorScheme
     public let server: EmbyServerConfig?
     public let item: EmbyItem
     public var kind: EmbyImageKind = .primary
@@ -14,6 +15,7 @@ public struct MediaArtworkView: View {
     public var alignment: Alignment = .center
 
     @State private var loadedImage: CGImage? = nil
+    @State private var loadedKey: String = ""
 
     public init(
         server: EmbyServerConfig?,
@@ -152,7 +154,7 @@ public struct MediaArtworkView: View {
             }
             return keys
         }
-        return [primaryKey, item.id]
+        return [primaryKey]
     }
 
     nonisolated public static func cachedCGImageInMemory(item: EmbyItem, kind: EmbyImageKind, maxWidth: Int) -> CGImage? {
@@ -199,12 +201,8 @@ public struct MediaArtworkView: View {
                 if url.isFileURL {
                     if let data = try? Data(contentsOf: url), data.count > 128 {
                         var aliases = [url.absoluteString]
-                        if kind == .backdrop {
-                            if item.isEpisode, let sId = item.seriesId {
-                                aliases.append("series_\(sId)_backdrop")
-                            }
-                        } else {
-                            aliases.append(contentsOf: [item.id, "item_\(item.id)"])
+                        if kind == .backdrop, item.isEpisode, let sId = item.seriesId {
+                            aliases.append("series_\(sId)_backdrop")
                         }
                         if let decoded = await ArtworkImageCache.shared.storeRawDataCGAsync(
                             data,
@@ -226,12 +224,8 @@ public struct MediaArtworkView: View {
                     if let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
                        data.count > 128 {
                         var aliases = [url.absoluteString]
-                        if kind == .backdrop {
-                            if item.isEpisode, let sId = item.seriesId {
-                                aliases.append("series_\(sId)_backdrop")
-                            }
-                        } else {
-                            aliases.append(contentsOf: [item.id, "item_\(item.id)"])
+                        if kind == .backdrop, item.isEpisode, let sId = item.seriesId {
+                            aliases.append("series_\(sId)_backdrop")
                         }
                         if let decoded = await ArtworkImageCache.shared.storeRawDataCGAsync(
                             data,
@@ -251,7 +245,12 @@ public struct MediaArtworkView: View {
         }
     }
 
+    private var currentLoadKey: String {
+        "\(server?.activeBaseURL ?? "")|\(item.id)|\(kind.rawValue)"
+    }
+
     public var body: some View {
+        let isLight = (colorScheme == .light)
         Group {
             if let img = resolvedImage {
                 Color.clear
@@ -263,17 +262,20 @@ public struct MediaArtworkView: View {
                     .clipped()
             } else {
                 ZStack {
-                    Color(red: 0.88, green: 0.89, blue: 0.92).opacity(0.35)
+                    isLight
+                        ? Color(red: 0.91, green: 0.92, blue: 0.94)
+                        : Color(red: 0.10, green: 0.11, blue: 0.14)
                     Image(systemName: "film")
                         .font(.system(size: 22, weight: .light))
-                        .foregroundStyle(Color.black.opacity(0.18))
+                        .foregroundStyle(isLight ? Color.black.opacity(0.22) : Color.white.opacity(0.24))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
-        .task(id: "\(server?.activeBaseURL ?? "")|\(item.id)|\(kind.rawValue)") {
+        .task(id: currentLoadKey) {
+            let taskKey = currentLoadKey
             if resolvedImage != nil {
                 return
             }
@@ -281,13 +283,14 @@ public struct MediaArtworkView: View {
                !Task.isCancelled {
                 await MainActor.run {
                     self.loadedImage = img
+                    self.loadedKey = taskKey
                 }
             }
         }
     }
 
     private var resolvedImage: CGImage? {
-        if let loadedImage { return loadedImage }
+        if let loadedImage, loadedKey == currentLoadKey { return loadedImage }
         return Self.cachedCGImageInMemory(item: item, kind: kind, maxWidth: maxWidth)
     }
 }
@@ -421,6 +424,7 @@ public struct RecordArtworkThumbnailView: View {
     public var height: CGFloat = 114
 
     @State private var thumbnail: NSImage? = nil
+    @State private var loadedKey: String = ""
 
     public init(
         record: WatchRecordItem,
@@ -469,13 +473,17 @@ public struct RecordArtworkThumbnailView: View {
                 .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.65)
         )
         .shadow(color: Color.black.opacity(0.24), radius: 5, y: 2)
-        .task(id: "\(record.id)|\(record.posterURL ?? "")") {
-            await loadThumbnail()
+        .task(id: currentLoadKey) {
+            await loadThumbnail(forKey: currentLoadKey)
         }
     }
 
+    private var currentLoadKey: String {
+        "\(record.id)|\(record.posterURL ?? "")"
+    }
+
     private var resolvedThumbnail: NSImage? {
-        if let thumbnail { return thumbnail }
+        if let thumbnail, loadedKey == currentLoadKey { return thumbnail }
         return ArtworkImageCache.shared.imageFromMemoryFirst(keys: candidateCacheKeys)
     }
 
@@ -485,14 +493,15 @@ public struct RecordArtworkThumbnailView: View {
         if let stream = record.streamURLString { keys.append("local_frame_\(stream)") }
         if let urlStr = record.posterURL { keys.append(urlStr) }
         if let embyId = record.embyItemId {
-            keys.append(contentsOf: ["item_\(embyId)_primary", "item_\(embyId)_thumb", "item_\(embyId)", embyId, "emby_\(embyId)"])
+            keys.append(contentsOf: ["item_\(embyId)_primary", "item_\(embyId)_thumb", "emby_\(embyId)"])
         }
         return keys
     }
 
-    private func loadThumbnail() async {
+    private func loadThumbnail(forKey taskKey: String) async {
         if let cached = resolvedThumbnail {
             self.thumbnail = cached
+            self.loadedKey = taskKey
             return
         }
         for key in candidateCacheKeys {
@@ -501,6 +510,7 @@ public struct RecordArtworkThumbnailView: View {
                 if !Task.isCancelled {
                     await MainActor.run {
                         self.thumbnail = diskImg
+                        self.loadedKey = taskKey
                     }
                 }
                 return
@@ -512,10 +522,13 @@ public struct RecordArtworkThumbnailView: View {
             if let img = await fetchImage(url: url) {
                 var aliases = [cacheKey, "record_\(record.id)"]
                 if let embyId = record.embyItemId {
-                    aliases.append(contentsOf: ["item_\(embyId)", "item_\(embyId)_primary", embyId])
+                    aliases.append("item_\(embyId)_primary")
                 }
-                ArtworkImageCache.shared.store(img, for: cacheKey, aliases: aliases)
-                self.thumbnail = img
+                ArtworkImageCache.shared.aliasKeys(aliases, to: url.absoluteString)
+                if !Task.isCancelled {
+                    self.thumbnail = img
+                    self.loadedKey = taskKey
+                }
                 return
             }
         }
@@ -524,8 +537,11 @@ public struct RecordArtworkThumbnailView: View {
         if let itemId = record.embyItemId, let server, !server.host.isEmpty {
             if let url = EmbyClient.shared.imageURL(server: server, itemId: itemId, kind: .primary, maxWidth: 300) {
                 if let img = await fetchImage(url: url) {
-                    ArtworkImageCache.shared.store(img, for: cacheKey, aliases: ["item_\(itemId)", "item_\(itemId)_primary", itemId])
-                    self.thumbnail = img
+                    ArtworkImageCache.shared.aliasKeys([cacheKey, "item_\(itemId)_primary"], to: url.absoluteString)
+                    if !Task.isCancelled {
+                        self.thumbnail = img
+                        self.loadedKey = taskKey
+                    }
                     return
                 }
             }
@@ -542,7 +558,10 @@ public struct RecordArtworkThumbnailView: View {
             }()
             if let fileURL, let img = await extractLocalThumbnail(fileURL: fileURL) {
                 ArtworkImageCache.shared.store(img, for: cacheKey, aliases: ["local_frame_\(streamStr)"])
-                self.thumbnail = img
+                if !Task.isCancelled {
+                    self.thumbnail = img
+                    self.loadedKey = taskKey
+                }
                 return
             }
         }
@@ -607,6 +626,7 @@ public struct ClearLogoHeaderView: View {
     public let subtitle: String
 
     @State private var logoImage: NSImage? = nil
+    @State private var loadedLogoKey: String = ""
 
     public init(
         server: EmbyServerConfig?,
@@ -654,9 +674,23 @@ public struct ClearLogoHeaderView: View {
         return urls
     }
 
+    private var logoCacheKey: String {
+        let primaryTargetId = item.isEpisode ? (item.seriesId ?? item.id) : item.id
+        return "logo_\(primaryTargetId)"
+    }
+
+    private var logoTaskKey: String {
+        "\(server?.activeBaseURL ?? "")|\(item.id)|\(item.seriesId ?? "")"
+    }
+
+    private var resolvedLogoImage: NSImage? {
+        if let logoImage, loadedLogoKey == logoTaskKey { return logoImage }
+        return ArtworkImageCache.shared.imageFromMemory(for: logoCacheKey)
+    }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let img = logoImage {
+            if let img = resolvedLogoImage {
                 Image(nsImage: img)
                     .resizable()
                     .scaledToFit()
@@ -682,16 +716,19 @@ public struct ClearLogoHeaderView: View {
                 }
             }
         }
-        .task(id: "\(server?.activeBaseURL ?? "")|\(item.id)|\(item.seriesId ?? "")") {
-            let primaryTargetId = item.isEpisode ? (item.seriesId ?? item.id) : item.id
-            let cacheKey = "logo_\(primaryTargetId)"
+        .task(id: logoTaskKey) {
+            let currentTaskKey = logoTaskKey
+            let cacheKey = logoCacheKey
             if let cached = ArtworkImageCache.shared.imageFromMemory(for: cacheKey) {
                 self.logoImage = cached
+                self.loadedLogoKey = currentTaskKey
                 return
             }
             if let disk = await ArtworkImageCache.shared.imageFromDiskAsync(for: cacheKey, maxPixelSize: 800) {
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     self.logoImage = disk
+                    self.loadedLogoKey = currentTaskKey
                 }
                 return
             }
@@ -701,8 +738,10 @@ public struct ClearLogoHeaderView: View {
                 if url.isFileURL {
                     if let data = try? Data(contentsOf: url), data.count > 100,
                        let decoded = await ArtworkImageCache.shared.storeRawDataAsync(data, for: cacheKey, maxPixelSize: 800) {
+                        guard !Task.isCancelled else { return }
                         await MainActor.run {
                             self.logoImage = decoded
+                            self.loadedLogoKey = currentTaskKey
                         }
                         return
                     }
@@ -716,8 +755,10 @@ public struct ClearLogoHeaderView: View {
                     if let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
                        data.count > 100,
                        let decoded = await ArtworkImageCache.shared.storeRawDataAsync(data, for: cacheKey, maxPixelSize: 800) {
+                        guard !Task.isCancelled else { return }
                         await MainActor.run {
                             self.logoImage = decoded
+                            self.loadedLogoKey = currentTaskKey
                         }
                         return
                     }

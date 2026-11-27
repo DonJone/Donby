@@ -69,23 +69,22 @@ private struct DonbyLiquidGlassCapsuleModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         let isLight = (colorScheme == .light)
+        let fillColor: Color = tint ?? (
+            isLight
+                ? Color.white.opacity(isHovered ? 0.94 : 0.88)
+                : Color(red: 0.11, green: 0.115, blue: 0.135).opacity(isHovered ? 0.94 : 0.88)
+        )
+        let shadowColor: Color = tint != nil
+            ? tint!.opacity(isHovered ? 0.35 : 0.20)
+            : (isLight ? Color.black.opacity(isHovered ? 0.08 : 0.04) : Color.black.opacity(isHovered ? 0.25 : 0.15))
+        let shadowRadius: CGFloat = isHovered ? 5 : 2.5
+        let shadowY: CGFloat = isHovered ? 2 : 1
+
         content
             .background(
-                ZStack {
-                    if let tint {
-                        Capsule(style: .continuous)
-                            .fill(tint)
-                    } else if isLight {
-                        Capsule(style: .continuous)
-                            .fill(.ultraThinMaterial)
-                        Capsule(style: .continuous)
-                            .fill(Color.white.opacity(isHovered ? 0.94 : 0.88))
-                    } else {
-                        Capsule(style: .continuous)
-                            .fill(Color(red: 0.11, green: 0.115, blue: 0.135).opacity(isHovered ? 0.94 : 0.88))
-                    }
-                }
-                .clipShape(Capsule(style: .continuous))
+                Capsule(style: .continuous)
+                    .fill(fillColor)
+                    .shadow(color: shadowColor, radius: shadowRadius, y: shadowY)
             )
             .overlay(
                 Capsule(style: .continuous)
@@ -93,13 +92,6 @@ private struct DonbyLiquidGlassCapsuleModifier: ViewModifier {
                         tint != nil ? Color.white.opacity(0.18) : (isLight ? Color.black.opacity(0.06) : Color.white.opacity(isHovered ? 0.16 : 0.10)),
                         lineWidth: 0.65
                     )
-            )
-            .shadow(
-                color: tint != nil
-                    ? tint!.opacity(isHovered ? 0.35 : 0.20)
-                    : (isLight ? Color.black.opacity(isHovered ? 0.08 : 0.04) : Color.black.opacity(isHovered ? 0.25 : 0.15)),
-                radius: isHovered ? 5 : 2.5,
-                y: isHovered ? 2 : 1
             )
     }
 }
@@ -114,32 +106,28 @@ private struct DonbyLiquidGlassRectModifier: ViewModifier {
     func body(content: Content) -> some View {
         let isLight = (colorScheme == .light)
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        let fillColor: Color = tint ?? (
+            isLight
+                ? Color.white.opacity(isHovered ? 0.94 : 0.88)
+                : Color(red: 0.11, green: 0.115, blue: 0.135).opacity(isHovered ? 0.94 : 0.88)
+        )
+        let shadowColor: Color = tint != nil
+            ? tint!.opacity(isHovered ? 0.35 : 0.20)
+            : (isLight ? Color.black.opacity(isHovered ? 0.08 : 0.04) : Color.black.opacity(isHovered ? 0.25 : 0.15))
+        let shadowRadius: CGFloat = isHovered ? 5 : 2.5
+        let shadowY: CGFloat = isHovered ? 2 : 1
+
         content
             .background(
-                ZStack {
-                    if let tint {
-                        shape.fill(tint)
-                    } else if isLight {
-                        shape.fill(.ultraThinMaterial)
-                        shape.fill(Color.white.opacity(isHovered ? 0.94 : 0.88))
-                    } else {
-                        shape.fill(Color(red: 0.11, green: 0.115, blue: 0.135).opacity(isHovered ? 0.94 : 0.88))
-                    }
-                }
-                .clipShape(shape)
+                shape
+                    .fill(fillColor)
+                    .shadow(color: shadowColor, radius: shadowRadius, y: shadowY)
             )
             .overlay(
                 shape.strokeBorder(
                     tint != nil ? Color.white.opacity(0.18) : (isLight ? Color.black.opacity(0.06) : Color.white.opacity(isHovered ? 0.16 : 0.10)),
                     lineWidth: 0.65
                 )
-            )
-            .shadow(
-                color: tint != nil
-                    ? tint!.opacity(isHovered ? 0.35 : 0.20)
-                    : (isLight ? Color.black.opacity(isHovered ? 0.08 : 0.04) : Color.black.opacity(isHovered ? 0.25 : 0.15)),
-                radius: isHovered ? 5 : 2.5,
-                y: isHovered ? 2 : 1
             )
     }
 }
@@ -415,6 +403,10 @@ private struct LiquidGlassCircleMenuVisual: View {
             hoverBox.onHoverChange = { isHovered = $0 }
             isHovered = hoverBox.isHovered
         }
+        .onDisappear {
+            hoverBox.setHovered(false)
+            isHovered = false
+        }
     }
 }
 
@@ -464,6 +456,10 @@ public struct LiquidGlassCircleMenu<MenuItems: View>: View {
             .frame(width: size, height: size)
             .contentShape(Circle())
             .onHover { hoverBox.setHovered($0) }
+            .onDisappear { hoverBox.setHovered(false) }
+            .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+                hoverBox.setHovered(false)
+            }
         }
         .frame(width: size, height: size)
         .alignmentGuide(VerticalAlignment.center) { d in d[VerticalAlignment.center] }
@@ -541,6 +537,10 @@ private struct LiquidGlassSelectorCardVisual: View {
             hoverBox.onHoverChange = { isHovered = $0 }
             isHovered = hoverBox.isHovered
         }
+        .onDisappear {
+            hoverBox.setHovered(false)
+            isHovered = false
+        }
     }
 }
 
@@ -600,7 +600,124 @@ public struct LiquidGlassSelectorCard<MenuItems: View>: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
             .onHover { hoverBox.setHovered($0) }
+            .onDisappear { hoverBox.setHovered(false) }
+            .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+                hoverBox.setHovered(false)
+            }
         }
+    }
+}
+
+/// Theme-faithful Liquid Glass menu picker replacing native macOS blue/grey NSPopUpButton Picker(.menu).
+public struct DonbyGlassMenuPicker<Option: Hashable>: View {
+    public let options: [Option]
+    @Binding public var selection: Option
+    public let isLightMode: Bool
+    public let accentColor: Color
+    public var width: CGFloat? = nil
+    public var height: CGFloat = 30
+    public let title: (Option) -> String
+
+    @State private var hoverBox = DonbyMenuHoverBox()
+    @State private var isHovered: Bool = false
+
+    public init(
+        options: [Option],
+        selection: Binding<Option>,
+        isLightMode: Bool,
+        accentColor: Color,
+        width: CGFloat? = nil,
+        height: CGFloat = 30,
+        title: @escaping (Option) -> String
+    ) {
+        self.options = options
+        self._selection = selection
+        self.isLightMode = isLightMode
+        self.accentColor = accentColor
+        self.width = width
+        self.height = height
+        self.title = title
+    }
+
+    public var body: some View {
+        ZStack {
+            HStack(spacing: 8) {
+                Text(title(selection))
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: isLightMode))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(
+                        isHovered
+                            ? accentColor
+                            : DonbyGlassPalette.secondaryText(isLight: isLightMode)
+                    )
+            }
+            .padding(.horizontal, 11)
+            .frame(maxWidth: .infinity)
+            .frame(height: height)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(
+                        isLightMode
+                            ? Color.black.opacity(isHovered ? 0.065 : 0.04)
+                            : Color.white.opacity(isHovered ? 0.11 : 0.07)
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(
+                        isHovered
+                            ? accentColor.opacity(0.45)
+                            : DonbyGlassPalette.separator(isLight: isLightMode),
+                        lineWidth: 0.7
+                    )
+            )
+            .allowsHitTesting(false)
+            .onAppear {
+                hoverBox.onHoverChange = { isHovered = $0 }
+                isHovered = hoverBox.isHovered
+            }
+            .onDisappear {
+                hoverBox.setHovered(false)
+                isHovered = false
+            }
+
+            Menu {
+                ForEach(options, id: \.self) { opt in
+                    Button {
+                        selection = opt
+                    } label: {
+                        if selection == opt {
+                            Label(title(opt), systemImage: "checkmark")
+                        } else {
+                            Text(title(opt))
+                        }
+                    }
+                }
+            } label: {
+                Color.clear
+                    .frame(maxWidth: .infinity)
+                    .frame(height: height)
+                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .frame(maxWidth: .infinity)
+            .frame(height: height)
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .onHover { hoverBox.setHovered($0) }
+            .onDisappear { hoverBox.setHovered(false) }
+            .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+                hoverBox.setHovered(false)
+            }
+        }
+        .frame(width: width)
+        .frame(minHeight: max(24, height))
     }
 }
 

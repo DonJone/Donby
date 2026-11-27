@@ -5,8 +5,18 @@ import DonbyNetwork
 import DonbyKernelC
 import DonbyMetalRenderer
 
+/// Non-observable box holding preview-throttling and debounced commit tasks so
+/// 120Hz slider drags never trigger redundant SwiftUI updates or UserDefaults writes.
+private final class SubtitleDrawerSliderBox {
+    var lastPreviewUptime: TimeInterval = 0
+    var lastAppliedPreview: SubtitleStyleConfiguration? = nil
+    var pendingPreviewTask: Task<Void, Never>? = nil
+    var pendingCommitTask: Task<Void, Never>? = nil
+}
+
 struct PlayerSubtitleStyleDrawerView: View {
     @ObservedObject var appState: AppState
+    @ObservedObject private var alignmentCoordinator = SubtitleAlignmentCoordinator.shared
     @Binding var isAdjustingSubtitleLayout: Bool
     let hasActivePrimary: Bool
     let hasActiveSecondary: Bool
@@ -27,6 +37,14 @@ struct PlayerSubtitleStyleDrawerView: View {
     @State private var showMoreSubtitleOptions: Bool = false
     @State private var draftScale: Double? = nil
     @State private var draftVerticalPos: Double? = nil
+    @State private var draftSecondaryScale: Double? = nil
+    @State private var draftDualGapPx: Double? = nil
+    @State private var draftBorderWidth: Double? = nil
+    @State private var sliderBox = SubtitleDrawerSliderBox()
+
+    private var activeAlignmentMode: SubtitleAlignmentMode {
+        isAutoAligningSubtitle ? alignmentCoordinator.mode : .none
+    }
 
     private var activeScale: Double {
         draftScale ?? appState.subtitleStyle.scale
@@ -36,29 +54,158 @@ struct PlayerSubtitleStyleDrawerView: View {
         draftVerticalPos ?? appState.subtitleStyle.verticalPositionPercent
     }
 
-    private var scaleBinding: Binding<Double> {
+    private var activeSecondaryScale: Double {
+        draftSecondaryScale ?? appState.subtitleStyle.secondaryScale
+    }
+
+    private var activeDualGapPx: Double {
+        draftDualGapPx ?? appState.subtitleStyle.dualSubtitleGapPx
+    }
+
+    private var activeBorderWidth: Double {
+        draftBorderWidth ?? appState.subtitleStyle.borderWidth
+    }
+
+    private func makeDraftStyle(base: SubtitleStyleConfiguration) -> SubtitleStyleConfiguration {
+        var preview = base
+        if let s = draftScale { preview.scale = s }
+        if let v = draftVerticalPos { preview.verticalPositionPercent = v }
+        if let sec = draftSecondaryScale { preview.secondaryScale = sec }
+        if let gap = draftDualGapPx { preview.dualSubtitleGapPx = gap }
+        if let border = draftBorderWidth { preview.borderWidth = border }
+        return preview
+    }
+
+    private func scheduleLivePreview(_ preview: SubtitleStyleConfiguration, immediate: Bool = false) {
+        guard onLivePreviewStyle != nil else { return }
+        if preview == sliderBox.lastAppliedPreview { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        if immediate || (now - sliderBox.lastPreviewUptime >= 0.033 && sliderBox.pendingPreviewTask == nil) {
+            sliderBox.pendingPreviewTask?.cancel()
+            sliderBox.pendingPreviewTask = nil
+            sliderBox.lastPreviewUptime = now
+            sliderBox.lastAppliedPreview = preview
+            onLivePreviewStyle?(preview)
+            return
+        }
+        sliderBox.pendingPreviewTask?.cancel()
+        sliderBox.pendingPreviewTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 33_000_000)
+            guard !Task.isCancelled else { return }
+            sliderBox.pendingPreviewTask = nil
+            let latest = makeDraftStyle(base: appState.subtitleStyle)
+            guard latest != sliderBox.lastAppliedPreview else { return }
+            sliderBox.lastPreviewUptime = ProcessInfo.processInfo.systemUptime
+            sliderBox.lastAppliedPreview = latest
+            onLivePreviewStyle?(latest)
+        }
+    }
+
+    private func scheduleDebouncedCommit() {
+        sliderBox.pendingCommitTask?.cancel()
+        sliderBox.pendingCommitTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            sliderBox.pendingCommitTask = nil
+            commitPendingDrafts()
+        }
+    }
+
+    private func commitPendingDrafts() {
+        sliderBox.pendingCommitTask?.cancel()
+        sliderBox.pendingCommitTask = nil
+        sliderBox.pendingPreviewTask?.cancel()
+        sliderBox.pendingPreviewTask = nil
+        let hasDraft = draftScale != nil
+            || draftVerticalPos != nil
+            || draftSecondaryScale != nil
+            || draftDualGapPx != nil
+            || draftBorderWidth != nil
+        guard hasDraft else { return }
+        let updated = makeDraftStyle(base: appState.subtitleStyle)
+        draftScale = nil
+        draftVerticalPos = nil
+        draftSecondaryScale = nil
+        draftDualGapPx = nil
+        draftBorderWidth = nil
+        if updated != appState.subtitleStyle {
+            appState.subtitleStyle = updated
+        }
+    }
+
+    private func clearAllDraftsAndTasks() {
+        sliderBox.pendingPreviewTask?.cancel()
+        sliderBox.pendingPreviewTask = nil
+        sliderBox.pendingCommitTask?.cancel()
+        sliderBox.pendingCommitTask = nil
+        sliderBox.lastAppliedPreview = nil
+        draftScale = nil
+        draftVerticalPos = nil
+        draftSecondaryScale = nil
+        draftDualGapPx = nil
+        draftBorderWidth = nil
+    }
+
+    private func draftSliderBinding(
+        current: @escaping () -> Double,
+        assignDraft: @escaping (Double) -> Void
+    ) -> Binding<Double> {
         Binding(
-            get: { draftScale ?? appState.subtitleStyle.scale },
+            get: current,
             set: { newVal in
-                draftScale = newVal
-                var preview = appState.subtitleStyle
-                preview.scale = newVal
-                if let v = draftVerticalPos { preview.verticalPositionPercent = v }
-                onLivePreviewStyle?(preview)
+                sliderBox.pendingCommitTask?.cancel()
+                sliderBox.pendingCommitTask = nil
+                assignDraft(newVal)
+                scheduleLivePreview(makeDraftStyle(base: appState.subtitleStyle))
             }
         )
     }
 
+    private func handleSliderEditingChanged(_ editing: Bool, affectsLayout: Bool) {
+        if affectsLayout {
+            withAnimation(.easeInOut(duration: 0.15)) { isAdjustingSubtitleLayout = editing }
+        }
+        if editing {
+            sliderBox.pendingCommitTask?.cancel()
+            sliderBox.pendingCommitTask = nil
+        } else {
+            scheduleLivePreview(makeDraftStyle(base: appState.subtitleStyle), immediate: true)
+            scheduleDebouncedCommit()
+        }
+    }
+
+    private var scaleBinding: Binding<Double> {
+        draftSliderBinding(
+            current: { activeScale },
+            assignDraft: { draftScale = $0 }
+        )
+    }
+
     private var verticalPosBinding: Binding<Double> {
-        Binding(
-            get: { draftVerticalPos ?? appState.subtitleStyle.verticalPositionPercent },
-            set: { newVal in
-                draftVerticalPos = newVal
-                var preview = appState.subtitleStyle
-                if let s = draftScale { preview.scale = s }
-                preview.verticalPositionPercent = newVal
-                onLivePreviewStyle?(preview)
-            }
+        draftSliderBinding(
+            current: { activeVerticalPos },
+            assignDraft: { draftVerticalPos = $0 }
+        )
+    }
+
+    private var secondaryScaleBinding: Binding<Double> {
+        draftSliderBinding(
+            current: { activeSecondaryScale },
+            assignDraft: { draftSecondaryScale = $0 }
+        )
+    }
+
+    private var dualGapPxBinding: Binding<Double> {
+        draftSliderBinding(
+            current: { activeDualGapPx },
+            assignDraft: { draftDualGapPx = $0 }
+        )
+    }
+
+    private var borderWidthBinding: Binding<Double> {
+        draftSliderBinding(
+            current: { activeBorderWidth },
+            assignDraft: { draftBorderWidth = $0 }
         )
     }
 
@@ -76,7 +223,7 @@ struct PlayerSubtitleStyleDrawerView: View {
                     onAutoAlignAudio()
                 } label: {
                     HStack(spacing: 5) {
-                        if isAutoAligningSubtitle {
+                        if activeAlignmentMode == .audioToSubtitle {
                             ProgressView().controlSize(.mini)
                         } else {
                             Image(systemName: "waveform")
@@ -107,8 +254,12 @@ struct PlayerSubtitleStyleDrawerView: View {
                     onAutoAlignDual()
                 } label: {
                     HStack(spacing: 5) {
-                        Image(systemName: "arrow.left.arrow.right")
-                            .font(.system(size: 10.5, weight: .semibold))
+                        if activeAlignmentMode == .dualSubtitles {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "arrow.left.arrow.right")
+                                .font(.system(size: 10.5, weight: .semibold))
+                        }
                         Text("双字对齐")
                     }
                     .font(.system(size: 11.5, weight: .semibold))
@@ -129,7 +280,28 @@ struct PlayerSubtitleStyleDrawerView: View {
                 .disabled(dualAlignDisabled)
                 .help("对齐主/副字幕偏移及 23.976/25fps 帧率漂移（自动校验音轨基准）")
 
-                if lastSubtitleAlignUndo != nil {
+                if isAutoAligningSubtitle {
+                    Button {
+                        alignmentCoordinator.cancel()
+                        appState.showToast("已取消字幕对齐", icon: "xmark.circle")
+                    } label: {
+                        Text("取消")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(accentTint)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                    .fill(Color.white.opacity(0.08))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                    .strokeBorder(Color.white.opacity(0.14), lineWidth: 0.65)
+                            )
+                            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                } else if lastSubtitleAlignUndo != nil {
                     Button {
                         onUndoAlign()
                     } label: {
@@ -211,6 +383,7 @@ struct PlayerSubtitleStyleDrawerView: View {
                     .foregroundStyle(.white.opacity(0.68))
                 Spacer()
                 Button {
+                    clearAllDraftsAndTasks()
                     let prevDelay1 = appState.subtitleStyle.primaryDelaySeconds
                     let prevDelay2 = appState.subtitleStyle.secondaryDelaySeconds
                     var fresh = SubtitleStyleConfiguration()
@@ -258,11 +431,7 @@ struct PlayerSubtitleStyleDrawerView: View {
                     isLightMode: false,
                     accentColor: accentTint,
                     onEditingChanged: { editing in
-                        withAnimation(.easeInOut(duration: 0.15)) { isAdjustingSubtitleLayout = editing }
-                        if !editing, let committed = draftScale {
-                            draftScale = nil
-                            appState.subtitleStyle.scale = committed
-                        }
+                        handleSliderEditingChanged(editing, affectsLayout: true)
                     }
                 )
             }
@@ -296,11 +465,7 @@ struct PlayerSubtitleStyleDrawerView: View {
                     isLightMode: false,
                     accentColor: accentTint,
                     onEditingChanged: { editing in
-                        withAnimation(.easeInOut(duration: 0.15)) { isAdjustingSubtitleLayout = editing }
-                        if !editing, let committed = draftVerticalPos {
-                            draftVerticalPos = nil
-                            appState.subtitleStyle.verticalPositionPercent = committed
-                        }
+                        handleSliderEditingChanged(editing, affectsLayout: true)
                     }
                 )
             }
@@ -346,11 +511,14 @@ struct PlayerSubtitleStyleDrawerView: View {
 
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
-                            Text(String(format: "外语副行比例 %.2fx", appState.subtitleStyle.secondaryScale))
+                            Text(String(format: "外语副行比例 %.2fx", activeSecondaryScale))
                                 .font(.system(size: 11)).foregroundStyle(.white.opacity(0.82))
                             Spacer()
-                            if abs(appState.subtitleStyle.secondaryScale - 0.60) > 0.01 {
-                                Button { appState.subtitleStyle.secondaryScale = 0.60 } label: {
+                            if abs(activeSecondaryScale - 0.60) > 0.01 {
+                                Button {
+                                    draftSecondaryScale = nil
+                                    appState.subtitleStyle.secondaryScale = 0.60
+                                } label: {
                                     Text("重置")
                                         .font(.system(size: 10.5, weight: .semibold))
                                         .foregroundStyle(accentTint)
@@ -362,28 +530,28 @@ struct PlayerSubtitleStyleDrawerView: View {
                             }
                         }
                         DonbySlider(
-                            value: $appState.subtitleStyle.secondaryScale,
+                            value: secondaryScaleBinding,
                             in: 0.45...0.90,
                             step: 0.02,
                             isLightMode: false,
                             accentColor: accentTint,
                             onEditingChanged: { editing in
-                                withAnimation(.easeInOut(duration: 0.15)) { isAdjustingSubtitleLayout = editing }
+                                handleSliderEditingChanged(editing, affectsLayout: true)
                             }
                         )
                     }
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(String(format: "双语行间距 %.0f px", appState.subtitleStyle.dualSubtitleGapPx))
+                        Text(String(format: "双语行间距 %.0f px", activeDualGapPx))
                             .font(.system(size: 11)).foregroundStyle(.white.opacity(0.82))
                         DonbySlider(
-                            value: $appState.subtitleStyle.dualSubtitleGapPx,
+                            value: dualGapPxBinding,
                             in: 2...20,
                             step: 1,
                             isLightMode: false,
                             accentColor: accentTint,
                             onEditingChanged: { editing in
-                                withAnimation(.easeInOut(duration: 0.15)) { isAdjustingSubtitleLayout = editing }
+                                handleSliderEditingChanged(editing, affectsLayout: true)
                             }
                         )
                     }
@@ -417,14 +585,17 @@ struct PlayerSubtitleStyleDrawerView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(String(format: "描边宽度 %.1f", appState.subtitleStyle.borderWidth))
+                        Text(String(format: "描边宽度 %.1f", activeBorderWidth))
                             .font(.system(size: 11)).foregroundStyle(.white.opacity(0.82))
                         DonbySlider(
-                            value: $appState.subtitleStyle.borderWidth,
+                            value: borderWidthBinding,
                             in: 0...6,
                             step: 0.25,
                             isLightMode: false,
-                            accentColor: accentTint
+                            accentColor: accentTint,
+                            onEditingChanged: { editing in
+                                handleSliderEditingChanged(editing, affectsLayout: false)
+                            }
                         )
                     }
 
@@ -490,6 +661,9 @@ struct PlayerSubtitleStyleDrawerView: View {
                 .padding(.top, 4)
             }
         }
+        }
+        .onDisappear {
+            commitPendingDrafts()
         }
     }
 }

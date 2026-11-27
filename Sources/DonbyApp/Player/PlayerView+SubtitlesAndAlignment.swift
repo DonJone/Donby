@@ -5,6 +5,52 @@ import DonbyCore
 import DonbyNetwork
 import DonbyKernelC
 
+enum SubtitleAlignmentMode: Equatable {
+    case none
+    case audioToSubtitle
+    case dualSubtitles
+}
+
+@MainActor
+final class SubtitleAlignmentCoordinator: ObservableObject {
+    static let shared = SubtitleAlignmentCoordinator()
+    @Published private(set) var mode: SubtitleAlignmentMode = .none
+    private(set) var activeTaskID: UUID? = nil
+    private var activeTask: Task<Void, Never>? = nil
+    private var onCancelResetState: (() -> Void)? = nil
+
+    func begin(
+        mode: SubtitleAlignmentMode,
+        onCancelResetState: @escaping () -> Void,
+        taskFactory: (UUID) -> Task<Void, Never>
+    ) {
+        activeTask?.cancel()
+        let taskID = UUID()
+        self.mode = mode
+        self.activeTaskID = taskID
+        self.onCancelResetState = onCancelResetState
+        self.activeTask = taskFactory(taskID)
+    }
+
+    func clear(taskID: UUID) {
+        guard activeTaskID == taskID else { return }
+        activeTask = nil
+        activeTaskID = nil
+        mode = .none
+        onCancelResetState = nil
+    }
+
+    func cancel() {
+        activeTask?.cancel()
+        activeTask = nil
+        activeTaskID = nil
+        mode = .none
+        let reset = onCancelResetState
+        onCancelResetState = nil
+        reset?()
+    }
+}
+
 extension PlayerView {
     func resolvedDualAnchorMode() -> Int32 {
         func isChineseTag(_ raw: String) -> Bool {
@@ -104,7 +150,22 @@ extension PlayerView {
         guard let handle = playerHandle else { return }
         var cfg = Self.makeKernelSubtitleStyleConfig(styleOverride ?? appState.subtitleStyle, anchorMode: resolvedDualAnchorMode())
         dk_player_set_subtitle_style(handle, &cfg)
-        subtitleStyleRevision &+= 1
+        NotificationCenter.default.post(
+            name: Notification.Name("DonbyMetalRequestPausedSubtitleRedraw"),
+            object: nil,
+            userInfo: ["handle": UInt(bitPattern: handle)]
+        )
+    }
+
+    func cancelActiveSubtitleAlignment(showToast: Bool = false) {
+        guard SubtitleAlignmentCoordinator.shared.mode != .none || isAutoAligningSubtitle else { return }
+        SubtitleAlignmentCoordinator.shared.cancel()
+        if isAutoAligningSubtitle {
+            isAutoAligningSubtitle = false
+        }
+        if showToast {
+            appState.showToast("已取消字幕对齐", icon: "xmark.circle")
+        }
     }
 
     func loadRemoteExternalSubtitle(
@@ -113,11 +174,13 @@ extension PlayerView {
         silentToast: Bool,
         asSecondary: Bool = false
     ) {
+        cancelActiveSubtitleAlignment(showToast: false)
+        let expectedSelection: PlayerSubtitleSelection = .remoteExternal(url: item.url)
         if asSecondary {
-            activeSecondarySubtitleSelection = .remoteExternal(url: item.url)
+            activeSecondarySubtitleSelection = expectedSelection
         } else {
             selectedSubIdx = embyStreamIndex
-            activeSubtitleSelection = .remoteExternal(url: item.url)
+            activeSubtitleSelection = expectedSelection
         }
         let expectedGeneration = activePlaybackGeneration
         let headers = currentResource.headers
@@ -130,14 +193,29 @@ extension PlayerView {
             guard let (data, _) = try? await URLSession.shared.data(for: req),
                   let decoded = SubtitleTextDecoder.decode(data: data, fileExtension: ext) else {
                 await MainActor.run {
-                    appState.showToast("下载外挂字幕失败", icon: "exclamationmark.triangle.fill", isError: true)
+                    let stillSelected = asSecondary
+                        ? (self.activeSecondarySubtitleSelection == expectedSelection)
+                        : (self.activeSubtitleSelection == expectedSelection)
+                    guard self.activePlaybackGeneration == expectedGeneration, stillSelected else { return }
+                    if asSecondary {
+                        self.activeSecondarySubtitleSelection = .off
+                    } else {
+                        self.activeSubtitleSelection = .off
+                        self.selectedSubIdx = nil
+                    }
+                    if !silentToast {
+                        self.appState.showToast("下载外挂字幕失败", icon: "exclamationmark.triangle.fill", isError: true)
+                    }
                 }
                 return
             }
             let text = decoded.text
             let isAss = (ext == "ass" || ext == "ssa" || text.contains("[Script Info]"))
             await MainActor.run {
-                guard self.activePlaybackGeneration == expectedGeneration else { return }
+                let stillSelected = asSecondary
+                    ? (self.activeSecondarySubtitleSelection == expectedSelection)
+                    : (self.activeSubtitleSelection == expectedSelection)
+                guard self.activePlaybackGeneration == expectedGeneration, stillSelected else { return }
                 if let handle = self.playerHandle {
                     if asSecondary {
                         self.secondarySubtitleTimeScale = 1.0
@@ -167,8 +245,14 @@ extension PlayerView {
             if let t = UTType(filenameExtension: ext) { types.append(t) }
         }
         panel.allowedContentTypes = types
-        if panel.runModal() == .OK, let url = panel.url {
-            loadLocalExternalSubtitleURL(url, asSecondary: asSecondary, silentToast: false, persist: true)
+        let handleSelection: (NSApplication.ModalResponse) -> Void = { response in
+            guard response == .OK, let url = panel.url else { return }
+            self.loadLocalExternalSubtitleURL(url, asSecondary: asSecondary, silentToast: false, persist: true)
+        }
+        if let hostWindow = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible }) {
+            panel.beginSheetModal(for: hostWindow, completionHandler: handleSelection)
+        } else {
+            panel.begin(completionHandler: handleSelection)
         }
     }
 
@@ -178,50 +262,72 @@ extension PlayerView {
         silentToast: Bool,
         persist: Bool
     ) {
-        let ext = url.pathExtension.lowercased()
-        guard let data = try? Data(contentsOf: url),
-              let decoded = SubtitleTextDecoder.decode(data: data, fileExtension: ext) else {
-            if !silentToast {
-                appState.showToast("读取字幕文件失败", icon: "exclamationmark.triangle.fill", isError: true)
-            }
-            return
+        cancelActiveSubtitleAlignment(showToast: false)
+        let expectedSelection: PlayerSubtitleSelection = .localExternal(url: url)
+        let expectedGeneration = activePlaybackGeneration
+        if asSecondary {
+            secondaryLocalSubtitleName = url.lastPathComponent
+            activeSecondarySubtitleSelection = expectedSelection
+        } else {
+            explicitSubtitleOff = false
+            selectedSubIdx = nil
+            localExternalSubtitleName = url.lastPathComponent
+            activeSubtitleSelection = expectedSelection
         }
-        let text = decoded.text
-        let isAss = (ext == "ass" || ext == "ssa" || text.contains("[Script Info]"))
-        if let handle = playerHandle {
-            if asSecondary {
-                secondaryLocalSubtitleName = url.lastPathComponent
-                secondarySubtitleTimeScale = 1.0
-                isSecondaryAlignedToPrimary = false
-                activeSecondarySubtitleSelection = .localExternal(url: url)
-                dk_player_load_secondary_external_subtitle(handle, text, isAss)
-            } else {
-                explicitSubtitleOff = false
-                selectedSubIdx = nil
-                localExternalSubtitleName = url.lastPathComponent
-                activeSubtitleSelection = .localExternal(url: url)
-                dk_player_load_external_subtitle(handle, text, isAss)
+        let ext = url.pathExtension.lowercased()
+        Task.detached(priority: .userInitiated) {
+            let decoded = (try? Data(contentsOf: url)).flatMap {
+                SubtitleTextDecoder.decode(data: $0, fileExtension: ext)
             }
-            applyKernelSubtitleStyle()
-            if persist {
-                let pref = SubtitleTrackPreference(
-                    isDisabled: false,
-                    language: nil,
-                    titleHint: url.lastPathComponent,
-                    codec: ext,
-                    isExternal: true,
-                    embyStreamIndex: nil,
-                    localFilePath: url.path
-                )
-                if asSecondary {
-                    appState.recordSecondarySubtitleChoice(serverId: session.server.id, item: currentItem, preference: pref, updateGlobal: false)
-                } else {
-                    appState.recordPrimarySubtitleChoice(serverId: session.server.id, item: currentItem, preference: pref, updateGlobal: false)
+            await MainActor.run {
+                let stillSelected = asSecondary
+                    ? (self.activeSecondarySubtitleSelection == expectedSelection)
+                    : (self.activeSubtitleSelection == expectedSelection)
+                guard self.activePlaybackGeneration == expectedGeneration, stillSelected else { return }
+                guard let decoded else {
+                    if asSecondary {
+                        self.secondaryLocalSubtitleName = nil
+                        self.activeSecondarySubtitleSelection = .off
+                    } else {
+                        self.localExternalSubtitleName = nil
+                        self.activeSubtitleSelection = .off
+                    }
+                    if !silentToast {
+                        self.appState.showToast("读取字幕文件失败", icon: "exclamationmark.triangle.fill", isError: true)
+                    }
+                    return
                 }
-            }
-            if !silentToast {
-                let tag = asSecondary ? "已加载本地副字幕" : "已加载本地字幕"
-                appState.showToast("\(tag): \(url.lastPathComponent) (\(decoded.encoding.rawValue))", icon: "captions.bubble.fill")
+                let text = decoded.text
+                let isAss = (ext == "ass" || ext == "ssa" || text.contains("[Script Info]"))
+                guard let handle = self.playerHandle else { return }
+                if asSecondary {
+                    self.secondarySubtitleTimeScale = 1.0
+                    self.isSecondaryAlignedToPrimary = false
+                    dk_player_load_secondary_external_subtitle(handle, text, isAss)
+                } else {
+                    dk_player_load_external_subtitle(handle, text, isAss)
+                }
+                self.applyKernelSubtitleStyle()
+                if persist {
+                    let pref = SubtitleTrackPreference(
+                        isDisabled: false,
+                        language: nil,
+                        titleHint: url.lastPathComponent,
+                        codec: ext,
+                        isExternal: true,
+                        embyStreamIndex: nil,
+                        localFilePath: url.path
+                    )
+                    if asSecondary {
+                        self.appState.recordSecondarySubtitleChoice(serverId: self.session.server.id, item: self.currentItem, preference: pref, updateGlobal: false)
+                    } else {
+                        self.appState.recordPrimarySubtitleChoice(serverId: self.session.server.id, item: self.currentItem, preference: pref, updateGlobal: false)
+                    }
+                }
+                if !silentToast {
+                    let tag = asSecondary ? "已加载本地副字幕" : "已加载本地字幕"
+                    self.appState.showToast("\(tag): \(url.lastPathComponent) (\(decoded.encoding.rawValue))", icon: "captions.bubble.fill")
+                }
             }
         }
     }
@@ -279,61 +385,83 @@ extension PlayerView {
         }
 
         let generation = activePlaybackGeneration
+        let expectedPrimary = activeSubtitleSelection
+        let expectedSecondary = activeSecondarySubtitleSelection
         let curPrimaryDelay = appState.subtitleStyle.primaryDelaySeconds
         let curSecondaryDelay = appState.subtitleStyle.secondaryDelaySeconds
         let curSecScale = secondarySubtitleTimeScale
         let prevAligned = isSecondaryAlignedToPrimary
         isAutoAligningSubtitle = true
 
-        Task.detached(priority: .userInitiated) {
-            do {
-                let outcome = try SubtitleAutoAligner.alignAudioFirst(
-                    pcm16k: pcm,
-                    audioStartPTS: audioStartPTS,
-                    primaryCues: primaryCues,
-                    secondaryCues: secondaryCues,
-                    currentPrimaryDelay: curPrimaryDelay,
-                    currentSecondaryDelay: curSecondaryDelay,
-                    currentSecondaryScale: curSecScale,
-                    maxShiftSeconds: 30.0
-                )
-                await MainActor.run {
-                    guard self.activePlaybackGeneration == generation else { return }
-                    self.isAutoAligningSubtitle = false
-                    guard let currentHandle = self.playerHandle else { return }
-                    switch outcome {
-                    case .applied(let plan):
-                        DonbyLogger.shared.log("字音对齐完成: \(plan.diagnosticLog)", subsystem: "SubtitleAlign")
-                        if !plan.alreadyAligned {
-                            self.lastSubtitleAlignUndo = SubtitleAlignUndoState(
-                                primaryDelay: curPrimaryDelay,
-                                secondaryDelay: curSecondaryDelay,
-                                secondaryTimeScale: curSecScale,
-                                wasSecondaryAligned: prevAligned,
-                                label: "字音对齐"
-                            )
-                            dk_player_set_secondary_subtitle_time_scale(currentHandle, plan.secondaryTimeScale)
-                            self.secondarySubtitleTimeScale = plan.secondaryTimeScale
-                            if !secondaryCues.isEmpty {
-                                self.isSecondaryAlignedToPrimary = true
+        SubtitleAlignmentCoordinator.shared.begin(
+            mode: .audioToSubtitle,
+            onCancelResetState: { self.isAutoAligningSubtitle = false }
+        ) { taskID in
+            Task.detached(priority: .userInitiated) {
+                do {
+                    try Task.checkCancellation()
+                    let outcome = try SubtitleAutoAligner.alignAudioFirst(
+                        pcm16k: pcm,
+                        audioStartPTS: audioStartPTS,
+                        primaryCues: primaryCues,
+                        secondaryCues: secondaryCues,
+                        currentPrimaryDelay: curPrimaryDelay,
+                        currentSecondaryDelay: curSecondaryDelay,
+                        currentSecondaryScale: curSecScale,
+                        maxShiftSeconds: 30.0
+                    )
+                    try Task.checkCancellation()
+                    await MainActor.run {
+                        guard SubtitleAlignmentCoordinator.shared.activeTaskID == taskID else { return }
+                        SubtitleAlignmentCoordinator.shared.clear(taskID: taskID)
+                        self.isAutoAligningSubtitle = false
+                        guard !Task.isCancelled,
+                              self.activePlaybackGeneration == generation,
+                              self.activeSubtitleSelection == expectedPrimary,
+                              self.activeSecondarySubtitleSelection == expectedSecondary,
+                              let currentHandle = self.playerHandle else { return }
+                        switch outcome {
+                        case .applied(let plan):
+                            DonbyLogger.shared.log("字音对齐完成: \(plan.diagnosticLog)", subsystem: "SubtitleAlign")
+                            if !plan.alreadyAligned {
+                                self.lastSubtitleAlignUndo = SubtitleAlignUndoState(
+                                    primaryDelay: curPrimaryDelay,
+                                    secondaryDelay: curSecondaryDelay,
+                                    secondaryTimeScale: curSecScale,
+                                    wasSecondaryAligned: prevAligned,
+                                    label: "字音对齐"
+                                )
+                                dk_player_set_secondary_subtitle_time_scale(currentHandle, plan.secondaryTimeScale)
+                                self.secondarySubtitleTimeScale = plan.secondaryTimeScale
+                                if !secondaryCues.isEmpty {
+                                    self.isSecondaryAlignedToPrimary = true
+                                }
+                                self.appState.subtitleStyle.primaryDelaySeconds = plan.primaryDelaySeconds
+                                self.appState.subtitleStyle.secondaryDelaySeconds = plan.secondaryDelaySeconds
+                                self.applyKernelSubtitleStyle()
                             }
-                            self.appState.subtitleStyle.primaryDelaySeconds = plan.primaryDelaySeconds
-                            self.appState.subtitleStyle.secondaryDelaySeconds = plan.secondaryDelaySeconds
-                            self.applyKernelSubtitleStyle()
+                            self.lastAutoAlignSummary = plan.summaryMessage
+                            self.appState.showToast(plan.summaryMessage, icon: "waveform.badge.magnifyingglass")
+                        case .failed(let userMsg, let diag):
+                            DonbyLogger.shared.log("字音对齐未应用: \(diag)", level: .warning, subsystem: "SubtitleAlign")
+                            self.appState.showToast(userMsg, icon: "exclamationmark.triangle.fill", isError: true)
                         }
-                        self.lastAutoAlignSummary = plan.summaryMessage
-                        self.appState.showToast(plan.summaryMessage, icon: "waveform.badge.magnifyingglass")
-                    case .failed(let userMsg, let diag):
-                        DonbyLogger.shared.log("字音对齐未应用: \(diag)", level: .warning, subsystem: "SubtitleAlign")
-                        self.appState.showToast(userMsg, icon: "exclamationmark.triangle.fill", isError: true)
                     }
-                }
-            } catch {
-                await MainActor.run {
-                    guard self.activePlaybackGeneration == generation else { return }
-                    self.isAutoAligningSubtitle = false
-                    DonbyLogger.shared.log("字音对齐异常: \(error.localizedDescription)", level: .error, subsystem: "SubtitleAlign")
-                    self.appState.showToast(error.localizedDescription, icon: "exclamationmark.triangle.fill", isError: true)
+                } catch is CancellationError {
+                    await MainActor.run {
+                        guard SubtitleAlignmentCoordinator.shared.activeTaskID == taskID else { return }
+                        SubtitleAlignmentCoordinator.shared.clear(taskID: taskID)
+                        self.isAutoAligningSubtitle = false
+                    }
+                } catch {
+                    await MainActor.run {
+                        guard SubtitleAlignmentCoordinator.shared.activeTaskID == taskID else { return }
+                        SubtitleAlignmentCoordinator.shared.clear(taskID: taskID)
+                        self.isAutoAligningSubtitle = false
+                        guard self.activePlaybackGeneration == generation else { return }
+                        DonbyLogger.shared.log("字音对齐异常: \(error.localizedDescription)", level: .error, subsystem: "SubtitleAlign")
+                        self.appState.showToast(error.localizedDescription, icon: "exclamationmark.triangle.fill", isError: true)
+                    }
                 }
             }
         }
@@ -366,50 +494,70 @@ extension PlayerView {
         }
 
         let generation = activePlaybackGeneration
+        let expectedPrimary = activeSubtitleSelection
+        let expectedSecondary = activeSecondarySubtitleSelection
         let curPrimaryDelay = appState.subtitleStyle.primaryDelaySeconds
         let curSecondaryDelay = appState.subtitleStyle.secondaryDelaySeconds
         let curSecScale = secondarySubtitleTimeScale
         let prevAligned = isSecondaryAlignedToPrimary
         isAutoAligningSubtitle = true
 
-        Task.detached(priority: .userInitiated) {
-            let outcome = SubtitleAutoAligner.alignDualAudioAnchored(
-                primaryCues: primaryCues,
-                secondaryCues: secondaryCues,
-                pcm16k: pcm,
-                audioStartPTS: audioStartPTS,
-                currentPrimaryDelay: curPrimaryDelay,
-                currentSecondaryDelay: curSecondaryDelay,
-                currentSecondaryScale: curSecScale,
-                maxShiftSeconds: 120.0
-            )
-            await MainActor.run {
-                guard self.activePlaybackGeneration == generation else { return }
-                self.isAutoAligningSubtitle = false
-                guard let currentHandle = self.playerHandle else { return }
-                switch outcome {
-                case .applied(let plan):
-                    DonbyLogger.shared.log("双字对齐完成: \(plan.diagnosticLog)", subsystem: "SubtitleAlign")
-                    if !plan.alreadyAligned {
-                        self.lastSubtitleAlignUndo = SubtitleAlignUndoState(
-                            primaryDelay: curPrimaryDelay,
-                            secondaryDelay: curSecondaryDelay,
-                            secondaryTimeScale: curSecScale,
-                            wasSecondaryAligned: prevAligned,
-                            label: "双字对齐"
-                        )
-                        dk_player_set_secondary_subtitle_time_scale(currentHandle, plan.secondaryTimeScale)
-                        self.secondarySubtitleTimeScale = plan.secondaryTimeScale
-                        self.isSecondaryAlignedToPrimary = true
-                        self.appState.subtitleStyle.primaryDelaySeconds = plan.primaryDelaySeconds
-                        self.appState.subtitleStyle.secondaryDelaySeconds = plan.secondaryDelaySeconds
-                        self.applyKernelSubtitleStyle()
+        SubtitleAlignmentCoordinator.shared.begin(
+            mode: .dualSubtitles,
+            onCancelResetState: { self.isAutoAligningSubtitle = false }
+        ) { taskID in
+            Task.detached(priority: .userInitiated) {
+                guard !Task.isCancelled else {
+                    await MainActor.run {
+                        guard SubtitleAlignmentCoordinator.shared.activeTaskID == taskID else { return }
+                        SubtitleAlignmentCoordinator.shared.clear(taskID: taskID)
+                        self.isAutoAligningSubtitle = false
                     }
-                    self.lastAutoAlignSummary = plan.summaryMessage
-                    self.appState.showToast(plan.summaryMessage, icon: "arrow.left.arrow.right")
-                case .failed(let userMsg, let diag):
-                    DonbyLogger.shared.log("双字对齐未应用: \(diag)", level: .warning, subsystem: "SubtitleAlign")
-                    self.appState.showToast(userMsg, icon: "exclamationmark.triangle.fill", isError: true)
+                    return
+                }
+                let outcome = SubtitleAutoAligner.alignDualAudioAnchored(
+                    primaryCues: primaryCues,
+                    secondaryCues: secondaryCues,
+                    pcm16k: pcm,
+                    audioStartPTS: audioStartPTS,
+                    currentPrimaryDelay: curPrimaryDelay,
+                    currentSecondaryDelay: curSecondaryDelay,
+                    currentSecondaryScale: curSecScale,
+                    maxShiftSeconds: 120.0
+                )
+                await MainActor.run {
+                    guard SubtitleAlignmentCoordinator.shared.activeTaskID == taskID else { return }
+                    SubtitleAlignmentCoordinator.shared.clear(taskID: taskID)
+                    self.isAutoAligningSubtitle = false
+                    guard !Task.isCancelled,
+                          self.activePlaybackGeneration == generation,
+                          self.activeSubtitleSelection == expectedPrimary,
+                          self.activeSecondarySubtitleSelection == expectedSecondary,
+                          let currentHandle = self.playerHandle else { return }
+                    switch outcome {
+                    case .applied(let plan):
+                        DonbyLogger.shared.log("双字对齐完成: \(plan.diagnosticLog)", subsystem: "SubtitleAlign")
+                        if !plan.alreadyAligned {
+                            self.lastSubtitleAlignUndo = SubtitleAlignUndoState(
+                                primaryDelay: curPrimaryDelay,
+                                secondaryDelay: curSecondaryDelay,
+                                secondaryTimeScale: curSecScale,
+                                wasSecondaryAligned: prevAligned,
+                                label: "双字对齐"
+                            )
+                            dk_player_set_secondary_subtitle_time_scale(currentHandle, plan.secondaryTimeScale)
+                            self.secondarySubtitleTimeScale = plan.secondaryTimeScale
+                            self.isSecondaryAlignedToPrimary = true
+                            self.appState.subtitleStyle.primaryDelaySeconds = plan.primaryDelaySeconds
+                            self.appState.subtitleStyle.secondaryDelaySeconds = plan.secondaryDelaySeconds
+                            self.applyKernelSubtitleStyle()
+                        }
+                        self.lastAutoAlignSummary = plan.summaryMessage
+                        self.appState.showToast(plan.summaryMessage, icon: "arrow.left.arrow.right")
+                    case .failed(let userMsg, let diag):
+                        DonbyLogger.shared.log("双字对齐未应用: \(diag)", level: .warning, subsystem: "SubtitleAlign")
+                        self.appState.showToast(userMsg, icon: "exclamationmark.triangle.fill", isError: true)
+                    }
                 }
             }
         }

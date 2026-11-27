@@ -54,6 +54,7 @@ public final class DonbyLogger: ObservableObject {
     public static let shared = DonbyLogger()
 
     @Published public private(set) var entries: [DonbyLogEntry] = []
+    @Published public private(set) var entriesRevision: UInt64 = 0
 
     private let lock = NSLock()
     private let ioQueue = DispatchQueue(label: "com.donby.logger.io", qos: .utility)
@@ -129,6 +130,7 @@ public final class DonbyLogger: ObservableObject {
                 if self.entries.count > self.maxEntries {
                     self.entries.removeFirst(self.entries.count - self.maxEntries)
                 }
+                self.entriesRevision &+= 1
             }
         }
     }
@@ -156,7 +158,9 @@ public final class DonbyLogger: ObservableObject {
         }
 
         DispatchQueue.main.async { [weak self] in
-            self?.entries.removeAll()
+            guard let self else { return }
+            self.entries.removeAll()
+            self.entriesRevision &+= 1
         }
     }
 
@@ -169,6 +173,26 @@ public final class DonbyLogger: ObservableObject {
             return entries.map(\.fullLine).joined(separator: "\n")
         }
         return ""
+    }
+
+    public func exportAllTextAsync() async -> String {
+        let url = logFileURL
+        let fileText: String? = await withCheckedContinuation { continuation in
+            ioQueue.async {
+                if let data = try? Data(contentsOf: url),
+                   let str = String(data: data, encoding: .utf8) {
+                    continuation.resume(returning: str)
+                } else {
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+        if let fileText {
+            return fileText
+        }
+        return await MainActor.run {
+            self.entries.map(\.fullLine).joined(separator: "\n")
+        }
     }
 
     public func revealLogInFinder() {

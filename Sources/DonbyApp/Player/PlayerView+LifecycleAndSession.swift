@@ -7,24 +7,27 @@ import DonbyMetalRenderer
 
 extension PlayerView {
     func handleEmbySyncTimerTick() {
-        guard !session.server.host.isEmpty && !session.server.accessToken.isEmpty else { return }
+        guard !isOpeningMedia, openingErrorMessage == nil, playerHandle != nil, !didHandlePlaybackEnded else { return }
+        let srv = resolvedServer
+        guard !srv.host.isEmpty && !srv.accessToken.isEmpty else { return }
         let livePos = autoHideBox.liveCurrentTime
-        if let ext = DonbyMediaServiceRegistry.shared.provider(for: session.server.type) {
-            let srv = session.server
-            let itm = currentItem
-            let assetId = currentResource.mediaSource.id
+        let itm = currentItem
+        let assetId = currentResource.mediaSource.id
+        let playSessionId = currentResource.playSessionId
+        let paused = !isPlaying
+        if let ext = DonbyMediaServiceRegistry.shared.provider(for: srv.type) {
             Task {
                 await ext.reportPlayback(server: srv, kind: .progress, item: itm, assetId: assetId, positionSeconds: livePos)
             }
         } else {
             Task {
                 await EmbyClient.shared.reportPlaybackProgress(
-                    server: session.server,
-                    itemId: currentItem.id,
-                    mediaSourceId: currentResource.mediaSource.id,
-                    playSessionId: currentResource.playSessionId,
+                    server: srv,
+                    itemId: itm.id,
+                    mediaSourceId: assetId,
+                    playSessionId: playSessionId,
                     positionSeconds: livePos,
-                    isPaused: !isPlaying
+                    isPaused: paused
                 )
             }
         }
@@ -32,17 +35,17 @@ extension PlayerView {
 
     func prefetchNextEpisodeIfNearEnd() {
         let livePos = autoHideBox.liveCurrentTime
-        let dur = telemetry.duration
+        let dur = telemetryBox.duration
         guard dur > 90, livePos >= max(dur * 0.72, dur - 120) else { return }
         guard let idx = session.episodesQueue.firstIndex(where: { $0.id == currentItem.id }),
               session.episodesQueue.indices.contains(idx + 1) else {
             return
         }
         let nextEp = session.episodesQueue[idx + 1]
-        if DonbyDownloadManager.shared.completedEntry(for: nextEp.id, serverId: session.server.id) != nil {
+        let server = resolvedServer
+        if DonbyDownloadManager.shared.completedEntry(for: nextEp.id, serverId: server.id) != nil {
             return
         }
-        let server = session.server
         guard !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
         // If control-plane resource is already resolved, opportunistically micro-stage Head + Cues + Intro-Skip landing
@@ -131,12 +134,12 @@ extension PlayerView {
     }
 
     func evaluateIntroOutroSkipWindow() {
-        let dur = telemetry.duration
+        let dur = telemetryBox.duration
         guard dur > 60 else {
             skipBannerLabel = nil
             return
         }
-        let pref = appState.effectiveSkipPreference(serverId: session.server.id, item: currentItem)
+        let pref = appState.effectiveSkipPreference(serverId: resolvedServer.id, item: currentItem)
         let chapterIntroEnd = pref.chapterDetection
             ? ChapterSkipDetector.detectIntroEndSeconds(chapters: kernelChapters, duration: dur)
             : nil
@@ -167,14 +170,14 @@ extension PlayerView {
 
         let livePos = autoHideBox.liveCurrentTime
         if let introEnd, livePos >= 1.5, livePos < introEnd - 1.5 {
-            if pref.mode == .automatic && !didAutoSkipIntroForCurrentItem && session.startPositionSeconds < introEnd {
+            if pref.mode == .automatic && !didAutoSkipIntroForCurrentItem && currentItemStartPositionSeconds < introEnd {
                 didAutoSkipIntroForCurrentItem = true
                 seekTo(introEnd)
                 appState.showToast("已自动跳过片头 (\(formatTime(introEnd)))", icon: "forward.fill")
                 skipBannerLabel = nil
                 return
             }
-            if !skipBannerIsOutro || skipBannerLabel != "跳过片头" {
+            if skipBannerIsOutro || skipBannerLabel != "跳过片头" {
                 skipBannerLabel = "跳过片头"
                 skipBannerTargetSec = introEnd
                 skipBannerIsOutro = false
@@ -194,7 +197,7 @@ extension PlayerView {
                 skipBannerLabel = nil
                 return
             }
-            if skipBannerLabel != "跳过片尾 · 下一集" {
+            if !skipBannerIsOutro || skipBannerLabel != "跳过片尾 · 下一集" {
                 skipBannerLabel = "跳过片尾 · 下一集"
                 skipBannerTargetSec = dur
                 skipBannerIsOutro = true
@@ -211,15 +214,17 @@ extension PlayerView {
 
     func exportRedactedDiagnostics() {
         let appVer = DonbyAppInfo.version
+        let stats = telemetryBox.kernelStats
         var lines: [String] = []
         lines.append("Donby Diagnostics Report (v\(appVer))")
         lines.append("Time: \(Self.diagnosticsDateFormatter.string(from: Date()))")
-        lines.append("Server Type: \(session.server.type.rawValue) | Line: \(session.server.activeLineName)")
+        let srv = resolvedServer
+        lines.append("Server Type: \(srv.type.rawValue) | Line: \(srv.activeLineName)")
         lines.append("Item: \(currentItem.name) | Route: \(currentResource.routeNote)")
         lines.append("Stream URL: \(currentResource.streamURL.absoluteString)")
-        lines.append("Decoder: \(telemetry.kernelStats.is_hw_accelerated ? "VideoToolbox HW" : "Software") | \(telemetry.kernelStats.width)x\(telemetry.kernelStats.height) @ \(String(format: "%.3f", telemetry.kernelStats.fps))fps")
-        lines.append("HDR: DoVi=\(telemetry.kernelStats.is_dolby_vision) HDR=\(telemetry.kernelStats.is_hdr) | Codec: \(Self.cString(from: telemetry.kernelStats.video_codec)) / \(Self.cString(from: telemetry.kernelStats.audio_codec))")
-        lines.append("Position: \(String(format: "%.2f", telemetry.currentTime)) / \(String(format: "%.2f", telemetry.duration)) | BufferedAhead: \(String(format: "%.2f", telemetry.bufferedAheadSeconds))s | Turbo: \(activeTurboHandle != nil)")
+        lines.append("Decoder: \(stats.is_hw_accelerated ? "VideoToolbox HW" : "Software") | \(stats.width)x\(stats.height) @ \(String(format: "%.3f", stats.fps))fps")
+        lines.append("HDR: DoVi=\(stats.is_dolby_vision) HDR=\(stats.is_hdr) | Codec: \(Self.cString(from: stats.video_codec)) / \(Self.cString(from: stats.audio_codec))")
+        lines.append("Position: \(String(format: "%.2f", autoHideBox.liveCurrentTime)) / \(String(format: "%.2f", telemetryBox.duration)) | BufferedAhead: \(String(format: "%.2f", autoHideBox.liveBufferedAheadSeconds))s | Turbo: \(activeTurboHandle != nil)")
         lines.append("Recent Logs:")
         let allLogs = DonbyLogger.shared.exportAllText().components(separatedBy: .newlines).suffix(80)
         lines.append(contentsOf: allLogs)
@@ -243,14 +248,14 @@ extension PlayerView {
     private func isCurrentPlaybackConsideredFinished() -> Bool {
         if didHandlePlaybackEnded || didAutoSkipOutroForCurrentItem { return true }
         if let pending = finishedItemPendingCleanup, pending.itemId == currentItem.id { return true }
-        let dur = telemetry.duration
+        let dur = telemetryBox.duration
         let pos = autoHideBox.liveCurrentTime
         return dur > 60 && pos > 0 && (pos / dur) >= 0.92
     }
 
     func switchToEpisode(_ nextEp: EmbyItem) {
         episodeSwitchTask?.cancel()
-        let server = session.server
+        let server = resolvedServer
         let preset = appState.preferredVersionPreset
         let audioIdx = selectedAudioIdx
         let enable302 = appState.enable302Cache
@@ -283,6 +288,7 @@ extension PlayerView {
             selectedSubIdx = nil
             currentItem = nextEp
             currentResource = res
+            currentItemStartPositionSeconds = nextEp.resumePositionSeconds
             appState.updateDetailFocusedEpisodeIfActive(forItem: nextEp)
             companionBox.companion?.onLocalEpisodeSwitched(
                 assetId: res.mediaSource.id,
@@ -346,10 +352,14 @@ extension PlayerView {
         }
     }
 
-    func toggleFullScreen() { NSApp.keyWindow?.toggleFullScreen(nil) }
+    func toggleFullScreen() { (autoHideBox.hostWindow ?? NSApp.keyWindow)?.toggleFullScreen(nil) }
 
     func exitPlayer() {
         autoHideBox.autoHideTask?.cancel()
+        autoHideBox.lineReloadTask?.cancel()
+        autoHideBox.lineReloadTask = nil
+        autoHideBox.coalescedSeekTask?.cancel()
+        autoHideBox.coalescedSeekTask = nil
         if let mm = mouseMonitor { NSEvent.removeMonitor(mm); mouseMonitor = nil }
         if let km = keyMonitor { NSEvent.removeMonitor(km); keyMonitor = nil }
 
@@ -362,8 +372,8 @@ extension PlayerView {
         if wasOpenedSuccessfully {
             saveCurrentWatchProgress(isFinal: true)
 
-            if !session.server.host.isEmpty && !session.server.accessToken.isEmpty {
-                let srv = session.server
+            let srv = resolvedServer
+            if !srv.host.isEmpty && !srv.accessToken.isEmpty {
                 let itm = currentItem
                 let msId = currentResource.mediaSource.id
                 let psId = currentResource.playSessionId
@@ -403,7 +413,7 @@ extension PlayerView {
     }
 
     func configureAndBindCompanionIfNeeded() {
-        companionBox.configureIfNeeded(server: session.server, appState: appState)
+        companionBox.configureIfNeeded(server: resolvedServer, appState: appState)
         guard let companion = companionBox.companion else { return }
         companion.bindDriver(
             pauseAndGetPosition: {
@@ -412,11 +422,14 @@ extension PlayerView {
                 isPlaying = false
                 let exactPos = dk_player_get_position(handle)
                 autoHideBox.liveCurrentTime = exactPos
-                telemetry.updateCurrentTime(exactPos, force: true)
+                telemetryBox.updateCurrentTime(exactPos, force: true, syncLegacy: activeDrawer == .mediaInfo)
                 return exactPos
             },
             play: {
                 if let handle = playerHandle {
+                    autoHideBox.lastObservedPos = dk_player_get_position(handle)
+                    autoHideBox.lastObservedPosUptime = ProcessInfo.processInfo.systemUptime
+                    isWaitingForSeekOrBuffer = false
                     dk_player_play(handle)
                     isPlaying = true
                 }
@@ -439,6 +452,7 @@ extension PlayerView {
             switchMedia: { item, res, startSec in
                 currentItem = item
                 currentResource = res
+                currentItemStartPositionSeconds = startSec
                 startNativeKernelPlayback(startSeconds: startSec)
             },
             snapshot: {
@@ -457,13 +471,14 @@ extension PlayerView {
 
     func saveCurrentWatchProgress(isFinal: Bool = false) {
         let livePos = autoHideBox.liveCurrentTime
-        let dur = telemetry.duration
+        let dur = telemetryBox.duration
         guard dur > 0 || livePos > 0 else { return }
 
         let isLocal = currentResource.streamURL.isFileURL ||
                       currentResource.streamURL.scheme == "file" ||
                       currentResource.streamURL.path.hasPrefix("/")
-        let isEmby = !isLocal && !session.server.host.isEmpty && session.server.host != "127.0.0.1" && session.server.host != "local"
+        let srv = resolvedServer
+        let isEmby = !isLocal && !srv.host.isEmpty && srv.host != "127.0.0.1" && srv.host != "local"
 
         // Capture stop frame / current video snapshot for local files
         if isLocal {
@@ -511,13 +526,13 @@ extension PlayerView {
             title: recTitle,
             subtitle: recSubtitle,
             posterKey: isLocal ? "local_frame_\(streamStr)" : nil,
-            posterURL: isEmby ? EmbyClient.shared.imageURL(server: session.server, item: currentItem, kind: .primary, maxWidth: 320)?.absoluteString : nil,
+            posterURL: isEmby ? EmbyClient.shared.imageURL(server: srv, item: currentItem, kind: .primary, maxWidth: 320)?.absoluteString : nil,
             position: livePos,
             duration: dur > 0 ? dur : 3600,
             sourceType: resolvedSourceType,
             streamURLString: streamStr,
             embyItemId: embyId,
-            resolutionTag: isLocal ? (telemetry.kernelStats.is_hw_accelerated ? "本地 4K" : "本地文件") : (telemetry.kernelStats.is_hw_accelerated ? "HW 4K" : "4K UHD"),
+            resolutionTag: isLocal ? (telemetryBox.kernelStats.is_hw_accelerated ? "本地 4K" : "本地文件") : (telemetryBox.kernelStats.is_hw_accelerated ? "HW 4K" : "4K UHD"),
             mediaType: isEmby ? currentItem.type : nil,
             seriesId: isEmby ? currentItem.seriesId : nil
         )

@@ -91,38 +91,50 @@ extension PlayerView {
                 .fill(Color.white.opacity(0.10))
                 .frame(height: 0.6)
 
-            ScrollView(showsIndicators: false) {
-                switch tab {
-                case .playlist:
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        ForEach(Array(session.episodesQueue.enumerated()), id: \.offset) { _, ep in
-                            let isCurrent = ep.id == currentItem.id
-                            Button { switchToEpisode(ep) } label: {
-                                HStack(spacing: 10) {
-                                    Image(systemName: isCurrent ? "play.circle.fill" : "film")
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundStyle(isCurrent ? drawerSelectedAccentTint() : .white.opacity(0.55))
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(ep.episodeCodeString != nil ? "\(ep.episodeCodeString!) · \(ep.name)" : ep.name)
-                                            .font(.system(size: 12.5, weight: isCurrent ? .semibold : .medium))
-                                            .foregroundStyle(.white)
-                                            .lineLimit(1)
-                                        if let rt = ep.runtimeMinutesString {
-                                            Text(rt).font(.system(size: 11)).foregroundStyle(.white.opacity(0.58))
+            ScrollViewReader { scrollProxy in
+                ScrollView(showsIndicators: false) {
+                    switch tab {
+                    case .playlist:
+                        LazyVStack(alignment: .leading, spacing: 8) {
+                            ForEach(Array(session.episodesQueue.enumerated()), id: \.offset) { _, ep in
+                                let isCurrent = ep.id == currentItem.id
+                                Button { switchToEpisode(ep) } label: {
+                                    HStack(spacing: 10) {
+                                        Image(systemName: isCurrent ? "play.circle.fill" : "film")
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundStyle(isCurrent ? drawerSelectedAccentTint() : .white.opacity(0.55))
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(ep.episodeCodeString != nil ? "\(ep.episodeCodeString!) · \(ep.name)" : ep.name)
+                                                .font(.system(size: 12.5, weight: isCurrent ? .semibold : .medium))
+                                                .foregroundStyle(.white)
+                                                .lineLimit(1)
+                                            if let rt = ep.runtimeMinutesString {
+                                                Text(rt).font(.system(size: 11)).foregroundStyle(.white.opacity(0.58))
+                                            }
                                         }
+                                        Spacer()
                                     }
-                                    Spacer()
+                                    .padding(.horizontal, 11)
+                                    .padding(.vertical, 9)
+                                    .background(drawerRowBackground(isSelected: isCurrent))
+                                    .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                                 }
-                                .padding(.horizontal, 11)
-                                .padding(.vertical, 9)
-                                .background(drawerRowBackground(isSelected: isCurrent))
-                                .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                .buttonStyle(.plain)
+                                .id(ep.id)
                             }
-                            .buttonStyle(.plain)
                         }
-                    }
+                        .onAppear {
+                            DispatchQueue.main.async {
+                                scrollProxy.scrollTo(currentItem.id, anchor: .center)
+                            }
+                        }
+                        .donbyOnChange(of: currentItem.id) { newId in
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                scrollProxy.scrollTo(newId, anchor: .center)
+                            }
+                        }
 
-                case .tracks:
+                    case .tracks:
                     VStack(alignment: .leading, spacing: 12) {
                         drawerSegmentedPill(
                             options: TracksDrawerSection.allCases,
@@ -340,6 +352,7 @@ extension PlayerView {
 
                 case .watchParty:
                     watchPartyDrawerContent
+                    }
                 }
             }
         }
@@ -360,7 +373,8 @@ extension PlayerView {
         .opacity(isAdjustingSubtitleLayout ? 0.42 : 1.0)
         .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .onTapGesture {}
-        .padding(.vertical, 14)
+        .padding(.top, showControls ? 68 : 14)
+        .padding(.bottom, (showControls && bottomControlBarHeight > 0) ? (bottomControlBarHeight + 8) : 14)
         .padding(.trailing, 14)
     }
 

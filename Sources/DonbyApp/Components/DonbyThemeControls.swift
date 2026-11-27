@@ -87,7 +87,7 @@ public struct DonbySegmentedControl<Option: Hashable>: View {
                         .lineLimit(1)
                         .padding(.horizontal, horizontalPadding)
                         .padding(.vertical, verticalPadding)
-                        .frame(maxWidth: expandsEqually ? .infinity : nil)
+                        .frame(maxWidth: expandsEqually ? .infinity : nil, minHeight: 24)
                         .background(
                             RoundedRectangle(cornerRadius: 7, style: .continuous)
                                 .fill(isSelected ? accentColor : Color.clear)
@@ -155,10 +155,13 @@ public struct DonbyCheckboxToggleStyle: ToggleStyle {
 
                 configuration.label
             }
+            .frame(minWidth: 24, minHeight: 24, alignment: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .focusable(false)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(configuration.isOn ? [.isButton, .isSelected] : [.isButton])
+        .accessibilityValue(configuration.isOn ? "已选中" : "未选中")
     }
 }
 
@@ -206,10 +209,13 @@ public struct DonbySwitchToggleStyle: ToggleStyle {
                         .offset(x: configuration.isOn ? thumbOffset : -thumbOffset)
                 }
             }
+            .frame(minWidth: 24, minHeight: 24)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .focusable(false)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(configuration.isOn ? [.isButton, .isSelected] : [.isButton])
+        .accessibilityValue(configuration.isOn ? "已开启" : "已关闭")
     }
 }
 
@@ -243,6 +249,13 @@ public struct DonbySlider: View {
     private var fraction: Double {
         let span = max(0.0001, range.upperBound - range.lowerBound)
         return min(1.0, max(0.0, (value - range.lowerBound) / span))
+    }
+
+    private var formattedAccessibilityValue: String {
+        if let step, step >= 1.0 {
+            return String(format: "%.0f", value)
+        }
+        return String(format: "%.2f", value)
     }
 
     public var body: some View {
@@ -286,7 +299,10 @@ public struct DonbySlider: View {
                         if let step, step > 0 {
                             next = (next / step).rounded() * step
                         }
-                        value = min(range.upperBound, max(range.lowerBound, next))
+                        let clamped = min(range.upperBound, max(range.lowerBound, next))
+                        if abs(clamped - value) > 1e-9 {
+                            value = clamped
+                        }
                     }
                     .onEnded { _ in
                         if isDragging {
@@ -296,24 +312,68 @@ public struct DonbySlider: View {
                     }
             )
         }
-        .frame(height: 18)
+        .frame(height: 24)
+        .accessibilityElement(children: .ignore)
+        .accessibilityValue(formattedAccessibilityValue)
+        .accessibilityAdjustableAction { direction in
+            let delta = step ?? max((range.upperBound - range.lowerBound) / 20.0, 0.01)
+            let next: Double
+            switch direction {
+            case .increment:
+                next = min(range.upperBound, value + delta)
+            case .decrement:
+                next = max(range.lowerBound, value - delta)
+            @unknown default:
+                return
+            }
+            if abs(next - value) > 1e-9 {
+                onEditingChanged?(true)
+                value = next
+                onEditingChanged?(false)
+            }
+        }
     }
 }
 
-public extension View {
-    /// Clean flat Donby text field styling without macOS default bright-blue focus rings.
-    func donbyFlatTextField(isLight: Bool, cornerRadius: CGFloat = 9, horizontalPadding: CGFloat = 11, verticalPadding: CGFloat = 8) -> some View {
-        self
+private struct DonbyFlatTextFieldModifier: ViewModifier {
+    let isLight: Bool
+    let cornerRadius: CGFloat
+    let horizontalPadding: CGFloat
+    let verticalPadding: CGFloat
+    @FocusState private var isFocused: Bool
+
+    func body(content: Content) -> some View {
+        content
             .textFieldStyle(.plain)
             .donbyFocusEffectDisabled()
+            .focused($isFocused)
             .padding(.horizontal, horizontalPadding)
             .padding(.vertical, verticalPadding)
             .background(isLight ? Color.black.opacity(0.03) : Color.white.opacity(0.06))
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(DonbyGlassPalette.separator(isLight: isLight), lineWidth: 0.65)
+                    .strokeBorder(
+                        isFocused
+                            ? (isLight ? Color.black.opacity(0.42) : Color.white.opacity(0.48))
+                            : DonbyGlassPalette.separator(isLight: isLight),
+                        lineWidth: isFocused ? 1.2 : 0.65
+                    )
             )
+    }
+}
+
+public extension View {
+    /// Clean flat Donby text field styling without macOS default bright-blue focus rings.
+    func donbyFlatTextField(isLight: Bool, cornerRadius: CGFloat = 9, horizontalPadding: CGFloat = 11, verticalPadding: CGFloat = 8) -> some View {
+        self.modifier(
+            DonbyFlatTextFieldModifier(
+                isLight: isLight,
+                cornerRadius: cornerRadius,
+                horizontalPadding: horizontalPadding,
+                verticalPadding: verticalPadding
+            )
+        )
     }
 
     @ViewBuilder

@@ -1,6 +1,6 @@
 # App Sub-Map: 120Hz Native Collection Views & Artwork Pipeline
 
-> Parent: [app/INDEX.md](INDEX.md). Covers 11 files under `Sources/DonbyApp/Components/`.
+> Last synced: `v2.1.5`. Parent: [app/INDEX.md](INDEX.md). Covers 11 files under `Sources/DonbyApp/Components/`.
 
 ## 1. File Inventory & Responsibilities
 - **AppKit 120Hz `NSCollectionView` / `CALayer` Stack**:
@@ -8,14 +8,14 @@
   - `Components/NativeCardRenderCaches.swift` — `@MainActor NativeCardLayerCache` (sRGB normalization, bounded offscreen `CGContext` gradient/symbol/pill caches: `pillCache` 512, `iconCache` 256, `symbolCGCache` 256, `configureBadgeLayer`), `CardTextBitmapCache` (`@unchecked Sendable` + `NSLock` + `OperationQueue` `com.don.CardTextRender` off-main-thread CoreText rasterizer).
   - `Components/NativePosterCollectionItem.swift` — pure `CALayer` dynamic-width poster cell shared by `NativePosterGridView` and `NativeEmbyHomeView`.
   - `Components/NativeShelfCollectionItems.swift` — pure `CALayer` fixed-size shelf cells (`NativeLandscapeCollectionItem` `248x180`, `NativeLibraryCollectionItem` `205x112`) and `private createTextLayer`.
-  - `Components/NativeEmbyHomeView.swift` — 120Hz ProMotion vertical stack of horizontal shelves backed by `HorizontalShelfScrollView` + `InteractiveCollectionView`, with O(1) `homeRevision` fast-path and visible-cell-only badge updates.
-  - `Components/NativePosterGridView.swift` — 120Hz ProMotion adaptive poster wall backed by `InteractiveCollectionView`.
+  - `Components/NativeEmbyHomeView.swift` — 120Hz ProMotion vertical stack of horizontal shelves backed by `HorizontalShelfScrollView` + `InteractiveCollectionView`, with O(1) `homeRevision` fast-path, Combine `downloadStatusStore.$statusIndex` subscription, and visible-cell-only badge updates.
+  - `Components/NativePosterGridView.swift` — 120Hz ProMotion adaptive poster wall backed by `InteractiveCollectionView` with optional `downloadStatusStore` Combine subscription for visible-cell-only badge updates.
 - **Artwork Cache & SwiftUI Media Views**:
-  - `Components/ArtworkCacheEngine.swift` — `ScrollActivityTracker` (`NSLock`), `ArtworkImageCache` (3 `NSCache` tiers, `colorSpaceLock`, `diskQueue`, `decodeOperationQueue` max 4, 512 MiB disk cache / 410 MiB LRU prune target / 30d TTL, eager ImageIO hardware downsampling & decode, `normalizeToDisplaySpace` fast-return).
-  - `Components/ArtworkDownloadManager.swift` — `DownloadConcurrencyGate`, `ArtworkDownloadCoordinator`, `ArtworkDownloadManager` (`urlCache = nil`, `.reloadIgnoringLocalCacheData`), `CGImageLoadCoordinator` (concurrency-gated artwork downloads and deduplicated `CGImage` load coordination).
-  - `Components/MediaArtworkViews.swift` — `MediaArtworkView` (direct UHD fallback across `.primary`/`.backdrop`/`.thumb` + `Color.clear.overlay(alignment:) { Image.resizable().scaledToFill() }.clipped()`), `PersonAvatarView`, `RecordArtworkThumbnailView` (`isLightMode` prop), `ClearLogoHeaderView`.
+  - `Components/ArtworkCacheEngine.swift` — `ScrollActivityTracker` (`NSLock`), `ArtworkImageCache` (3 `NSCache` tiers with 1-byte RAM alias cost, `colorSpaceLock`, `aliasLock` + `alias_index.json` periodic persistence replacing APFS `link()`, `diskQueue`, `decodeOperationQueue` max 4, 512 MiB disk cache / 410 MiB inode-deduped LRU prune / 30d TTL, ImageIO hardware downsampling clamped to `2560px`, `normalizeToDisplaySpace` skipped for `> 900px` GPU-mapped images).
+  - `Components/ArtworkDownloadManager.swift` — `DownloadConcurrencyGate` (with `boostPriority` to prevent priority inversion), `ArtworkDownloadCoordinator`, `ArtworkDownloadManager` (`urlCache = nil`, `.reloadIgnoringLocalCacheData`), `CGImageLoadCoordinator` (concurrency-gated artwork downloads and deduplicated `CGImage` load coordination).
+  - `Components/MediaArtworkViews.swift` — `MediaArtworkView` (direct UHD fallback across `.primary`/`.backdrop`/`.thumb`, `loadedKey` validation, theme-aware dark/light placeholders, no bare `item.id` cross-kind sharing), `PersonAvatarView`, `RecordArtworkThumbnailView` (`isLightMode`, `loadedKey` validation, `aliasKeys` avoiding double disk writes), `ClearLogoHeaderView` (sync RAM lookup + cancellation guard).
   - `Components/HeroTopEdgeBackdrop.swift` — `HeroTopEdgeBackdropView` (`#03` weighted top-edge strip synthesized via `HeroTopEdgeSynthesizer`, matching hero Display P3/sRGB gamut with zero zoom/blur).
-  - `Components/MediaCards.swift` — SwiftUI card equivalents (`PosterCardView`, `LandscapeCardView`) used in inline search and secondary surfaces.
+  - `Components/MediaCards.swift` — `DonbyCardAppearance` (with `withDownloadStatusIndex(_:)`), `DonbyDownloadStatusObserver`, and SwiftUI card equivalents (`PosterCardView`, `LandscapeCardView`, `LibraryCardView`) used in inline search and secondary surfaces.
 
 ## 2. Critical Invariants (DO NOT BREAK)
 1. **120Hz Scroll Hygiene**: Never perform synchronous disk I/O, offscreen shadows, or SwiftUI layout thrashing inside `NativeEmbyHomeView` / `NativePosterGridView` scroll paths; respect `ScrollActivityTracker.isScrolling` and `ScrollHoverGate`. Keep `CATransaction.setDisableActions(true)` and `noImplicitActions` in all 3 `Native*CollectionItem` classes.

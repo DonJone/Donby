@@ -49,7 +49,7 @@ extension DetailView {
     }
 
     func runDetailPrewarmAndPreload() async {
-        guard !isLoadingDetails else { return }
+        guard hasHydratedDetail, !isLoadingDetails else { return }
         guard let server = effectiveDetailServer, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         if item.isSeries && heroTargetEpisode == nil { return }
         let target = heroResolvedPlayTarget
@@ -222,80 +222,115 @@ extension DetailView {
         return merged.sorted { ($0.indexNumber ?? 0) < ($1.indexNumber ?? 0) }
     }
 
-    func refreshOfflineAndCacheSnapshots() async {
+    private func fetchOfflineAndCacheSnapshots() async -> (OfflineLibraryGroup?, [CachedMediaSummary]) {
         let entries = DonbyDownloadManager.shared.entries
         let target = initialItem
-        let (group, assets) = await Task.detached(priority: .userInitiated) {
+        return await Task.detached(priority: .userInitiated) {
             let groups = DonbyOfflineLibraryStorage.scanOfflineLibrary(entries: entries)
             let matched = Self.matchOfflineGroup(for: target, in: groups)
             let unpinned = DonbyTurboCacheEngine.shared.listUnpinnedCachedAssets()
             return (matched, unpinned)
         }.value
+    }
+
+    func refreshOfflineAndCacheSnapshots(signature: String? = nil) async {
+        let (group, assets) = await fetchOfflineAndCacheSnapshots()
         guard !Task.isCancelled else { return }
         self.cachedOfflineGroup = group
         self.cachedUnpinnedAssets = assets
+        if let signature {
+            self.lastScannedDownloadSignature = signature
+        }
+    }
+
+    private func applyOfflineGroupHydration(_ localGroup: OfflineLibraryGroup) {
+        self.item = localGroup.displayItem
+        let remembered = appState.detailFocusedEpisode(forSeriesKey: AppState.detailSeriesKey(for: localGroup.displayItem))
+        if localGroup.isSeries && !localGroup.seasonItems.isEmpty {
+            self.seasons = localGroup.seasonItems
+            if let remembered,
+               let rSeason = remembered.seasonNumber,
+               let localEps = localGroup.episodesBySeason[rSeason],
+               !localEps.isEmpty {
+                self.selectedSeasonIndex = rSeason
+                self.episodes = localEps
+                if localEps.contains(where: { $0.id == remembered.episodeId }) {
+                    self.focusedEpisodeId = remembered.episodeId
+                } else if !userDidPickEpisodeLocally {
+                    self.focusedEpisodeId = preferredFocusEpisodeId(in: localEps)
+                }
+            } else if preferOfflineFocus {
+                let allDownloaded = downloadedEpisodesIn(localGroup)
+                let targetEp = allDownloaded.first(where: { !isEpisodeWatched($0) }) ?? allDownloaded.first
+                let preferredSeasonNum = targetEp?.parentIndexNumber ?? localGroup.seasonItems.first?.indexNumber ?? 1
+                let localEps = localGroup.episodesBySeason[preferredSeasonNum] ?? []
+                self.selectedSeasonIndex = preferredSeasonNum
+                self.episodes = localEps
+                if !userDidPickEpisodeLocally {
+                    self.focusedEpisodeId = targetEp?.id ?? preferredFocusEpisodeId(in: localEps)
+                }
+            } else {
+                let preferredSeasonNum = initialItem.isEpisode
+                    ? (initialItem.parentIndexNumber ?? localGroup.seasonItems.first?.indexNumber ?? 1)
+                    : (localGroup.seasonItems.first?.indexNumber ?? 1)
+                let localEps = localGroup.episodesBySeason[preferredSeasonNum] ?? []
+                self.selectedSeasonIndex = preferredSeasonNum
+                self.episodes = localEps
+                if let remembered, localEps.contains(where: { $0.id == remembered.episodeId }) {
+                    self.focusedEpisodeId = remembered.episodeId
+                } else if !userDidPickEpisodeLocally {
+                    self.focusedEpisodeId = preferredFocusEpisodeId(in: localEps)
+                }
+            }
+        }
+        syncDefaultTracks()
     }
 
     func loadFullDetailData() async {
-        await refreshOfflineAndCacheSnapshots()
-        guard !Task.isCancelled else { return }
-        let localGroup = cachedOfflineGroup
-        // Hydrate from local offline library first so offline items / slow networks show immediately
-        if let localGroup {
-            self.item = localGroup.displayItem
-            let remembered = appState.detailFocusedEpisode(forSeriesKey: AppState.detailSeriesKey(for: localGroup.displayItem))
-            if localGroup.isSeries && !localGroup.seasonItems.isEmpty {
-                self.seasons = localGroup.seasonItems
-                if let remembered,
-                   let rSeason = remembered.seasonNumber,
-                   let localEps = localGroup.episodesBySeason[rSeason],
-                   !localEps.isEmpty {
-                    self.selectedSeasonIndex = rSeason
-                    self.episodes = localEps
-                    if localEps.contains(where: { $0.id == remembered.episodeId }) {
-                        self.focusedEpisodeId = remembered.episodeId
-                    } else if !userDidPickEpisodeLocally {
-                        self.focusedEpisodeId = preferredFocusEpisodeId(in: localEps)
-                    }
-                } else if preferOfflineFocus {
-                    let allDownloaded = downloadedEpisodesIn(localGroup)
-                    let targetEp = allDownloaded.first(where: { !isEpisodeWatched($0) }) ?? allDownloaded.first
-                    let preferredSeasonNum = targetEp?.parentIndexNumber ?? localGroup.seasonItems.first?.indexNumber ?? 1
-                    let localEps = localGroup.episodesBySeason[preferredSeasonNum] ?? []
-                    self.selectedSeasonIndex = preferredSeasonNum
-                    self.episodes = localEps
-                    if !userDidPickEpisodeLocally {
-                        self.focusedEpisodeId = targetEp?.id ?? preferredFocusEpisodeId(in: localEps)
-                    }
-                } else {
-                    let preferredSeasonNum = initialItem.isEpisode
-                        ? (initialItem.parentIndexNumber ?? localGroup.seasonItems.first?.indexNumber ?? 1)
-                        : (localGroup.seasonItems.first?.indexNumber ?? 1)
-                    let localEps = localGroup.episodesBySeason[preferredSeasonNum] ?? []
-                    self.selectedSeasonIndex = preferredSeasonNum
-                    self.episodes = localEps
-                    if let remembered, localEps.contains(where: { $0.id == remembered.episodeId }) {
-                        self.focusedEpisodeId = remembered.episodeId
-                    } else if !userDidPickEpisodeLocally {
-                        self.focusedEpisodeId = preferredFocusEpisodeId(in: localEps)
-                    }
-                }
-            }
-            syncDefaultTracks()
-        }
-
-        guard let server = effectiveDetailServer else { return }
-        guard !server.host.isEmpty else { return }
+        detailLoadError = nil
+        hasHydratedDetail = false
         isLoadingDetails = true
         defer { isLoadingDetails = false }
 
+        let initialSig = detailCompletedDownloadSignature
+        async let snapshotTask = fetchOfflineAndCacheSnapshots()
+
+        let precheckServer = effectiveDetailServer
+        if precheckServer == nil || precheckServer?.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+            let (localGroup, assets) = await snapshotTask
+            guard !Task.isCancelled else { return }
+            self.cachedOfflineGroup = localGroup
+            self.cachedUnpinnedAssets = assets
+            self.lastScannedDownloadSignature = initialSig
+            if let localGroup {
+                applyOfflineGroupHydration(localGroup)
+            } else {
+                self.detailLoadError = "未配置可用服务器且无本地离线缓存"
+            }
+            self.hasHydratedDetail = true
+            return
+        }
+
+        let server = precheckServer!
         let targetSeriesId: String? = initialItem.isSeries ? initialItem.id : (initialItem.isEpisode ? initialItem.seriesId : nil)
 
         if let ext = DonbyAppExtensionCenter.shared.plugin, ext.isActive(for: server) {
-            let payload = await ext.loadDetailPayload(server: server, initialItem: initialItem, targetSeriesId: targetSeriesId)
+            async let extPayloadTask = ext.loadDetailPayload(server: server, initialItem: initialItem, targetSeriesId: targetSeriesId)
+            let (localGroup, assets) = await snapshotTask
+            guard !Task.isCancelled else { return }
+            self.cachedOfflineGroup = localGroup
+            self.cachedUnpinnedAssets = assets
+            self.lastScannedDownloadSignature = initialSig
+            if let localGroup {
+                applyOfflineGroupHydration(localGroup)
+            }
+
+            let payload = await extPayloadTask
             guard !Task.isCancelled else { return }
             if let enriched = payload.enrichedItem {
                 self.item = enriched
+            } else if localGroup == nil && payload.seasons?.isEmpty != false {
+                self.detailLoadError = "无法获取详情信息，请检查网络或切换线路"
             }
             syncDefaultTracks()
 
@@ -316,6 +351,7 @@ extension DetailView {
                 }
             }
             self.similarItems = []
+            self.hasHydratedDetail = true
             return
         }
 
@@ -325,15 +361,44 @@ extension DetailView {
             initialItem.id
         }
 
-        async let detailTask = try? EmbyClient.shared.fetchItemDetail(server: server, itemId: detailFetchId)
-        async let similarTask = try? EmbyClient.shared.fetchSimilarItems(server: server, itemId: detailFetchId)
-        async let seasonsTask: [EmbyItem]? = {
+        async let detailResultTask: Result<EmbyItem, Error> = {
+            do {
+                return .success(try await EmbyClient.shared.fetchItemDetail(server: server, itemId: detailFetchId))
+            } catch {
+                return .failure(error)
+            }
+        }()
+        async let seasonsResultTask: Result<[EmbyItem], Error>? = {
             guard let sid = targetSeriesId, !sid.isEmpty else { return nil }
-            return try? await EmbyClient.shared.fetchSeasons(server: server, seriesId: sid)
+            do {
+                return .success(try await EmbyClient.shared.fetchSeasons(server: server, seriesId: sid))
+            } catch {
+                return .failure(error)
+            }
         }()
 
-        var upgradedSimilarItems: [EmbyItem]? = nil
-        if let detailed = await detailTask {
+        // Launch similar items in an independent branch so it never blocks or causes 4-wave vertical jumps
+        activeSimilarTask?.cancel()
+        activeSimilarTask = Task { [weak appState] in
+            _ = appState
+            if let sims = try? await EmbyClient.shared.fetchSimilarItems(server: server, itemId: detailFetchId),
+               !Task.isCancelled {
+                self.similarItems = sims
+            }
+        }
+
+        let (localGroup, assets) = await snapshotTask
+        guard !Task.isCancelled else { return }
+        self.cachedOfflineGroup = localGroup
+        self.cachedUnpinnedAssets = assets
+        self.lastScannedDownloadSignature = initialSig
+        if let localGroup {
+            applyOfflineGroupHydration(localGroup)
+        }
+
+        var detailError: Error? = nil
+        switch await detailResultTask {
+        case .success(let detailed):
             guard !Task.isCancelled else { return }
             if detailed.isEpisode, let sid = detailed.seriesId, !sid.isEmpty {
                 appState.rememberDetailFocusedEpisode(
@@ -341,26 +406,49 @@ extension DetailView {
                     seasonNumber: detailed.parentIndexNumber,
                     episodeId: detailed.id
                 )
-                async let parentSeriesTask = try? EmbyClient.shared.fetchItemDetail(server: server, itemId: sid)
-                async let parentSimilarTask = try? EmbyClient.shared.fetchSimilarItems(server: server, itemId: sid)
-                if let parentSeries = await parentSeriesTask {
+                if sid != detailFetchId {
+                    activeSimilarTask?.cancel()
+                    activeSimilarTask = Task {
+                        if let sims = try? await EmbyClient.shared.fetchSimilarItems(server: server, itemId: sid),
+                           !Task.isCancelled {
+                            self.similarItems = sims
+                        }
+                    }
+                }
+                if let parentSeries = try? await EmbyClient.shared.fetchItemDetail(server: server, itemId: sid) {
                     guard !Task.isCancelled else { return }
                     self.item = parentSeries
-                    upgradedSimilarItems = await parentSimilarTask
                 } else {
                     self.item = detailed
                 }
             } else {
                 self.item = detailed
             }
+        case .failure(let error):
+            if !(error is CancellationError) {
+                detailError = error
+            }
         }
         guard !Task.isCancelled else { return }
         syncDefaultTracks()
 
-        var preloadedSeasons = await seasonsTask
+        var preloadedSeasons: [EmbyItem]? = nil
+        var seasonsError: Error? = nil
+        if let sRes = await seasonsResultTask {
+            switch sRes {
+            case .success(let s):
+                preloadedSeasons = s
+            case .failure(let err):
+                if !(err is CancellationError) { seasonsError = err }
+            }
+        }
         guard !Task.isCancelled else { return }
         if (preloadedSeasons == nil || preloadedSeasons?.isEmpty == true), item.isSeries, targetSeriesId == nil {
-            preloadedSeasons = try? await EmbyClient.shared.fetchSeasons(server: server, seriesId: item.id)
+            do {
+                preloadedSeasons = try await EmbyClient.shared.fetchSeasons(server: server, seriesId: item.id)
+            } catch {
+                if !(error is CancellationError) { seasonsError = error }
+            }
             guard !Task.isCancelled else { return }
         }
 
@@ -368,22 +456,29 @@ extension DetailView {
             if let loadedSeasons = preloadedSeasons, !loadedSeasons.isEmpty {
                 self.seasons = loadedSeasons
                 await applyInitialSeasonAndFocus(seasons: loadedSeasons, localGroup: localGroup)
-            } else if let allEps = try? await EmbyClient.shared.fetchEpisodes(server: server, seriesId: item.id) {
-                guard !Task.isCancelled else { return }
-                let sNums = Set(allEps.compactMap { $0.parentIndexNumber }).sorted()
-                if !sNums.isEmpty {
-                    let builtSeasons = sNums.map { s in
-                        EmbyItem(id: "\(item.id)_s\(s)", name: "第 \(s) 季", type: "Season", seriesId: item.id, indexNumber: s)
+            } else {
+                do {
+                    let allEps = try await EmbyClient.shared.fetchEpisodes(server: server, seriesId: item.id)
+                    guard !Task.isCancelled else { return }
+                    let sNums = Set(allEps.compactMap { $0.parentIndexNumber }).sorted()
+                    if !sNums.isEmpty {
+                        let builtSeasons = sNums.map { s in
+                            EmbyItem(id: "\(item.id)_s\(s)", name: "第 \(s) 季", type: "Season", seriesId: item.id, indexNumber: s)
+                        }
+                        self.seasons = builtSeasons
+                        await applyInitialSeasonAndFocus(seasons: builtSeasons, localGroup: localGroup, preloadedAllEpisodes: allEps)
+                    } else {
+                        self.episodes = allEps
+                        let remembered = appState.detailFocusedEpisode(forSeriesKey: detailSeriesKey)
+                        if let remembered, allEps.contains(where: { $0.id == remembered.episodeId }) {
+                            self.focusedEpisodeId = remembered.episodeId
+                        } else if !userDidPickEpisodeLocally || !allEps.contains(where: { $0.id == focusedEpisodeId }) {
+                            self.focusedEpisodeId = preferredFocusEpisodeId(in: allEps)
+                        }
                     }
-                    self.seasons = builtSeasons
-                    await applyInitialSeasonAndFocus(seasons: builtSeasons, localGroup: localGroup, preloadedAllEpisodes: allEps)
-                } else {
-                    self.episodes = allEps
-                    let remembered = appState.detailFocusedEpisode(forSeriesKey: detailSeriesKey)
-                    if let remembered, allEps.contains(where: { $0.id == remembered.episodeId }) {
-                        self.focusedEpisodeId = remembered.episodeId
-                    } else if !userDidPickEpisodeLocally || !allEps.contains(where: { $0.id == focusedEpisodeId }) {
-                        self.focusedEpisodeId = preferredFocusEpisodeId(in: allEps)
+                } catch {
+                    if !(error is CancellationError), self.episodes.isEmpty {
+                        self.detailLoadError = (seasonsError ?? detailError ?? error).localizedDescription
                     }
                 }
             }
@@ -392,7 +487,12 @@ extension DetailView {
             if let preloadedSeasons, !preloadedSeasons.isEmpty {
                 loadedSeasons = preloadedSeasons
             } else {
-                loadedSeasons = try? await EmbyClient.shared.fetchSeasons(server: server, seriesId: sId)
+                do {
+                    loadedSeasons = try await EmbyClient.shared.fetchSeasons(server: server, seriesId: sId)
+                } catch {
+                    loadedSeasons = nil
+                    if !(error is CancellationError) { seasonsError = error }
+                }
             }
             guard !Task.isCancelled else { return }
             if let loadedSeasons, !loadedSeasons.isEmpty {
@@ -403,15 +503,15 @@ extension DetailView {
                 if let currentSeason = loadedSeasons.first(where: { ($0.indexNumber ?? 1) == sNum }) ?? loadedSeasons.first {
                     await loadEpisodesForSeason(currentSeason, seasonNumber: sNum, preferredOverrideEpisodeId: remembered?.episodeId)
                 }
+            } else if self.episodes.isEmpty, let err = seasonsError ?? detailError {
+                self.detailLoadError = err.localizedDescription
             }
+        } else if localGroup == nil, let err = detailError {
+            self.detailLoadError = err.localizedDescription
         }
 
         guard !Task.isCancelled else { return }
-        if let sims = upgradedSimilarItems {
-            self.similarItems = sims
-        } else if let sims = await similarTask {
-            self.similarItems = sims
-        }
+        self.hasHydratedDetail = true
     }
 
     private func applyInitialSeasonAndFocus(
@@ -451,7 +551,7 @@ extension DetailView {
 
                 for sNum in downloadedSeasonNums {
                     guard let seasonObj = loadedSeasons.first(where: { ($0.indexNumber ?? 1) == sNum }) else { continue }
-                    let seasonEps = await fetchMergedEpisodesForSeason(seasonObj, seasonNumber: sNum, localGroup: localGroup, preloadedAllEpisodes: preloadedAllEpisodes)
+                    let seasonEps = await fetchMergedEpisodesForSeason(seasonObj, seasonNumber: sNum, localGroup: localGroup, preloadedAllEpisodes: preloadedAllEpisodes).episodes
                     guard !Task.isCancelled else { return }
 
                     let downloadedInSeason = seasonEps.filter { downloadedIds.contains($0.id) }
@@ -488,26 +588,27 @@ extension DetailView {
         seasonNumber: Int,
         localGroup: OfflineLibraryGroup?,
         preloadedAllEpisodes: [EmbyItem]? = nil
-    ) async -> [EmbyItem] {
+    ) async -> (episodes: [EmbyItem], error: Error?) {
         let localEps = localGroup?.episodesBySeason[seasonNumber] ?? []
         if let preloadedAllEpisodes {
             let filtered = preloadedAllEpisodes.filter { ($0.parentIndexNumber ?? 1) == seasonNumber }
             let remote = filtered.isEmpty ? preloadedAllEpisodes : filtered
-            return mergeEpisodes(remote: remote, local: localEps)
+            return (mergeEpisodes(remote: remote, local: localEps), nil)
         }
         guard let server = effectiveDetailServer, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return localEps
+            return (localEps, nil)
         }
         if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
             let tvId = item.isEpisode ? (item.seriesId ?? item.id) : item.id
             let sName = item.isEpisode ? item.seriesName : item.name
-            if let eps = try? await ext.fetchSeasonEpisodes(
-                server: server,
-                tvId: tvId,
-                seasonId: season.id,
-                seasonNumber: seasonNumber,
-                seriesName: sName
-            ) {
+            do {
+                let eps = try await ext.fetchSeasonEpisodes(
+                    server: server,
+                    tvId: tvId,
+                    seasonId: season.id,
+                    seasonNumber: seasonNumber,
+                    seriesName: sName
+                )
                 let fallbackPoster = season.uhdPosterURL ?? item.uhdPosterURL
                 let fallbackBackdrop = item.uhdBackdropURL
                 let fallbackLogo = item.uhdLogoURL
@@ -518,19 +619,36 @@ extension DetailView {
                         logoURL: fallbackLogo
                     )
                 }
-                return mergeEpisodes(remote: enrichedRemote, local: localEps)
+                return (mergeEpisodes(remote: enrichedRemote, local: localEps), nil)
+            } catch {
+                return (localEps, error)
             }
-            return localEps
         }
         let seriesId = item.isEpisode ? (item.seriesId ?? item.id) : item.id
-        if let eps = try? await EmbyClient.shared.fetchEpisodes(server: server, seriesId: seriesId, seasonId: season.id), !eps.isEmpty {
-            return mergeEpisodes(remote: eps, local: localEps)
+        var lastError: Error? = nil
+        do {
+            let eps = try await EmbyClient.shared.fetchEpisodes(server: server, seriesId: seriesId, seasonId: season.id)
+            if !eps.isEmpty {
+                return (mergeEpisodes(remote: eps, local: localEps), nil)
+            }
+        } catch {
+            lastError = error
         }
-        if let allEps = try? await EmbyClient.shared.fetchEpisodes(server: server, seriesId: seriesId) {
+        do {
+            let allEps = try await EmbyClient.shared.fetchEpisodes(server: server, seriesId: seriesId)
             let filtered = allEps.filter { ($0.parentIndexNumber ?? 1) == seasonNumber }
-            return mergeEpisodes(remote: filtered.isEmpty ? allEps : filtered, local: localEps)
+            return (mergeEpisodes(remote: filtered.isEmpty ? allEps : filtered, local: localEps), nil)
+        } catch {
+            return (localEps, lastError ?? error)
         }
-        return localEps
+    }
+
+    func triggerSeasonLoad(_ season: EmbyItem, seasonNumber: Int) {
+        activeSeasonLoadTask?.cancel()
+        selectedSeasonIndex = seasonNumber
+        activeSeasonLoadTask = Task {
+            await loadEpisodesForSeason(season, seasonNumber: seasonNumber)
+        }
     }
 
     func loadEpisodesForSeason(
@@ -540,17 +658,30 @@ extension DetailView {
         preferredOverrideEpisodeId: String? = nil
     ) async {
         let sNum = seasonNumber ?? season.indexNumber ?? 1
+        seasonLoadGeneration &+= 1
+        let gen = seasonLoadGeneration
         selectedSeasonIndex = sNum
+        isLoadingSeasonEpisodes = true
+        defer {
+            if gen == seasonLoadGeneration {
+                isLoadingSeasonEpisodes = false
+            }
+        }
         let localGroup = cachedOfflineGroup
-        let merged = await fetchMergedEpisodesForSeason(season, seasonNumber: sNum, localGroup: localGroup, preloadedAllEpisodes: preloadedAllEpisodes)
-        guard !Task.isCancelled else { return }
-        self.episodes = merged
-        if let ovId = preferredOverrideEpisodeId, merged.contains(where: { $0.id == ovId }) {
+        let result = await fetchMergedEpisodesForSeason(season, seasonNumber: sNum, localGroup: localGroup, preloadedAllEpisodes: preloadedAllEpisodes)
+        guard !Task.isCancelled, gen == seasonLoadGeneration else { return }
+        self.episodes = result.episodes
+        if result.episodes.isEmpty, let err = result.error, !(err is CancellationError) {
+            self.detailLoadError = err.localizedDescription
+        } else if !result.episodes.isEmpty {
+            self.detailLoadError = nil
+        }
+        if let ovId = preferredOverrideEpisodeId, result.episodes.contains(where: { $0.id == ovId }) {
             self.focusedEpisodeId = ovId
-        } else if userDidPickEpisodeLocally, let curId = focusedEpisodeId, merged.contains(where: { $0.id == curId }) {
+        } else if userDidPickEpisodeLocally, let curId = focusedEpisodeId, result.episodes.contains(where: { $0.id == curId }) {
             self.focusedEpisodeId = curId
         } else {
-            self.focusedEpisodeId = preferredFocusEpisodeId(in: merged)
+            self.focusedEpisodeId = preferredFocusEpisodeId(in: result.episodes)
         }
     }
 

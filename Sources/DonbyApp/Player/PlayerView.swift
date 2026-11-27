@@ -15,9 +15,8 @@ public struct PlayerView: View {
     @State var episodeSwitchTask: Task<Void, Never>? = nil
     @State var currentItem: EmbyItem
     @State var currentResource: DonbyCore.ResolvedPlaybackResource
+    @State var currentItemStartPositionSeconds: Double = 0
     @State var isPlaying: Bool = true
-    @State var isScrubbing: Bool = false
-    @State var scrubTime: Double = 0
     @State var volume: Float = 1.0
     @State var isMuted: Bool = false
     @State var playbackSpeed: Float = 1.0
@@ -40,16 +39,14 @@ public struct PlayerView: View {
     @State var autoHideBox = PlayerAutoHideBox()
     @State var mouseMonitor: Any? = nil
     @State var keyMonitor: Any? = nil
-    @State var lastRecordedPosition: Double = -10
     @State var activePlaybackGeneration: Int = 0
-    @State private var bottomControlBarHeight: CGFloat = 96
+    @State var bottomControlBarHeight: CGFloat = 96
     @State var activeTurboHandle: TurboStreamByteHandle? = nil
     @State var playbackNetworkPriorityToken: UUID? = nil
     @State var activeSecondarySubtitleSelection: PlayerSubtitleSelection = .off
     @State var secondaryLocalSubtitleName: String? = nil
     @State var explicitSubtitleOff: Bool = false
     @State var kernelChapters: [PlaybackChapterItem] = []
-    @State var healthPolicy = PlaybackHealthPolicy()
     @State var seekGeneration: Int = 0
     @State var lastSeekCommitUptime: TimeInterval = 0
     @State var lastSeekCommitTarget: Double = 0
@@ -61,7 +58,6 @@ public struct PlayerView: View {
     @State var finishedItemPendingCleanup: (itemId: String, mediaSourceId: String)? = nil
     @State var prefetchedNextEpisodeResource: (itemId: String, resource: ResolvedPlaybackResource)? = nil
     @State var prefetchedNextEpisodeInFlightId: String? = nil
-    @State var subtitleStyleRevision: Int = 0
     @State var isAdjustingSubtitleLayout: Bool = false
     @State var tracksDrawerSection: TracksDrawerSection = .tracks
     @State var isAutoAligningSubtitle: Bool = false
@@ -69,8 +65,46 @@ public struct PlayerView: View {
     @State var lastSubtitleAlignUndo: SubtitleAlignUndoState? = nil
     @State var secondarySubtitleTimeScale: Double = 1.0
     @State var isSecondaryAlignedToPrimary: Bool = false
-    @StateObject var telemetry = PlayerHUDTelemetry()
+    @State var telemetryBox = PlayerTelemetryBox()
     @StateObject var companionBox = DonbyPlayerCompanionBox()
+
+    var resolvedServer: EmbyServerConfig {
+        appState.servers.first(where: { $0.id == session.server.id }) ?? session.server
+    }
+
+    var subtitleStyleRevision: Int {
+        get { 0 }
+        nonmutating set {
+            autoHideBox.subtitleRedrawGeneration &+= 1
+            if let handle = playerHandle {
+                NotificationCenter.default.post(
+                    name: Notification.Name("DonbyMetalRequestPausedSubtitleRedraw"),
+                    object: nil,
+                    userInfo: ["handle": UInt(bitPattern: handle)]
+                )
+            }
+        }
+    }
+
+    var telemetry: PlayerHUDTelemetry {
+        telemetryBox.legacyTelemetry
+    }
+
+    private var effectiveSubtitleOcclusionHeight: CGFloat {
+        guard !isAdjustingSubtitleLayout,
+              activeDrawer == nil,
+              hasRenderedFirstFrame,
+              !isOpeningMedia,
+              openingErrorMessage == nil else {
+            return 0
+        }
+        let barHeight = showControls ? bottomControlBarHeight : 0
+        if skipBannerLabel != nil {
+            let skipBannerLift: CGFloat = showControls ? (bottomControlBarHeight + 52) : 76
+            return max(barHeight, skipBannerLift)
+        }
+        return barHeight
+    }
 
 
     // Use `.default` RunLoop mode so timers automatically pause during macOS NSMenu `.eventTracking`,
@@ -83,6 +117,7 @@ public struct PlayerView: View {
         self.session = session
         self._currentItem = State(initialValue: session.item)
         self._currentResource = State(initialValue: session.resource)
+        self._currentItemStartPositionSeconds = State(initialValue: session.startPositionSeconds)
         self._selectedAudioIdx = State(initialValue: session.selectedAudioIndex)
         self._selectedSubIdx = State(initialValue: session.selectedSubtitleIndex)
         self._explicitSubtitleOff = State(initialValue: session.subtitleExplicitlyOff)
@@ -95,10 +130,9 @@ public struct PlayerView: View {
             // C++ / Metal Native Engine Video Surface
             DKMetalVideoView(
                 playerHandle: playerHandle,
-                controlsOcclusionHeight: (isPlaying && showControls && !isAdjustingSubtitleLayout && activeDrawer == nil) ? bottomControlBarHeight : 0,
+                controlsOcclusionHeight: effectiveSubtitleOcclusionHeight,
                 subtitleHDRPeakNits: Float(appState.subtitleStyle.hdrPeakNits.rawValue),
                 antiOcclusionEnabled: appState.subtitleStyle.antiOcclusionEnabled,
-                subtitleStyleRevision: subtitleStyleRevision,
                 onFirstFrameRendered: {
                     if !hasRenderedFirstFrame {
                         withAnimation(.easeOut(duration: 0.16)) {
@@ -111,9 +145,6 @@ public struct PlayerView: View {
                 }
             )
                 .ignoresSafeArea()
-                .onContinuousHover { _ in
-                    showControlsAndResetTimer()
-                }
                 .onTapGesture(count: 2) {
                     toggleFullScreen()
                     showControlsAndResetTimer()
@@ -133,6 +164,7 @@ public struct PlayerView: View {
                         } else {
                             autoHideBox.autoHideTask?.cancel()
                             autoHideBox.autoHideTask = nil
+                            NSCursor.setHiddenUntilMouseMoves(true)
                         }
                     }
                 }
@@ -162,35 +194,49 @@ public struct PlayerView: View {
             if let err = openingErrorMessage {
                 PlayerErrorOverlayView(
                     errorMessage: err,
-                    onRetry: { startNativeKernelPlayback(startSeconds: autoHideBox.liveCurrentTime) },
-                    onSwitchLine: { appState.linePickerServer = session.server },
+                    onRetry: { reloadPlaybackWithResolvedServer(at: autoHideBox.liveCurrentTime, resetHealthPolicy: true) },
+                    onSwitchLine: { appState.linePickerServer = resolvedServer },
                     onShowLogs: { showLogSheet = true },
                     onExit: { exitPlayer() }
                 )
             }
 
+            if hasRenderedFirstFrame && !isOpeningMedia && openingErrorMessage == nil,
+               let bannerTitle = skipBannerLabel {
+                VStack {
+                    Spacer()
+                    PlayerSkipBannerView(
+                        title: bannerTitle,
+                        isOutro: skipBannerIsOutro,
+                        onTap: {
+                            if skipBannerIsOutro,
+                               let idx = session.episodesQueue.firstIndex(where: { $0.id == currentItem.id }),
+                               session.episodesQueue.indices.contains(idx + 1) {
+                                switchToEpisode(session.episodesQueue[idx + 1])
+                            } else {
+                                seekTo(skipBannerTargetSec)
+                            }
+                            skipBannerLabel = nil
+                        }
+                    )
+                    .padding(.bottom, showControls ? bottomControlBarHeight : 16)
+                }
+                .transition(.opacity)
+            }
+
             if showControls || isOpeningMedia || openingErrorMessage != nil {
                 VStack {
                     topOSDBar
-                        .onContinuousHover { _ in showControlsAndResetTimer() }
-                    Spacer()
-                    if showControls && !isOpeningMedia && openingErrorMessage == nil {
-                        if let bannerTitle = skipBannerLabel {
-                            PlayerSkipBannerView(
-                                title: bannerTitle,
-                                isOutro: skipBannerIsOutro,
-                                onTap: {
-                                    if skipBannerIsOutro,
-                                       let idx = session.episodesQueue.firstIndex(where: { $0.id == currentItem.id }),
-                                       session.episodesQueue.indices.contains(idx + 1) {
-                                        switchToEpisode(session.episodesQueue[idx + 1])
-                                    } else {
-                                        seekTo(skipBannerTargetSec)
-                                    }
-                                    skipBannerLabel = nil
-                                }
-                            )
+                        .onHover { hovering in
+                            autoHideBox.isHoveringTopBar = hovering
+                            if hovering {
+                                showControlsAndResetTimer()
+                            } else if showControls {
+                                showControlsAndResetTimer()
+                            }
                         }
+                    Spacer()
+                    if showControls && hasRenderedFirstFrame && !isOpeningMedia && openingErrorMessage == nil {
                         bottomControlBar
                             .background(
                                 GeometryReader { geo in
@@ -203,7 +249,14 @@ public struct PlayerView: View {
                                         }
                                 }
                             )
-                            .onContinuousHover { _ in showControlsAndResetTimer() }
+                            .onHover { hovering in
+                                autoHideBox.isHoveringBottomBar = hovering
+                                if hovering {
+                                    showControlsAndResetTimer()
+                                } else if showControls {
+                                    showControlsAndResetTimer()
+                                }
+                            }
                     }
                 }
                 .transition(.opacity)
@@ -214,30 +267,29 @@ public struct PlayerView: View {
                     Spacer()
                     rightDrawerPanel(tab: drawer)
                         .transition(.move(edge: .trailing).combined(with: .opacity))
-                        .onContinuousHover { _ in
-                            autoHideBox.autoHideTask?.cancel()
-                            autoHideBox.autoHideTask = nil
+                        .onHover { hovering in
+                            autoHideBox.isHoveringDrawer = hovering
+                            if hovering {
+                                autoHideBox.autoHideTask?.cancel()
+                                autoHideBox.autoHideTask = nil
+                            } else if showControls {
+                                showControlsAndResetTimer()
+                            }
                         }
                 }
             }
         }
+        .background(
+            PlayerHostWindowFinder { win in
+                autoHideBox.hostWindow = win
+            }
+        )
         .sheet(isPresented: $showLogSheet) {
             LogViewerSheet()
                 .environmentObject(appState)
                 .preferredColorScheme(appState.colorScheme)
                 .tint(appState.accentColor)
         }
-        .focusable()
-        .donbyFocusEffectDisabled()
-        .modifier(DonbyPlayerKeyPressModifier(
-            togglePlayPause: togglePlayPause,
-            seekRelative: seekRelative,
-            adjustVolume: adjustVolume,
-            toggleFullScreen: toggleFullScreen,
-            toggleLogSheet: { showLogSheet.toggle() },
-            exitPlayer: exitPlayer
-        ))
-        .onExitCommand { exitPlayer() }
         .onAppear {
             playbackSpeed = Float(appState.defaultPlaySpeed)
             startNativeKernelPlayback(startSeconds: session.startPositionSeconds)
@@ -246,10 +298,15 @@ public struct PlayerView: View {
             // Setup global window monitors for mouse activity and keyboard shortcuts
             if let mm = mouseMonitor { NSEvent.removeMonitor(mm); mouseMonitor = nil }
             if let km = keyMonitor { NSEvent.removeMonitor(km); keyMonitor = nil }
-            mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDown, .rightMouseDown]) { event in
+            mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .leftMouseDown, .rightMouseDown]) { event in
                 guard NSApp.modalWindow == nil else { return event }
+                let hostWin = autoHideBox.hostWindow ?? NSApp.keyWindow
+                guard event.window == hostWin, event.window?.sheetParent == nil else { return event }
                 let now = ProcessInfo.processInfo.systemUptime
-                if event.type != .mouseMoved || now - autoHideBox.lastMouseMoveTimestamp > 0.15 {
+                if event.type == .leftMouseDown && !showControls {
+                    return event
+                }
+                if (event.type != .mouseMoved && event.type != .leftMouseDragged) || now - autoHideBox.lastMouseMoveTimestamp > 0.15 {
                     autoHideBox.lastMouseMoveTimestamp = now
                     showControlsAndResetTimer()
                 }
@@ -257,23 +314,31 @@ public struct PlayerView: View {
             }
 
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                let hasSheet = showLogSheet || appState.showLogViewer || appState.serverEditorRequest != nil || appState.linePickerServer != nil
-                if hasSheet || NSApp.modalWindow != nil || event.window?.attachedSheet != nil || (NSApp.keyWindow?.firstResponder is NSTextView) {
+                if RunLoop.current.currentMode == .eventTracking {
+                    return event
+                }
+                let hostWin = autoHideBox.hostWindow ?? NSApp.keyWindow
+                guard event.window == hostWin else { return event }
+                guard event.window?.sheetParent == nil, event.window?.attachedSheet == nil else { return event }
+                let hasSheet = showLogSheet || appState.showLogViewer || appState.serverEditorRequest != nil || appState.linePickerServer != nil || NSApp.modalWindow != nil
+                if hasSheet || (hostWin?.firstResponder is NSTextView) || (NSApp.keyWindow?.firstResponder is NSTextView) {
                     return event
                 }
                 let mods = event.modifierFlags.intersection([.command, .control, .option])
                 if !mods.isEmpty {
                     return event
                 }
-                showControlsAndResetTimer()
                 switch event.keyCode {
                 case 49: // Space
+                    showControlsAndResetTimer()
                     togglePlayPause()
                     return nil
                 case 123: // Left Arrow (-10s)
+                    showControlsAndResetTimer()
                     seekRelative(-10)
                     return nil
                 case 124: // Right Arrow (+10s)
+                    showControlsAndResetTimer()
                     seekRelative(10)
                     return nil
                 case 126: // Up Arrow (+5% volume)
@@ -282,16 +347,25 @@ public struct PlayerView: View {
                 case 125: // Down Arrow (-5% volume)
                     adjustVolume(delta: -0.05)
                     return nil
-                case 53: // Esc
-                    exitPlayer()
+                case 53: // Esc (layered: drawer -> fullscreen -> exit)
+                    if activeDrawer != nil {
+                        withAnimation(.easeInOut(duration: 0.18)) { activeDrawer = nil }
+                        showControlsAndResetTimer()
+                    } else if hostWin?.styleMask.contains(.fullScreen) == true {
+                        hostWin?.toggleFullScreen(nil)
+                    } else {
+                        exitPlayer()
+                    }
                     return nil
                 default:
                     let char = event.charactersIgnoringModifiers?.lowercased()
                     if char == "f" {
+                        showControlsAndResetTimer()
                         toggleFullScreen()
                         return nil
                     }
                     if char == "l" {
+                        showControlsAndResetTimer()
                         showLogSheet.toggle()
                         return nil
                     }
@@ -300,10 +374,16 @@ public struct PlayerView: View {
             }
         }
         .onDisappear {
+            NSCursor.setHiddenUntilMouseMoves(false)
             autoHideBox.autoHideTask?.cancel()
             if let mm = mouseMonitor { NSEvent.removeMonitor(mm); mouseMonitor = nil }
             if let km = keyMonitor { NSEvent.removeMonitor(km); keyMonitor = nil }
             stopNativeKernel()
+        }
+        .donbyOnChange(of: activeDrawer) { newDrawer in
+            if newDrawer != nil {
+                NSCursor.setHiddenUntilMouseMoves(false)
+            }
         }
         .onAppear {
             configureAndBindCompanionIfNeeded()
@@ -336,7 +416,8 @@ public struct PlayerView: View {
             applyKernelSubtitleStyle()
         }
         .donbyOnChange(of: appState.turboConnectionBudget) { _ in
-            let budget = appState.effectiveConnectionBudget(for: session.server)
+            let srv = resolvedServer
+            let budget = appState.effectiveConnectionBudget(for: srv)
             activeTurboHandle?.updateTuning(
                 connectionBudget: budget,
                 prefetchAheadChunks: Self.resolvedTurboPrefetchChunks(
@@ -345,6 +426,10 @@ public struct PlayerView: View {
                 )
             )
         }
+        .donbyOnChange(of: "\(resolvedServer.selectedLineId?.uuidString ?? "main")|\(resolvedServer.activeBaseURL)") { _ in
+            guard !currentResource.isLocalOrOfflineMedia else { return }
+            reloadPlaybackWithResolvedServer(at: autoHideBox.liveCurrentTime, resetHealthPolicy: true)
+        }
         .onReceive(embySyncTimer) { _ in
             handleEmbySyncTimerTick()
         }
@@ -352,13 +437,14 @@ public struct PlayerView: View {
     }
 
     func syncVisiblePlaybackStateFromBox() {
-        telemetry.updateCurrentTime(autoHideBox.liveCurrentTime)
-        telemetry.updateBufferedAhead(autoHideBox.liveBufferedAheadSeconds)
+        telemetryBox.updateCurrentTime(autoHideBox.liveCurrentTime)
+        telemetryBox.updateBufferedAhead(autoHideBox.liveBufferedAheadSeconds)
         if currentResource.isLocalOrOfflineMedia {
-            telemetry.updateDownloadSpeed(0.0)
+            telemetryBox.updateDownloadSpeed(0.0)
         } else if let turboHandle = activeTurboHandle {
-            telemetry.updateDownloadSpeed(turboHandle.currentWireSpeedMBs)
+            telemetryBox.updateDownloadSpeed(turboHandle.currentWireSpeedMBs)
         }
+        telemetryBox.syncLegacySnapshot()
     }
 
     func showControlsAndResetTimer() {
@@ -366,6 +452,7 @@ public struct PlayerView: View {
         if RunLoop.current.currentMode == .eventTracking {
             return
         }
+        NSCursor.setHiddenUntilMouseMoves(false)
         if !showControls {
             syncVisiblePlaybackStateFromBox()
             withAnimation(.easeInOut(duration: 0.18)) {
@@ -388,10 +475,16 @@ public struct PlayerView: View {
             await MainActor.run {
                 autoHideBox.autoHideTask = nil
                 if RunLoop.current.currentMode != .eventTracking &&
-                    activeDrawer == nil && !isScrubbing && !isOpeningMedia && openingErrorMessage == nil {
+                    !autoHideBox.isHoveringTopBar &&
+                    !autoHideBox.isHoveringBottomBar &&
+                    !autoHideBox.isHoveringDrawer &&
+                    !autoHideBox.isScrubbing &&
+                    !autoHideBox.isDraggingVolume &&
+                    activeDrawer == nil && !isOpeningMedia && openingErrorMessage == nil {
                     withAnimation(.easeInOut(duration: 0.25)) {
                         showControls = false
                     }
+                    NSCursor.setHiddenUntilMouseMoves(true)
                 }
             }
         }
@@ -406,32 +499,5 @@ public struct PlayerView: View {
         }
         appState.showToast("音量: \(Int(newVol * 100))%", icon: newVol == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill")
         showControlsAndResetTimer()
-    }
-}
-
-private struct DonbyPlayerKeyPressModifier: ViewModifier {
-    let togglePlayPause: () -> Void
-    let seekRelative: (Double) -> Void
-    let adjustVolume: (Float) -> Void
-    let toggleFullScreen: () -> Void
-    let toggleLogSheet: () -> Void
-    let exitPlayer: () -> Void
-
-    func body(content: Content) -> some View {
-        if #available(macOS 14.0, *) {
-            content
-                .onKeyPress(.space) { togglePlayPause(); return .handled }
-                .onKeyPress(.leftArrow) { seekRelative(-10); return .handled }
-                .onKeyPress(.rightArrow) { seekRelative(10); return .handled }
-                .onKeyPress(.upArrow) { adjustVolume(0.05); return .handled }
-                .onKeyPress(.downArrow) { adjustVolume(-0.05); return .handled }
-                .onKeyPress(KeyEquivalent("f")) { toggleFullScreen(); return .handled }
-                .onKeyPress(KeyEquivalent("F")) { toggleFullScreen(); return .handled }
-                .onKeyPress(KeyEquivalent("l")) { toggleLogSheet(); return .handled }
-                .onKeyPress(KeyEquivalent("L")) { toggleLogSheet(); return .handled }
-                .onKeyPress(.escape) { exitPlayer(); return .handled }
-        } else {
-            content
-        }
     }
 }

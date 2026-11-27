@@ -158,6 +158,36 @@ private final class DisplayLinkDriver {
     }
 }
 
+// MARK: - Paused Subtitle Redraw Trigger
+
+public final class MetalSubtitleRedrawTrigger: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _generation: UInt64 = 0
+    private weak var layerView: DKMetalLayerView?
+
+    public init() {}
+
+    public func requestPausedRedraw() {
+        lock.lock()
+        _generation &+= 1
+        let target = layerView
+        lock.unlock()
+        target?.requestRedraw()
+    }
+
+    fileprivate func attach(to view: DKMetalLayerView?) {
+        lock.lock()
+        layerView = view
+        lock.unlock()
+    }
+
+    fileprivate var generation: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return _generation
+    }
+}
+
 // MARK: - SwiftUI Representable
 
 public struct DKMetalVideoView: NSViewRepresentable {
@@ -166,6 +196,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
     public let subtitleHDRPeakNits: Float
     public let antiOcclusionEnabled: Bool
     public let subtitleStyleRevision: Int
+    public let subtitleRedrawTrigger: MetalSubtitleRedrawTrigger?
     public let onFirstFrameRendered: (() -> Void)?
     public let onRenderDiagnostic: ((String) -> Void)?
 
@@ -175,6 +206,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
         subtitleHDRPeakNits: Float = 203.0,
         antiOcclusionEnabled: Bool = false,
         subtitleStyleRevision: Int = 0,
+        subtitleRedrawTrigger: MetalSubtitleRedrawTrigger? = nil,
         onFirstFrameRendered: (() -> Void)? = nil,
         onRenderDiagnostic: ((String) -> Void)? = nil
     ) {
@@ -183,6 +215,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
         self.subtitleHDRPeakNits = subtitleHDRPeakNits
         self.antiOcclusionEnabled = antiOcclusionEnabled
         self.subtitleStyleRevision = subtitleStyleRevision
+        self.subtitleRedrawTrigger = subtitleRedrawTrigger
         self.onFirstFrameRendered = onFirstFrameRendered
         self.onRenderDiagnostic = onRenderDiagnostic
     }
@@ -194,8 +227,10 @@ public struct DKMetalVideoView: NSViewRepresentable {
         view.antiOcclusionEnabled = antiOcclusionEnabled
         let coordinator = context.coordinator
         coordinator.lastSubtitleStyleRevision = subtitleStyleRevision
+        coordinator.lastSubtitleRedrawTriggerGen = subtitleRedrawTrigger?.generation ?? 0
         coordinator.onFirstFrameRendered = onFirstFrameRendered
         coordinator.onRenderDiagnostic = onRenderDiagnostic
+        subtitleRedrawTrigger?.attach(to: view)
         view.onDetachFromWindow = { [weak coordinator] in
             coordinator?.stopDisplayLink()
         }
@@ -209,9 +244,15 @@ public struct DKMetalVideoView: NSViewRepresentable {
         nsView.antiOcclusionEnabled = antiOcclusionEnabled
         context.coordinator.onFirstFrameRendered = onFirstFrameRendered
         context.coordinator.onRenderDiagnostic = onRenderDiagnostic
+        subtitleRedrawTrigger?.attach(to: nsView)
         if context.coordinator.lastSubtitleStyleRevision != subtitleStyleRevision {
             context.coordinator.lastSubtitleStyleRevision = subtitleStyleRevision
-            nsView.needsRedrawOnSameFrame = true
+            nsView.requestRedraw()
+        }
+        if let trigger = subtitleRedrawTrigger,
+           context.coordinator.lastSubtitleRedrawTriggerGen != trigger.generation {
+            context.coordinator.lastSubtitleRedrawTriggerGen = trigger.generation
+            nsView.requestRedraw()
         }
         if context.coordinator.player != playerHandle {
             context.coordinator.updatePlayer(playerHandle)
@@ -220,6 +261,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
 
     public static func dismantleNSView(_ nsView: DKMetalLayerView, coordinator: Coordinator) {
         coordinator.stopDisplayLink()
+        nsView.releasePlaybackResourcesOnExit()
     }
 
     public func sizeThatFits(_ proposal: ProposedViewSize, nsView: DKMetalLayerView, context: Context) -> CGSize? {
@@ -246,6 +288,8 @@ public struct DKMetalVideoView: NSViewRepresentable {
         private weak var view: DKMetalLayerView?
         private let driver = DisplayLinkDriver()
         fileprivate var lastSubtitleStyleRevision: Int = 0
+        fileprivate var lastSubtitleRedrawTriggerGen: UInt64 = 0
+        private var redrawObserver: NSObjectProtocol?
         var lastPts: Double = -1.0
         var lastBufferPtr: UnsafeMutableRawPointer?
         var lastSubSerial: UInt64 = UInt64.max
@@ -266,7 +310,25 @@ public struct DKMetalVideoView: NSViewRepresentable {
         private var lastViewportDrawableW: CGFloat = 0
         private var lastViewportDrawableH: CGFloat = 0
         private var lastViewportMetrics: (canvasW: Int32, canvasH: Int32, marginT: Int32, marginB: Int32, marginL: Int32, marginR: Int32) = (0, 0, 0, 0, 0, 0)
-        private let subtitleSyncBox = SubtitleSyncBox()
+
+        public init() {
+            redrawObserver = NotificationCenter.default.addObserver(
+                forName: Notification.Name("DonbyMetalRequestPausedSubtitleRedraw"),
+                object: nil,
+                queue: nil
+            ) { [weak self] note in
+                guard let self,
+                      let requestedHandle = note.userInfo?["handle"] as? UInt else {
+                    return
+                }
+                self.playerLock.lock()
+                let p = self._player
+                let v = self.view
+                self.playerLock.unlock()
+                guard let p, let v, requestedHandle == UInt(bitPattern: p) else { return }
+                v.requestRedraw()
+            }
+        }
         public var onRenderDiagnostic: ((String) -> Void)? {
             get {
                 playerLock.lock()
@@ -292,14 +354,13 @@ public struct DKMetalVideoView: NSViewRepresentable {
             }
         }
 
-        private final class SubtitleSyncBox {
-            weak var view: DKMetalLayerView?
-            var updatedSerial: UInt64 = 0
+        private struct SubtitleSyncState {
+            unowned var view: DKMetalLayerView
+            var updatedSerial: UInt64
             var changed: Bool = false
         }
 
         public func startDisplayLink(for view: DKMetalLayerView, player: OpaquePointer?) {
-            view.hasExternalDisplayLink = true
             playerLock.lock()
             self.view = view
             self.lastPts = -1.0
@@ -322,18 +383,21 @@ public struct DKMetalVideoView: NSViewRepresentable {
             self.maxTickGapMs = 0
             playerLock.unlock()
 
+            guard player != nil else {
+                view.hasExternalDisplayLink = false
+                driver.stop()
+                return
+            }
+
+            view.hasExternalDisplayLink = true
             driver.start { [weak self] in
                 self?.tick()
             }
         }
 
         public func updatePlayer(_ newPlayer: OpaquePointer?) {
-            if newPlayer == nil {
-                driver.stop()
-                view?.hasExternalDisplayLink = false
-                view?.clearDisplayedFrame()
-            }
             playerLock.lock()
+            let oldPlayer = _player
             _player = newPlayer
             lastPts = -1.0
             lastBufferPtr = nil
@@ -353,11 +417,31 @@ public struct DKMetalVideoView: NSViewRepresentable {
             acqNilCount = 0
             maxTickGapMs = 0
             playerLock.unlock()
+
+            if newPlayer == nil {
+                driver.stop()
+                view?.hasExternalDisplayLink = false
+                view?.clearDisplayedFrame()
+                view?.releasePlaybackResourcesOnExit()
+            } else if oldPlayer != nil && oldPlayer != newPlayer {
+                view?.clearDisplayedFrame()
+            }
             view?.updateSubtitleOverlay(rgbaPtr: nil, width: 0, height: 0)
             if newPlayer != nil, let view = view {
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated {
+                        _ = view.updateDrawableSize(force: true)
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        _ = view.updateDrawableSize(force: true)
+                    }
+                }
                 view.hasExternalDisplayLink = true
-                driver.start { [weak self] in
-                    self?.tick()
+                if oldPlayer == nil {
+                    driver.start { [weak self] in
+                        self?.tick()
+                    }
                 }
             }
         }
@@ -375,7 +459,6 @@ public struct DKMetalVideoView: NSViewRepresentable {
             lastViewportDrawableW = 0
             lastViewportDrawableH = 0
             lastViewportMetrics = (0, 0, 0, 0, 0, 0)
-            subtitleSyncBox.view = nil
             playerLock.unlock()
         }
 
@@ -446,24 +529,28 @@ public struct DKMetalVideoView: NSViewRepresentable {
                 }
                 playerLock.unlock()
             }
-            subtitleSyncBox.view = v
-            subtitleSyncBox.updatedSerial = prevSubSerial
-            subtitleSyncBox.changed = false
-            let boxPtr = Unmanaged.passUnretained(subtitleSyncBox).toOpaque()
-            dk_player_sync_subtitle_rgba(p, subClockPts, vp.canvasW, vp.canvasH, prevSubSerial, { rgba, w, h, serial, ctx in
-                guard let ctx else { return }
-                let box = Unmanaged<SubtitleSyncBox>.fromOpaque(ctx).takeUnretainedValue()
-                box.updatedSerial = serial
-                box.changed = true
-                if let rgba, w > 0, h > 0 {
-                    box.view?.updateSubtitleOverlay(rgbaPtr: rgba, width: Int(w), height: Int(h))
-                } else {
-                    box.view?.updateSubtitleOverlay(rgbaPtr: nil, width: 0, height: 0)
-                }
-            }, boxPtr)
+            var syncState = SubtitleSyncState(view: v, updatedSerial: prevSubSerial)
+            withUnsafeMutablePointer(to: &syncState) { statePtr in
+                dk_player_sync_subtitle_rgba(p, subClockPts, vp.canvasW, vp.canvasH, prevSubSerial, { rgba, w, h, serial, ctx in
+                    guard let ctx else { return }
+                    let state = ctx.assumingMemoryBound(to: SubtitleSyncState.self)
+                    state.pointee.updatedSerial = serial
+                    state.pointee.changed = true
+                    if let rgba, w > 0, h > 0 {
+                        state.pointee.view.updateSubtitleOverlay(rgbaPtr: rgba, width: Int(w), height: Int(h))
+                    } else {
+                        state.pointee.view.updateSubtitleOverlay(rgbaPtr: nil, width: 0, height: 0)
+                    }
+                }, UnsafeMutableRawPointer(statePtr))
+            }
             let tSub = ProcessInfo.processInfo.systemUptime
-            let subtitleChanged = subtitleSyncBox.changed
+            let subtitleChanged = syncState.changed
             if subtitleChanged {
+                playerLock.lock()
+                if _player == p {
+                    lastSubSerial = syncState.updatedSerial
+                }
+                playerLock.unlock()
                 var by0: Int32 = 0
                 var by1: Int32 = 0
                 var bch: Int32 = 0
@@ -519,7 +606,6 @@ public struct DKMetalVideoView: NSViewRepresentable {
                     }
                     lastPts = pts
                     lastBufferPtr = bufPtr
-                    lastSubSerial = subtitleSyncBox.updatedSerial
                     if !didNotifyFirstFrame {
                         didNotifyFirstFrame = true
                         notifyKernelFirstFrame = true
@@ -544,13 +630,16 @@ public struct DKMetalVideoView: NSViewRepresentable {
                 playerLock.lock()
                 if _player == p { renderFalseCount += 1 }
                 playerLock.unlock()
-                if subtitleChanged {
-                    v.needsRedrawOnSameFrame = true
+                if subtitleChanged || needsRedraw {
+                    v.requestRedraw()
                 }
             }
         }
 
         deinit {
+            if let obs = redrawObserver {
+                NotificationCenter.default.removeObserver(obs)
+            }
             stopDisplayLink()
         }
     }

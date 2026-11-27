@@ -1,3 +1,6 @@
+#[path = "subtitle/async_worker.rs"]
+mod sub_async_worker;
+
 use crate::abi::{
     CGImageRef, CVPixelBufferRef, DKChapterInfo, DKCustomIOAbortCallback, DKCustomIOCloseCallback,
     DKCustomIOReadCallback, DKCustomIOSeekCallback, DKGpuColorUniforms, DKLogCallback,
@@ -28,6 +31,7 @@ pub unsafe extern "C" fn dk_player_create() -> *mut DKPlayer {
 
 #[no_mangle]
 pub unsafe extern "C" fn dk_player_destroy(player: *mut DKPlayer) {
+    sub_async_worker::shutdown(player);
     destroy_raw(player);
 }
 
@@ -70,18 +74,23 @@ pub unsafe extern "C" fn dk_player_open_with_tracks(
         return -1;
     }
     let raw_url = CStr::from_ptr(url).to_string_lossy();
-    p.open_with_tracks(
+    let rc = p.open_with_tracks(
         &raw_url,
         headers_crlf,
         start_sec,
         hw_decode,
         preferred_audio_hint,
         preferred_sub_hint,
-    )
+    );
+    if rc == 0 {
+        sub_async_worker::start_and_prewarm(player);
+    }
+    rc
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn dk_player_close(player: *mut DKPlayer) {
+    sub_async_worker::shutdown(player);
     let Some(p) = player.as_ref() else { return };
     p.close_session();
 }
@@ -105,6 +114,7 @@ pub unsafe extern "C" fn dk_player_seek(player: *mut DKPlayer, target_sec: f64, 
     let guard = ReaderGuard::acquire(player);
     let Some(p) = guard.player else { return };
     p.signal_seek_request(target_sec, accurate);
+    sub_async_worker::nudge(player);
 }
 
 #[no_mangle]
@@ -174,6 +184,9 @@ pub unsafe extern "C" fn dk_player_select_track(
     let guard = ReaderGuard::acquire(player);
     let Some(p) = guard.player else { return };
     p.select_track(track_type, stream_index);
+    if track_type == 2 {
+        sub_async_worker::nudge(player);
+    }
 }
 
 #[no_mangle]
@@ -184,6 +197,7 @@ pub unsafe extern "C" fn dk_player_select_secondary_subtitle_track(
     let guard = ReaderGuard::acquire(player);
     let Some(p) = guard.player else { return };
     p.select_secondary_subtitle_track(stream_index);
+    sub_async_worker::nudge(player);
 }
 
 #[no_mangle]
@@ -199,6 +213,7 @@ pub unsafe extern "C" fn dk_player_load_external_subtitle(
         p.sub_stream_idx.store(-1, Ordering::Release);
         sub.load_external_subtitle(&text, is_ass, false);
     }
+    sub_async_worker::nudge(player);
 }
 
 #[no_mangle]
@@ -214,6 +229,7 @@ pub unsafe extern "C" fn dk_player_load_secondary_external_subtitle(
         p.secondary_sub_stream_idx.store(-1, Ordering::Release);
         sub.load_external_subtitle(&text, is_ass, true);
     }
+    sub_async_worker::nudge(player);
 }
 
 #[no_mangle]
@@ -228,6 +244,7 @@ pub unsafe extern "C" fn dk_player_set_subtitle_style(
     if let Ok(mut sub) = p.sub_mtx.lock() {
         sub.set_style(*cfg, has_pri, has_sec);
     }
+    sub_async_worker::nudge(player);
 }
 
 #[no_mangle]
@@ -256,6 +273,7 @@ pub unsafe extern "C" fn dk_player_set_subtitle_viewport(
             margin_right,
         );
     }
+    sub_async_worker::nudge(player);
 }
 
 #[no_mangle]
@@ -270,8 +288,13 @@ pub unsafe extern "C" fn dk_player_get_subtitle_vertical_bounds(
     if out_y0.is_null() || out_y1.is_null() || out_canvas_h.is_null() {
         return false;
     }
-    let Ok(sub) = p.sub_mtx.lock() else { return false };
-    match sub.get_vertical_bounds() {
+    let bounds = if let Some(ready_bounds) = sub_async_worker::get_vertical_bounds(player) {
+        ready_bounds
+    } else {
+        let Ok(sub) = p.sub_mtx.lock() else { return false };
+        sub.get_vertical_bounds()
+    };
+    match bounds {
         Some((y0, y1, ch)) => {
             *out_y0 = y0;
             *out_y1 = y1;
@@ -343,6 +366,7 @@ pub unsafe extern "C" fn dk_player_set_secondary_subtitle_time_scale(
     if let Ok(mut sub) = p.sub_mtx.lock() {
         sub.set_secondary_time_scale(scale);
     }
+    sub_async_worker::nudge(player);
 }
 
 #[no_mangle]
@@ -393,21 +417,11 @@ pub unsafe extern "C" fn dk_player_sync_subtitle_rgba(
     context: *mut c_void,
 ) {
     let guard = ReaderGuard::acquire(player);
-    let (Some(p), Some(cb)) = (guard.player, callback) else { return };
+    let (Some(_p), Some(cb)) = (guard.player, callback) else { return };
     if canvas_w <= 0 || canvas_h <= 0 {
         return;
     }
-    let Ok(mut sub) = p.sub_mtx.lock() else { return };
-    let (has_sub, rgba_ptr, w, h, serial) = sub.update_subtitle_rgba(pts, canvas_w, canvas_h);
-    if serial != last_serial {
-        cb(
-            if has_sub { rgba_ptr } else { ptr::null() },
-            if has_sub { w } else { 0 },
-            if has_sub { h } else { 0 },
-            serial,
-            context,
-        );
-    }
+    sub_async_worker::sync_subtitle_rgba(player, pts, canvas_w, canvas_h, last_serial, Some(cb), context);
 }
 
 #[no_mangle]

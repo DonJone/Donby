@@ -13,15 +13,30 @@ extension AppState {
         }
     }
 
-    public func deleteServer(_ server: EmbyServerConfig) {
-        servers.removeAll { $0.id == server.id }
-        if servers.isEmpty {
-            let emptySlot = DemoServerData.makeDefaultUHDServer()
-            servers = [emptySlot]
-            activeServerId = emptySlot.id
+    func updateServerLastWatchedDate(for serverId: UUID, date: Date) {
+        guard let idx = servers.firstIndex(where: { $0.id == serverId }) else { return }
+        performWithoutHomeShelfRefresh {
+            servers[idx].lastWatchedDate = date
         }
-        if openedServerId == server.id { openedServerId = nil }
-        if activeServerId == server.id { activeServerId = servers.first?.id }
+    }
+
+    public func deleteServer(_ server: EmbyServerConfig) {
+        var updatedServers = servers
+        updatedServers.removeAll { $0.id == server.id }
+        var nextActiveId = activeServerId
+        var nextOpenedId = openedServerId
+        if updatedServers.isEmpty {
+            let emptySlot = DemoServerData.makeDefaultUHDServer()
+            updatedServers = [emptySlot]
+            nextActiveId = emptySlot.id
+        }
+        if nextOpenedId == server.id { nextOpenedId = nil }
+        if nextActiveId == server.id { nextActiveId = updatedServers.first?.id }
+        performBatchedHomeShelfUpdate {
+            servers = updatedServers
+            if activeServerId != nextActiveId { activeServerId = nextActiveId }
+            if openedServerId != nextOpenedId { openedServerId = nextOpenedId }
+        }
         showToast("已删除服务器 \(server.name)", icon: "trash.fill")
     }
 
@@ -40,8 +55,12 @@ extension AppState {
 
     public func setDefaultHomeServer(_ server: EmbyServerConfig) {
         let wasDefault = server.isDefaultHome
-        for i in servers.indices {
-            servers[i].isDefaultHome = wasDefault ? false : (servers[i].id == server.id)
+        var updatedServers = servers
+        for i in updatedServers.indices {
+            updatedServers[i].isDefaultHome = wasDefault ? false : (updatedServers[i].id == server.id)
+        }
+        performWithoutHomeShelfRefresh {
+            servers = updatedServers
         }
         showToast(wasDefault ? "已取消默认首页" : "已设为默认首页", icon: "house.fill")
     }
@@ -120,15 +139,23 @@ extension AppState {
         if server.lastLoginDate == nil {
             server.lastLoginDate = Date()
         }
+        var updatedServers = servers
         if !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            servers.removeAll { $0.id != server.id && $0.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            updatedServers.removeAll { $0.id != server.id && $0.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         }
         if let selId = server.selectedLineId, !server.backupLines.contains(where: { $0.id == selId }) {
             server.selectedLineId = server.backupLines.first?.id
         }
-        updateServerInList(server)
-        activeServerId = server.id
-        openedServerId = server.id
+        if let idx = updatedServers.firstIndex(where: { $0.id == server.id }) {
+            updatedServers[idx] = server
+        } else {
+            updatedServers.append(server)
+        }
+        performBatchedHomeShelfUpdate {
+            servers = updatedServers
+            activeServerId = server.id
+            openedServerId = server.id
+        }
         selectedLibrary = nil
         detailStack.removeAll()
         detailOfflineFocusIds.removeAll()
@@ -158,11 +185,13 @@ extension AppState {
         detailStack.removeAll()
         if let srv = activeServer {
             ServerHomeCacheStore.shared.clear(for: srv.id)
-            libraryViews = []
-            resumeItems = []
-            nextUpItems = []
-            favoriteItems = []
-            latestByLibrary = [:]
+            performBatchedHomeShelfUpdate {
+                libraryViews = []
+                resumeItems = []
+                nextUpItems = []
+                favoriteItems = []
+                latestByLibrary = [:]
+            }
             carouselItems = []
             Task {
                 await loadActiveServerHome(syncDomains: true)
@@ -195,8 +224,12 @@ extension AppState {
                 server.accessToken = auth.accessToken ?? ""
                 if let uid = auth.user?.id { server.userId = uid }
                 if let currentIdx = servers.firstIndex(where: { $0.id == serverId }) {
-                    servers[currentIdx].accessToken = server.accessToken
-                    if !server.userId.isEmpty { servers[currentIdx].userId = server.userId }
+                    var patched = servers[currentIdx]
+                    patched.accessToken = server.accessToken
+                    if !server.userId.isEmpty { patched.userId = server.userId }
+                    performWithoutHomeShelfRefresh {
+                        servers[currentIdx] = patched
+                    }
                 }
             }
         }
@@ -283,13 +316,18 @@ extension AppState {
 
         let resolvedMainPing = await mainPing
         guard let currentIdx = servers.firstIndex(where: { $0.id == serverId }) else { return }
-        servers[currentIdx].mainLineLatencyMs = resolvedMainPing
-        for i in servers[currentIdx].backupLines.indices {
-            let lineId = servers[currentIdx].backupLines[i].id
+        var updatedServer = servers[currentIdx]
+        updatedServer.mainLineLatencyMs = resolvedMainPing
+        let checkedAt = Date()
+        for i in updatedServer.backupLines.indices {
+            let lineId = updatedServer.backupLines[i].id
             if let pingVal = linePings[lineId] {
-                servers[currentIdx].backupLines[i].latencyMs = pingVal
-                servers[currentIdx].backupLines[i].lastCheckedAt = Date()
+                updatedServer.backupLines[i].latencyMs = pingVal
+                updatedServer.backupLines[i].lastCheckedAt = checkedAt
             }
+        }
+        performWithoutHomeShelfRefresh {
+            servers[currentIdx] = updatedServer
         }
     }
 

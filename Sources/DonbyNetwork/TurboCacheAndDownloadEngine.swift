@@ -217,6 +217,13 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
         return (unpinned, pinned)
     }
 
+    /// Async off-main-actor snapshot of disk usage via `.utility` detached task.
+    public func calculateDiskUsageAsync() async -> (unpinnedCacheBytes: Int64, pinnedDownloadBytes: Int64) {
+        await Task.detached(priority: .utility) { [self] in
+            self.calculateDiskUsage()
+        }.value
+    }
+
     /// LRU sweeps unpinned cache directories to keep unpinned disk usage within `maxDiskBytes`.
     public func enforceDiskBudget(maxDiskBytes: Int64) {
         let clampedBudget = max(128 * 1024 * 1024, maxDiskBytes)
@@ -244,6 +251,13 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
         for dir in cacheAssetDirectories() {
             removeAsset(assetKey: dir.lastPathComponent, forceIncludePinned: false)
         }
+    }
+
+    /// Async off-main-actor removal of all unpinned cache directories via `.utility` detached task.
+    public func clearAllUnpinnedCacheAsync() async {
+        await Task.detached(priority: .utility) { [self] in
+            self.clearAllUnpinnedCache()
+        }.value
     }
 
     public func cachedProgress(
@@ -302,6 +316,13 @@ public final class DonbyTurboCacheEngine: @unchecked Sendable {
         }
 
         return results.sorted { $0.lastAccess > $1.lastAccess }
+    }
+
+    /// Async off-main-actor snapshot of unpinned cached media summaries via `.utility` detached task.
+    public func listUnpinnedCachedAssetsAsync(excludingAssetKeys: Set<String> = []) async -> [CachedMediaSummary] {
+        await Task.detached(priority: .utility) { [self] in
+            self.listUnpinnedCachedAssets(excludingAssetKeys: excludingAssetKeys)
+        }.value
     }
 }
 

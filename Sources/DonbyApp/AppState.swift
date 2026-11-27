@@ -24,7 +24,11 @@ public final class AppState: ObservableObject {
 
     @Published public var selectedTab: MainNavigationTab = .servers
     @Published public var openedServerId: UUID? = nil {
-        didSet { if !isLoadingFromDisk { refreshCachedHomeShelvesIfNeeded() } }
+        didSet {
+            if !isLoadingFromDisk && openedServerId != nil {
+                refreshCachedHomeShelvesIfNeeded()
+            }
+        }
     }
     @Published public var selectedLibrary: EmbyItem? = nil
     @Published public var detailStack: [EmbyItem] = []
@@ -64,7 +68,7 @@ public final class AppState: ObservableObject {
     @Published public var servers: [EmbyServerConfig] = [] {
         didSet {
             if !isLoadingFromDisk {
-                saveServersToDisk()
+                scheduleSaveServersToDisk()
                 refreshCachedHomeShelvesIfNeeded()
             }
         }
@@ -82,6 +86,11 @@ public final class AppState: ObservableObject {
     @Published public var isSyncingDomains: Bool = false
     @Published public var isPingingLines: Bool = false
     var homeLoadGeneration: UInt64 = 0
+    var homeCurationGeneration: UInt64 = 0
+    var homeShelvesGeneration: UInt64 = 0
+    var homeShelvesComputeTask: Task<Void, Never>? = nil
+    var isBatchUpdatingHomeShelves: Bool = false
+    var isSuppressingHomeShelfRefresh: Bool = false
     var playbackStartGeneration: UInt64 = 0
     var pendingPlaybackKey: String? = nil
     var pendingPlaybackTimestamp: TimeInterval = 0
@@ -95,7 +104,11 @@ public final class AppState: ObservableObject {
         didSet { if !isLoadingFromDisk { refreshCachedHomeShelvesIfNeeded() } }
     }
     @Published public var carouselItems: [EmbyItem] = []
-    @Published public var multiPlatformRatingsByItemId: [String: MultiPlatformRatings] = [:]
+    public let ratingsStore = DonbyRatingsStore()
+    public var multiPlatformRatingsByItemId: [String: MultiPlatformRatings] {
+        get { ratingsStore.multiPlatformRatingsByItemId }
+        set { ratingsStore.multiPlatformRatingsByItemId = newValue }
+    }
     @Published public var resumeItems: [EmbyItem] = [] {
         didSet { if !isLoadingFromDisk { refreshCachedHomeShelvesIfNeeded() } }
     }
@@ -145,10 +158,20 @@ public final class AppState: ObservableObject {
     var didMutateWatchHistoryBeforeHydration: Bool = false
     var didMutateCachedSeriesNamesBeforeHydration: Bool = false
 
-    @Published public var watchHistory: [WatchRecordItem] = [] {
-        didSet { if !isLoadingFromDisk { didMutateWatchHistoryBeforeHydration = true } }
+    public let watchHistoryStore = DonbyWatchHistoryStore()
+    public var watchHistory: [WatchRecordItem] {
+        get { watchHistoryStore.watchHistory }
+        set {
+            watchHistoryStore.watchHistory = newValue
+            if !isLoadingFromDisk {
+                didMutateWatchHistoryBeforeHydration = true
+            }
+        }
     }
+    var saveServersDebounceTask: Task<Void, Never>? = nil
+    var inFlightServersSaveTask: Task<Void, Never>? = nil
     var saveWatchHistoryTask: Task<Void, Never>? = nil
+    var inFlightWatchHistorySaveTask: Task<Void, Never>? = nil
     var lastRecordedWatchItemId: String? = nil
     var lastRecordedWatchPosition: Double = -1.0
     var lastRecordedWatchDate: Date = .distantPast
@@ -252,7 +275,11 @@ public final class AppState: ObservableObject {
     }
     private var downloadStatusCancellable: AnyCancellable? = nil
     private var pendingDownloadStatusIndex: DonbyDownloadStatusIndex? = nil
-    @Published public private(set) var downloadStatusIndex: DonbyDownloadStatusIndex = .empty
+    public let downloadStatusStore = DonbyDownloadStatusStore()
+    public private(set) var downloadStatusIndex: DonbyDownloadStatusIndex {
+        get { downloadStatusStore.statusIndex }
+        set { downloadStatusStore.statusIndex = newValue }
+    }
     @AppStorage("donby.turboEnabled") public var turboEnabled: Bool = true
     @AppStorage("donby.turboConnectionBudget") public var turboConnectionBudget: Int = 4
     @AppStorage("donby.turboMemoryCacheMB") public var turboMemoryCacheMB: Int = 500
@@ -344,6 +371,10 @@ public final class AppState: ObservableObject {
     }
 
     public var cardAppearance: DonbyCardAppearance {
+        cardAppearance(downloadStatusIndex: downloadStatusIndex)
+    }
+
+    public func cardAppearance(downloadStatusIndex index: DonbyDownloadStatusIndex) -> DonbyCardAppearance {
         DonbyCardAppearance(
             server: activeServer,
             isLightMode: isLightMode,
@@ -352,7 +383,7 @@ public final class AppState: ObservableObject {
             showResolutionBadge: showResolutionBadge,
             showRatingBadge: showRatingBadge,
             isMonochromeTheme: isMonochromeTheme,
-            downloadStatusIndex: downloadStatusIndex
+            downloadStatusIndex: index
         )
     }
 
@@ -370,9 +401,16 @@ public final class AppState: ObservableObject {
 
     // Persistent search state (survives navigating into DetailView and returning) & Search History
     @Published public var searchHistory: [String] = []
-    @Published public var globalSearchQuery: String = ""
+    public let searchStore = DonbySearchStore()
+    public var globalSearchQuery: String {
+        get { searchStore.globalSearchQuery }
+        set { searchStore.globalSearchQuery = newValue }
+    }
     @Published public var globalSearchFilterChip: String = "全部"
-    @Published public var globalSearchRemoteResults: [EmbyItem] = []
+    public var globalSearchRemoteResults: [EmbyItem] {
+        get { searchStore.globalSearchRemoteResults }
+        set { searchStore.globalSearchRemoteResults = newValue }
+    }
     public var globalSearchLastServerId: UUID? = nil
     public var globalSearchLastFetchedQuery: String = ""
 
@@ -440,10 +478,14 @@ public final class AppState: ObservableObject {
                 }
             }
 
+        let maxCacheBytes = Int64(max(128, turboDiskCacheMB)) * 1024 * 1024
+        Task.detached(priority: .utility) {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            DonbyTurboCacheEngine.shared.enforceDiskBudget(maxDiskBytes: maxCacheBytes)
+        }
+        let serversSnapshot = self.servers
         Task {
-            let maxBytes = Int64(max(128, turboDiskCacheMB)) * 1024 * 1024
-            DonbyTurboCacheEngine.shared.enforceDiskBudget(maxDiskBytes: maxBytes)
-            await DonbyDownloadManager.shared.migrateLegacyCompletedDownloads(servers: self.servers)
+            await DonbyDownloadManager.shared.migrateLegacyCompletedDownloads(servers: serversSnapshot)
         }
 
         DonbyTurboCacheEngine.shared.setOnAssetFullyCached { meta in
@@ -513,7 +555,8 @@ public final class AppState: ObservableObject {
     }
 
     public func prepareForTermination() {
-        flushWatchHistory()
+        flushServersToDiskSync()
+        flushWatchHistorySync()
         if activePlayback != nil {
             activePlayback = nil
         }
@@ -547,7 +590,7 @@ public final class AppState: ObservableObject {
         }
         self.servers = migrated
         if needsMigration || didMigratePlaceholder {
-            saveServersToDisk()
+            flushServersToDiskSync()
             if needsMigration {
                 DonbyLogger.shared.log("已完成服务器凭证向本地 AES-256-GCM 加密凭证库的自动迁移", level: .info, subsystem: "Credentials")
             }
@@ -555,9 +598,39 @@ public final class AppState: ObservableObject {
     }
 
     private func saveServersToDisk() {
-        let sanitized = ServerCredentialStore.shared.persistSecretsAndSanitizeForDefaults(servers)
-        if let data = try? jsonEncoder.encode(sanitized) {
-            UserDefaults.standard.set(data, forKey: serversStorageKey)
+        scheduleSaveServersToDisk()
+    }
+
+    private func scheduleSaveServersToDisk() {
+        saveServersDebounceTask?.cancel()
+        saveServersDebounceTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.saveServersDebounceTask = nil
+            self.dispatchServersWriteOffMainActor()
+        }
+    }
+
+    private func dispatchServersWriteOffMainActor() {
+        let snapshot = servers
+        let key = serversStorageKey
+        let previousTask = inFlightServersSaveTask
+        inFlightServersSaveTask = Task.detached(priority: .utility) {
+            _ = await previousTask?.value
+            Self.persistServersSnapshot(snapshot, storageKey: key)
+        }
+    }
+
+    private func flushServersToDiskSync() {
+        saveServersDebounceTask?.cancel()
+        saveServersDebounceTask = nil
+        Self.persistServersSnapshot(servers, storageKey: serversStorageKey)
+    }
+
+    private nonisolated static func persistServersSnapshot(_ snapshot: [EmbyServerConfig], storageKey: String) {
+        let sanitized = ServerCredentialStore.shared.persistSecretsAndSanitizeForDefaults(snapshot)
+        if let data = try? JSONEncoder().encode(sanitized) {
+            UserDefaults.standard.set(data, forKey: storageKey)
         }
     }
 
@@ -615,105 +688,6 @@ public final class AppState: ObservableObject {
             try? await Task.sleep(nanoseconds: 2_800_000_000)
             if toastMessage?.id == currentId {
                 withAnimation(.easeOut(duration: 0.22)) { toastMessage = nil }
-            }
-        }
-    }
-
-    public func openServer(_ server: EmbyServerConfig) {
-        cancelPendingPlaybackStart()
-        let isSwitchingServer = (openedServerId != server.id)
-        activeServerId = server.id
-        openedServerId = server.id
-        selectedLibrary = nil
-        detailStack.removeAll()
-        detailOfflineFocusIds.removeAll()
-        detailFocusedEpisodeMemory.removeAll()
-        homeErrorMessage = nil
-        inFlightSeriesNameTasks.removeAll()
-        if isSwitchingServer {
-            embyInlineSearchQuery = ""
-            embyInlineSearchResults = []
-            embyInlineSearchTruncated = false
-            embyInlineSearchLastServerId = nil
-            embyInlineSearchLastFetchedQuery = ""
-            librarySearchQueryById.removeAll()
-            DonbyAppExtensionCenter.shared.plugin?.resetHomeShelves()
-        }
-
-        // Instantaneous switch from in-memory snapshot; fall back to off-main-thread disk decode on miss
-        if let snap = ServerHomeCacheStore.shared.cachedSnapshotInMemory(for: server.id), !snap.libraryViews.isEmpty {
-            applyHomeSnapshot(snap, for: server)
-        } else {
-            self.libraryViews = []
-            self.resumeItems = []
-            self.nextUpItems = []
-            self.favoriteItems = []
-            self.latestByLibrary = [:]
-            self.carouselItems = []
-            self.isLoadingHome = !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            let targetServer = server
-            Task { [weak self] in
-                guard let snap = await ServerHomeCacheStore.shared.loadSnapshotFromDiskAsync(for: targetServer.id),
-                      !snap.libraryViews.isEmpty else { return }
-                await MainActor.run {
-                    guard let self,
-                          self.openedServerId == targetServer.id,
-                          self.libraryViews.isEmpty else { return }
-                    self.applyHomeSnapshot(snap, for: targetServer)
-                }
-            }
-        }
-
-        Task { await loadActiveServerHome(syncDomains: true) }
-        PlaybackIntentCoordinator.shared.warmServerOnConnectOrLaunch(server: server)
-    }
-
-    private func applyHomeSnapshot(_ snap: ServerHomeCacheStore.ServerHomeSnapshot, for server: EmbyServerConfig) {
-        self.libraryViews = snap.libraryViews
-        self.resumeItems = snap.resumeItems
-        self.nextUpItems = snap.nextUpItems
-        self.favoriteItems = snap.favoriteItems
-        self.latestByLibrary = snap.latestByLibrary
-        if !snap.latestByLibrary.isEmpty {
-            let explicitAnime = DonbyAppExtensionCenter.shared.plugin?.isAnimeModeActive(for: server)
-            self.carouselItems = HomeHeroCurator.selectHeroItems(
-                libraryViews: snap.libraryViews,
-                latestByLibrary: snap.latestByLibrary,
-                fallbackResumes: snap.resumeItems,
-                serverName: server.name,
-                explicitAnimeMode: explicitAnime
-            )
-        } else {
-            self.carouselItems = snap.carouselItems
-        }
-        self.isLoadingHome = false
-        let snapshotCarousel = self.carouselItems
-        Task { [weak self] in
-            let cached = await MultiPlatformRatingService.shared.cachedRatingsByItemId(for: snapshotCarousel)
-            guard !cached.isEmpty else { return }
-            await MainActor.run {
-                guard let self else { return }
-                for (itemId, rating) in cached {
-                    self.multiPlatformRatingsByItemId[itemId] = rating
-                }
-            }
-        }
-    }
-
-    public func selectSidebarModule(_ tab: MainNavigationTab) {
-        cancelPendingPlaybackStart()
-        openedServerId = nil
-        selectedLibrary = nil
-        detailStack.removeAll()
-        detailOfflineFocusIds.removeAll()
-        detailFocusedEpisodeMemory.removeAll()
-        selectedTab = tab
-
-        if tab == .files {
-            if !defaultFilesFolderId.isEmpty, let folder = localFolders.first(where: { $0.id.uuidString == defaultFilesFolderId }) {
-                browsingFolder = folder
-            } else {
-                browsingFolder = nil
             }
         }
     }

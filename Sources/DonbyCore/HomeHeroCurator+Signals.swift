@@ -282,22 +282,187 @@ extension HomeHeroCurator {
         return .unknown
     }
 
+    private struct FastUTF8KeywordMatcher {
+        private struct Entry {
+            let index: Int
+            let bytes: [UInt8]
+            let hasASCII: Bool
+        }
+
+        private let buckets: [UInt32: [Entry]]
+
+        init(_ keywords: [String]) {
+            var map: [UInt32: [Entry]] = [:]
+            for (idx, kw) in keywords.enumerated() {
+                let bytes = Array(kw.lowercased().utf8)
+                guard let first = bytes.first else { continue }
+                let key = Self.bucketKey(bytes: bytes, index: 0, count: bytes.count, b0: first)
+                let hasASCII = bytes.contains { $0 < 0x80 }
+                map[key, default: []].append(Entry(index: idx, bytes: bytes, hasASCII: hasASCII))
+            }
+            self.buckets = map
+        }
+
+        @inline(__always)
+        private static func bucketKey(bytes: [UInt8], index i: Int, count: Int, b0: UInt8) -> UInt32 {
+            if b0 < 0x80 {
+                let lower = (b0 >= 65 && b0 <= 90) ? (b0 &+ 32) : b0
+                return UInt32(lower)
+            } else if b0 >= 0xE0 && b0 < 0xF0 && i + 2 < count {
+                return (UInt32(b0) << 16) | (UInt32(bytes[i + 1]) << 8) | UInt32(bytes[i + 2])
+            } else if b0 >= 0xC0 && b0 < 0xE0 && i + 1 < count {
+                return (UInt32(b0) << 8) | UInt32(bytes[i + 1])
+            }
+            return UInt32(b0)
+        }
+
+        @inline(__always)
+        private static func bufferKey(_ base: UnsafePointer<UInt8>, index i: Int, count: Int, b0: UInt8) -> (key: UInt32, step: Int) {
+            if b0 < 0x80 {
+                let lower = (b0 >= 65 && b0 <= 90) ? (b0 &+ 32) : b0
+                return (UInt32(lower), 1)
+            } else if b0 >= 0xE0 && b0 < 0xF0 && i + 2 < count {
+                return ((UInt32(b0) << 16) | (UInt32(base[i + 1]) << 8) | UInt32(base[i + 2]), 3)
+            } else if b0 >= 0xC0 && b0 < 0xE0 && i + 1 < count {
+                return ((UInt32(b0) << 8) | UInt32(base[i + 1]), 2)
+            } else if b0 >= 0xF0 && i + 3 < count {
+                return (UInt32(b0), 4)
+            }
+            return (UInt32(b0), 1)
+        }
+
+        @inline(__always)
+        private static func matches(_ ptr: UnsafePointer<UInt8>, _ entry: Entry) -> Bool {
+            let len = entry.bytes.count
+            if !entry.hasASCII {
+                for j in 0..<len where ptr[j] != entry.bytes[j] {
+                    return false
+                }
+                return true
+            }
+            for j in 0..<len {
+                let b = ptr[j]
+                let lb = (b >= 65 && b <= 90) ? (b &+ 32) : b
+                if lb != entry.bytes[j] { return false }
+            }
+            return true
+        }
+
+        func countUniqueMatches<C: Collection>(
+            in utf8: C,
+            matchedMask: inout UInt64,
+            overflowMatched: inout Set<Int>?,
+            hits: inout Int
+        ) where C.Element == UInt8 {
+            let handled: Void? = utf8.withContiguousStorageIfAvailable { buf in
+                scanCountBuffer(buf, matchedMask: &matchedMask, overflowMatched: &overflowMatched, hits: &hits)
+            }
+            if handled == nil {
+                let contiguous = Array(utf8)
+                contiguous.withUnsafeBufferPointer { buf in
+                    scanCountBuffer(buf, matchedMask: &matchedMask, overflowMatched: &overflowMatched, hits: &hits)
+                }
+            }
+        }
+
+        func containsAny<C: Collection>(in utf8: C) -> Bool where C.Element == UInt8 {
+            if let hit = utf8.withContiguousStorageIfAvailable({ scanAnyBuffer($0) }) {
+                return hit
+            }
+            let contiguous = Array(utf8)
+            return contiguous.withUnsafeBufferPointer { scanAnyBuffer($0) }
+        }
+
+        private func scanCountBuffer(
+            _ buf: UnsafeBufferPointer<UInt8>,
+            matchedMask: inout UInt64,
+            overflowMatched: inout Set<Int>?,
+            hits: inout Int
+        ) {
+            let count = buf.count
+            guard count > 0, let base = buf.baseAddress else { return }
+            var i = 0
+            while i < count {
+                let b0 = base[i]
+                let (key, step) = Self.bufferKey(base, index: i, count: count, b0: b0)
+                if let candidates = buckets[key] {
+                    for entry in candidates {
+                        let bitIdx = entry.index
+                        if bitIdx < 64 {
+                            if (matchedMask & (1 << bitIdx)) != 0 { continue }
+                        } else if overflowMatched?.contains(bitIdx) == true {
+                            continue
+                        }
+                        let kwLen = entry.bytes.count
+                        if i + kwLen <= count && Self.matches(base + i, entry) {
+                            if bitIdx < 64 {
+                                matchedMask |= (1 << bitIdx)
+                            } else {
+                                if overflowMatched == nil { overflowMatched = [] }
+                                overflowMatched?.insert(bitIdx)
+                            }
+                            hits += 1
+                        }
+                    }
+                }
+                i += step
+            }
+        }
+
+        private func scanAnyBuffer(_ buf: UnsafeBufferPointer<UInt8>) -> Bool {
+            let count = buf.count
+            guard count > 0, let base = buf.baseAddress else { return false }
+            var i = 0
+            while i < count {
+                let b0 = base[i]
+                let (key, step) = Self.bufferKey(base, index: i, count: count, b0: b0)
+                if let candidates = buckets[key] {
+                    for entry in candidates {
+                        let kwLen = entry.bytes.count
+                        if i + kwLen <= count && Self.matches(base + i, entry) {
+                            return true
+                        }
+                    }
+                }
+                i += step
+            }
+            return false
+        }
+    }
+
+    private static let cheapWebDramaMatcher = FastUTF8KeywordMatcher(cheapWebDramaKeywords)
+    private static let cheapWebDramaStudioMatcher = FastUTF8KeywordMatcher(cheapWebDramaStudios)
+    private static let domesticIdolGenreMatcher = FastUTF8KeywordMatcher(domesticIdolGenres)
+    private static let blAndIdolFandomMatcher = FastUTF8KeywordMatcher(blAndIdolFandomKeywords)
+    private static let thaiStudioMatcher = FastUTF8KeywordMatcher(thaiStudioKeywords)
+
     static func hasIdolBLOrRomanceSignals(
         item: EmbyItem,
         libraryLower: String,
         genresLower: [String]
     ) -> (hasIdolRomanceGenre: Bool, hasExplicitBLOrFandom: Bool) {
-        let hasIdolRomanceGenre = genresLower.contains { g in
-            domesticIdolGenres.contains { g.contains($0) }
-        }
-        let nameLower = item.name.lowercased()
-        let taglineLower = (item.taglines ?? []).joined(separator: " ").lowercased()
-        let overviewPrefix = String((item.overview ?? "").prefix(220)).lowercased()
-        let studioLower = (item.studios ?? []).compactMap { $0.name?.lowercased() }.joined(separator: " ")
+        let hasIdolRomanceGenre = genresLower.contains { domesticIdolGenreMatcher.containsAny(in: $0.utf8) }
 
-        let hasExplicitBL = blAndIdolFandomKeywords.contains { kw in
-            nameLower.contains(kw) || libraryLower.contains(kw) || taglineLower.contains(kw) || overviewPrefix.contains(kw) || genresLower.contains(where: { $0.contains(kw) })
-        } || thaiStudioKeywords.contains { studioLower.contains($0) }
+        var hasExplicitBL = blAndIdolFandomMatcher.containsAny(in: item.name.utf8)
+            || blAndIdolFandomMatcher.containsAny(in: libraryLower.utf8)
+            || genresLower.contains { blAndIdolFandomMatcher.containsAny(in: $0.utf8) }
+        if !hasExplicitBL, let taglines = item.taglines {
+            for t in taglines where blAndIdolFandomMatcher.containsAny(in: t.utf8) {
+                hasExplicitBL = true
+                break
+            }
+        }
+        if !hasExplicitBL, let overview = item.overview, !overview.isEmpty {
+            hasExplicitBL = blAndIdolFandomMatcher.containsAny(in: overview.prefix(220).utf8)
+        }
+        if !hasExplicitBL, let studios = item.studios {
+            for s in studios {
+                if let sName = s.name, !sName.isEmpty, thaiStudioMatcher.containsAny(in: sName.utf8) {
+                    hasExplicitBL = true
+                    break
+                }
+            }
+        }
 
         return (hasIdolRomanceGenre, hasExplicitBL)
     }
@@ -308,22 +473,32 @@ extension HomeHeroCurator {
         genresLower: [String]
     ) -> Int {
         var hits = 0
-        let nameLower = item.name.lowercased()
-        let taglineLower = (item.taglines ?? []).joined(separator: " ").lowercased()
-        let overviewPrefix = String((item.overview ?? "").prefix(160)).lowercased()
-        let studioLower = (item.studios ?? []).compactMap { $0.name?.lowercased() }.joined(separator: " ")
+        var matchedMask: UInt64 = 0
+        var overflowMatched: Set<Int>? = nil
 
-        for kw in cheapWebDramaKeywords {
-            if nameLower.contains(kw) || libraryLower.contains(kw) || genresLower.contains(where: { $0.contains(kw) }) {
-                hits += 1
-            } else if taglineLower.contains(kw) || overviewPrefix.contains(kw) {
-                hits += 1
+        cheapWebDramaMatcher.countUniqueMatches(in: item.name.utf8, matchedMask: &matchedMask, overflowMatched: &overflowMatched, hits: &hits)
+        if !libraryLower.isEmpty {
+            cheapWebDramaMatcher.countUniqueMatches(in: libraryLower.utf8, matchedMask: &matchedMask, overflowMatched: &overflowMatched, hits: &hits)
+        }
+        for genre in genresLower where !genre.isEmpty {
+            cheapWebDramaMatcher.countUniqueMatches(in: genre.utf8, matchedMask: &matchedMask, overflowMatched: &overflowMatched, hits: &hits)
+        }
+        if let taglines = item.taglines {
+            for tagline in taglines where !tagline.isEmpty {
+                cheapWebDramaMatcher.countUniqueMatches(in: tagline.utf8, matchedMask: &matchedMask, overflowMatched: &overflowMatched, hits: &hits)
             }
         }
+        if let overview = item.overview, !overview.isEmpty {
+            cheapWebDramaMatcher.countUniqueMatches(in: overview.prefix(160).utf8, matchedMask: &matchedMask, overflowMatched: &overflowMatched, hits: &hits)
+        }
 
-        if !studioLower.isEmpty {
-            for studio in cheapWebDramaStudios where studioLower.contains(studio) {
-                hits += 1
+        if let studios = item.studios, !studios.isEmpty {
+            var studioMask: UInt64 = 0
+            var studioOverflow: Set<Int>? = nil
+            for studio in studios {
+                if let name = studio.name, !name.isEmpty {
+                    cheapWebDramaStudioMatcher.countUniqueMatches(in: name.utf8, matchedMask: &studioMask, overflowMatched: &studioOverflow, hits: &hits)
+                }
             }
         }
 

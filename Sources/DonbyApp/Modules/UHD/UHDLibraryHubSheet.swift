@@ -283,12 +283,14 @@ public struct UHDLibraryHubSheet: View {
                         .foregroundStyle(appState.accentColor)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
+                        .frame(minHeight: 24)
                         .background(
                             Capsule().fill(appState.accentColor.opacity(0.12))
                         )
                         .overlay(
                             Capsule().strokeBorder(appState.accentColor.opacity(0.35), lineWidth: 0.6)
                         )
+                        .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
                     .disabled(isSaving)
@@ -429,7 +431,9 @@ public struct UHDLibraryHubSheet: View {
                             .foregroundStyle(appState.accentTextColor)
                             .padding(.horizontal, 11)
                             .padding(.vertical, 4.5)
+                            .frame(minHeight: 24)
                             .background(Capsule().fill(appState.accentColor))
+                            .contentShape(Capsule())
                         }
                         .buttonStyle(.plain)
                         .disabled(isSaving)
@@ -522,6 +526,7 @@ public struct UHDLibraryHubSheet: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(index > 0 ? DonbyGlassPalette.primaryText(isLight: isLight) : DonbyGlassPalette.secondaryText(isLight: isLight).opacity(0.3))
                         .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(index == 0)
@@ -535,6 +540,7 @@ public struct UHDLibraryHubSheet: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(index + 1 < total ? DonbyGlassPalette.primaryText(isLight: isLight) : DonbyGlassPalette.secondaryText(isLight: isLight).opacity(0.3))
                         .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(index + 1 >= total)
@@ -557,7 +563,9 @@ public struct UHDLibraryHubSheet: View {
         do {
             let fetched = try await uhd.refreshLibrarySettings(server: server)
             settings = fetched
-            rebuildCollectionDraft(from: fetched, mode: selectedMode)
+            if !hasOrderEdits {
+                rebuildCollectionDraft(from: fetched, mode: selectedMode)
+            }
         } catch {
             errorMessage = "加载失败: \(error.localizedDescription)"
         }

@@ -43,20 +43,24 @@ private func dkTurboCloseCB(_ opaque: UnsafeMutableRawPointer?) {
 extension PlayerView {
     func handleProgressTimerTick() {
         let hudVisible = showControls || activeDrawer != nil
+        let needsLegacyMediaInfo = (activeDrawer == .mediaInfo)
+        let needsLegacySpeed = isWaitingForSeekOrBuffer || needsLegacyMediaInfo
         if currentResource.isLocalOrOfflineMedia {
-            telemetry.updateDownloadSpeed(0.0)
-        } else if playerHandle == nil && (showControls || isOpeningMedia) {
-            telemetry.updateDownloadSpeed(activeTurboHandle?.currentWireSpeedMBs ?? 0.0)
+            if hudVisible || needsLegacySpeed || isOpeningMedia {
+                telemetryBox.updateDownloadSpeed(0.0, syncLegacy: needsLegacySpeed)
+            }
+        } else if playerHandle == nil && (showControls || isOpeningMedia || needsLegacySpeed) {
+            telemetryBox.updateDownloadSpeed(activeTurboHandle?.currentWireSpeedMBs ?? 0.0, syncLegacy: needsLegacySpeed)
         }
-            guard let handle = playerHandle, !isScrubbing else { return }
+            guard let handle = playerHandle, !autoHideBox.isScrubbing else { return }
             let nowUptime = ProcessInfo.processInfo.systemUptime
             let newPos = dk_player_get_position(handle)
             let sinceSeek = nowUptime - lastSeekCommitUptime
-            let isSettlingSeek = sinceSeek < 2.5 && abs(newPos - lastSeekCommitTarget) > 8.0
+            let isSettlingSeek = sinceSeek < 0.75 && abs(newPos - lastSeekCommitTarget) > 0.35
             if !isSettlingSeek {
                 autoHideBox.liveCurrentTime = newPos
                 if hudVisible {
-                    telemetry.updateCurrentTime(newPos)
+                    telemetryBox.updateCurrentTime(newPos, syncLegacy: needsLegacyMediaInfo)
                 }
             }
             let livePos = autoHideBox.liveCurrentTime
@@ -71,6 +75,7 @@ extension PlayerView {
                     }
                 } else if (nowUptime - autoHideBox.lastObservedPosUptime) >= 0.48 {
                     if !isWaitingForSeekOrBuffer {
+                        telemetryBox.syncLegacySnapshot()
                         withAnimation(.easeIn(duration: 0.14)) {
                             isWaitingForSeekOrBuffer = true
                         }
@@ -82,24 +87,25 @@ extension PlayerView {
             let newBuffered = dk_player_get_buffered_duration(handle)
             autoHideBox.liveBufferedAheadSeconds = newBuffered
             if hudVisible {
-                telemetry.updateBufferedAhead(newBuffered)
+                telemetryBox.updateBufferedAhead(newBuffered, syncLegacy: needsLegacyMediaInfo)
             }
             let dur = dk_player_get_duration(handle)
             if dur > 0 {
-                telemetry.updateDuration(dur)
+                telemetryBox.updateDuration(dur, syncLegacy: needsLegacyMediaInfo)
             } else if currentItem.durationSeconds > 0 {
-                telemetry.updateDuration(currentItem.durationSeconds)
+                telemetryBox.updateDuration(currentItem.durationSeconds, syncLegacy: needsLegacyMediaInfo)
             }
-            if showControls || activeDrawer == .mediaInfo || isWaitingForSeekOrBuffer || telemetry.kernelStats.width == 0 {
+            if showControls || needsLegacyMediaInfo || isWaitingForSeekOrBuffer || telemetryBox.kernelStats.width == 0 {
                 var freshStats = DKRuntimeStats()
                 dk_player_get_stats(handle, &freshStats)
-                telemetry.updateKernelStats(freshStats, forceUpdate: activeDrawer == .mediaInfo)
+                telemetryBox.updateKernelStats(freshStats, forceUpdate: needsLegacyMediaInfo, syncLegacy: needsLegacyMediaInfo)
+                let syncSpeedToLegacy = isWaitingForSeekOrBuffer || needsLegacyMediaInfo
                 if currentResource.isLocalOrOfflineMedia {
-                    telemetry.updateDownloadSpeed(0.0)
+                    telemetryBox.updateDownloadSpeed(0.0, syncLegacy: syncSpeedToLegacy)
                 } else if let turboHandle = activeTurboHandle {
-                    telemetry.updateDownloadSpeed(turboHandle.currentWireSpeedMBs)
+                    telemetryBox.updateDownloadSpeed(turboHandle.currentWireSpeedMBs, syncLegacy: syncSpeedToLegacy)
                 } else {
-                    telemetry.updateDownloadSpeed(max(0.0, freshStats.download_speed_mbs))
+                    telemetryBox.updateDownloadSpeed(max(0.0, freshStats.download_speed_mbs), syncLegacy: syncSpeedToLegacy)
                 }
             }
 
@@ -117,19 +123,18 @@ extension PlayerView {
             if pState == DK_STATE_ENDED && !didHandlePlaybackEnded {
                 didHandlePlaybackEnded = true
                 isPlaying = false
-                telemetry.updateCurrentTime(livePos, force: true)
+                telemetryBox.updateCurrentTime(livePos, force: true, syncLegacy: needsLegacyMediaInfo)
                 finishedItemPendingCleanup = (currentItem.id, currentResource.mediaSource.id)
                 companionBox.companion?.onPlaybackEnded(livePos: livePos, playbackSpeed: playbackSpeed)
-                if let ext = DonbyMediaServiceRegistry.shared.provider(for: session.server.type), !session.server.accessToken.isEmpty {
-                    let srv = session.server
+                let srv = resolvedServer
+                if let ext = DonbyMediaServiceRegistry.shared.provider(for: srv.type), !srv.accessToken.isEmpty {
                     let itm = currentItem
                     let assetId = currentResource.mediaSource.id
                     let endPos = livePos
                     Task {
                         await ext.reportPlayback(server: srv, kind: .finished, item: itm, assetId: assetId, positionSeconds: endPos)
                     }
-                } else if !session.server.host.isEmpty && !session.server.accessToken.isEmpty {
-                    let srv = session.server
+                } else if !srv.host.isEmpty && !srv.accessToken.isEmpty {
                     let itm = currentItem
                     let assetId = currentResource.mediaSource.id
                     let psId = currentResource.playSessionId
@@ -149,7 +154,7 @@ extension PlayerView {
                     itemId: currentItem.id,
                     played: true,
                     positionSeconds: 0,
-                    durationSeconds: telemetry.duration,
+                    durationSeconds: telemetryBox.duration,
                     persistDiskNow: true
                 )
                 if let idx = session.episodesQueue.firstIndex(where: { $0.id == currentItem.id }),
@@ -166,14 +171,14 @@ extension PlayerView {
             }
 
             // Stall health check & auto-recovery
-            let healthEval = healthPolicy.evaluate(
+            let healthEval = autoHideBox.healthPolicy.evaluate(
                 now: Date().timeIntervalSinceReferenceDate,
                 position: livePos,
                 bufferedAhead: newBuffered,
                 isPaused: !isPlaying,
                 isOpening: isOpeningMedia,
                 isEnded: didHandlePlaybackEnded,
-                isScrubbing: isScrubbing,
+                isScrubbing: autoHideBox.isScrubbing,
                 seekGeneration: seekGeneration
             )
             switch healthEval {
@@ -182,7 +187,7 @@ extension PlayerView {
             case .recover:
                 DonbyLogger.shared.log("触发播放卡顿自动恢复 at \(String(format: "%.1fs", livePos))", level: .warning, subsystem: "PlaybackHealth")
                 appState.showToast("缓冲停滞，正在自动重连当前位置...", icon: "arrow.clockwise")
-                startNativeKernelPlayback(startSeconds: livePos)
+                startNativeKernelPlayback(startSeconds: livePos, resetHealthPolicy: false)
                 return
             case .fail(let reason):
                 isPlaying = false
@@ -196,13 +201,56 @@ extension PlayerView {
             prefetchNextEpisodeIfNearEnd()
 
             // Update watch history periodically (every 5s) to avoid UI frame drops
-            if abs(livePos - lastRecordedPosition) >= 5.0 {
-                lastRecordedPosition = livePos
+            if abs(livePos - autoHideBox.lastRecordedPosition) >= 5.0 {
+                autoHideBox.lastRecordedPosition = livePos
                 saveCurrentWatchProgress(isFinal: false)
             }
     }
 
-    func startNativeKernelPlayback(startSeconds: Double, allowWarmCacheRetry: Bool = true) {
+    func reloadPlaybackWithResolvedServer(at startSeconds: Double, resetHealthPolicy: Bool = true) {
+        if currentResource.isLocalOrOfflineMedia {
+            startNativeKernelPlayback(startSeconds: startSeconds, resetHealthPolicy: resetHealthPolicy)
+            return
+        }
+        stopNativeKernel()
+        let expectedGeneration = activePlaybackGeneration
+        isOpeningMedia = true
+        hasRenderedFirstFrame = false
+        isWaitingForSeekOrBuffer = false
+        openingErrorMessage = nil
+        let srv = resolvedServer
+        let item = currentItem
+        let preset = appState.preferredVersionPreset
+        let audioIdx = selectedAudioIdx
+        let subIdx = selectedSubIdx
+        let enable302 = appState.enable302Cache
+        let defer302 = appState.turboEnabled
+        autoHideBox.lineReloadTask?.cancel()
+        autoHideBox.lineReloadTask = Task {
+            do {
+                let res = try await PlaybackIntentCoordinator.shared.resolveAndCacheResource(
+                    server: srv,
+                    item: item,
+                    preferredPreset: preset,
+                    audioStreamIndex: audioIdx,
+                    subtitleStreamIndex: subIdx,
+                    enable302Cache: enable302,
+                    defer302ProbeWhenTurbo: defer302
+                )
+                guard !Task.isCancelled, self.activePlaybackGeneration == expectedGeneration else { return }
+                self.autoHideBox.lineReloadTask = nil
+                self.currentResource = res
+                self.startNativeKernelPlayback(startSeconds: startSeconds, resetHealthPolicy: resetHealthPolicy)
+            } catch {
+                guard !Task.isCancelled, self.activePlaybackGeneration == expectedGeneration else { return }
+                self.autoHideBox.lineReloadTask = nil
+                self.isOpeningMedia = false
+                self.openingErrorMessage = "重新解析播放地址失败: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func startNativeKernelPlayback(startSeconds: Double, allowWarmCacheRetry: Bool = true, resetHealthPolicy: Bool = true) {
         stopNativeKernel()
         activePlaybackGeneration &+= 1
         let thisGeneration = activePlaybackGeneration
@@ -216,10 +264,10 @@ extension PlayerView {
         openingErrorMessage = nil
         didHandlePlaybackEnded = false
         finishedItemPendingCleanup = nil
-        telemetry.updateCurrentTime(max(0, startSeconds), force: true)
-        telemetry.updateDuration(1)
-        telemetry.updateBufferedAhead(0)
-        telemetry.updateDownloadSpeed(0.0)
+        telemetryBox.updateCurrentTime(max(0, startSeconds), force: true, syncLegacy: true)
+        telemetryBox.updateDuration(1, syncLegacy: true)
+        telemetryBox.updateBufferedAhead(0, syncLegacy: true)
+        telemetryBox.updateDownloadSpeed(0.0, syncLegacy: true)
         localExternalSubtitleName = nil
         secondaryLocalSubtitleName = nil
         activeSecondarySubtitleSelection = .off
@@ -234,7 +282,9 @@ extension PlayerView {
         prefetchedNextEpisodeResource = nil
         prefetchedNextEpisodeInFlightId = nil
         seekGeneration += 1
-        healthPolicy.reset()
+        if resetHealthPolicy {
+            autoHideBox.healthPolicy.reset()
+        }
 
         let urlStr: String = {
             if currentResource.streamURL.isFileURL || currentResource.streamURL.scheme == "file" {
@@ -273,8 +323,9 @@ extension PlayerView {
         let hadWarmCachedHeader = turboSetup.hadWarmCachedHeader
         self.activeTurboHandle = preparedTurboHandle
 
-        let serverCapDesc = appState.serverCapabilities[session.server.id].map { String($0.activeVideoDeliveryLimit) } ?? "none"
-        let budgetDesc = preparedTurboHandle != nil ? "\(appState.effectiveConnectionBudget(for: session.server)) (serverCap=\(serverCapDesc))" : "n/a"
+        let srv = resolvedServer
+        let serverCapDesc = appState.serverCapabilities[srv.id].map { String($0.activeVideoDeliveryLimit) } ?? "none"
+        let budgetDesc = preparedTurboHandle != nil ? "\(appState.effectiveConnectionBudget(for: srv)) (serverCap=\(serverCapDesc))" : "n/a"
         DonbyLogger.shared.log("启动原生播放内核 (URL: \(PlaybackDiagnosticsRedactor.redact(urlStr)), Turbo: \(preparedTurboHandle != nil), budget: \(budgetDesc))", level: .info, subsystem: "Player")
 
         Task.detached(priority: .userInitiated) {
@@ -378,7 +429,7 @@ extension PlayerView {
                 self.kernelChapters = Self.queryKernelChapters(handle: validHandle)
 
                 // Resolve initial audio track (mapping Emby MediaStream.index -> FFmpeg AVStream index via ordinal)
-                let audioOpts = self.resolvedAudioOptions
+                let audioOpts = self.cachedAudioOptions
                 if let requestedEmbyAudio = audioIdx,
                    let matchedAudio = audioOpts.first(where: { $0.embyIndex == requestedEmbyAudio })
                        ?? audioOpts.first(where: { $0.avStreamIndex == requestedEmbyAudio }) {
@@ -391,7 +442,7 @@ extension PlayerView {
                 }
 
                 // Resolve initial subtitle track using explicit override -> per-item/series memory -> global preference -> smart default
-                let subOpts = self.resolvedSubtitleOptions
+                let subOpts = self.cachedSubtitleOptions
                 let candidates = subOpts.map(\.trackCandidate)
                 if isExplicitSubOff {
                     self.activeSubtitleSelection = .off
@@ -408,7 +459,7 @@ extension PlayerView {
                     } else if let autoSub = discovered.selectedSubIndex {
                         self.activeSubtitleSelection = .embedded(avStreamIndex: autoSub)
                     }
-                } else if let remembered = self.appState.resolvedPrimarySubtitleMemory(serverId: self.session.server.id, item: self.currentItem) {
+                } else if let remembered = self.appState.resolvedPrimarySubtitleMemory(serverId: self.resolvedServer.id, item: self.currentItem) {
                     if remembered.isDisabled {
                         self.activeSubtitleSelection = .off
                         if discovered.selectedSubIndex != nil {
@@ -440,7 +491,7 @@ extension PlayerView {
                 }
 
                 // Restore secondary bilingual subtitle if remembered
-                if let rememberedSecondary = self.appState.resolvedSecondarySubtitleMemory(serverId: self.session.server.id, item: self.currentItem),
+                if let rememberedSecondary = self.appState.resolvedSecondarySubtitleMemory(serverId: self.resolvedServer.id, item: self.currentItem),
                    !rememberedSecondary.isDisabled {
                     if let localPath = rememberedSecondary.localFilePath,
                        FileManager.default.fileExists(atPath: localPath) {
@@ -474,8 +525,7 @@ extension PlayerView {
             }
         }
 
-        guard !session.server.host.isEmpty && !session.server.accessToken.isEmpty else { return }
-        let srv = session.server
+        guard !srv.host.isEmpty && !srv.accessToken.isEmpty else { return }
         let itm = currentItem
         let msId = currentResource.mediaSource.id
         let psId = currentResource.playSessionId
@@ -503,6 +553,11 @@ extension PlayerView {
 
     func stopNativeKernel() {
         activePlaybackGeneration &+= 1
+        autoHideBox.lineReloadTask?.cancel()
+        autoHideBox.lineReloadTask = nil
+        autoHideBox.coalescedSeekTask?.cancel()
+        autoHideBox.coalescedSeekTask = nil
+        autoHideBox.pendingCoalescedSeekTarget = nil
         let activeHandle = playerHandle
         self.playerHandle = nil
         if let activeHandle { dk_player_request_abort(activeHandle) }
@@ -514,8 +569,8 @@ extension PlayerView {
         releasePlaybackNetworkPriority()
         episodeSwitchTask?.cancel()
         episodeSwitchTask = nil
-        telemetry.updateDownloadSpeed(0.0)
-        telemetry.updateBufferedAhead(0)
+        telemetryBox.updateDownloadSpeed(0.0, syncLegacy: true)
+        telemetryBox.updateBufferedAhead(0, syncLegacy: true)
         skipBannerLabel = nil
         isAutoAligningSubtitle = false
         lastAutoAlignSummary = nil
@@ -539,7 +594,10 @@ extension PlayerView {
             didHandlePlaybackEnded = false
             finishedItemPendingCleanup = nil
             autoHideBox.liveCurrentTime = 0
-            telemetry.updateCurrentTime(0, force: true)
+            autoHideBox.lastObservedPos = 0
+            autoHideBox.lastObservedPosUptime = ProcessInfo.processInfo.systemUptime
+            isWaitingForSeekOrBuffer = false
+            telemetryBox.updateCurrentTime(0, force: true, syncLegacy: activeDrawer == .mediaInfo)
             dk_player_seek(handle, 0, true)
             dk_player_play(handle)
             isPlaying = true
@@ -551,6 +609,9 @@ extension PlayerView {
             saveCurrentWatchProgress(isFinal: false)
             appState.flushWatchHistory()
         } else {
+            autoHideBox.lastObservedPos = dk_player_get_position(handle)
+            autoHideBox.lastObservedPosUptime = ProcessInfo.processInfo.systemUptime
+            isWaitingForSeekOrBuffer = false
             dk_player_play(handle)
             isPlaying = true
         }
@@ -562,11 +623,29 @@ extension PlayerView {
     }
 
     func seekRelative(_ delta: Double) {
-        let target = max(0, min(telemetry.duration, autoHideBox.liveCurrentTime + delta))
-        seekTo(target)
+        let base = autoHideBox.pendingCoalescedSeekTarget ?? autoHideBox.liveCurrentTime
+        let target = max(0, min(telemetryBox.duration, base + delta))
+        autoHideBox.pendingCoalescedSeekTarget = target
+        lastSeekCommitUptime = ProcessInfo.processInfo.systemUptime
+        lastSeekCommitTarget = target
+        autoHideBox.liveCurrentTime = target
+        telemetryBox.updateCurrentTime(target, force: true, syncLegacy: activeDrawer == .mediaInfo)
+
+        autoHideBox.coalescedSeekTask?.cancel()
+        autoHideBox.coalescedSeekTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 70_000_000)
+            guard !Task.isCancelled else { return }
+            let finalTarget = autoHideBox.pendingCoalescedSeekTarget ?? target
+            autoHideBox.pendingCoalescedSeekTarget = nil
+            autoHideBox.coalescedSeekTask = nil
+            seekTo(finalTarget)
+        }
     }
 
     func seekTo(_ seconds: Double, accurate: Bool = false) {
+        autoHideBox.coalescedSeekTask?.cancel()
+        autoHideBox.coalescedSeekTask = nil
+        autoHideBox.pendingCoalescedSeekTarget = nil
         didHandlePlaybackEnded = false
         seekGeneration += 1
         lastSeekCommitUptime = ProcessInfo.processInfo.systemUptime
@@ -574,7 +653,7 @@ extension PlayerView {
         autoHideBox.lastObservedPos = seconds
         autoHideBox.lastObservedPosUptime = lastSeekCommitUptime
         autoHideBox.liveCurrentTime = seconds
-        telemetry.updateCurrentTime(seconds, force: true)
+        telemetryBox.updateCurrentTime(seconds, force: true, syncLegacy: activeDrawer == .mediaInfo)
         if let handle = playerHandle {
             dk_player_seek(handle, seconds, accurate)
             activeTurboHandle?.wakeWaitingReads()

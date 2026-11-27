@@ -8,78 +8,84 @@ public struct MainWindowView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject private var updater = AppUpdateManager.shared
     @State private var showDelayedResolvePill: Bool = false
+    @State private var escapeKeyMonitor: Any? = nil
 
     public init() {}
 
     public var body: some View {
+        let isPlaying = (appState.activePlayback != nil)
         ZStack(alignment: .bottom) {
+            HStack(spacing: 0) {
+                if !appState.isSidebarCollapsed {
+                    appSidebarView
+                        .frame(width: appState.isWindowFullScreen ? 228 : 206)
+                        .layoutPriority(1)
+                        .background(
+                            ZStack {
+                                DonbyVisualEffectView(material: .sidebar, blendingMode: .behindWindow)
+                                DonbyGlassPalette.sidebar(isLight: appState.isLightMode).opacity(appState.isLightMode ? 0.35 : 0.85)
+                            }
+                        )
+
+                    Rectangle()
+                        .fill(DonbyGlassPalette.separator(isLight: appState.isLightMode))
+                        .frame(width: 1)
+                }
+
+                let hasDetail = (appState.currentDetailItem != nil)
+                ZStack(alignment: .topLeading) {
+                    Group {
+                        if appState.openedServerId != nil {
+                            EmbyMainView()
+                        } else {
+                            switch appState.selectedTab {
+                            case .files:
+                                FilesModuleView()
+                            case .servers:
+                                ServerListView()
+                            case .iptv:
+                                IPTVModuleView()
+                            case .records:
+                                RecordsView()
+                            case .downloads:
+                                DownloadsView()
+                            case .search:
+                                GlobalSearchView()
+                            case .settings:
+                                SettingsView()
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+                    .opacity(hasDetail ? 0 : 1)
+                    .allowsHitTesting(!hasDetail)
+                    .accessibilityHidden(hasDetail)
+
+                    if let detailItem = appState.currentDetailItem {
+                        DetailView(
+                            item: detailItem,
+                            preferOfflineFocus: appState.detailOfflineFocusIds.contains(detailItem.id)
+                        )
+                        .id(detailItem.id)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+                    }
+                }
+                .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
+            }
+            .ignoresSafeArea(.container, edges: .top)
+            .opacity(isPlaying ? 0 : 1)
+            .allowsHitTesting(!isPlaying)
+            .accessibilityHidden(isPlaying)
+
             if let playback = appState.activePlayback {
                 PlayerView(session: playback)
                     .transition(.opacity)
                     .environment(\.colorScheme, .dark)
                     .preferredColorScheme(.dark)
-            } else {
-                HStack(spacing: 0) {
-                    if !appState.isSidebarCollapsed {
-                        appSidebarView
-                            .frame(width: appState.isWindowFullScreen ? 228 : 206)
-                            .layoutPriority(1)
-                            .background(
-                                ZStack {
-                                    DonbyVisualEffectView(material: .sidebar, blendingMode: .behindWindow)
-                                    DonbyGlassPalette.sidebar(isLight: appState.isLightMode).opacity(appState.isLightMode ? 0.35 : 0.85)
-                                }
-                            )
-
-                        Rectangle()
-                            .fill(DonbyGlassPalette.separator(isLight: appState.isLightMode))
-                            .frame(width: 1)
-                    }
-
-                    let hasDetail = (appState.currentDetailItem != nil)
-                    ZStack(alignment: .topLeading) {
-                        Group {
-                            if appState.openedServerId != nil {
-                                EmbyMainView()
-                            } else {
-                                switch appState.selectedTab {
-                                case .files:
-                                    FilesModuleView()
-                                case .servers:
-                                    ServerListView()
-                                case .iptv:
-                                    IPTVModuleView()
-                                case .records:
-                                    RecordsView()
-                                case .downloads:
-                                    DownloadsView()
-                                case .search:
-                                    GlobalSearchView()
-                                case .settings:
-                                    SettingsView()
-                                }
-                            }
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
-                        .opacity(hasDetail ? 0 : 1)
-                        .allowsHitTesting(!hasDetail)
-                        .accessibilityHidden(hasDetail)
-
-                        if let detailItem = appState.currentDetailItem {
-                            DetailView(
-                                item: detailItem,
-                                preferOfflineFocus: appState.detailOfflineFocusIds.contains(detailItem.id)
-                            )
-                            .id(detailItem.id)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
-                        }
-                    }
-                    .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
-                }
-                .ignoresSafeArea(.container, edges: .top)
+                    .zIndex(50)
             }
 
             if appState.activePlayback == nil && showDelayedResolvePill {
@@ -139,14 +145,26 @@ public struct MainWindowView: View {
             }
         }
         .onExitCommand {
-            if appState.activePlayback == nil && appState.isStartingPlayback {
-                appState.cancelPendingPlaybackStart()
-            }
+            _ = handleBrowseEscape()
         }
         .onAppear {
             if let win = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first {
                 appState.isWindowFullScreen = win.styleMask.contains(.fullScreen)
             }
+            if let km = escapeKeyMonitor { NSEvent.removeMonitor(km); escapeKeyMonitor = nil }
+            escapeKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                guard event.keyCode == 53 else { return event }
+                guard RunLoop.current.currentMode != .eventTracking else { return event }
+                guard appState.activePlayback == nil else { return event }
+                guard event.window?.sheetParent == nil, event.window?.attachedSheet == nil, NSApp.modalWindow == nil else { return event }
+                guard !(event.window?.firstResponder is NSTextView), !(NSApp.keyWindow?.firstResponder is NSTextView) else { return event }
+                let mods = event.modifierFlags.intersection([.command, .control, .option])
+                guard mods.isEmpty else { return event }
+                return handleBrowseEscape() ? nil : event
+            }
+        }
+        .onDisappear {
+            if let km = escapeKeyMonitor { NSEvent.removeMonitor(km); escapeKeyMonitor = nil }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.willEnterFullScreenNotification)) { _ in
             appState.isWindowFullScreen = true
@@ -194,6 +212,24 @@ public struct MainWindowView: View {
             .preferredColorScheme(appState.colorScheme)
             .tint(appState.accentColor)
         }
+    }
+
+    private func handleBrowseEscape() -> Bool {
+        guard appState.activePlayback == nil else { return false }
+        if appState.isStartingPlayback {
+            appState.cancelPendingPlaybackStart()
+            return true
+        } else if !appState.detailStack.isEmpty {
+            appState.popDetail()
+            return true
+        } else if appState.selectedLibrary != nil {
+            appState.selectedLibrary = nil
+            return true
+        } else if appState.browsingFolder != nil {
+            appState.browsingFolder = nil
+            return true
+        }
+        return false
     }
 
     private var appSidebarView: some View {

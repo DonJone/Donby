@@ -40,10 +40,15 @@ public final class ArtworkImageCache: @unchecked Sendable {
     }()
     private let fileManager = FileManager.default
     private let cacheDirectoryURL: URL
+    private let aliasLock = NSLock()
+    private var aliasIndex: [String: String] = [:]
+    private var aliasIndexDirty = false
+    private var aliasFlushScheduled = false
     private var writesSinceLastPrune: Int = 0
     private static let maxDiskCacheBytes: Int64 = 512 * 1024 * 1024
     private static let pruneTargetBytes: Int64 = 410 * 1024 * 1024
     private static let maxDiskCacheAge: TimeInterval = 30 * 86400
+    private static let aliasIndexFileName = "alias_index.json"
 
     private init() {
         let initialCS = CGDisplayCopyColorSpace(CGMainDisplayID())
@@ -70,6 +75,18 @@ public final class ArtworkImageCache: @unchecked Sendable {
             queue: .main
         ) { [weak self] _ in
             self?.refreshDisplayColorSpaceIfNeeded()
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            self?.flushAliasIndexSync()
+        }
+
+        diskQueue.async { [weak self] in
+            self?.loadAliasIndex()
         }
 
         diskQueue.asyncAfter(deadline: .now() + 10.0) { [weak self] in
@@ -229,8 +246,9 @@ public final class ArtworkImageCache: @unchecked Sendable {
     }
 
     private func decodeCGThumbnail(fromSource source: CGImageSource, maxPixelSize: Int, isPreThumb: Bool) -> CGImage? {
+        let clampedMaxPixel = min(max(maxPixelSize, 1), 2560)
         let options: [CFString: Any]
-        if isPreThumb || maxPixelSize >= 2400 {
+        if isPreThumb {
             options = [
                 kCGImageSourceShouldCacheImmediately: true,
                 kCGImageSourceShouldCache: false
@@ -241,11 +259,11 @@ public final class ArtworkImageCache: @unchecked Sendable {
                 kCGImageSourceShouldCacheImmediately: true,
                 kCGImageSourceShouldCache: false,
                 kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+                kCGImageSourceThumbnailMaxPixelSize: clampedMaxPixel
             ]
         }
         let rawCG: CGImage?
-        if isPreThumb || maxPixelSize >= 2400 {
+        if isPreThumb {
             rawCG = CGImageSourceCreateImageAtIndex(source, 0, options as CFDictionary)
                 ?? CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
         } else {
@@ -254,6 +272,10 @@ public final class ArtworkImageCache: @unchecked Sendable {
         }
         guard let rawCG else {
             return nil
+        }
+        // Skip CPU Display P3 redraw for large images; let GPU handle display gamut mapping.
+        if max(rawCG.width, rawCG.height) > 900 || clampedMaxPixel > 900 {
+            return rawCG
         }
         return normalizeToDisplaySpace(rawCG)
     }
@@ -330,15 +352,21 @@ public final class ArtworkImageCache: @unchecked Sendable {
         if let mem = memoryCache.object(forKey: key as NSString) {
             return mem
         }
-        let fileURL = cacheDirectoryURL.appendingPathComponent(diskFileName(for: key))
+        let fileURL = resolveDiskFileURL(for: key)
+        let directURL = cacheDirectoryURL.appendingPathComponent(diskFileName(for: key))
         return await runOnDecodeQueue { [weak self] op in
             if op?.isCancelled == true { return nil }
             guard let self else { return nil }
-            guard let data = try? Data(contentsOf: fileURL) else {
+            let resolvedData: (Data, URL)? = {
+                if let d = try? Data(contentsOf: fileURL) { return (d, fileURL) }
+                if directURL != fileURL, let d = try? Data(contentsOf: directURL) { return (d, directURL) }
+                return nil
+            }()
+            guard let (data, hitURL) = resolvedData else {
                 return nil
             }
             self.diskQueue.async { [weak self] in
-                self?.touchIfStale(fileURL)
+                self?.touchIfStale(hitURL)
             }
             if let thumb = self.decodeThumbnail(from: data, maxPixelSize: maxPixelSize) {
                 let cost = self.decodedByteCost(for: thumb, fallbackBytes: data.count)
@@ -366,7 +394,18 @@ public final class ArtworkImageCache: @unchecked Sendable {
         let diskThumbURL = isThumbBucket
             ? cacheDirectoryURL.appendingPathComponent(diskFileName(for: "\(primaryKey)#thumb_v1_\(maxPixelSize)"))
             : nil
-        let fileURLs = keys.map { cacheDirectoryURL.appendingPathComponent(diskFileName(for: $0)) }
+        var seenURLs = Set<URL>()
+        var fileEntries: [(idx: Int, url: URL)] = []
+        for (idx, key) in keys.enumerated() {
+            let resolved = resolveDiskFileURL(for: key)
+            if seenURLs.insert(resolved).inserted {
+                fileEntries.append((idx, resolved))
+            }
+            let direct = cacheDirectoryURL.appendingPathComponent(diskFileName(for: key))
+            if direct != resolved && seenURLs.insert(direct).inserted {
+                fileEntries.append((idx, direct))
+            }
+        }
         return await runOnDecodeQueue(priority: priority) { [weak self] op in
             if op?.isCancelled == true { return nil }
             guard let self else { return nil }
@@ -382,13 +421,13 @@ public final class ArtworkImageCache: @unchecked Sendable {
                     self?.touchIfStale(diskThumbURL)
                 }
                 let cost = self.decodedByteCost(for: thumbCG)
-                for key in keys {
-                    memCache.setObject(thumbCG, forKey: self.cgCacheKey(for: key, maxPixelSize: maxPixelSize), cost: cost)
+                for (idx, key) in keys.enumerated() {
+                    memCache.setObject(thumbCG, forKey: self.cgCacheKey(for: key, maxPixelSize: maxPixelSize), cost: idx == 0 ? cost : 1)
                 }
                 return thumbCG
             }
 
-            for (idx, fileURL) in fileURLs.enumerated() {
+            for (idx, fileURL) in fileEntries {
                 if op?.isCancelled == true { return nil }
                 guard let cgImg = self.decodeCGThumbnail(fromURL: fileURL, maxPixelSize: maxPixelSize) else {
                     continue
@@ -403,7 +442,7 @@ public final class ArtworkImageCache: @unchecked Sendable {
                 let cost = self.decodedByteCost(for: cgImg)
                 memCache.setObject(cgImg, forKey: self.cgCacheKey(for: primaryKey, maxPixelSize: maxPixelSize), cost: cost)
                 if idx > 0 {
-                    memCache.setObject(cgImg, forKey: self.cgCacheKey(for: keys[idx], maxPixelSize: maxPixelSize), cost: cost)
+                    memCache.setObject(cgImg, forKey: self.cgCacheKey(for: keys[idx], maxPixelSize: maxPixelSize), cost: 1)
                 }
                 return cgImg
             }
@@ -417,9 +456,10 @@ public final class ArtworkImageCache: @unchecked Sendable {
         }
         // Restrict synchronous disk I/O to background threads so main-thread UI never blocks
         if !Thread.isMainThread {
-            let fileURL = cacheDirectoryURL.appendingPathComponent(diskFileName(for: key))
-            if let data = try? Data(contentsOf: fileURL),
-               let img = NSImage(data: data) {
+            let fileURL = resolveDiskFileURL(for: key)
+            let directURL = cacheDirectoryURL.appendingPathComponent(diskFileName(for: key))
+            let data = (try? Data(contentsOf: fileURL)) ?? (directURL != fileURL ? (try? Data(contentsOf: directURL)) : nil)
+            if let data, let img = NSImage(data: data) {
                 memoryCache.setObject(img, forKey: key as NSString, cost: decodedByteCost(for: img, fallbackBytes: data.count))
                 return img
             }
@@ -436,10 +476,10 @@ public final class ArtworkImageCache: @unchecked Sendable {
             targetCGMemoryCache(for: px).setObject(cg, forKey: cgCacheKey(for: key, maxPixelSize: px), cost: decodedByteCost(for: cg))
         }
         for alias in aliases where !alias.isEmpty {
-            memoryCache.setObject(image, forKey: alias as NSString, cost: cost)
+            memoryCache.setObject(image, forKey: alias as NSString, cost: 1)
             if let cg {
                 let px = max(cg.width, cg.height)
-                targetCGMemoryCache(for: px).setObject(cg, forKey: cgCacheKey(for: alias, maxPixelSize: px), cost: decodedByteCost(for: cg))
+                targetCGMemoryCache(for: px).setObject(cg, forKey: cgCacheKey(for: alias, maxPixelSize: px), cost: 1)
             }
         }
         diskQueue.async { [weak self, cacheDirectoryURL] in
@@ -461,7 +501,7 @@ public final class ArtworkImageCache: @unchecked Sendable {
             let cost = decodedByteCost(for: decoded, fallbackBytes: data.count)
             memoryCache.setObject(decoded, forKey: key as NSString, cost: cost)
             for alias in aliases where !alias.isEmpty {
-                memoryCache.setObject(decoded, forKey: alias as NSString, cost: cost)
+                memoryCache.setObject(decoded, forKey: alias as NSString, cost: 1)
             }
         }
         diskQueue.async { [weak self, cacheDirectoryURL] in
@@ -481,7 +521,7 @@ public final class ArtworkImageCache: @unchecked Sendable {
                 let cost = self.decodedByteCost(for: decoded, fallbackBytes: data.count)
                 self.memoryCache.setObject(decoded, forKey: key as NSString, cost: cost)
                 for alias in aliases where !alias.isEmpty {
-                    self.memoryCache.setObject(decoded, forKey: alias as NSString, cost: cost)
+                    self.memoryCache.setObject(decoded, forKey: alias as NSString, cost: 1)
                 }
             }
             self.diskQueue.async { [weak self] in
@@ -509,7 +549,7 @@ public final class ArtworkImageCache: @unchecked Sendable {
                 let cost = self.decodedByteCost(for: cgImg)
                 memCache.setObject(cgImg, forKey: self.cgCacheKey(for: key, maxPixelSize: maxPixelSize), cost: cost)
                 for alias in aliases where !alias.isEmpty {
-                    memCache.setObject(cgImg, forKey: self.cgCacheKey(for: alias, maxPixelSize: maxPixelSize), cost: cost)
+                    memCache.setObject(cgImg, forKey: self.cgCacheKey(for: alias, maxPixelSize: maxPixelSize), cost: 1)
                 }
             }
             let diskThumbURL = maxPixelSize <= 900
@@ -553,18 +593,76 @@ public final class ArtworkImageCache: @unchecked Sendable {
     }
 
     private func writeRawDataToDisk(_ data: Data, baseDir: URL, key: String, aliases: [String]) {
-        let fileURL = baseDir.appendingPathComponent(diskFileName(for: key))
-        try? data.write(to: fileURL, options: .atomic)
-        for alias in aliases where !alias.isEmpty {
-            let aliasURL = baseDir.appendingPathComponent(diskFileName(for: alias))
-            if aliasURL == fileURL { continue }
-            if fileManager.fileExists(atPath: aliasURL.path) {
-                try? fileManager.removeItem(at: aliasURL)
-            }
-            if (try? fileManager.linkItem(at: fileURL, to: aliasURL)) == nil {
-                try? data.write(to: aliasURL, options: .atomic)
+        let canonicalName = diskFileName(for: key)
+        let fileURL = baseDir.appendingPathComponent(canonicalName)
+        try? data.write(to: fileURL)
+        registerAliases(aliases, targetFileName: canonicalName)
+    }
+
+    private func resolveDiskFileURL(for key: String) -> URL {
+        aliasLock.lock()
+        let mapped = aliasIndex[key]
+        aliasLock.unlock()
+        return cacheDirectoryURL.appendingPathComponent(mapped ?? diskFileName(for: key))
+    }
+
+    private func registerAliases(_ aliases: [String], targetFileName: String) {
+        let filtered = aliases.filter { !$0.isEmpty }
+        guard !filtered.isEmpty else { return }
+        var changed = false
+        aliasLock.lock()
+        for alias in filtered where diskFileName(for: alias) != targetFileName {
+            if aliasIndex[alias] != targetFileName {
+                aliasIndex[alias] = targetFileName
+                changed = true
             }
         }
+        if changed {
+            aliasIndexDirty = true
+        }
+        let shouldSchedule = changed && !aliasFlushScheduled
+        if shouldSchedule {
+            aliasFlushScheduled = true
+        }
+        aliasLock.unlock()
+        if shouldSchedule {
+            diskQueue.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+                self?.flushAliasIndex()
+            }
+        }
+    }
+
+    private func loadAliasIndex() {
+        let url = cacheDirectoryURL.appendingPathComponent(Self.aliasIndexFileName)
+        guard let data = try? Data(contentsOf: url),
+              let decoded = try? JSONDecoder().decode([String: String].self, from: data) else {
+            return
+        }
+        aliasLock.lock()
+        for (k, v) in decoded where aliasIndex[k] == nil {
+            aliasIndex[k] = v
+        }
+        aliasLock.unlock()
+    }
+
+    private func flushAliasIndex() {
+        aliasLock.lock()
+        aliasFlushScheduled = false
+        guard aliasIndexDirty else {
+            aliasLock.unlock()
+            return
+        }
+        let snapshot = aliasIndex
+        aliasIndexDirty = false
+        aliasLock.unlock()
+        if let data = try? JSONEncoder().encode(snapshot) {
+            let url = cacheDirectoryURL.appendingPathComponent(Self.aliasIndexFileName)
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    private func flushAliasIndexSync() {
+        flushAliasIndex()
     }
 
     public func systemAsset(_ name: String) -> NSImage? {
@@ -580,20 +678,14 @@ public final class ArtworkImageCache: @unchecked Sendable {
     public func aliasKeys(_ aliases: [String], to canonicalKey: String) {
         if let img = image(for: canonicalKey) {
             for alias in aliases where !alias.isEmpty {
-                memoryCache.setObject(img, forKey: alias as NSString)
+                memoryCache.setObject(img, forKey: alias as NSString, cost: 1)
             }
             diskQueue.async { [weak self, cacheDirectoryURL] in
                 guard let self else { return }
-                let canonicalURL = cacheDirectoryURL.appendingPathComponent(self.diskFileName(for: canonicalKey))
+                let canonicalFileName = self.diskFileName(for: canonicalKey)
+                let canonicalURL = cacheDirectoryURL.appendingPathComponent(canonicalFileName)
                 if self.fileManager.fileExists(atPath: canonicalURL.path) {
-                    for alias in aliases where !alias.isEmpty {
-                        let aliasURL = cacheDirectoryURL.appendingPathComponent(self.diskFileName(for: alias))
-                        if aliasURL == canonicalURL { continue }
-                        if self.fileManager.fileExists(atPath: aliasURL.path) {
-                            try? self.fileManager.removeItem(at: aliasURL)
-                        }
-                        try? self.fileManager.linkItem(at: canonicalURL, to: aliasURL)
-                    }
+                    self.registerAliases(aliases, targetFileName: canonicalFileName)
                     return
                 }
                 guard let tiff = img.tiffRepresentation,
@@ -635,10 +727,12 @@ public final class ArtworkImageCache: @unchecked Sendable {
         }
 
         let cutoff = Date().addingTimeInterval(-Self.maxDiskCacheAge)
-        var remaining: [(url: URL, size: Int64, mtime: Date)] = []
+        var byInode: [UInt64: (urls: [URL], size: Int64, mtime: Date)] = [:]
+        var uniqueCount = 0
         var totalBytes: Int64 = 0
 
         for url in entries {
+            if url.lastPathComponent == Self.aliasIndexFileName { continue }
             guard let values = try? url.resourceValues(forKeys: Set(keys)),
                   values.isRegularFile == true else {
                 continue
@@ -649,16 +743,41 @@ public final class ArtworkImageCache: @unchecked Sendable {
                 try? fileManager.removeItem(at: url)
                 continue
             }
-            remaining.append((url, size, mtime))
-            totalBytes += size
+            var st = stat()
+            let inode: UInt64 = stat(url.path, &st) == 0 ? UInt64(st.st_ino) : UInt64(bitPattern: Int64(url.path.hashValue))
+            if var existing = byInode[inode] {
+                existing.urls.append(url)
+                if mtime > existing.mtime { existing.mtime = mtime }
+                byInode[inode] = existing
+            } else {
+                byInode[inode] = ([url], size, mtime)
+                totalBytes += size
+                uniqueCount += 1
+            }
         }
 
-        guard totalBytes > Self.maxDiskCacheBytes else { return }
-        remaining.sort { $0.mtime < $1.mtime }
-        for entry in remaining {
-            if totalBytes <= Self.pruneTargetBytes { break }
-            try? fileManager.removeItem(at: entry.url)
-            totalBytes -= entry.size
+        if totalBytes > Self.maxDiskCacheBytes && uniqueCount > 0 {
+            let sorted = byInode.values.sorted { $0.mtime < $1.mtime }
+            for entry in sorted {
+                if totalBytes <= Self.pruneTargetBytes { break }
+                for url in entry.urls {
+                    try? fileManager.removeItem(at: url)
+                }
+                totalBytes -= entry.size
+            }
         }
+
+        // Drop alias index entries whose canonical disk file no longer exists
+        aliasLock.lock()
+        let staleKeys = aliasIndex.compactMap { (alias, targetName) -> String? in
+            let targetURL = cacheDirectoryURL.appendingPathComponent(targetName)
+            return fileManager.fileExists(atPath: targetURL.path) ? nil : alias
+        }
+        if !staleKeys.isEmpty {
+            for k in staleKeys { aliasIndex.removeValue(forKey: k) }
+            aliasIndexDirty = true
+        }
+        aliasLock.unlock()
+        flushAliasIndex()
     }
 }

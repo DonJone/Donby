@@ -1,6 +1,6 @@
 # Module Map: Playback Kernel (`KernelRust` + `DonbyKernelC` ABI)
 
-> Last synced: `v2.1.3` (C++20 baseline archived on `legacy/cpp-kernel`). Read [../../decisions/003-rust-kernel-migration.md](../../decisions/003-rust-kernel-migration.md), [../../decisions/004-zero-serial-rtt-instant-play-v3.md](../../decisions/004-zero-serial-rtt-instant-play-v3.md), [../../decisions/005-zero-crate-rust-media-data-plane-2a.md](../../decisions/005-zero-crate-rust-media-data-plane-2a.md), and [../../decisions/006-intel-x64-and-hackintosh-support.md](../../decisions/006-intel-x64-and-hackintosh-support.md) for architecture rationale.
+> Last synced: `v2.1.5` (C++20 baseline archived on `legacy/cpp-kernel`). Read [../../decisions/003-rust-kernel-migration.md](../../decisions/003-rust-kernel-migration.md), [../../decisions/004-zero-serial-rtt-instant-play-v3.md](../../decisions/004-zero-serial-rtt-instant-play-v3.md), [../../decisions/005-zero-crate-rust-media-data-plane-2a.md](../../decisions/005-zero-crate-rust-media-data-plane-2a.md), and [../../decisions/006-intel-x64-and-hackintosh-support.md](../../decisions/006-intel-x64-and-hackintosh-support.md) for architecture rationale.
 
 ## 1. Sub-Document Routing
 
@@ -25,6 +25,7 @@
   - `demux.rs` — `demux_worker`, buffer backpressure, DoVi probe, `execute_pending_seek`.
   - `video.rs` — VT callbacks, software fallback, `video_decode_worker`, `acquire_frame`, `extract_video_thumbnail`.
   - `audio.rs` — AQ trampolines, `stop_reset_audio_queue`/`stop_dispose_audio_queue`, clock, `audio_decode_worker`, playback controls.
+  - `audio_control.rs` — Per-player `"donby-aq-ctrl"` background worker for non-blocking `AudioQueuePause`/`AudioQueueStart` dispatch, seek barriers, and teardown sync.
   - `tracks.rs` — Auto-subtitle scoring, subtitle packet history, track/chapter getters, `select_track`.
   - `c_api.rs` — 38 `#[no_mangle] extern "C" fn dk_*` thin ABI wrappers (including `dk_player_notify_metal_first_frame` `[StartupTiming]` emitter).
   - `c_api_net.rs` — `#[no_mangle] extern "C" fn dk_net_*` & `dk_player_attach_stream_bridge` C ABI wrappers for the 2A media data plane.
@@ -39,12 +40,13 @@
   - `clock.rs` — Monotonic ns clock helpers, `ClockState`, `SpeedTracker`.
   - `dovi.rs` — `check_dovi_rpu_or_el` (`check_dovi_fel` & `pq_norm_to_nits` are `#[cfg(test)]`).
   - `vad.rs` — `VadAudioRing` (60s @ 16kHz mono 3:1 decimator).
-  - `subtitle/` (7 submodules; see [subtitles.md](subtitles.md) for task routing):
+  - `subtitle/` (8 submodules; see [subtitles.md](subtitles.md) for task routing):
     - `subtitle/mod.rs` — `SubtitleEngine` struct/lifecycle/`Drop`/`mark_replayed` + unit tests.
     - `subtitle/pgs.rs` — FFmpeg packet decode (`DecodeCtx` callbacks) & PGS bitmap cue/pixel overrides.
     - `subtitle/ass_text.rs` — External SRT/VTT/ASS ingestion, `CFStringTransform`, ASS payload/tag sanitization.
     - `subtitle/ass_style.rs` — Style/viewport/affine time scale setters, header/style override application.
-    - `subtitle/compositor.rs` — `update_subtitle_rgba`, `raster_paired_line`, dual-layer RGBA blitting.
+    - `subtitle/compositor.rs` — `prewarm_cjk_font`, `update_subtitle_rgba`, `raster_paired_line`, dual-layer RGBA blitting.
+    - `subtitle/async_worker.rs` — Per-player `"donby-sub-worker"` thread for background `libass` CJK font prewarm, async `ass_render_frame` rasterization, and ready RGBA frame swaps for `CVDisplayLink`.
     - `subtitle/pair_a_render.rs` — Pair-A cinema bilingual layout engine & 1200px viewport anchoring.
     - `subtitle/pair_a_parse.rs` — Pair-A dialogue cleaning, speaker-dash grouping, semantic turn pairing.
 

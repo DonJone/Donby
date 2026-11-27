@@ -553,6 +553,7 @@ final class CardTextBitmapCache: @unchecked Sendable {
     static let shared = CardTextBitmapCache()
     private let cache = NSCache<NSString, CGImage>()
     private let colorSpaceLock = NSLock()
+    private var cachedColorSpace: CGColorSpace
     private var lastColorSpaceICC: Data?
     private let renderQueue: OperationQueue = {
         let q = OperationQueue()
@@ -573,32 +574,53 @@ final class CardTextBitmapCache: @unchecked Sendable {
     private init() {
         cache.countLimit = 2800
         cache.totalCostLimit = 140 * 1024 * 1024
-        lastColorSpaceICC = ArtworkImageCache.shared.activeDisplayColorSpace.copyICCData() as Data?
+        let initialCS = ArtworkImageCache.shared.activeDisplayColorSpace
+        cachedColorSpace = initialCS
+        lastColorSpaceICC = initialCS.copyICCData() as Data?
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshDisplayColorSpaceIfNeeded()
+        }
     }
 
-    private func activeDisplayColorSpace() -> CGColorSpace {
+    private func refreshDisplayColorSpaceIfNeeded() {
         let cs = ArtworkImageCache.shared.activeDisplayColorSpace
         let icc = cs.copyICCData() as Data?
         colorSpaceLock.lock()
         let changed = (icc != lastColorSpaceICC)
         if changed {
+            cachedColorSpace = cs
             lastColorSpaceICC = icc
         }
         colorSpaceLock.unlock()
         if changed {
             cache.removeAllObjects()
         }
-        return cs
+    }
+
+    private func activeDisplayColorSpace() -> CGColorSpace {
+        colorSpaceLock.lock()
+        defer { colorSpaceLock.unlock() }
+        return cachedColorSpace
+    }
+
+    private static func quantizedWidth(_ width: CGFloat) -> Int {
+        let step = 8
+        let rounded = Int((width / CGFloat(step)).rounded()) * step
+        return max(64, rounded)
     }
 
     func cached(title: String, subtitle: String, width: CGFloat, isLightMode: Bool) -> CGImage? {
-        let bucketW = max(60, Int(round(width)))
+        let bucketW = Self.quantizedWidth(width)
         let key = "\(isLightMode ? 1 : 0)|\(bucketW)|\(title)\u{1F}\(subtitle)" as NSString
         return cache.object(forKey: key)
     }
 
     func cacheKey(title: String, subtitle: String, width: CGFloat, isLightMode: Bool) -> String {
-        let bucketW = max(60, Int(round(width)))
+        let bucketW = Self.quantizedWidth(width)
         return "\(isLightMode ? 1 : 0)|\(bucketW)|\(title)\u{1F}\(subtitle)"
     }
 
@@ -623,7 +645,7 @@ final class CardTextBitmapCache: @unchecked Sendable {
 
     @discardableResult
     func renderOrCached(title: String, subtitle: String, width: CGFloat, isLightMode: Bool) -> CGImage? {
-        let bucketW = max(60, Int(round(width)))
+        let bucketW = Self.quantizedWidth(width)
         let key = "\(isLightMode ? 1 : 0)|\(bucketW)|\(title)\u{1F}\(subtitle)" as NSString
         if let hit = cache.object(forKey: key) {
             return hit

@@ -173,6 +173,7 @@ extension PlayerView {
     }
 
     func disableSubtitles(showFeedback: Bool, persist: Bool = true) {
+        cancelActiveSubtitleAlignment(showToast: false)
         explicitSubtitleOff = true
         selectedSubIdx = nil
         activeSubtitleSelection = .off
@@ -240,6 +241,7 @@ extension PlayerView {
     }
 
     func selectSubtitleOption(_ option: PlayerSubtitleTrackOption) {
+        cancelActiveSubtitleAlignment(showToast: false)
         explicitSubtitleOff = false
         selectedSubIdx = option.embyIndex
         switch option.selection {
@@ -288,6 +290,7 @@ extension PlayerView {
     }
 
     func disableSecondarySubtitle() {
+        cancelActiveSubtitleAlignment(showToast: false)
         activeSecondarySubtitleSelection = .off
         secondaryLocalSubtitleName = nil
         secondarySubtitleTimeScale = 1.0
@@ -307,6 +310,7 @@ extension PlayerView {
     }
 
     func selectSecondarySubtitleOption(_ option: PlayerSubtitleTrackOption) {
+        cancelActiveSubtitleAlignment(showToast: false)
         switch option.selection {
         case .off:
             disableSecondarySubtitle()

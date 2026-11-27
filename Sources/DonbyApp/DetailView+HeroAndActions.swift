@@ -16,13 +16,18 @@ extension DetailView {
             )
             .frame(maxWidth: .infinity)
             .frame(height: heroHeight)
-            .saturation(1.10)
-            .contrast(1.04)
             .clipped()
 
-            // 2. Silky Ambient Gradient Dissolve into Canvas (upper 46% completely clear & vivid)
+            // 2. Silky Ambient Gradient Dissolve into Canvas (upper 46-50% completely clear & vivid)
             LinearGradient(
-                stops: [
+                stops: appState.isLightMode ? [
+                    .init(color: .clear, location: 0.0),
+                    .init(color: .clear, location: 0.50),
+                    .init(color: canvasCol.opacity(0.30), location: 0.66),
+                    .init(color: canvasCol.opacity(0.82), location: 0.80),
+                    .init(color: canvasCol.opacity(0.97), location: 0.92),
+                    .init(color: canvasCol, location: 1.0)
+                ] : [
                     .init(color: .clear, location: 0.0),
                     .init(color: .clear, location: 0.46),
                     .init(color: canvasCol.opacity(0.26), location: 0.62),
@@ -49,6 +54,8 @@ extension DetailView {
                         showTitle: item.isEpisode ? (item.seriesName ?? item.name) : item.name,
                         subtitle: heroSubtitle
                     )
+                    .shadow(color: Color.black.opacity(appState.isLightMode ? 0.26 : 0.0), radius: 7, y: 2)
+                    .frame(minHeight: 58, alignment: .bottomLeading)
 
                     HStack(alignment: .top, spacing: 28) {
                         // Left Column: Action Buttons (Stacked: Circle Buttons above Wide Play Capsule)
@@ -232,6 +239,7 @@ extension DetailView {
                                 fontSize: 13.5,
                                 iconHeight: 17
                             )
+                            .frame(minHeight: 24, alignment: .leading)
 
                             if (item.genres?.isEmpty == false) || heroDownloadedBadgeText != nil {
                                 HStack(spacing: 8) {

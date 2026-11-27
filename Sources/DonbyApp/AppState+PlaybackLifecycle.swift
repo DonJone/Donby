@@ -26,14 +26,25 @@ extension AppState {
             serverId: activeServer?.id,
             mediaSourceId: preferredSourceId
         ) ?? DonbyDownloadManager.shared.completedEntry(for: item.id, mediaSourceId: preferredSourceId)
+        var seriesOfflineMatch: DownloadEntry? = nil
+        if directOfflineMatch == nil && item.isSeries {
+            for entry in DonbyDownloadManager.shared.entries where entry.status == .completed {
+                let snap = entry.hydratedItemSnapshot
+                if snap.seriesId == item.id || snap.seriesName == item.name {
+                    seriesOfflineMatch = entry
+                    break
+                }
+            }
+        }
+        let offlineServerMatch = directOfflineMatch ?? seriesOfflineMatch
 
         let resolvedServer: EmbyServerConfig
         if let active = activeServer, !active.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             resolvedServer = active
-        } else if let dl = directOfflineMatch,
+        } else if let dl = offlineServerMatch,
                   let dlSrv = servers.first(where: { $0.id == dl.serverId }) {
             resolvedServer = dlSrv
-        } else if directOfflineMatch != nil {
+        } else if offlineServerMatch != nil {
             resolvedServer = DemoServerData.makeDefaultUHDServer()
         } else {
             showToast("请先配置服务器信息", icon: "exclamationmark.triangle.fill", isError: true)
@@ -58,8 +69,9 @@ extension AppState {
         pendingPlaybackKey = startKey
         pendingPlaybackTimestamp = nowUptime
         if !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            server.lastWatchedDate = Date()
-            updateServerInList(server)
+            let now = Date()
+            server.lastWatchedDate = now
+            updateServerLastWatchedDate(for: server.id, date: now)
         }
 
         isStartingPlayback = true
@@ -107,14 +119,36 @@ extension AppState {
                         resolvedQueue = allOfflineEps
                         targetItem = allOfflineEps.first(where: { !isItemWatchedOfflineOrLocal($0) }) ?? allOfflineEps[0]
                     }
-                } else if isUsingUHDExtension(for: server), let ext = DonbyAppExtensionCenter.shared.plugin {
-                    let extRes = try await ext.resolveSeriesStartEpisode(server: server, seriesItem: item)
-                    eps = extRes.episodes
-                    if let exact = extRes.preferredTarget {
-                        targetItem = exact
-                    }
                 } else {
-                    eps = try await EmbyClient.shared.fetchEpisodes(server: server, seriesId: item.id)
+                    do {
+                        if isUsingUHDExtension(for: server), let ext = DonbyAppExtensionCenter.shared.plugin {
+                            let extRes = try await ext.resolveSeriesStartEpisode(server: server, seriesItem: item)
+                            eps = extRes.episodes
+                            if let exact = extRes.preferredTarget {
+                                targetItem = exact
+                            }
+                        } else {
+                            eps = try await EmbyClient.shared.fetchEpisodes(server: server, seriesId: item.id)
+                        }
+                    } catch {
+                        if let offlineGroup = offlineLibraryGroup {
+                            let allOfflineEps = offlineGroup.episodesBySeason.keys.sorted().flatMap { seasonKey in
+                                (offlineGroup.episodesBySeason[seasonKey] ?? []).sorted {
+                                    ($0.indexNumber ?? 0) < ($1.indexNumber ?? 0)
+                                }
+                            }
+                            if !allOfflineEps.isEmpty {
+                                DonbyLogger.shared.log("远端剧集拉取失败，自动回退至本地离线剧集: \(error.localizedDescription)", level: .warning, subsystem: "Playback")
+                                eps = allOfflineEps
+                                resolvedQueue = allOfflineEps
+                                targetItem = allOfflineEps.first(where: { !isItemWatchedOfflineOrLocal($0) }) ?? allOfflineEps[0]
+                            } else {
+                                throw error
+                            }
+                        } else {
+                            throw error
+                        }
+                    }
                 }
                 guard currentStartGen == playbackStartGeneration else { return }
                 if resolvedQueue.isEmpty && !eps.isEmpty {

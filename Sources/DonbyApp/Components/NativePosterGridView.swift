@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import AppKit
 import QuartzCore
 import DonbyCore
@@ -117,6 +118,7 @@ public struct NativePosterGridView: NSViewRepresentable {
     public let hasMoreItems: Bool
     public let isLoadingMore: Bool
     public let appearance: DonbyCardAppearance
+    public let downloadStatusStore: DonbyDownloadStatusStore?
     public let onSelect: (EmbyItem) -> Void
     public let onPlay: (EmbyItem) -> Void
     public let onLoadMore: () -> Void
@@ -128,6 +130,7 @@ public struct NativePosterGridView: NSViewRepresentable {
         hasMoreItems: Bool,
         isLoadingMore: Bool,
         appearance: DonbyCardAppearance,
+        downloadStatusStore: DonbyDownloadStatusStore? = nil,
         onSelect: @escaping (EmbyItem) -> Void,
         onPlay: @escaping (EmbyItem) -> Void,
         onLoadMore: @escaping () -> Void
@@ -138,13 +141,19 @@ public struct NativePosterGridView: NSViewRepresentable {
         self.hasMoreItems = hasMoreItems
         self.isLoadingMore = isLoadingMore
         self.appearance = appearance
+        self.downloadStatusStore = downloadStatusStore
         self.onSelect = onSelect
         self.onPlay = onPlay
         self.onLoadMore = onLoadMore
     }
 
     public func makeCoordinator() -> Coordinator {
-        Coordinator(onSelect: onSelect, onPlay: onPlay, onLoadMore: onLoadMore)
+        Coordinator(
+            downloadStatusStore: downloadStatusStore,
+            onSelect: onSelect,
+            onPlay: onPlay,
+            onLoadMore: onLoadMore
+        )
     }
 
     public func makeNSView(context: Context) -> NSScrollView {
@@ -238,6 +247,8 @@ public struct NativePosterGridView: NSViewRepresentable {
 
         private weak var scrollView: NSScrollView?
         private weak var collectionView: InteractiveCollectionView?
+        private weak var downloadStatusStore: DonbyDownloadStatusStore?
+        private var downloadStatusCancellable: AnyCancellable?
         private var prefetchTasks: [IndexPath: Task<Void, Never>] = [:]
         private var prewarmTextTask: Task<Void, Never>?
         private var observers: [NSObjectProtocol] = []
@@ -245,10 +256,12 @@ public struct NativePosterGridView: NSViewRepresentable {
         private var lastPaginationRequestCount: Int = -1
 
         init(
+            downloadStatusStore: DonbyDownloadStatusStore?,
             onSelect: @escaping (EmbyItem) -> Void,
             onPlay: @escaping (EmbyItem) -> Void,
             onLoadMore: @escaping () -> Void
         ) {
+            self.downloadStatusStore = downloadStatusStore
             self.onSelect = onSelect
             self.onPlay = onPlay
             self.onLoadMore = onLoadMore
@@ -287,6 +300,30 @@ public struct NativePosterGridView: NSViewRepresentable {
                     self?.checkPaginationTriggerFromScroll()
                 }
             })
+
+            downloadStatusCancellable = downloadStatusStore?.$statusIndex
+                .dropFirst()
+                .sink { [weak self] nextIndex in
+                    MainActor.assumeIsolated {
+                        self?.applyDownloadStatusIndex(nextIndex)
+                    }
+                }
+        }
+
+        private func applyDownloadStatusIndex(_ nextIndex: DonbyDownloadStatusIndex) {
+            guard let current = self.appearance else { return }
+            let prevIndex = current.downloadStatusIndex
+            guard prevIndex != nextIndex else { return }
+            let nextAppearance = current.withDownloadStatusIndex(nextIndex)
+            self.appearance = nextAppearance
+            if let cv = collectionView {
+                refreshVisibleDownloadBadges(
+                    in: cv,
+                    prevIndex: prevIndex,
+                    nextIndex: nextIndex,
+                    appearance: nextAppearance
+                )
+            }
         }
 
         private func checkPaginationTriggerFromScroll() {
@@ -321,8 +358,9 @@ public struct NativePosterGridView: NSViewRepresentable {
             totalCount: Int,
             hasMoreItems: Bool,
             isLoadingMore: Bool,
-            appearance: DonbyCardAppearance
+            appearance rawAppearance: DonbyCardAppearance
         ) {
+            let appearance = downloadStatusStore.map { rawAppearance.withDownloadStatusIndex($0.statusIndex) } ?? rawAppearance
             let oldItems = self.items
             let oldAppearance = self.appearance
             let oldRevision = self.itemsRevision
@@ -356,9 +394,12 @@ public struct NativePosterGridView: NSViewRepresentable {
                 return
             }
 
-            // Fast path: pure append (pagination) with unchanged appearance
+            let visualThemeMatches = oldAppearance.map { appearance.matchesVisualTheme(of: $0) } ?? false
+            let statusIndexChanged = (oldAppearance?.downloadStatusIndex != appearance.downloadStatusIndex)
+
+            // Fast path: pure append (pagination) with matching visual theme (preserved across download status updates)
             let isPureAppend: Bool = {
-                guard oldAppearance == appearance,
+                guard visualThemeMatches,
                       !oldItems.isEmpty,
                       newItems.count > oldItems.count else { return false }
                 for i in 0..<oldItems.count {
@@ -371,8 +412,17 @@ public struct NativePosterGridView: NSViewRepresentable {
                 let prevCount = oldItems.count
                 self.items = newItems
                 self.itemsRevision = newRevision
-                let inserted = Set((oldItems.count..<newItems.count).map { IndexPath(item: $0, section: 0) })
+                let inserted = Set((prevCount..<newItems.count).map { IndexPath(item: $0, section: 0) })
                 cv.insertItems(at: inserted)
+                if statusIndexChanged, let prevIndex = oldAppearance?.downloadStatusIndex {
+                    refreshVisibleDownloadBadges(
+                        in: cv,
+                        prevIndex: prevIndex,
+                        nextIndex: appearance.downloadStatusIndex,
+                        appearance: appearance,
+                        maxItemIndex: prevCount
+                    )
+                }
                 refreshFooter()
                 scheduleTextPrewarm(from: prevCount, count: min(72, newItems.count - prevCount))
                 return
@@ -380,16 +430,32 @@ public struct NativePosterGridView: NSViewRepresentable {
 
             self.itemsRevision = newRevision
 
-            // Fast path: unchanged revision & count and identical appearance -> skip deep 2400-item equality
-            if newRevision > 0 && oldRevision == newRevision && oldItems.count == newItems.count && oldAppearance == appearance {
+            // Fast path: unchanged revision & count and matching visual theme -> visible-cell badge refresh only
+            if newRevision > 0 && oldRevision == newRevision && oldItems.count == newItems.count && visualThemeMatches {
+                if statusIndexChanged, let prevIndex = oldAppearance?.downloadStatusIndex {
+                    refreshVisibleDownloadBadges(
+                        in: cv,
+                        prevIndex: prevIndex,
+                        nextIndex: appearance.downloadStatusIndex,
+                        appearance: appearance
+                    )
+                }
                 if footerChanged {
                     refreshFooter()
                 }
                 return
             }
 
-            // Fast path: identical IDs & content and identical appearance -> footer-only update
-            if oldAppearance == appearance && oldItems == newItems {
+            // Fast path: identical IDs & content and matching visual theme -> visible-cell badge & footer update
+            if visualThemeMatches && oldItems == newItems {
+                if statusIndexChanged, let prevIndex = oldAppearance?.downloadStatusIndex {
+                    refreshVisibleDownloadBadges(
+                        in: cv,
+                        prevIndex: prevIndex,
+                        nextIndex: appearance.downloadStatusIndex,
+                        appearance: appearance
+                    )
+                }
                 if footerChanged {
                     refreshFooter()
                 }
@@ -405,6 +471,34 @@ public struct NativePosterGridView: NSViewRepresentable {
                 sv.reflectScrolledClipView(sv.contentView)
             }
             scheduleTextPrewarm(from: 0, count: min(72, newItems.count))
+        }
+
+        private func refreshVisibleDownloadBadges(
+            in collectionView: NSCollectionView,
+            prevIndex: DonbyDownloadStatusIndex,
+            nextIndex: DonbyDownloadStatusIndex,
+            appearance: DonbyCardAppearance,
+            maxItemIndex: Int? = nil
+        ) {
+            let limit = min(items.count, maxItemIndex ?? items.count)
+            let deferText = hoverGate?.isActivelyScrolling ?? false
+            for visibleItem in collectionView.visibleItems() {
+                guard let cell = visibleItem as? NativePosterCollectionItem,
+                      let indexPath = collectionView.indexPath(for: visibleItem),
+                      indexPath.item >= 0,
+                      indexPath.item < limit else { continue }
+                let item = items[indexPath.item]
+                let badgeChanged = prevIndex.badgeText(for: item) != nextIndex.badgeText(for: item)
+                let downloadedChanged = prevIndex.isItemDownloaded(item) != nextIndex.isItemDownloaded(item)
+                guard badgeChanged || downloadedChanged else { continue }
+                cell.configure(
+                    item: item,
+                    cardWidth: currentCardWidth,
+                    appearance: appearance,
+                    allowAsyncLoad: true,
+                    deferTextRenderIfScrolling: deferText
+                )
+            }
         }
 
         private func scheduleTextPrewarm(from start: Int, count: Int) {

@@ -67,57 +67,85 @@ public struct UHDSpeedSparklineChart: View {
 // MARK: - Speed Test Controller (Owned cleanly inside UHD Module)
 
 @MainActor
+public final class UHDSpeedTestProgressStore: ObservableObject {
+    @Published public var liveProgress: UHDSpeedTestProgress? = nil
+    public init() {}
+}
+
+@MainActor
 public final class UHDSpeedTestSessionModel: ObservableObject {
     @Published public var selectedSizeMiB: Int = 32
     @Published public var isSpeedTesting: Bool = false
     @Published public var isBatchTesting: Bool = false
     @Published public var testingDomainId: String? = nil
-    @Published public var liveProgress: UHDSpeedTestProgress? = nil
     @Published public var lastResult: UHDSpeedTestResult? = nil
     @Published public var speedTestError: String? = nil
 
+    public let progressStore = UHDSpeedTestProgressStore()
+
     private var speedTestTask: Task<Void, Never>? = nil
+    private var currentRunID: UInt64 = 0
 
     public init() {}
 
     public func cancel() {
+        currentRunID &+= 1
         speedTestTask?.cancel()
+        speedTestTask = nil
+        isSpeedTesting = false
+        isBatchTesting = false
+        testingDomainId = nil
+        progressStore.liveProgress = nil
+        speedTestError = "已取消测速"
     }
 
     public func launchSingle(server: EmbyServerConfig, domainId: String, appState: AppState) {
+        currentRunID &+= 1
+        let runID = currentRunID
         speedTestTask?.cancel()
         let sizeMiB = selectedSizeMiB
         speedTestTask = Task {
-            await executeSingle(server: server, domainId: domainId, sizeMiB: sizeMiB, appState: appState)
+            await executeSingle(server: server, domainId: domainId, sizeMiB: sizeMiB, appState: appState, runID: runID)
+            guard !Task.isCancelled, runID == self.currentRunID else { return }
             await UHDModuleManager.shared.refreshAccountSnapshot(for: server, appState: appState)
         }
     }
 
     public func launchBatch(server: EmbyServerConfig, lines: [ServerLineInfo], appState: AppState) {
+        currentRunID &+= 1
+        let runID = currentRunID
         speedTestTask?.cancel()
         let sizeMiB = selectedSizeMiB
         speedTestTask = Task {
             isBatchTesting = true
-            defer { isBatchTesting = false }
-            for line in lines {
-                if Task.isCancelled { break }
-                guard let did = line.domainId, !did.isEmpty else { continue }
-                await executeSingle(server: server, domainId: did, sizeMiB: sizeMiB, appState: appState)
+            defer {
+                if runID == self.currentRunID {
+                    isBatchTesting = false
+                }
             }
-            if !Task.isCancelled {
+            for line in lines {
+                if Task.isCancelled || runID != self.currentRunID { break }
+                guard let did = line.domainId, !did.isEmpty else { continue }
+                await executeSingle(server: server, domainId: did, sizeMiB: sizeMiB, appState: appState, runID: runID)
+            }
+            if !Task.isCancelled && runID == self.currentRunID {
                 await UHDModuleManager.shared.refreshAccountSnapshot(for: server, appState: appState)
             }
         }
     }
 
-    private func executeSingle(server: EmbyServerConfig, domainId: String, sizeMiB: Int, appState: AppState) async {
+    private func executeSingle(server: EmbyServerConfig, domainId: String, sizeMiB: Int, appState: AppState, runID: UInt64) async {
+        guard runID == currentRunID else { return }
         speedTestError = nil
-        liveProgress = nil
+        progressStore.liveProgress = nil
         testingDomainId = domainId
         isSpeedTesting = true
         defer {
-            isSpeedTesting = false
-            testingDomainId = nil
+            if runID == self.currentRunID {
+                isSpeedTesting = false
+                testingDomainId = nil
+                progressStore.liveProgress = nil
+            }
         }
         do {
             let res = try await UHDStreamClient.shared.runSpeedTest(
@@ -125,18 +153,24 @@ public final class UHDSpeedTestSessionModel: ObservableObject {
                 domainId: domainId,
                 sizeMiB: sizeMiB,
                 onNetworkInfo: nil,
-                onProgress: { prog in
-                    Task { @MainActor in
-                        self.liveProgress = prog
+                onProgress: { [weak self] prog in
+                    Task { @MainActor [weak self] in
+                        guard let self, runID == self.currentRunID else { return }
+                        self.progressStore.liveProgress = prog
                     }
                 }
             )
+            guard !Task.isCancelled, runID == self.currentRunID else { return }
             self.lastResult = res
             UHDModuleManager.shared.updateLineSpeedResult(serverId: server.id, domainId: domainId, result: res, appState: appState)
         } catch is CancellationError {
-            self.speedTestError = "已取消测速"
+            if runID == self.currentRunID {
+                self.speedTestError = "已取消测速"
+            }
         } catch {
-            self.speedTestError = "测速失败: \(error.localizedDescription)"
+            if runID == self.currentRunID {
+                self.speedTestError = "测速失败: \(error.localizedDescription)"
+            }
         }
     }
 }
@@ -281,42 +315,13 @@ public struct UHDSpeedTestConsoleView: View {
                 }
             }
 
-            if model.isSpeedTesting, let prog = model.liveProgress {
-                VStack(alignment: .leading, spacing: 6) {
-                    if prog.recentSamplesMbps.count >= 2 {
-                        UHDSpeedSparklineChart(
-                            samplesMbps: prog.recentSamplesMbps,
-                            accentColor: appState.accentColor,
-                            isLightMode: appState.isLightMode
-                        )
-                    }
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule()
-                                .fill(appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.10))
-                            Capsule()
-                                .fill(appState.accentColor)
-                                .frame(width: max(4, geo.size.width * CGFloat(prog.fraction)))
-                        }
-                    }
-                    .frame(height: 4)
-                    HStack(spacing: 10) {
-                        Text(String(format: "实时 %.1f · 均值 %.1f · 峰值 %.1f Mbps", prog.currentMbps, prog.averageMbps, prog.peakMbps))
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                        Spacer()
-                        Text("\(UHDTrafficSummary.formatBytes(prog.downloadedBytes)) / \(model.selectedSizeMiB) MiB")
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                    }
-                }
-            } else if model.isSpeedTesting {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("正在解析测速节点...")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                }
+            if model.isSpeedTesting {
+                UHDSpeedTestLiveProgressView(
+                    progressStore: model.progressStore,
+                    selectedSizeMiB: model.selectedSizeMiB,
+                    accentColor: appState.accentColor,
+                    isLightMode: appState.isLightMode
+                )
             } else if let res = model.lastResult {
                 VStack(alignment: .leading, spacing: 6) {
                     if res.samplesMbps.count >= 2 {
@@ -351,6 +356,53 @@ public struct UHDSpeedTestConsoleView: View {
             RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
         )
+    }
+}
+
+private struct UHDSpeedTestLiveProgressView: View {
+    @ObservedObject var progressStore: UHDSpeedTestProgressStore
+    let selectedSizeMiB: Int
+    let accentColor: Color
+    let isLightMode: Bool
+
+    var body: some View {
+        if let prog = progressStore.liveProgress {
+            VStack(alignment: .leading, spacing: 6) {
+                if prog.recentSamplesMbps.count >= 2 {
+                    UHDSpeedSparklineChart(
+                        samplesMbps: prog.recentSamplesMbps,
+                        accentColor: accentColor,
+                        isLightMode: isLightMode
+                    )
+                }
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.10))
+                        Capsule()
+                            .fill(accentColor)
+                            .frame(width: max(4, geo.size.width * CGFloat(prog.fraction)))
+                    }
+                }
+                .frame(height: 4)
+                HStack(spacing: 10) {
+                    Text(String(format: "实时 %.1f · 均值 %.1f · 峰值 %.1f Mbps", prog.currentMbps, prog.averageMbps, prog.peakMbps))
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: isLightMode))
+                    Spacer()
+                    Text("\(UHDTrafficSummary.formatBytes(prog.downloadedBytes)) / \(selectedSizeMiB) MiB")
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))
+                }
+            }
+        } else {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("正在解析测速节点...")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLightMode))
+            }
+        }
     }
 }
 

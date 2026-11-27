@@ -5,7 +5,17 @@ import DonbyNetwork
 
 public struct DownloadsView: View {
     @EnvironmentObject private var appState: AppState
-    @ObservedObject private var downloadManager = DonbyDownloadManager.shared
+
+    @State private var entriesSnapshot: [DownloadEntry] = DonbyDownloadManager.shared.entries
+    @State private var structuralKeys: [DownloadEntryStructuralKey] = DonbyDownloadManager.shared.entries.map(DownloadEntryStructuralKey.init)
+    @State private var libraryScanToken: DownloadLibraryScanToken = DownloadLibraryScanToken(
+        statusRevision: DonbyDownloadManager.shared.statusIndex.revision,
+        entryCount: DonbyDownloadManager.shared.entries.count
+    )
+    @State private var scanTask: Task<Void, Never>? = nil
+    @State private var isMigrating: Bool = false
+    @State private var needsPostMigrationScan: Bool = false
+    @State private var isClearingCache: Bool = false
 
     @State private var unpinnedCacheBytes: Int64 = 0
     @State private var pinnedDownloadBytes: Int64 = 0
@@ -22,6 +32,12 @@ public struct DownloadsView: View {
     @State private var mediaFilter: OfflineLibraryFilter = .all
     @State private var showSortPopover: Bool = false
     @State private var isRefreshing: Bool = false
+
+    private static let fileByteFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter
+    }()
 
     private enum DownloadDisplayMode: String, CaseIterable, Identifiable {
         case library = "海报墙"
@@ -45,15 +61,15 @@ public struct DownloadsView: View {
 
     public init() {}
 
-    private var activeOrAttentionEntries: [DownloadEntry] {
-        downloadManager.entries.filter {
+    private var hasActiveOrAttentionEntries: Bool {
+        entriesSnapshot.contains {
             $0.status == .downloading || $0.status == .queued || $0.status == .failed
         }
     }
 
     private var filteredEntries: [DownloadEntry] {
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return downloadManager.entries.filter { entry in
+        return entriesSnapshot.filter { entry in
             if let statusFilter, entry.status != statusFilter { return false }
             if q.isEmpty { return true }
             return entry.title.lowercased().contains(q)
@@ -68,8 +84,20 @@ public struct DownloadsView: View {
             headerBar
 
             if displayMode == .library {
-                if !activeOrAttentionEntries.isEmpty {
-                    compactActiveTransferStrip
+                if hasActiveOrAttentionEntries {
+                    CompactActiveTransferStripView(
+                        isLightMode: appState.isLightMode,
+                        accentColor: appState.accentColor,
+                        accentTextColor: appState.accentTextColor,
+                        onPause: { assetKey in
+                            DonbyDownloadManager.shared.pauseDownload(assetKey: assetKey)
+                        },
+                        onResume: { entry in
+                            let server = appState.servers.first(where: { $0.id == entry.serverId })
+                            let budget = server.map { appState.effectiveDownloadConnectionBudget(for: $0) } ?? 6
+                            DonbyDownloadManager.shared.resumeDownload(assetKey: entry.assetKey, connectionBudgetPerTask: budget)
+                        }
+                    )
                 }
 
                 if displayedItems.isEmpty && !isRefreshing {
@@ -82,6 +110,7 @@ public struct DownloadsView: View {
                         hasMoreItems: false,
                         isLoadingMore: false,
                         appearance: appearance,
+                        downloadStatusStore: appState.downloadStatusStore,
                         onSelect: { item in appState.openDetail(for: item, preferOfflineFocus: true) },
                         onPlay: { item in Task { await appState.startPlayback(item: item, preferOffline: true) } },
                         onLoadMore: {}
@@ -93,13 +122,23 @@ public struct DownloadsView: View {
         }
         .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
         .onAppear {
-            refreshDiskUsage(runMigration: true)
+            syncStructuralState(from: DonbyDownloadManager.shared.entries, statusIndex: appState.downloadStatusStore.statusIndex)
+            scheduleRefreshDiskUsage(runMigration: true, debounceNanoseconds: 0)
         }
-        .donbyOnChange(of: downloadManager.statusIndex) { _ in
-            refreshDiskUsage(runMigration: false)
+        .onDisappear {
+            scanTask?.cancel()
+            scanTask = nil
         }
-        .donbyOnChange(of: downloadManager.entries.count) { _ in
-            refreshDiskUsage(runMigration: false)
+        .onReceive(DonbyDownloadManager.shared.$entries) { latestEntries in
+            syncStructuralState(from: latestEntries, statusIndex: nil)
+        }
+        .onReceive(appState.downloadStatusStore.$statusIndex) { latestIndex in
+            if libraryScanToken.statusRevision != latestIndex.revision {
+                libraryScanToken.statusRevision = latestIndex.revision
+            }
+        }
+        .donbyOnChange(of: libraryScanToken) { _ in
+            scheduleRefreshDiskUsage(runMigration: false)
         }
         .donbyOnChange(of: searchQuery) { _ in recomputeDisplayedItems() }
         .donbyOnChange(of: sortField) { _ in recomputeDisplayedItems() }
@@ -138,32 +177,24 @@ public struct DownloadsView: View {
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
 
-            let activeCount = downloadManager.entries.filter { $0.status == .downloading || $0.status == .queued }.count
+            let activeCount = entriesSnapshot.filter { $0.status == .downloading || $0.status == .queued }.count
             if activeCount > 0 {
-                Button {
+                DownloadsActiveHeaderPill(
+                    activeCount: activeCount,
+                    isLightMode: appState.isLightMode,
+                    accentColor: appState.accentColor
+                ) {
                     withAnimation(.easeOut(duration: 0.18)) {
                         displayMode = .queue
                     }
-                } label: {
-                    HStack(spacing: 5) {
-                        ProgressView().controlSize(.mini)
-                        Text("\(activeCount) 下载中")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(appState.accentColor)
-                    }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 3.5)
-                    .background(appState.accentColor.opacity(0.12))
-                    .clipShape(Capsule())
                 }
-                .buttonStyle(.plain)
             }
 
             Spacer()
 
             ToolbarVectorButton(
                 tooltip: "刷新离线媒体库",
-                action: { refreshDiskUsage(runMigration: true) }
+                action: { scheduleRefreshDiskUsage(runMigration: true, debounceNanoseconds: 0) }
             ) { hovered in
                 let iconColor = appState.isLightMode ? (hovered ? Color.black : Color(white: 0.32)) : (hovered ? .white : Color(white: 0.88))
                 RefreshVectorIcon(size: 14.5, color: iconColor, isSpinning: isRefreshing)
@@ -221,12 +252,14 @@ public struct DownloadsView: View {
                         Text("排序方式")
                             .font(.system(size: 11.5, weight: .semibold))
                             .foregroundStyle(.secondary)
-                        Picker("排序", selection: $sortField) {
-                            ForEach(OfflineLibrarySortField.allCases) { field in
-                                Text(field.rawValue).tag(field)
-                            }
-                        }
-                        .labelsHidden()
+                        DonbyGlassMenuPicker(
+                            options: OfflineLibrarySortField.allCases,
+                            selection: $sortField,
+                            isLightMode: appState.isLightMode,
+                            accentColor: appState.accentColor,
+                            height: 28,
+                            title: { $0.rawValue }
+                        )
 
                         Toggle("升序排列", isOn: $sortAscending)
                             .toggleStyle(
@@ -264,6 +297,7 @@ public struct DownloadsView: View {
                                             .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                                         Spacer()
                                     }
+                                    .frame(minHeight: 24)
                                     .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
@@ -273,7 +307,7 @@ public struct DownloadsView: View {
                         Text("任务状态筛选")
                             .font(.system(size: 11.5, weight: .semibold))
                             .foregroundStyle(.secondary)
-                        Button("全部任务 (\(downloadManager.entries.count))") { statusFilter = nil; showSortPopover = false }
+                        Button("全部任务 (\(entriesSnapshot.count))") { statusFilter = nil; showSortPopover = false }
                         Button("下载中") { statusFilter = .downloading; showSortPopover = false }
                         Button("已完成") { statusFilter = .completed; showSortPopover = false }
                         Button("已暂停") { statusFilter = .paused; showSortPopover = false }
@@ -296,80 +330,6 @@ public struct DownloadsView: View {
                 .frame(height: 0.6),
             alignment: .bottom
         )
-    }
-
-    // MARK: - Compact Live Transfer Strip (Shown in Poster Grid Only When Active/Failed Tasks Exist)
-
-    private var compactActiveTransferStrip: some View {
-        VStack(spacing: 6) {
-            ForEach(activeOrAttentionEntries.prefix(3)) { entry in
-                HStack(spacing: 10) {
-                    Circle()
-                        .fill(entry.status == .failed ? Color.red : appState.accentColor)
-                        .frame(width: 7, height: 7)
-                    Text(entry.subtitle.map { "\(entry.title) · \($0)" } ?? entry.title)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                        .lineLimit(1)
-                    Spacer(minLength: 8)
-                    ProgressView(value: min(1.0, max(0.0, entry.progressFraction)))
-                        .frame(width: 110)
-                        .tint(entry.status == .failed ? .red : appState.accentColor)
-                    if entry.status == .downloading && entry.speedMBs > 0.01 {
-                        Text(String(format: "%.1f MB/s", entry.speedMBs))
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(appState.accentColor)
-                            .frame(width: 68, alignment: .trailing)
-                    } else {
-                        Text(entry.status.displayTitle)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(entry.status == .failed ? Color.red : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                            .frame(width: 68, alignment: .trailing)
-                    }
-                    if entry.status == .downloading || entry.status == .queued {
-                        Button {
-                            DonbyDownloadManager.shared.pauseDownload(assetKey: entry.assetKey)
-                        } label: {
-                            HStack(spacing: 4) {
-                                PauseVectorIcon(size: 10.5, color: DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                                Text("暂停")
-                                    .font(.system(size: 11, weight: .semibold))
-                            }
-                            .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .donbyLiquidGlassCapsule()
-                        }
-                        .buttonStyle(.plain)
-                    } else {
-                        Button {
-                            let server = appState.servers.first(where: { $0.id == entry.serverId })
-                            let budget = server.map { appState.effectiveDownloadConnectionBudget(for: $0) } ?? 6
-                            DonbyDownloadManager.shared.resumeDownload(assetKey: entry.assetKey, connectionBudgetPerTask: budget)
-                        } label: {
-                            HStack(spacing: 4) {
-                                DownloadVectorIcon(state: .idle, size: 11, color: appState.accentTextColor)
-                                Text("继续")
-                                    .font(.system(size: 11, weight: .semibold))
-                            }
-                            .foregroundStyle(appState.accentTextColor)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(appState.accentColor)
-                            .clipShape(Capsule())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
-        }
-        .padding(.horizontal, 24)
-        .padding(.top, 10)
-        .padding(.bottom, 4)
     }
 
     // MARK: - Queue & Cache Management Body
@@ -415,9 +375,10 @@ public struct DownloadsView: View {
                                 },
                                 onRemove: {
                                     DonbyDownloadManager.shared.removeDownload(assetKey: entry.assetKey)
-                                    refreshDiskUsage(runMigration: false)
+                                    scheduleRefreshDiskUsage(runMigration: false)
                                 }
                             )
+                            .equatable()
                         }
 
                         if statusFilter == nil && !cachedAssets.isEmpty {
@@ -458,19 +419,26 @@ public struct DownloadsView: View {
             Spacer()
 
             Button {
-                DonbyTurboCacheEngine.shared.clearAllUnpinnedCache()
-                refreshDiskUsage(runMigration: false)
-                appState.showToast("已清理临时分片缓存（已下载内容已保留）", icon: "sparkles")
+                guard !isClearingCache else { return }
+                isClearingCache = true
+                Task {
+                    await DonbyTurboCacheEngine.shared.clearAllUnpinnedCacheAsync()
+                    isClearingCache = false
+                    scheduleRefreshDiskUsage(runMigration: false, debounceNanoseconds: 0)
+                    appState.showToast("已清理临时分片缓存（已下载内容已保留）", icon: "sparkles")
+                }
             } label: {
                 Text("清理临时缓存")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                     .padding(.horizontal, 12)
                     .padding(.vertical, 7)
+                    .frame(minHeight: 24)
                     .donbyLiquidGlassCapsule()
+                    .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .disabled(unpinnedCacheBytes == 0)
+            .disabled(unpinnedCacheBytes == 0 || isClearingCache)
         }
         .padding(12)
         .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
@@ -483,7 +451,7 @@ public struct DownloadsView: View {
 
     private var filterChipBar: some View {
         HStack(spacing: 8) {
-            filterChip(title: "全部 (\(downloadManager.entries.count))", status: nil)
+            filterChip(title: "全部 (\(entriesSnapshot.count))", status: nil)
             filterChip(title: "下载中", status: .downloading)
             filterChip(title: "已完成", status: .completed)
             filterChip(title: "已暂停", status: .paused)
@@ -502,8 +470,10 @@ public struct DownloadsView: View {
                 .foregroundStyle(isSelected ? appState.accentTextColor : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 .padding(.horizontal, 13)
                 .padding(.vertical, 5.5)
+                .frame(minHeight: 24)
                 .background(isSelected ? appState.accentColor : (appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.07)))
                 .clipShape(Capsule())
+                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
     }
@@ -527,17 +497,19 @@ public struct DownloadsView: View {
             Text("在任意电影或剧集详情页点击下载按钮即可缓存至 ~/Movies/Donby")
                 .font(.system(size: 12))
                 .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-            if !downloadManager.entries.isEmpty {
+            if !entriesSnapshot.isEmpty {
                 Button {
                     displayMode = .queue
                 } label: {
-                    Text("打开下载队列 (\(downloadManager.entries.count))")
+                    Text("打开下载队列 (\(entriesSnapshot.count))")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(appState.accentTextColor)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 7)
+                        .frame(minHeight: 24)
                         .background(appState.accentColor)
                         .clipShape(Capsule())
+                        .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
                 .padding(.top, 4)
@@ -561,40 +533,78 @@ public struct DownloadsView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func refreshDiskUsage(runMigration: Bool) {
-        let usage = DonbyTurboCacheEngine.shared.calculateDiskUsage()
-        unpinnedCacheBytes = usage.unpinnedCacheBytes
-        pinnedDownloadBytes = usage.pinnedDownloadBytes
-        let excludedKeys = Set(downloadManager.entries.map(\.assetKey))
-        cachedAssets = DonbyTurboCacheEngine.shared.listUnpinnedCachedAssets(excludingAssetKeys: excludedKeys)
+    private func syncStructuralState(from latestEntries: [DownloadEntry], statusIndex: DonbyDownloadStatusIndex?) {
+        let nextKeys = latestEntries.map(DownloadEntryStructuralKey.init)
+        if nextKeys != structuralKeys {
+            structuralKeys = nextKeys
+            entriesSnapshot = latestEntries
+        }
+        if libraryScanToken.entryCount != latestEntries.count {
+            libraryScanToken.entryCount = latestEntries.count
+        }
+        if let statusIndex, libraryScanToken.statusRevision != statusIndex.revision {
+            libraryScanToken.statusRevision = statusIndex.revision
+        }
+    }
 
+    private func scheduleRefreshDiskUsage(runMigration: Bool, debounceNanoseconds: UInt64 = 180_000_000) {
+        if !runMigration && isMigrating {
+            needsPostMigrationScan = true
+            return
+        }
+        scanTask?.cancel()
         if runMigration {
+            isMigrating = true
             isRefreshing = true
-            let serversSnapshot = appState.servers
-            Task {
-                await DonbyDownloadManager.shared.migrateLegacyCompletedDownloads(servers: serversSnapshot)
-                let entries = DonbyDownloadManager.shared.entries
-                let scanned = await Task.detached(priority: .utility) {
-                    DonbyOfflineLibraryStorage.scanOfflineLibrary(entries: entries)
-                }.value
-                await MainActor.run {
-                    let latestUsage = DonbyTurboCacheEngine.shared.calculateDiskUsage()
-                    self.unpinnedCacheBytes = latestUsage.unpinnedCacheBytes
-                    self.pinnedDownloadBytes = latestUsage.pinnedDownloadBytes
-                    self.cachedAssets = DonbyTurboCacheEngine.shared.listUnpinnedCachedAssets(excludingAssetKeys: Set(entries.map(\.assetKey)))
-                    self.offlineLibraryGroups = scanned
-                    self.recomputeDisplayedItems()
-                    self.isRefreshing = false
+            needsPostMigrationScan = false
+        }
+        let serversSnapshot = appState.servers
+        scanTask = Task {
+            defer {
+                if runMigration {
+                    isMigrating = false
+                    isRefreshing = false
                 }
             }
-        } else {
-            let entries = downloadManager.entries
-            Task.detached(priority: .utility) {
-                let scanned = DonbyOfflineLibraryStorage.scanOfflineLibrary(entries: entries)
-                await MainActor.run {
-                    self.offlineLibraryGroups = scanned
-                    self.recomputeDisplayedItems()
-                }
+            if debounceNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: debounceNanoseconds)
+                guard !Task.isCancelled else { return }
+            }
+
+            if runMigration {
+                await DonbyDownloadManager.shared.migrateLegacyCompletedDownloads(servers: serversSnapshot)
+                guard !Task.isCancelled else { return }
+            }
+
+            let entries = DonbyDownloadManager.shared.entries
+            let excludedKeys = Set(entries.map(\.assetKey))
+
+            async let usageTask = DonbyTurboCacheEngine.shared.calculateDiskUsageAsync()
+            async let assetsTask = DonbyTurboCacheEngine.shared.listUnpinnedCachedAssetsAsync(excludingAssetKeys: excludedKeys)
+            async let libraryTask = Task.detached(priority: .utility) {
+                DonbyOfflineLibraryStorage.scanOfflineLibrary(entries: entries)
+            }.value
+
+            let (usage, assets, scanned) = await (usageTask, assetsTask, libraryTask)
+            guard !Task.isCancelled else { return }
+
+            if unpinnedCacheBytes != usage.unpinnedCacheBytes {
+                unpinnedCacheBytes = usage.unpinnedCacheBytes
+            }
+            if pinnedDownloadBytes != usage.pinnedDownloadBytes {
+                pinnedDownloadBytes = usage.pinnedDownloadBytes
+            }
+            if cachedAssets != assets {
+                cachedAssets = assets
+            }
+            if offlineLibraryGroups != scanned {
+                offlineLibraryGroups = scanned
+                recomputeDisplayedItems()
+            }
+
+            if runMigration && needsPostMigrationScan {
+                needsPostMigrationScan = false
+                scheduleRefreshDiskUsage(runMigration: false, debounceNanoseconds: 100_000_000)
             }
         }
     }
@@ -622,14 +632,20 @@ public struct DownloadsView: View {
                     onPromoteToOffline: {
                         Task {
                             await appState.promoteCachedAssetToOffline(cached)
-                            refreshDiskUsage(runMigration: false)
+                            scheduleRefreshDiskUsage(runMigration: false)
                         }
                     },
                     onRemoveCache: {
-                        DonbyTurboCacheEngine.shared.removeAsset(assetKey: cached.assetKey, forceIncludePinned: false)
-                        refreshDiskUsage(runMigration: false)
+                        let assetKey = cached.assetKey
+                        Task {
+                            await Task.detached(priority: .utility) {
+                                DonbyTurboCacheEngine.shared.removeAsset(assetKey: assetKey, forceIncludePinned: false)
+                            }.value
+                            scheduleRefreshDiskUsage(runMigration: false, debounceNanoseconds: 0)
+                        }
                     }
                 )
+                .equatable()
             }
         }
     }
@@ -669,11 +685,81 @@ public struct DownloadsView: View {
             }
         }
 
-        displayedItems = sorted.map(\.displayItem)
-        gridRevision &+= 1
+        let nextItems = sorted.map(\.displayItem)
+        if nextItems != displayedItems {
+            displayedItems = nextItems
+            gridRevision &+= 1
+        }
     }
 
     private func formatBytes(_ bytes: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: max(0, bytes), countStyle: .file)
+        Self.fileByteFormatter.string(fromByteCount: max(0, bytes))
+    }
+}
+
+private struct DownloadEntryStructuralKey: Equatable {
+    let assetKey: String
+    let title: String
+    let subtitle: String?
+    let serverName: String
+    let resolutionBadge: String?
+    let status: DownloadTaskStatus
+    let origin: DownloadOrigin
+    let localVideoFilePath: String?
+    let localFolderPath: String?
+    let offlineSubtitlesCount: Int
+    let errorMessage: String?
+
+    init(_ entry: DownloadEntry) {
+        self.assetKey = entry.assetKey
+        self.title = entry.title
+        self.subtitle = entry.subtitle
+        self.serverName = entry.serverName
+        self.resolutionBadge = entry.resolutionBadge
+        self.status = entry.status
+        self.origin = entry.origin
+        self.localVideoFilePath = entry.localVideoFilePath
+        self.localFolderPath = entry.localFolderPath
+        self.offlineSubtitlesCount = entry.offlineSubtitles.count
+        self.errorMessage = entry.errorMessage
+    }
+}
+
+private struct DownloadLibraryScanToken: Equatable {
+    var statusRevision: Int
+    var entryCount: Int
+}
+
+private struct DownloadsActiveHeaderPill: View {
+    @ObservedObject private var downloadManager = DonbyDownloadManager.shared
+    let activeCount: Int
+    let isLightMode: Bool
+    let accentColor: Color
+    let action: () -> Void
+
+    var body: some View {
+        let isYielding = downloadManager.isYieldingForPlayback
+        let pillColor = isYielding ? Color.orange : accentColor
+        Button(action: action) {
+            HStack(spacing: 5) {
+                if isYielding {
+                    Image(systemName: "pause.circle.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(pillColor)
+                } else {
+                    ProgressView().controlSize(.mini)
+                }
+                Text(isYielding ? "\(activeCount) 已为播放让路" : "\(activeCount) 下载中")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(pillColor)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 3.5)
+            .frame(minHeight: 24)
+            .background(pillColor.opacity(0.12))
+            .clipShape(Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 }

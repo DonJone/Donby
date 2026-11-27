@@ -2,6 +2,56 @@ use super::*;
 use super::pgs::render_pgs_cue_to_layer;
 
 impl SubtitleEngine {
+    pub fn prewarm_cjk_font(&mut self) {
+        if self.ass_lib.is_null() {
+            return;
+        }
+        let doc = concat!(
+            "[Script Info]\r\nScriptType: v4.00+\r\nPlayResX: 1280\r\nPlayResY: 720\r\n",
+            "[V4+ Styles]\r\n",
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\r\n",
+            "Style: Default,PingFang SC,48,&H00FFFFFF,&H0000FFFF,&H10000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,0,2,20,20,20,1\r\n",
+            "[Events]\r\n",
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\r\n",
+            "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,中文字幕Aa0\r\n"
+        );
+        let tr = unsafe { ass_read_memory(self.ass_lib, doc.as_ptr() as *const c_char, doc.len(), ptr::null()) };
+        if tr.is_null() {
+            return;
+        }
+        let mut ch: c_int = 0;
+        if !self.ass_renderer.is_null() {
+            unsafe {
+                ass_set_frame_size(self.ass_renderer, 1280, 720);
+                ass_set_storage_size(self.ass_renderer, 1280, 720);
+                let _ = ass_render_frame(self.ass_renderer, tr, 500, &mut ch);
+            }
+        }
+        if self.paired_ass_renderer.is_null() {
+            self.paired_ass_renderer = unsafe { ass_renderer_init(self.ass_lib) };
+            if !self.paired_ass_renderer.is_null() {
+                unsafe {
+                    ass_set_fonts(
+                        self.paired_ass_renderer,
+                        ptr::null(),
+                        PINGFANG_CSTR.as_ptr() as *const c_char,
+                        1,
+                        ptr::null(),
+                        1,
+                    );
+                }
+            }
+        }
+        if !self.paired_ass_renderer.is_null() {
+            unsafe {
+                ass_set_frame_size(self.paired_ass_renderer, 1280, 720);
+                ass_set_storage_size(self.paired_ass_renderer, 1280, 720);
+                let _ = ass_render_frame(self.paired_ass_renderer, tr, 500, &mut ch);
+            }
+        }
+        unsafe { ass_free_track(tr) };
+    }
+
     pub(super) fn clear_subtitle_canvas(&mut self, target_w: i32, target_h: i32) {
         let expected = (target_w as usize) * (target_h as usize) * 4;
         if self.sub_rgba_buf.len() != expected {

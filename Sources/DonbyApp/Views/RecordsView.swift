@@ -4,20 +4,63 @@ import DonbyCore
 // MARK: - Records View (Watch History & Progress)
 public struct RecordsView: View {
     @EnvironmentObject private var appState: AppState
-    @State private var filterMode: String = "全部"
-    @State private var filteredRecords: [WatchRecordItem] = []
-    @State private var showClearAlert: Bool = false
 
     public init() {}
 
+    public var body: some View {
+        RecordsContentView(watchHistoryStore: appState.watchHistoryStore)
+    }
+}
+
+private struct DisplayWatchRecord: Identifiable {
+    let record: WatchRecordItem
+    let displayTitle: String
+    let displaySubtitle: String?
+    var id: WatchRecordItem.ID { record.id }
+}
+
+private struct RecordsContentView: View {
+    @EnvironmentObject private var appState: AppState
+    @ObservedObject var watchHistoryStore: DonbyWatchHistoryStore
+    @State private var filterMode: String = "全部"
+    @State private var filteredRecords: [DisplayWatchRecord] = []
+    @State private var showClearAlert: Bool = false
+
+    private static func resolveDisplayTitles(
+        for record: WatchRecordItem,
+        cachedSeriesNames: [String: String]
+    ) -> (String, String?) {
+        if record.sourceType == "本地文件" || (record.streamURLString?.hasPrefix("/") == true) || record.title.contains(".mkv") || record.title.contains(".mp4") {
+            let parsed = MediaTitleParser.parse(rawName: record.title)
+            return (parsed.mainTitle, parsed.subTitle)
+        }
+        if record.title.hasPrefix("第") && (record.title.hasSuffix("集") || record.title.contains("集")),
+           let sName = cachedSeriesNames[record.embyItemId ?? ""], !sName.isEmpty {
+            let epSub = (record.subtitle != nil && !record.subtitle!.isEmpty) ? "\(record.subtitle!) · \(record.title)" : record.title
+            return (sName, epSub)
+        }
+        if record.title.hasPrefix("第") && (record.title.hasSuffix("集") || record.title.contains("集")),
+           let sub = record.subtitle, sub.contains(" · ") {
+            let parts = sub.components(separatedBy: " · ")
+            let showName = parts[0]
+            let remaining = parts.dropFirst().joined(separator: " · ")
+            return (showName, "\(remaining) · \(record.title)")
+        }
+        return (record.title, record.subtitle)
+    }
+
     private func recomputeFilteredRecords() {
-        var list = appState.watchHistory
+        var list = watchHistoryStore.watchHistory
         if filterMode == "Emby" {
             list = list.filter { $0.sourceType == "Emby" || $0.sourceType == "UHDNow" || $0.embyItemId != nil }
         } else if filterMode == "本地与直链" {
             list = list.filter { $0.embyItemId == nil && ($0.sourceType == "本地文件" || $0.sourceType == "网络直链" || $0.sourceType == "Local") }
         }
-        filteredRecords = list
+        let seriesCache = appState.cachedSeriesNames
+        filteredRecords = list.map { record in
+            let (title, subtitle) = Self.resolveDisplayTitles(for: record, cachedSeriesNames: seriesCache)
+            return DisplayWatchRecord(record: record, displayTitle: title, displaySubtitle: subtitle)
+        }
     }
 
     public var body: some View {
@@ -76,7 +119,7 @@ public struct RecordsView: View {
                     .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
-                .disabled(appState.watchHistory.isEmpty)
+                .disabled(watchHistoryStore.watchHistory.isEmpty)
             }
             .padding(.horizontal, 28)
             .padding(.top, 22)
@@ -89,8 +132,8 @@ public struct RecordsView: View {
                     emptyRecordsPlaceholder
                 } else {
                     LazyVStack(spacing: 12) {
-                        ForEach(filteredRecords) { record in
-                            watchRecordRow(record)
+                        ForEach(filteredRecords) { item in
+                            watchRecordRow(item)
                         }
                     }
                     .padding(.horizontal, 28)
@@ -102,10 +145,32 @@ public struct RecordsView: View {
         .onAppear {
             recomputeFilteredRecords()
         }
+        .task(id: watchHistoryStore.watchHistory.count) {
+            let pendingIDs: [String] = watchHistoryStore.watchHistory.compactMap { record in
+                guard record.title.hasPrefix("第"),
+                      record.title.hasSuffix("集") || record.title.contains("集"),
+                      let itemId = record.embyItemId,
+                      appState.cachedSeriesNames[itemId] == nil else {
+                    return nil
+                }
+                return itemId
+            }
+            guard !pendingIDs.isEmpty else { return }
+            var resolvedAny = false
+            for itemId in Set(pendingIDs) {
+                guard !Task.isCancelled else { return }
+                if let name = await appState.resolveSeriesName(for: itemId), !name.isEmpty {
+                    resolvedAny = true
+                }
+            }
+            if resolvedAny && !Task.isCancelled {
+                recomputeFilteredRecords()
+            }
+        }
         .donbyOnChange(of: filterMode) { _ in
             recomputeFilteredRecords()
         }
-        .donbyOnChange(of: appState.watchHistory) { _ in
+        .donbyOnChange(of: watchHistoryStore.watchHistory) { _ in
             recomputeFilteredRecords()
         }
         .alert("清除观看记录", isPresented: $showClearAlert) {
@@ -118,26 +183,10 @@ public struct RecordsView: View {
         }
     }
 
-    private func watchRecordRow(_ record: WatchRecordItem) -> some View {
-        let (displayTitle, displaySubtitle): (String, String?) = {
-            if record.sourceType == "本地文件" || (record.streamURLString?.hasPrefix("/") == true) || record.title.contains(".mkv") || record.title.contains(".mp4") {
-                let parsed = MediaTitleParser.parse(rawName: record.title)
-                return (parsed.mainTitle, parsed.subTitle)
-            }
-            if record.title.hasPrefix("第") && (record.title.hasSuffix("集") || record.title.contains("集")),
-               let sName = appState.cachedSeriesNames[record.embyItemId ?? ""], !sName.isEmpty {
-                let epSub = (record.subtitle != nil && !record.subtitle!.isEmpty) ? "\(record.subtitle!) · \(record.title)" : record.title
-                return (sName, epSub)
-            }
-            if record.title.hasPrefix("第") && (record.title.hasSuffix("集") || record.title.contains("集")),
-               let sub = record.subtitle, sub.contains(" · ") {
-                let parts = sub.components(separatedBy: " · ")
-                let showName = parts[0]
-                let remaining = parts.dropFirst().joined(separator: " · ")
-                return (showName, "\(remaining) · \(record.title)")
-            }
-            return (record.title, record.subtitle)
-        }()
+    private func watchRecordRow(_ item: DisplayWatchRecord) -> some View {
+        let record = item.record
+        let displayTitle = item.displayTitle
+        let displaySubtitle = item.displaySubtitle
 
         return HStack(spacing: 16) {
             // Artwork / Poster Thumbnail
@@ -257,20 +306,6 @@ public struct RecordsView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
         )
-        .task(id: "\(record.id)|\(record.embyItemId ?? "")") {
-            if record.sourceType == "本地文件" || (record.streamURLString?.hasPrefix("/") == true) || record.title.contains(".mkv") || record.title.contains(".mp4") {
-                let parsed = MediaTitleParser.parse(rawName: record.title)
-                if parsed.mainTitle != record.title {
-                    appState.updateRecordTitles(id: record.id, newTitle: parsed.mainTitle, newSubtitle: parsed.subTitle)
-                }
-            } else if record.title.hasPrefix("第") && (record.title.hasSuffix("集") || record.title.contains("集")),
-                      let embyItemId = record.embyItemId {
-                if let sName = await appState.resolveSeriesName(for: embyItemId) {
-                    let epSub = (record.subtitle != nil && !record.subtitle!.isEmpty) ? "\(record.subtitle!) · \(record.title)" : record.title
-                    appState.updateRecordTitles(id: record.id, newTitle: sName, newSubtitle: epSub)
-                }
-            }
-        }
     }
 
     private var emptyRecordsPlaceholder: some View {

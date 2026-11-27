@@ -5,18 +5,6 @@ import QuartzCore
 import DonbyCore
 import DonbyNetwork
 
-private final class FixedShelfFlowLayout: NSCollectionViewFlowLayout {
-    override func shouldInvalidateLayout(forBoundsChange newBounds: NSRect) -> Bool {
-        guard let cv = collectionView else { return false }
-        return abs(newBounds.height - cv.bounds.height) > 0.5
-    }
-}
-
-@MainActor
-final class HomeCarouselPauseState {
-    var isScrolling: Bool = false
-}
-
 public struct HomeShelfSection: Equatable {
     public enum Kind: Equatable {
         case library
@@ -78,6 +66,7 @@ private final class NativeHomeShelfView: FlippedLayerHostView, NSCollectionViewD
     private var lastTitle: String?
     private var lastIsLightMode: Bool?
     private(set) var isViewportActive: Bool = false
+    private let isActivelyScrolling: () -> Bool
 
     var onSelectItem: ((EmbyItem) -> Void)?
     var onPlayItem: ((EmbyItem) -> Void)?
@@ -91,9 +80,15 @@ private final class NativeHomeShelfView: FlippedLayerHostView, NSCollectionViewD
         }
     }
 
-    init(sectionId: String, kind: HomeShelfSection.Kind, canHover: @escaping () -> Bool) {
+    init(
+        sectionId: String,
+        kind: HomeShelfSection.Kind,
+        canHover: @escaping () -> Bool,
+        isActivelyScrolling: @escaping () -> Bool
+    ) {
         self.sectionId = sectionId
         self.kind = kind
+        self.isActivelyScrolling = isActivelyScrolling
         super.init(frame: .zero)
         wantsLayer = true
 
@@ -238,25 +233,36 @@ private final class NativeHomeShelfView: FlippedLayerHostView, NSCollectionViewD
             self.countsByLibrary = section.countsByLibrary
             collectionView.reloadData()
         } else if statusIndexChanged, let prevIndex = prevAppearance?.downloadStatusIndex {
-            let nextIndex = appearance.downloadStatusIndex
-            for visibleItem in collectionView.visibleItems() {
-                guard let indexPath = collectionView.indexPath(for: visibleItem),
-                      indexPath.item >= 0,
-                      indexPath.item < items.count else { continue }
-                let item = items[indexPath.item]
-                let badgeChanged = prevIndex.badgeText(for: item) != nextIndex.badgeText(for: item)
-                let downloadedChanged = prevIndex.isItemDownloaded(item) != nextIndex.isItemDownloaded(item)
-                guard badgeChanged || downloadedChanged else { continue }
-                switch visibleItem {
-                case let cell as NativeLibraryCollectionItem:
-                    cell.configure(library: item, itemCount: countsByLibrary[item.id], appearance: appearance, allowAsyncLoad: isViewportActive)
-                case let cell as NativeLandscapeCollectionItem:
-                    cell.configure(item: item, appearance: appearance, allowAsyncLoad: isViewportActive)
-                case let cell as NativePosterCollectionItem:
-                    cell.configure(item: item, cardWidth: 152, appearance: appearance, allowAsyncLoad: isViewportActive)
-                default:
-                    break
-                }
+            refreshVisibleDownloadCells(prevIndex: prevIndex, appearance: appearance)
+        }
+    }
+
+    func updateDownloadStatus(appearance: DonbyCardAppearance) {
+        let prevIndex = cardAppearance?.downloadStatusIndex
+        self.cardAppearance = appearance
+        guard let prevIndex, prevIndex != appearance.downloadStatusIndex else { return }
+        refreshVisibleDownloadCells(prevIndex: prevIndex, appearance: appearance)
+    }
+
+    private func refreshVisibleDownloadCells(prevIndex: DonbyDownloadStatusIndex, appearance: DonbyCardAppearance) {
+        let nextIndex = appearance.downloadStatusIndex
+        for visibleItem in collectionView.visibleItems() {
+            guard let indexPath = collectionView.indexPath(for: visibleItem),
+                  indexPath.item >= 0,
+                  indexPath.item < items.count else { continue }
+            let item = items[indexPath.item]
+            let badgeChanged = prevIndex.badgeText(for: item) != nextIndex.badgeText(for: item)
+            let downloadedChanged = prevIndex.isItemDownloaded(item) != nextIndex.isItemDownloaded(item)
+            guard badgeChanged || downloadedChanged else { continue }
+            switch visibleItem {
+            case let cell as NativeLibraryCollectionItem:
+                cell.configure(library: item, itemCount: countsByLibrary[item.id], appearance: appearance, allowAsyncLoad: isViewportActive)
+            case let cell as NativeLandscapeCollectionItem:
+                cell.configure(item: item, appearance: appearance, allowAsyncLoad: isViewportActive)
+            case let cell as NativePosterCollectionItem:
+                cell.configure(item: item, cardWidth: 152, appearance: appearance, allowAsyncLoad: isViewportActive)
+            default:
+                break
             }
         }
     }
@@ -289,7 +295,10 @@ private final class NativeHomeShelfView: FlippedLayerHostView, NSCollectionViewD
         titleLayer.frame = CGRect(x: 24, y: 0, width: max(120, width - 110), height: 22)
         CATransaction.commit()
         moreButton.frame = NSRect(x: max(24, width - 24 - 56), y: 0, width: 56, height: 22)
-        horizontalScrollView.frame = NSRect(x: 0, y: 30, width: width, height: max(0, height - 30))
+        let targetScrollFrame = NSRect(x: 0, y: 30, width: width, height: max(0, height - 30))
+        if horizontalScrollView.frame != targetScrollFrame {
+            horizontalScrollView.frame = targetScrollFrame
+        }
     }
 
     // MARK: - NativeCardActionDelegate
@@ -339,7 +348,13 @@ private final class NativeHomeShelfView: FlippedLayerHostView, NSCollectionViewD
                 for: indexPath
             ) as! NativePosterCollectionItem
             if let cardAppearance {
-                cell.configure(item: item, cardWidth: 152, appearance: cardAppearance, allowAsyncLoad: isViewportActive)
+                cell.configure(
+                    item: item,
+                    cardWidth: 152,
+                    appearance: cardAppearance,
+                    allowAsyncLoad: isViewportActive,
+                    deferTextRenderIfScrolling: isActivelyScrolling()
+                )
             }
             cell.actionDelegate = self
             return cell
@@ -504,7 +519,6 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
 
         private var lastCarouselItems: [EmbyItem] = []
         private var lastCarouselIds: [String] = []
-        private var lastCarouselRatings: [String: MultiPlatformRatings] = [:]
         private var lastShowCarousel: Bool = false
         private var lastHomeRevision: Int = -1
         private var lastAppearance: DonbyCardAppearance?
@@ -517,8 +531,9 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
         }
 
         private var observers: [NSObjectProtocol] = []
+        private var cancellables = Set<AnyCancellable>()
         private var hoverGate: ScrollHoverGate?
-        private let carouselPauseState = HomeCarouselPauseState()
+        private let carouselStateBox = CarouselStateBox()
 
         init(
             appState: AppState,
@@ -544,43 +559,59 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
             let gate = ScrollHoverGate(
                 onScrollBegan: { [weak self] in
                     guard let self else { return }
-                    self.carouselPauseState.isScrolling = true
+                    self.carouselStateBox.isScrolling = true
                     for shelf in self.orderedShelfViews {
                         shelf.clearHover()
                     }
                 },
                 onScrollEnded: { [weak self] in
-                    self?.carouselPauseState.isScrolling = false
+                    self?.carouselStateBox.isScrolling = false
                 }
             )
             self.hoverGate = gate
 
             let nc = NotificationCenter.default
-            observers.append(nc.addObserver(forName: NSScrollView.willStartLiveScrollNotification, object: scrollView, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    self?.carouselPauseState.isScrolling = true
-                    self?.hoverGate?.markScrollingActivity()
-                }
-            })
-            observers.append(nc.addObserver(forName: NSScrollView.didLiveScrollNotification, object: scrollView, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    self?.carouselPauseState.isScrolling = true
-                    self?.hoverGate?.markScrollingActivity()
-                }
-            })
+            for name in [NSScrollView.willStartLiveScrollNotification, NSScrollView.didLiveScrollNotification] {
+                observers.append(nc.addObserver(forName: name, object: scrollView, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        self?.carouselStateBox.isScrolling = true
+                        self?.hoverGate?.markScrollingActivity()
+                    }
+                })
+            }
             observers.append(nc.addObserver(forName: NSScrollView.didEndLiveScrollNotification, object: scrollView, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.carouselPauseState.isScrolling = false
+                    self?.carouselStateBox.isScrolling = false
                     self?.hoverGate?.scheduleIdleEvaluation()
                 }
             })
             observers.append(nc.addObserver(forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.hoverGate?.markScrollingActivity()
-                    self?.carouselPauseState.isScrolling = self?.hoverGate?.isActivelyScrolling ?? false
+                    self?.carouselStateBox.isScrolling = self?.hoverGate?.isActivelyScrolling ?? false
                     self?.updateShelfViewportVisibility()
                 }
             })
+
+            cancellables.removeAll()
+            appState.downloadStatusStore.$statusIndex
+                .dropFirst()
+                .sink { [weak self] nextIndex in
+                    MainActor.assumeIsolated {
+                        self?.applyDownloadStatusIndex(nextIndex)
+                    }
+                }
+                .store(in: &cancellables)
+        }
+
+        private func applyDownloadStatusIndex(_ nextIndex: DonbyDownloadStatusIndex) {
+            guard let prevAppearance = lastAppearance,
+                  prevAppearance.downloadStatusIndex != nextIndex else { return }
+            let nextAppearance = prevAppearance.withDownloadStatusIndex(nextIndex)
+            lastAppearance = nextAppearance
+            for shelfView in orderedShelfViews {
+                shelfView.updateDownloadStatus(appearance: nextAppearance)
+            }
         }
 
         func update(
@@ -588,22 +619,15 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
             showCarousel: Bool,
             shelves: [HomeShelfSection],
             homeRevision: Int,
-            appearance: DonbyCardAppearance
+            appearance rawAppearance: DonbyCardAppearance
         ) {
+            let appearance = rawAppearance.withDownloadStatusIndex(appState.downloadStatusStore.statusIndex)
             let carouselIds = carouselItems.map(\.id)
-            var carouselRatings: [String: MultiPlatformRatings] = [:]
-            carouselRatings.reserveCapacity(carouselItems.count)
-            for item in carouselItems {
-                if let rating = appState.multiPlatformRatingsByItemId[item.id] {
-                    carouselRatings[item.id] = rating
-                }
-            }
 
             if lastHomeRevision == homeRevision &&
                lastShowCarousel == showCarousel &&
                lastCarouselIds == carouselIds &&
-               lastAppearance == appearance &&
-               lastCarouselRatings == carouselRatings {
+               lastAppearance == appearance {
                 return
             }
 
@@ -611,7 +635,6 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
             let visualThemeChanged = lastAppearance.map { !appearance.matchesVisualTheme(of: $0) } ?? true
             let carouselChanged = (lastShowCarousel != showCarousel) ||
                 (lastCarouselItems != carouselItems) ||
-                (lastCarouselRatings != carouselRatings) ||
                 visualThemeChanged
             let shelvesChanged = (lastHomeRevision != homeRevision) || (lastAppearance != appearance)
 
@@ -621,7 +644,6 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
 
             lastCarouselItems = carouselItems
             lastCarouselIds = carouselIds
-            lastCarouselRatings = carouselRatings
             lastShowCarousel = showCarousel
             lastHomeRevision = homeRevision
             lastAppearance = appearance
@@ -656,22 +678,20 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
 
             let carouselHeight = Self.resolvedCarouselHeight(forWidth: max(400, scrollView?.contentView.bounds.width ?? currentWidth))
             currentCarouselHeight = carouselHeight
-            let carouselRoot = AnyView(
-                MainCarouselView(
-                    items: items,
-                    height: carouselHeight,
-                    isScrollPaused: { [weak pauseState = carouselPauseState] in pauseState?.isScrolling ?? false },
-                    swipePublisher: carouselSwipeSubject.eraseToAnyPublisher(),
-                    onPlay: { [weak self] item in self?.onPlayItem(item) },
-                    onSelectDetail: { [weak self] item in self?.onSelectItem(item) }
-                )
-                .environmentObject(appState)
-                .preferredColorScheme(appearance.isLightMode ? .light : .dark)
-            )
+            carouselStateBox.items = items
+            carouselStateBox.height = carouselHeight
+            carouselStateBox.isLightMode = appearance.isLightMode
 
-            if let existing = carouselHostingView {
-                existing.rootView = carouselRoot
-            } else {
+            if carouselHostingView == nil {
+                let carouselRoot = AnyView(
+                    MainCarouselView(
+                        stateBox: carouselStateBox,
+                        swipePublisher: carouselSwipeSubject.eraseToAnyPublisher(),
+                        onPlay: { [weak self] item in self?.onPlayItem(item) },
+                        onSelectDetail: { [weak self] item in self?.onSelectItem(item) }
+                    )
+                    .environmentObject(appState)
+                )
                 let hosting = CarouselHostingView(rootView: carouselRoot)
                 hosting.sizingOptions = []
                 hosting.layerContentsRedrawPolicy = .onSetNeedsDisplay
@@ -703,7 +723,8 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
                     let created = NativeHomeShelfView(
                         sectionId: section.id,
                         kind: section.kind,
-                        canHover: { [weak self] in self?.hoverGate?.canHover ?? true }
+                        canHover: { [weak self] in self?.hoverGate?.canHover ?? true },
+                        isActivelyScrolling: { [weak self] in self?.hoverGate?.isActivelyScrolling ?? false }
                     )
                     documentView.addSubview(created)
                     shelfViewsById[section.id] = created
@@ -729,8 +750,9 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
             var cursorY: CGFloat = 12
             if let carousel = carouselHostingView {
                 let targetCarouselHeight = Self.resolvedCarouselHeight(forWidth: resolvedWidth)
-                if abs(targetCarouselHeight - currentCarouselHeight) > 1.0, let appearance = lastAppearance {
-                    updateCarousel(items: lastCarouselItems, visible: lastShowCarousel, appearance: appearance)
+                if abs(targetCarouselHeight - currentCarouselHeight) > 1.0 {
+                    currentCarouselHeight = targetCarouselHeight
+                    carouselStateBox.height = targetCarouselHeight
                 }
                 carousel.frame = NSRect(x: 24, y: cursorY, width: max(200, resolvedWidth - 48), height: targetCarouselHeight)
                 cursorY += targetCarouselHeight

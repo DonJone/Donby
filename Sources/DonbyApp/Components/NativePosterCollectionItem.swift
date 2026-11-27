@@ -380,7 +380,9 @@ final class NativePosterCollectionItem: NSCollectionViewItem, HoverableCollectio
         let targetId = item.id
         loadTask = Task { @MainActor [weak self] in
             let cgImage = await MediaArtworkView.loadOrFetchCGImage(server: server, item: item, kind: .primary, maxWidth: 360, priority: .high)
-            guard let self, !Task.isCancelled, self.currentItem?.id == targetId, let cgImage else { return }
+            guard let self, !Task.isCancelled, self.currentItem?.id == targetId else { return }
+            self.loadTask = nil
+            guard let cgImage else { return }
             self.posterLayer.contents = cgImage
             self.posterLayer.isOpaque = NativeCardLayerCache.isOpaqueCGImage(cgImage)
             self.placeholderIconLayer.isHidden = true

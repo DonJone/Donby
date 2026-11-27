@@ -13,8 +13,7 @@ extension DetailView {
                         ForEach(Array(seasons.enumerated()), id: \.element.id) { idx, season in
                             let sNum = season.indexNumber ?? (idx + 1)
                             Button {
-                                selectedSeasonIndex = sNum
-                                Task { await loadEpisodesForSeason(season, seasonNumber: sNum) }
+                                triggerSeasonLoad(season, seasonNumber: sNum)
                             } label: {
                                 if selectedSeasonIndex == sNum {
                                     Label(season.name, systemImage: "checkmark")
@@ -67,29 +66,68 @@ extension DetailView {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-
-                    Text("更多")
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
                 }
             }
             .padding(.horizontal, 28)
 
             if episodes.isEmpty {
-                HStack {
-                    ProgressView().controlSize(.small)
-                    Text("正在加载分季剧集...").font(.system(size: 13)).foregroundStyle(.secondary)
+                if isLoadingDetails || isLoadingSeasonEpisodes {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(alignment: .top, spacing: 16) {
+                            ForEach(0..<4, id: \.self) { _ in
+                                VStack(alignment: .leading, spacing: 8) {
+                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                        .fill(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+                                        .frame(width: 256, height: 144)
+                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                        .fill(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+                                        .frame(width: 140, height: 14)
+                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                        .fill(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+                                        .frame(width: 96, height: 12)
+                                }
+                                .frame(width: 256)
+                            }
+                        }
+                        .padding(.horizontal, 28)
+                        .padding(.vertical, 14)
+                    }
+                    .frame(height: 214)
+                } else if let errMsg = detailLoadError {
+                    detailErrorBanner(message: errMsg)
+                        .padding(.horizontal, 28)
+                        .frame(minHeight: 214, alignment: .center)
+                } else {
+                    HStack(spacing: 12) {
+                        Text("暂无分季剧集")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                        Button {
+                            detailRefreshToken &+= 1
+                        } label: {
+                            Text("重试")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .frame(minHeight: 24)
+                                .donbyLiquidGlassCapsule()
+                                .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 28)
+                    .frame(height: 214, alignment: .leading)
                 }
-                .padding(.horizontal, 28)
-                .padding(.vertical, 20)
             } else {
+                let statusMap = buildEpisodeStatusMap(for: episodes)
                 ScrollViewReader { proxy in
                     ZStack(alignment: .leading) {
                     ScrollView(.horizontal, showsIndicators: false) {
                         LazyHStack(alignment: .top, spacing: 16) {
                             ForEach(episodes) { ep in
                                 let isSelected = (ep.id == (focusedEpisodeId ?? episodes.first?.id))
-                                episodeCardItem(ep, isSelected: isSelected)
+                                episodeCardItem(ep, isSelected: isSelected, status: statusMap[ep.id])
                                     .id(ep.id)
                             }
                         }
@@ -186,15 +224,82 @@ extension DetailView {
         )
     }
 
-    private func episodeCardItem(_ ep: EmbyItem, isSelected: Bool) -> some View {
-        let epDownloadEntry = DonbyDownloadManager.shared.activeOrCompletedEntry(for: ep.id)
+    private struct EpisodeCardStatus {
+        let downloadEntry: DownloadEntry?
+        let isWatched: Bool
+        let cachedSummary: CachedMediaSummary?
+    }
+
+    private func buildEpisodeStatusMap(for eps: [EmbyItem]) -> [String: EpisodeCardStatus] {
+        var downloadByItemId: [String: DownloadEntry] = [:]
+        for entry in DonbyDownloadManager.shared.entries {
+            if entry.status == .completed {
+                downloadByItemId[entry.itemId] = entry
+            } else if (entry.status == .downloading || entry.status == .queued),
+                      downloadByItemId[entry.itemId] == nil {
+                downloadByItemId[entry.itemId] = entry
+            }
+        }
+
+        var firstRatioByItemId: [String: Double] = [:]
+        var firstRatioByLocalPath: [String: Double] = [:]
+        for rec in appState.watchHistoryStore.watchHistory {
+            if let eid = rec.embyItemId, firstRatioByItemId[eid] == nil {
+                firstRatioByItemId[eid] = rec.progressRatio
+            }
+            if let lp = rec.streamURLString, !lp.isEmpty {
+                let norm = lp.hasPrefix("file://") ? (URL(string: lp)?.path ?? lp) : lp
+                if firstRatioByLocalPath[norm] == nil {
+                    firstRatioByLocalPath[norm] = rec.progressRatio
+                }
+            }
+        }
+
+        let serverId = effectiveDetailServer?.id
+        var cachedByItemId: [String: CachedMediaSummary] = [:]
+        for summary in cachedUnpinnedAssets where serverId == nil || summary.serverId == serverId {
+            if let itemId = summary.itemId, cachedByItemId[itemId] == nil {
+                cachedByItemId[itemId] = summary
+            }
+        }
+
+        var result: [String: EpisodeCardStatus] = [:]
+        result.reserveCapacity(eps.count)
+        for ep in eps {
+            let dlEntry = downloadByItemId[ep.id]
+            let isDlDone = dlEntry?.status == .completed
+            let isDlActive = dlEntry?.status == .downloading || dlEntry?.status == .queued
+
+            let watched: Bool = {
+                if ep.userData?.played == true || ep.progressFraction >= 0.90 { return true }
+                if let snap = dlEntry?.itemSnapshot,
+                   snap.userData?.played == true || snap.progressFraction >= 0.90 {
+                    return true
+                }
+                if let r = firstRatioByItemId[ep.id] { return r >= 0.90 }
+                if let lp = dlEntry?.localVideoFilePath, !lp.isEmpty,
+                   let r = firstRatioByLocalPath[lp] {
+                    return r >= 0.90
+                }
+                return false
+            }()
+
+            let cached = (!isDlDone && !isDlActive) ? cachedByItemId[ep.id] : nil
+            result[ep.id] = EpisodeCardStatus(
+                downloadEntry: dlEntry,
+                isWatched: watched,
+                cachedSummary: cached
+            )
+        }
+        return result
+    }
+
+    private func episodeCardItem(_ ep: EmbyItem, isSelected: Bool, status: EpisodeCardStatus?) -> some View {
+        let epDownloadEntry = status?.downloadEntry
         let isEpDownloaded = (epDownloadEntry?.status == .completed)
         let isEpDownloading = (epDownloadEntry?.status == .downloading || epDownloadEntry?.status == .queued)
-        let isEpWatched = appState.isItemWatchedOfflineOrLocal(ep, localVideoPath: epDownloadEntry?.localVideoFilePath)
-        let epCachedSummary = (!isEpDownloaded && !isEpDownloading) ? cachedProgressSnapshot(
-            forItemId: ep.id,
-            serverId: effectiveDetailServer?.id
-        ) : nil
+        let isEpWatched = status?.isWatched ?? (ep.userData?.played == true || ep.progressFraction >= 0.90)
+        let epCachedSummary = status?.cachedSummary
 
         return VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .bottomLeading) {
@@ -326,10 +431,13 @@ extension DetailView {
                 }
 
                 if isEpDownloaded, let doneEntry = epDownloadEntry {
-                    if let videoPath = doneEntry.localVideoFilePath,
-                       FileManager.default.fileExists(atPath: videoPath) {
+                    if let videoPath = doneEntry.localVideoFilePath, !videoPath.isEmpty {
                         Button {
-                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: videoPath)])
+                            if FileManager.default.fileExists(atPath: videoPath) {
+                                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: videoPath)])
+                            } else {
+                                appState.showToast("本地文件不存在或已被移动", icon: "exclamationmark.triangle.fill", isError: true)
+                            }
                         } label: {
                             Label("在访达中显示视频文件", systemImage: "folder")
                         }

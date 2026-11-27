@@ -20,6 +20,14 @@ public struct DetailView: View {
     @State var episodes: [EmbyItem] = []
     @State var similarItems: [EmbyItem] = []
     @State var isLoadingDetails: Bool = false
+    @State var isLoadingSeasonEpisodes: Bool = false
+    @State var hasHydratedDetail: Bool = false
+    @State var detailLoadError: String? = nil
+    @State var detailRefreshToken: Int = 0
+    @State var seasonLoadGeneration: Int = 0
+    @State var activeSeasonLoadTask: Task<Void, Never>? = nil
+    @State var activeSimilarTask: Task<Void, Never>? = nil
+    @State var lastScannedDownloadSignature: String = ""
     @State var focusedEpisodeId: String? = nil
     @State var selectedEpisodeForInfo: EmbyItem? = nil
     @State var didUserDisableSubtitle: Bool = false
@@ -28,6 +36,7 @@ public struct DetailView: View {
     @State var cachedUnpinnedAssets: [CachedMediaSummary] = []
     @State var showWatchPartyCreateSheet: Bool = false
     @State var multiPlatformRatings: MultiPlatformRatings? = nil
+    @State private var relevantWatchedSignature: String = ""
 
     var effectiveDetailRatings: MultiPlatformRatings? {
         multiPlatformRatings
@@ -122,16 +131,23 @@ public struct DetailView: View {
                         heroHeaderSection(heroHeight: heroHeight)
 
                         VStack(alignment: .leading, spacing: 24) {
-                            if item.isSeries || !episodes.isEmpty {
+                            if item.isSeries || item.isEpisode || !episodes.isEmpty {
                                 episodesSection
+                            }
+
+                            if let errMsg = detailLoadError, !item.isSeries, !item.isEpisode, cachedOfflineGroup == nil {
+                                detailErrorBanner(message: errMsg)
+                                    .padding(.horizontal, 28)
                             }
 
                             if let people = item.people, !people.isEmpty {
                                 castSection(people: people)
                             }
 
-                            mediaSpecsCard
-                                .padding(.horizontal, 28)
+                            if selectedMediaSource != nil || item.primaryVideoStream != nil {
+                                mediaSpecsCard
+                                    .padding(.horizontal, 28)
+                            }
 
                             if !similarItems.isEmpty {
                                 similarSection
@@ -177,28 +193,81 @@ public struct DetailView: View {
         .donbyOnChange(of: selectedSourceId) { _ in
             syncStreamsForSelectedSource()
         }
-        .task(id: initialItem.id) {
+        .task(id: "\(initialItem.id)|\(detailRefreshToken)") {
             await loadFullDetailData()
         }
         .task(id: detailRatingsTaskKey) {
             await loadDetailMultiPlatformRatings()
         }
-        .onReceive(DonbyDownloadManager.shared.$statusIndex) { nextIndex in
+        .onAppear {
+            let storeIndex = appState.downloadStatusStore.statusIndex
+            if observedDownloadIndex != storeIndex {
+                observedDownloadIndex = storeIndex
+            }
+            relevantWatchedSignature = watchedSignature(for: appState.watchHistoryStore.watchHistory)
+        }
+        .donbyOnChange(of: episodes.map(\.id)) { _ in
+            relevantWatchedSignature = watchedSignature(for: appState.watchHistoryStore.watchHistory)
+        }
+        .onReceive(appState.ratingsStore.$multiPlatformRatingsByItemId) { ratingsMap in
+            let resolved = ratingsMap[item.id] ?? ratingsMap[initialItem.id]
+            if let resolved, resolved != multiPlatformRatings {
+                multiPlatformRatings = resolved
+            }
+        }
+        .onReceive(appState.watchHistoryStore.$watchHistory) { nextHistory in
+            let nextSig = watchedSignature(for: nextHistory)
+            if nextSig != relevantWatchedSignature {
+                relevantWatchedSignature = nextSig
+            }
+        }
+        .onReceive(appState.downloadStatusStore.$statusIndex) { nextIndex in
             guard isDownloadIndexRelevant(nextIndex) else { return }
             observedDownloadIndex = nextIndex
         }
         .task(id: detailCompletedDownloadSignature) {
-            await refreshOfflineAndCacheSnapshots()
+            let sig = detailCompletedDownloadSignature
+            guard hasHydratedDetail, sig != lastScannedDownloadSignature else { return }
+            await refreshOfflineAndCacheSnapshots(signature: sig)
         }
         .onDisappear {
+            activeSeasonLoadTask?.cancel()
+            activeSeasonLoadTask = nil
+            activeSimilarTask?.cancel()
+            activeSimilarTask = nil
             DonbyTurboCacheEngine.shared.cancelDetailPreload()
         }
-        .task(id: "\(item.id)|\(heroTargetEpisode?.id ?? "")|\(selectedSourceId)|\(Int(effectivePlayButtonStartSeconds))|\(isLoadingDetails)|\(appState.detailPreloadEnabled)|\(appState.detailPreloadSeconds)") {
+        .task(id: "\(item.id)|\(heroTargetEpisode?.id ?? "")|\(selectedSourceId)|\(Int(effectivePlayButtonStartSeconds))|\(hasHydratedDetail)|\(isLoadingDetails)|\(appState.detailPreloadEnabled)|\(appState.detailPreloadSeconds)") {
             await runDetailPrewarmAndPreload()
         }
     }
 
-    private var detailCompletedDownloadSignature: String {
+    private func watchedSignature(for history: [WatchRecordItem]) -> String {
+        var relevantIds = Set<String>([item.id, initialItem.id])
+        relevantIds.reserveCapacity(episodes.count + 2)
+        var episodeLocalPaths = Set<String>()
+        for ep in episodes {
+            relevantIds.insert(ep.id)
+            if let path = DonbyDownloadManager.shared.activeOrCompletedEntry(for: ep.id)?.localVideoFilePath,
+               !path.isEmpty {
+                episodeLocalPaths.insert(path)
+            }
+        }
+        var parts: [String] = []
+        for rec in history {
+            if let eid = rec.embyItemId, relevantIds.contains(eid) {
+                parts.append("\(eid):\(rec.progressRatio >= 0.90 ? 1 : 0)")
+            } else if !episodeLocalPaths.isEmpty, let lp = rec.streamURLString, !lp.isEmpty {
+                let norm = lp.hasPrefix("file://") ? (URL(string: lp)?.path ?? lp) : lp
+                if episodeLocalPaths.contains(norm) {
+                    parts.append("\(norm):\(rec.progressRatio >= 0.90 ? 1 : 0)")
+                }
+            }
+        }
+        return parts.joined(separator: "|")
+    }
+
+    var detailCompletedDownloadSignature: String {
         let itemDone = observedDownloadIndex.completedItemIds.contains(item.id)
         let initDone = observedDownloadIndex.completedItemIds.contains(initialItem.id)
         let seriesCnt = observedDownloadIndex.downloadedCount(forSeries: item)
@@ -225,14 +294,36 @@ public struct DetailView: View {
                 return true
             }
         }
+        for sim in similarItems {
+            if observedDownloadIndex.badgeText(for: sim) != nextIndex.badgeText(for: sim) ||
+               observedDownloadIndex.isItemDownloaded(sim) != nextIndex.isItemDownloaded(sim) {
+                return true
+            }
+        }
         return false
     }
 
     private var floatingTopNavBar: some View {
-        HStack {
+        HStack(spacing: 10) {
+            if appState.isSidebarCollapsed {
+                Button {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                        appState.isSidebarCollapsed = false
+                    }
+                } label: {
+                    DonbyToolbarCircleView(systemName: "sidebar.left")
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .padding(.leading, appState.collapsedSidebarLeadingPadding)
+            }
+
             // Floating Left Capsule: [ Back | Home ] — full-area clickable halves with zero dead rim
             HStack(spacing: 0) {
                 Button {
+                    activeSeasonLoadTask?.cancel()
+                    activeSimilarTask?.cancel()
+                    DonbyTurboCacheEngine.shared.cancelDetailPreload()
                     withAnimation(.easeOut(duration: 0.18)) { appState.popDetail() }
                 } label: {
                     Image(systemName: "chevron.left")
@@ -248,6 +339,9 @@ public struct DetailView: View {
                     .frame(width: 0.75, height: 14)
 
                 Button {
+                    activeSeasonLoadTask?.cancel()
+                    activeSimilarTask?.cancel()
+                    DonbyTurboCacheEngine.shared.cancelDetailPreload()
                     withAnimation(.easeOut(duration: 0.18)) {
                         appState.popToRootDetail()
                     }
@@ -262,7 +356,6 @@ public struct DetailView: View {
             }
             .clipShape(Capsule(style: .continuous))
             .donbyLiquidGlassCapsule()
-            .padding(.leading, appState.isSidebarCollapsed ? (appState.isWindowFullScreen ? 0 : 68) : 0)
 
             Spacer()
 
@@ -285,7 +378,7 @@ public struct DetailView: View {
 
                 Menu {
                     Button {
-                        Task { await loadFullDetailData() }
+                        detailRefreshToken &+= 1
                     } label: {
                         Label("刷新详情信息", systemImage: "arrow.clockwise")
                     }
@@ -343,6 +436,44 @@ public struct DetailView: View {
         .padding(.top, 16)
     }
 
+    func detailErrorBanner(message: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("详情加载失败")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                Text(message)
+                    .font(.system(size: 12))
+                    .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    .lineLimit(2)
+            }
+            Spacer()
+            if let srv = effectiveDetailServer {
+                Button("切换线路") {
+                    appState.linePickerServer = srv
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            Button("重试") {
+                detailRefreshToken &+= 1
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(appState.accentColor)
+            .controlSize(.small)
+        }
+        .padding(14)
+        .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
+        )
+    }
+
     private var mediaSpecsCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             SectionHeaderView(title: "媒体信息")
@@ -350,13 +481,13 @@ public struct DetailView: View {
             let a = audioStreams.first
 
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 185), spacing: 12)], spacing: 12) {
-                specCell("封装格式", (selectedMediaSource?.container ?? item.container ?? "MKV").uppercased())
+                specCell("封装格式", (selectedMediaSource?.container ?? item.container)?.uppercased() ?? "未知")
                 specCell("文件大小", selectedMediaSource?.formattedFileSize ?? "未知")
-                specCell("总码率", selectedMediaSource?.formattedBitrate ?? "自适应")
-                specCell("视频编码", v?.codec?.uppercased() ?? "HEVC")
-                specCell("分辨率", (v?.width != nil && v?.height != nil) ? "\(v!.width!) × \(v!.height!)" : "3840 × 2160")
-                specCell("动态范围", item.dynamicRangeTag ?? v?.videoRange ?? "SDR")
-                specCell("主音轨", a?.readableLabel ?? "立体声")
+                specCell("总码率", selectedMediaSource?.formattedBitrate ?? "未知")
+                specCell("视频编码", v?.codec?.uppercased() ?? "未知")
+                specCell("分辨率", (v?.width != nil && v?.height != nil) ? "\(v!.width!) × \(v!.height!)" : "未知")
+                specCell("动态范围", item.dynamicRangeTag ?? v?.videoRange ?? "未知")
+                specCell("主音轨", a?.readableLabel ?? "未知")
             }
         }
     }
@@ -373,7 +504,7 @@ public struct DetailView: View {
     }
 
     private var similarSection: some View {
-        let appearance = appState.cardAppearance
+        let appearance = appState.cardAppearance(downloadStatusIndex: observedDownloadIndex)
         return VStack(alignment: .leading, spacing: 10) {
             SectionHeaderView(title: "类似作品")
                 .padding(.horizontal, 28)
@@ -475,15 +606,19 @@ public struct EpisodeInfoSheet: View {
 /// so releasing a two-finger pull-down always bounces cleanly back to y=0 instead of hanging at +28pt.
 private struct DetailScrollViewTopInsetFix: NSViewRepresentable {
     final class ProbeView: NSView {
+        private var didApplyInitialWindowFix = false
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            applyZeroTopInset()
+            guard window != nil else { return }
+            didApplyInitialWindowFix = false
+            applyZeroTopInset(isInitialAttachment: true)
             DispatchQueue.main.async { [weak self] in
-                self?.applyZeroTopInset()
+                self?.applyZeroTopInset(isInitialAttachment: true)
             }
         }
 
-        func applyZeroTopInset() {
+        func applyZeroTopInset(isInitialAttachment: Bool) {
             guard let sv = enclosingScrollView else { return }
             if sv.hasVerticalScroller {
                 sv.hasVerticalScroller = false
@@ -494,14 +629,18 @@ private struct DetailScrollViewTopInsetFix: NSViewRepresentable {
             if sv.automaticallyAdjustsContentInsets {
                 sv.automaticallyAdjustsContentInsets = false
             }
-            if sv.contentInsets.top != 0 {
+            let topInsetChanged = sv.contentInsets.top != 0
+            if topInsetChanged {
                 var insets = sv.contentInsets
                 insets.top = 0
                 sv.contentInsets = insets
             }
-            if sv.contentView.bounds.origin.y < 0 {
-                sv.contentView.scroll(to: NSPoint(x: sv.contentView.bounds.origin.x, y: 0))
-                sv.reflectScrolledClipView(sv.contentView)
+            if isInitialAttachment && !didApplyInitialWindowFix {
+                didApplyInitialWindowFix = true
+                if topInsetChanged && sv.contentView.bounds.origin.y < 0 {
+                    sv.contentView.scroll(to: NSPoint(x: sv.contentView.bounds.origin.x, y: 0))
+                    sv.reflectScrolledClipView(sv.contentView)
+                }
             }
         }
     }
@@ -513,6 +652,6 @@ private struct DetailScrollViewTopInsetFix: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: ProbeView, context: Context) {
-        nsView.applyZeroTopInset()
+        nsView.applyZeroTopInset(isInitialAttachment: false)
     }
 }

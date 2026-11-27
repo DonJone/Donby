@@ -1,9 +1,9 @@
 # Kernel Sub-Module: Subtitles (`subtitle/`)
 
-> Last synced: `v2.0.9`
+> Last synced: `v2.1.5`
 
 ## 1. Overview & Task-to-File Routing
-- `KernelRust/src/subtitle/` (7 focused submodules): Single-track and dual-track subtitle decoding, normalization, semantic pairing, and RGBA rasterization.
+- `KernelRust/src/subtitle/` (8 focused submodules): Single-track and dual-track subtitle decoding, normalization, semantic pairing, and async RGBA rasterization.
 
 | If your task involves... | Open |
 | :--- | :--- |
@@ -11,7 +11,8 @@
 | `decode_packet_for_slot`, `DecodeCtx` C callbacks, PGS bitmap cues, HDR/orange-gold pixel overrides | `subtitle/pgs.rs` |
 | External SRT/VTT/ASS loading, `CFStringTransform`, ASS tag filtering, `feed_and_store_ass_event`, `rebuild_embedded_ass_track` | `subtitle/ass_text.rs` |
 | `set_style`, `set_viewport`, `set_secondary_time_scale`, `get_vertical_bounds`, `get_intervals`, `apply_style_to_ass_track` | `subtitle/ass_style.rs` |
-| `update_subtitle_rgba` (empty fast-path + direct single-layer ASS compositing), `clear_subtitle_canvas`, `raster_paired_line`, dual-layer RGBA blitting & dirty-rect tracking | `subtitle/compositor.rs` |
+| `prewarm_cjk_font`, `update_subtitle_rgba` (empty fast-path + direct single-layer ASS compositing), `clear_subtitle_canvas`, `raster_paired_line`, dual-layer RGBA blitting & dirty-rect tracking | `subtitle/compositor.rs` |
+| Per-player `"donby-sub-worker"` thread: background `libass` CJK font prewarm on open, async `ass_render_frame` rasterization, and ready RGBA frame swap for `CVDisplayLink` | `subtitle/async_worker.rs` |
 | Pair-A bilingual layout (`try_render_paired_bilingual`), 1200px viewport anchoring, cluster snap/tail-hold | `subtitle/pair_a_render.rs` |
 | Pair-A ASS line extraction, speaker-dash splitting, `build_paired_turns`, Latin/CJK heuristics | `subtitle/pair_a_parse.rs` |
 | `dk_shim_ass_set_quiet_logger`, `CFStringTransform` (`Hant-Hans`/`Hans-Hant`), FFmpeg ASS/PGS/DVD subtitle packet decode, `libass` struct accessors | `Sources/DonbyKernelC/dk_ffi_subtitle.c` |

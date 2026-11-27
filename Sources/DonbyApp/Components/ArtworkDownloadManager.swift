@@ -6,32 +6,49 @@ private actor DownloadConcurrencyGate {
     private let limit: Int
     private var active: Int = 0
     private var waiters: [(id: UUID, priority: Int, continuation: CheckedContinuation<Void, Error>)] = []
+    private var pendingBoosts: [UUID: Int] = [:]
 
     init(limit: Int) {
         self.limit = limit
     }
 
-    func acquire(priority: Operation.QueuePriority = .normal) async throws {
+    func acquire(priority: Operation.QueuePriority = .normal, waiterId: UUID = UUID()) async throws {
         try Task.checkCancellation()
+        let boostedPriority = max(priority.rawValue, pendingBoosts.removeValue(forKey: waiterId) ?? priority.rawValue)
         if active < limit {
             active += 1
             return
         }
-        let waiterId = UUID()
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
                 if Task.isCancelled {
+                    pendingBoosts.removeValue(forKey: waiterId)
                     cont.resume(throwing: CancellationError())
                     return
                 }
-                waiters.append((waiterId, priority.rawValue, cont))
+                let finalPriority = max(boostedPriority, pendingBoosts.removeValue(forKey: waiterId) ?? boostedPriority)
+                waiters.append((waiterId, finalPriority, cont))
             }
         } onCancel: {
             Task { await self.cancelWaiter(id: waiterId) }
         }
     }
 
+    func boostPriority(id: UUID, to priority: Operation.QueuePriority) {
+        if let idx = waiters.firstIndex(where: { $0.id == id }) {
+            if priority.rawValue > waiters[idx].priority {
+                waiters[idx].priority = priority.rawValue
+            }
+        } else {
+            let existing = pendingBoosts[id] ?? Int.min
+            if priority.rawValue > existing {
+                pendingBoosts[id] = priority.rawValue
+            }
+        }
+    }
+
     private func cancelWaiter(id: UUID) {
+        pendingBoosts.removeValue(forKey: id)
         if let idx = waiters.firstIndex(where: { $0.id == id }) {
             let entry = waiters.remove(at: idx)
             entry.continuation.resume(throwing: CancellationError())
@@ -57,6 +74,8 @@ private actor DownloadConcurrencyGate {
 private actor ArtworkDownloadCoordinator {
     private struct InFlightEntry {
         let id: UUID
+        let gateWaiterId: UUID
+        var priority: Operation.QueuePriority
         let task: Task<Void, Never>
         var waiters: [(id: UUID, continuation: CheckedContinuation<(Data, URLResponse), Error>)] = []
     }
@@ -73,16 +92,22 @@ private actor ArtworkDownloadCoordinator {
         try Task.checkCancellation()
         let key = request.url?.absoluteString ?? UUID().uuidString
         let entryId: UUID
-        if let existing = inFlight[key] {
+        if var existing = inFlight[key] {
             entryId = existing.id
+            if priority.rawValue > existing.priority.rawValue {
+                existing.priority = priority
+                inFlight[key] = existing
+                await gate.boostPriority(id: existing.gateWaiterId, to: priority)
+            }
         } else {
             let newId = UUID()
+            let gateWaiterId = UUID()
             let session = self.session
             let gate = self.gate
             let task = Task {
                 let result: Result<(Data, URLResponse), Error>
                 do {
-                    try await gate.acquire(priority: priority)
+                    try await gate.acquire(priority: priority, waiterId: gateWaiterId)
                     do {
                         try Task.checkCancellation()
                         let response = try await session.data(for: request)
@@ -97,7 +122,7 @@ private actor ArtworkDownloadCoordinator {
                 }
                 self.complete(key: key, entryId: newId, result: result)
             }
-            inFlight[key] = InFlightEntry(id: newId, task: task)
+            inFlight[key] = InFlightEntry(id: newId, gateWaiterId: gateWaiterId, priority: priority, task: task)
             entryId = newId
         }
 

@@ -14,12 +14,32 @@ public struct IPTVModuleView: View {
     @State private var newChannelGroup: String = "4K UHD"
     @State private var newChannelURL: String = ""
     @State private var m3uTextInput: String = ""
-
-    private let groupOptions = ["全部", "4K UHD", "影视频道", "新闻资讯", "自定义"]
+    @State private var groupOptions: [String] = ["全部"]
+    @State private var importTask: Task<Void, Never>?
 
     public init() {}
 
-    private func recomputeFilteredChannels() {
+    private var channelListToken: Int {
+        var hasher = Hasher()
+        hasher.combine(appState.iptvChannels)
+        return hasher.finalize()
+    }
+
+    private func recomputeFilteredChannels(refreshGroups: Bool = false) {
+        if refreshGroups {
+            var seen = Set<String>(["全部"])
+            var groups: [String] = ["全部"]
+            for channel in appState.iptvChannels {
+                let grp = channel.group.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !grp.isEmpty && seen.insert(grp).inserted {
+                    groups.append(grp)
+                }
+            }
+            groupOptions = groups
+            if !seen.contains(selectedGroup) {
+                selectedGroup = "全部"
+            }
+        }
         var list = appState.iptvChannels
         if selectedGroup != "全部" {
             list = list.filter { $0.group == selectedGroup }
@@ -107,23 +127,24 @@ public struct IPTVModuleView: View {
             .padding(.bottom, 16)
 
             // Groups Tab Bar
-            HStack(spacing: 8) {
-                ForEach(groupOptions, id: \.self) { grp in
-                    let isSel = (selectedGroup == grp)
-                    Button {
-                        selectedGroup = grp
-                    } label: {
-                        Text(grp)
-                            .font(.system(size: 12, weight: isSel ? .bold : .medium))
-                            .foregroundStyle(isSel ? appState.accentTextColor : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 6)
-                            .background(isSel ? appState.accentColor : (appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.06)))
-                            .clipShape(Capsule())
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(groupOptions, id: \.self) { grp in
+                        let isSel = (selectedGroup == grp)
+                        Button {
+                            selectedGroup = grp
+                        } label: {
+                            Text(grp)
+                                .font(.system(size: 12, weight: isSel ? .bold : .medium))
+                                .foregroundStyle(isSel ? appState.accentTextColor : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 6)
+                                .background(isSel ? appState.accentColor : (appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.06)))
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
-                Spacer()
             }
             .padding(.horizontal, 28)
             .padding(.bottom, 14)
@@ -147,7 +168,10 @@ public struct IPTVModuleView: View {
         }
         .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
         .onAppear {
-            recomputeFilteredChannels()
+            recomputeFilteredChannels(refreshGroups: true)
+        }
+        .onDisappear {
+            importTask?.cancel()
         }
         .donbyOnChange(of: selectedGroup) { _ in
             recomputeFilteredChannels()
@@ -155,8 +179,8 @@ public struct IPTVModuleView: View {
         .donbyOnChange(of: searchText) { _ in
             recomputeFilteredChannels()
         }
-        .donbyOnChange(of: appState.iptvChannels.map { "\($0.id)|\($0.name)|\($0.group)|\($0.urlString)" }) { _ in
-            recomputeFilteredChannels()
+        .donbyOnChange(of: channelListToken) { _ in
+            recomputeFilteredChannels(refreshGroups: true)
         }
         .sheet(isPresented: $showAddChannelSheet) {
             addChannelSheetContent
@@ -379,9 +403,8 @@ public struct IPTVModuleView: View {
                     .text
                 ]
                 panel.allowsMultipleSelection = false
-                if panel.runModal() == .OK, let url = panel.url,
-                   let content = try? String(contentsOf: url) {
-                    appState.importM3UContent(content)
+                if panel.runModal() == .OK, let url = panel.url {
+                    importM3UAsync(fromFileURL: url, rawText: nil)
                     showImportM3USheet = false
                 }
             } label: {
@@ -438,7 +461,7 @@ public struct IPTVModuleView: View {
                         appState.showToast("请输入 M3U 文本", icon: "exclamationmark.triangle", isError: true)
                         return
                     }
-                    appState.importM3UContent(content)
+                    importM3UAsync(fromFileURL: nil, rawText: content)
                     showImportM3USheet = false
                 } label: {
                     Text("解析并导入")
@@ -463,5 +486,78 @@ public struct IPTVModuleView: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.8)
         )
+    }
+
+    private func importM3UAsync(fromFileURL fileURL: URL?, rawText: String?) {
+        importTask?.cancel()
+        let existingURLs = Set(appState.iptvChannels.map(\.urlString))
+        importTask = Task {
+            let parsedChannels: [IPTVChannelItem]? = await Task.detached(priority: .userInitiated) {
+                let resolvedText: String?
+                if let fileURL {
+                    resolvedText = (try? String(contentsOf: fileURL, encoding: .utf8))
+                        ?? (try? String(contentsOf: fileURL))
+                } else {
+                    resolvedText = rawText
+                }
+                guard let content = resolvedText, !content.isEmpty else {
+                    return nil
+                }
+                return Self.parseM3UChannels(from: content, existingURLs: existingURLs)
+            }.value
+
+            guard !Task.isCancelled else { return }
+            guard let parsedChannels else {
+                appState.showToast("无法读取 M3U 文件内容", icon: "exclamationmark.triangle", isError: true)
+                return
+            }
+
+            let currentURLs = Set(appState.iptvChannels.map(\.urlString))
+            let uniqueNewChannels = parsedChannels.filter { !currentURLs.contains($0.urlString) }
+            if !uniqueNewChannels.isEmpty {
+                appState.iptvChannels.append(contentsOf: uniqueNewChannels)
+                appState.showToast("成功导入 \(uniqueNewChannels.count) 个 IPTV 频道", icon: "sparkles.tv")
+            } else {
+                appState.showToast("未检测到有效 M3U 频道，请检查文件格式", icon: "exclamationmark.triangle", isError: true)
+            }
+        }
+    }
+
+    nonisolated private static func parseM3UChannels(
+        from content: String,
+        existingURLs: Set<String>
+    ) -> [IPTVChannelItem] {
+        let lines = content.components(separatedBy: .newlines)
+        var seenURLs = existingURLs
+        var newChannels: [IPTVChannelItem] = []
+        var currentName: String? = nil
+        var currentGroup = "导入频道"
+
+        for rawLine in lines {
+            if Task.isCancelled { return [] }
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty { continue }
+
+            if line.hasPrefix("#EXTINF:") {
+                if let groupRange = line.range(of: "group-title=\"") {
+                    let sub = line[groupRange.upperBound...]
+                    if let endQuote = sub.firstIndex(of: "\"") {
+                        let parsedGroup = String(sub[..<endQuote]).trimmingCharacters(in: .whitespacesAndNewlines)
+                        currentGroup = parsedGroup.isEmpty ? "导入频道" : parsedGroup
+                    }
+                }
+                if let commaIdx = line.lastIndex(of: ",") {
+                    let nameSub = line[line.index(after: commaIdx)...].trimmingCharacters(in: .whitespaces)
+                    if !nameSub.isEmpty { currentName = nameSub }
+                }
+            } else if !line.hasPrefix("#") {
+                let name = currentName ?? "未知频道 \(newChannels.count + 1)"
+                if seenURLs.insert(line).inserted {
+                    newChannels.append(IPTVChannelItem(name: name, group: currentGroup, urlString: line))
+                }
+                currentName = nil
+            }
+        }
+        return newChannels
     }
 }

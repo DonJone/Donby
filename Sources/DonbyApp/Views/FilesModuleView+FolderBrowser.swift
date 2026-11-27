@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ImageIO
 import UniformTypeIdentifiers
 import DonbyCore
 import DonbyNetwork
@@ -7,6 +8,19 @@ import DonbyNetwork
 extension FilesModuleView {
     func folderDetailHeader(_ folder: LocalMediaFolder) -> some View {
         HStack(alignment: .center, spacing: 14) {
+            if appState.isSidebarCollapsed {
+                Button {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                        appState.isSidebarCollapsed = false
+                    }
+                } label: {
+                    DonbyToolbarCircleView(systemName: "sidebar.left")
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .padding(.leading, appState.collapsedSidebarLeadingPadding)
+            }
+
             Button {
                 if !folderNavStack.isEmpty {
                     folderNavStack.removeLast()
@@ -213,7 +227,7 @@ extension FilesModuleView {
         let videoURL = URL(fileURLWithPath: video.path)
         let stem = videoURL.deletingPathExtension().lastPathComponent
         let thumbURL = videoURL.deletingLastPathComponent().appendingPathComponent("\(stem)-thumb.jpg")
-        let matchingOffline = downloadManager.entries.first { $0.localVideoFilePath == video.path && $0.status == .completed }
+        let matchingOffline = completedDownloadByVideoPath[video.path]
 
         return Button {
             if let offlineEntry = matchingOffline {
@@ -330,9 +344,18 @@ private struct LocalFileThumbView<Placeholder: View>: View {
             }
             let targetURL = url
             let key = cacheKey
+            let maxPixelSize = max(width, height) * 2.0
             let loaded: NSImage? = await Task.detached(priority: .utility) {
                 guard FileManager.default.fileExists(atPath: targetURL.path),
-                      let img = NSImage(contentsOf: targetURL) else { return nil }
+                      let src = CGImageSourceCreateWithURL(targetURL as CFURL, nil) else { return nil }
+                let opts: [CFString: Any] = [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceShouldCacheImmediately: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+                ]
+                guard let cgImg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+                let img = NSImage(cgImage: cgImg, size: NSSize(width: cgImg.width, height: cgImg.height))
                 ArtworkImageCache.shared.store(img, for: key)
                 return img
             }.value

@@ -110,6 +110,15 @@ public final class UHDModuleManager: ObservableObject {
             }
         }
         libraryModeByServer[server.id] = resolvedMode
+        appState.selectedLibrary = nil
+        appState.embyInlineSearchQuery = ""
+        appState.embyInlineSearchResults = []
+        appState.embyInlineSearchTruncated = false
+        appState.embyInlineSearchLastServerId = nil
+        appState.embyInlineSearchLastFetchedQuery = ""
+        appState.librarySearchQueryById.removeAll()
+        resetHomeShelves()
+        appState.isLoadingHome = true
         await appState.loadActiveServerHome(syncDomains: false)
     }
 

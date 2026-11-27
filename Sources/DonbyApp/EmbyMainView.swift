@@ -8,6 +8,9 @@ public struct EmbyMainView: View {
     @ObservedObject private var extCenter = DonbyAppExtensionCenter.shared
     @State private var isSearchingInline: Bool = false
     @State private var showViewOptionsPopover: Bool = false
+    @State private var cachedInlineSearchResults: [EmbyItem] = []
+    @State private var inlineFilterTask: Task<Void, Never>? = nil
+    @State private var isFilteringInlineLocal: Bool = false
 
     public init() {}
 
@@ -16,51 +19,49 @@ public struct EmbyMainView: View {
 
     public var body: some View {
         let appearance = appState.cardAppearance
-        Group {
-            if let library = appState.selectedLibrary {
-                MLibListView(library: library)
-            } else {
-                VStack(spacing: 0) {
-                    embyTopToolbar
+        let hasLibrary = (appState.selectedLibrary != nil)
+        let hasCachedHome = !appState.cachedHomeShelves.isEmpty || !appState.carouselItems.isEmpty
+        ZStack {
+            VStack(spacing: 0) {
+                embyTopToolbar
 
-                    if let server = appState.activeServer, server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 22) {
-                                unconfiguredServerHero(server: server)
-                                    .padding(.horizontal, 24)
-                            }
+                if let server = appState.activeServer, server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 22) {
+                            unconfiguredServerHero(server: server)
+                                .padding(.horizontal, 24)
+                        }
+                        .padding(.top, 12)
+                        .padding(.bottom, 36)
+                    }
+                } else if appState.isLoadingHome && appState.libraryViews.isEmpty && !hasCachedHome {
+                    VStack(spacing: 16) {
+                        ProgressView()
+                            .controlSize(.regular)
+                            .tint(appState.accentColor)
+                        Text("正在连接服务端并加载媒体库...")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color(white: 0.60))
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if !inlineSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 22) {
+                            inlineSearchResultsSection
+                                .padding(.horizontal, 24)
+                        }
+                        .padding(.top, 12)
+                        .padding(.bottom, 36)
+                    }
+                } else {
+                    if let err = appState.homeErrorMessage {
+                        errorBanner(message: err)
+                            .padding(.horizontal, 24)
                             .padding(.top, 12)
-                            .padding(.bottom, 36)
-                        }
-                    } else if let err = appState.homeErrorMessage {
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 22) {
-                                errorBanner(message: err)
-                                    .padding(.horizontal, 24)
-                            }
-                            .padding(.top, 12)
-                            .padding(.bottom, 36)
-                        }
-                    } else if appState.isLoadingHome && appState.libraryViews.isEmpty {
-                        VStack(spacing: 16) {
-                            ProgressView()
-                                .controlSize(.regular)
-                                .tint(appState.accentColor)
-                            Text("正在连接服务端并加载媒体库...")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(Color(white: 0.60))
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if !inlineSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 22) {
-                                inlineSearchResultsSection
-                                    .padding(.horizontal, 24)
-                            }
-                            .padding(.top, 12)
-                            .padding(.bottom, 36)
-                        }
-                    } else {
+                            .padding(.bottom, hasCachedHome ? 8 : 36)
+                    }
+
+                    if hasCachedHome || appState.homeErrorMessage == nil {
                         NativeEmbyHomeView(
                             carouselItems: appState.carouselItems,
                             showCarousel: appState.showCarousel,
@@ -72,44 +73,38 @@ public struct EmbyMainView: View {
                             onPlayItem: { item in Task { await appState.startPlayback(item: item) } },
                             onOpenLibrary: { lib in withAnimation(.easeOut(duration: 0.18)) { appState.selectedLibrary = lib } }
                         )
+                    } else {
+                        Spacer(minLength: 0)
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
-                .task(id: "\(appState.activeServer?.id.uuidString ?? "none")|\(appState.embyInlineSearchQuery)") {
-                    let q = appState.embyInlineSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !q.isEmpty,
-                          let server = appState.activeServer,
-                          !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                        appState.embyInlineSearchResults = []
-                        appState.embyInlineSearchLastFetchedQuery = ""
-                        isSearchingInline = false
-                        return
-                    }
-                    if q == appState.embyInlineSearchLastFetchedQuery && server.id == appState.embyInlineSearchLastServerId {
-                        isSearchingInline = false
-                        return
-                    }
-                    isSearchingInline = true
-                    try? await Task.sleep(nanoseconds: 250_000_000)
-                    guard !Task.isCancelled else { return }
-                    if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
-                        if let res = try? await ext.search(server: server, query: q, limit: 60),
-                           !Task.isCancelled {
-                            appState.embyInlineSearchResults = res.items
-                            appState.embyInlineSearchTruncated = res.truncated
-                            appState.embyInlineSearchLastServerId = server.id
-                            appState.embyInlineSearchLastFetchedQuery = q
-                        } else if !Task.isCancelled {
-                            appState.embyInlineSearchResults = []
-                            appState.embyInlineSearchTruncated = false
-                            appState.embyInlineSearchLastServerId = server.id
-                            appState.embyInlineSearchLastFetchedQuery = q
-                        }
-                    } else if let resp = try? await EmbyClient.shared.fetchItems(server: server, searchTerm: q, limit: 60),
-                              !Task.isCancelled {
-                        appState.embyInlineSearchResults = resp.items
-                        appState.embyInlineSearchTruncated = false
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+            .opacity(hasLibrary ? 0 : 1)
+            .allowsHitTesting(!hasLibrary)
+            .accessibilityHidden(hasLibrary)
+            .task(id: "\(appState.activeServer?.id.uuidString ?? "none")|\(appState.embyInlineSearchQuery)") {
+                let q = appState.embyInlineSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !q.isEmpty,
+                      let server = appState.activeServer,
+                      !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    appState.embyInlineSearchResults = []
+                    appState.embyInlineSearchLastFetchedQuery = ""
+                    isSearchingInline = false
+                    return
+                }
+                if q == appState.embyInlineSearchLastFetchedQuery && server.id == appState.embyInlineSearchLastServerId {
+                    isSearchingInline = false
+                    return
+                }
+                isSearchingInline = true
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard !Task.isCancelled else { return }
+                if let ext = DonbyMediaServiceRegistry.shared.provider(for: server.type) {
+                    if let res = try? await ext.search(server: server, query: q, limit: 60),
+                       !Task.isCancelled {
+                        appState.embyInlineSearchResults = res.items
+                        appState.embyInlineSearchTruncated = res.truncated
                         appState.embyInlineSearchLastServerId = server.id
                         appState.embyInlineSearchLastFetchedQuery = q
                     } else if !Task.isCancelled {
@@ -118,10 +113,29 @@ public struct EmbyMainView: View {
                         appState.embyInlineSearchLastServerId = server.id
                         appState.embyInlineSearchLastFetchedQuery = q
                     }
-                    if !Task.isCancelled {
-                        isSearchingInline = false
-                    }
+                } else if let resp = try? await EmbyClient.shared.fetchItems(server: server, searchTerm: q, limit: 60),
+                          !Task.isCancelled {
+                    appState.embyInlineSearchResults = resp.items
+                    appState.embyInlineSearchTruncated = false
+                    appState.embyInlineSearchLastServerId = server.id
+                    appState.embyInlineSearchLastFetchedQuery = q
+                } else if !Task.isCancelled {
+                    appState.embyInlineSearchResults = []
+                    appState.embyInlineSearchTruncated = false
+                    appState.embyInlineSearchLastServerId = server.id
+                    appState.embyInlineSearchLastFetchedQuery = q
                 }
+                if !Task.isCancelled {
+                    isSearchingInline = false
+                }
+            }
+
+            if let library = appState.selectedLibrary {
+                MLibListView(library: library)
+                    .id(library.id)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+                    .transition(.opacity)
             }
         }
     }
@@ -149,7 +163,7 @@ public struct EmbyMainView: View {
                         .font(.system(size: 15.5, weight: .bold))
                         .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                         .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
+                        .truncationMode(.tail)
 
                     if server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Button {
@@ -193,7 +207,11 @@ public struct EmbyMainView: View {
                         guard !appState.isLoadingHome else { return }
                         Task {
                             await appState.loadActiveServerHome(syncDomains: true)
-                            appState.showToast("已刷新首页并同步云端线路", icon: "checkmark.circle.fill")
+                            if appState.homeErrorMessage == nil {
+                                appState.showToast("已刷新首页并同步云端线路", icon: "checkmark.circle.fill")
+                            } else {
+                                appState.showToast("刷新失败，请检查网络连接或切换线路", icon: "exclamationmark.triangle.fill")
+                            }
                         }
                     }
                 ) { hovered in
@@ -268,26 +286,55 @@ public struct EmbyMainView: View {
         .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
     }
 
-    private var inlineSearchResults: [EmbyItem] {
+    private func scheduleInlineSearchResultsUpdate(debounceNanoseconds: UInt64) {
+        inlineFilterTask?.cancel()
         let q = inlineSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !q.isEmpty else { return [] }
-        let localMatches = appState.allLoadedMediaItems.filter { item in
-            item.name.lowercased().contains(q) ||
-            (item.originalTitle?.lowercased().contains(q) ?? false) ||
-            (item.overview?.lowercased().contains(q) ?? false)
+        guard !q.isEmpty else {
+            isFilteringInlineLocal = false
+            cachedInlineSearchResults = []
+            return
         }
-        var seen = Set<String>()
-        var list: [EmbyItem] = []
-        for item in (remoteInlineSearchResults + localMatches) where !seen.contains(item.id) {
-            seen.insert(item.id)
-            list.append(item)
+        isFilteringInlineLocal = true
+        inlineFilterTask = Task { @MainActor in
+            if debounceNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: debounceNanoseconds)
+                guard !Task.isCancelled else { return }
+            }
+            let currentQ = inlineSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard currentQ == q, !currentQ.isEmpty else {
+                if currentQ.isEmpty {
+                    isFilteringInlineLocal = false
+                    cachedInlineSearchResults = []
+                }
+                return
+            }
+            let remote = remoteInlineSearchResults
+            let loaded = appState.allLoadedMediaItems
+            let filtered = await Task.detached(priority: .userInitiated) {
+                let localMatches = loaded.filter { item in
+                    item.name.lowercased().contains(currentQ) ||
+                    (item.originalTitle?.lowercased().contains(currentQ) ?? false) ||
+                    (item.overview?.lowercased().contains(currentQ) ?? false)
+                }
+                var seen = Set<String>()
+                var list: [EmbyItem] = []
+                list.reserveCapacity(remote.count + localMatches.count)
+                for item in (remote + localMatches) where seen.insert(item.id).inserted {
+                    list.append(item)
+                }
+                return list
+            }.value
+            guard !Task.isCancelled,
+                  inlineSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == currentQ else {
+                return
+            }
+            cachedInlineSearchResults = filtered
+            isFilteringInlineLocal = false
         }
-        return list
     }
 
     private var inlineSearchResultsSection: some View {
-        let results = inlineSearchResults
-        let appearance = appState.cardAppearance
+        let results = cachedInlineSearchResults
         return VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 8) {
                 SectionHeaderView(
@@ -301,6 +348,9 @@ public struct EmbyMainView: View {
                 }
                 Spacer()
                 Button {
+                    inlineFilterTask?.cancel()
+                    isFilteringInlineLocal = false
+                    cachedInlineSearchResults = []
                     appState.embyInlineSearchQuery = ""
                     appState.embyInlineSearchResults = []
                     appState.embyInlineSearchLastFetchedQuery = ""
@@ -316,7 +366,7 @@ public struct EmbyMainView: View {
                 .buttonStyle(.plain)
             }
 
-            if results.isEmpty && !isSearchingInline {
+            if results.isEmpty && !isSearchingInline && !isFilteringInlineLocal {
                 VStack(spacing: 12) {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 32, weight: .light))
@@ -327,26 +377,48 @@ public struct EmbyMainView: View {
                 }
                 .frame(maxWidth: .infinity, minHeight: 180)
             } else {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 156, maximum: 180), spacing: 16)], alignment: .leading, spacing: 20) {
-                    ForEach(results) { item in
-                        PosterCardView(
-                            item: item,
-                            width: 152,
-                            appearance: appearance,
-                            onSelect: {
-                                appState.recordSearchHistory(appState.embyInlineSearchQuery)
-                                appState.openDetail(for: item)
-                            },
-                            onPlay: {
-                                appState.recordSearchHistory(appState.embyInlineSearchQuery)
-                                Task { await appState.startPlayback(item: item) }
-                            }
-                        )
-                        .equatable()
+                DonbyDownloadStatusObserver(store: appState.downloadStatusStore) { statusIndex in
+                    let appearance = appState.cardAppearance(downloadStatusIndex: statusIndex)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 156, maximum: 180), spacing: 16)], alignment: .leading, spacing: 20) {
+                        ForEach(results) { item in
+                            PosterCardView(
+                                item: item,
+                                width: 152,
+                                appearance: appearance,
+                                onSelect: {
+                                    appState.recordSearchHistory(appState.embyInlineSearchQuery)
+                                    appState.openDetail(for: item)
+                                },
+                                onPlay: {
+                                    appState.recordSearchHistory(appState.embyInlineSearchQuery)
+                                    Task { await appState.startPlayback(item: item) }
+                                }
+                            )
+                            .equatable()
+                        }
                     }
+                    .padding(.vertical, 4)
                 }
-                .padding(.vertical, 4)
             }
+        }
+        .onAppear {
+            scheduleInlineSearchResultsUpdate(debounceNanoseconds: 0)
+        }
+        .onDisappear {
+            inlineFilterTask?.cancel()
+            inlineFilterTask = nil
+            isFilteringInlineLocal = false
+            cachedInlineSearchResults = []
+        }
+        .donbyOnChange(of: inlineSearchText) { _ in
+            scheduleInlineSearchResultsUpdate(debounceNanoseconds: 150_000_000)
+        }
+        .donbyOnChange(of: remoteInlineSearchResults) { _ in
+            scheduleInlineSearchResultsUpdate(debounceNanoseconds: 0)
+        }
+        .donbyOnChange(of: appState.activeServer?.id) { _ in
+            cachedInlineSearchResults = []
+            scheduleInlineSearchResultsUpdate(debounceNanoseconds: 0)
         }
     }
 
