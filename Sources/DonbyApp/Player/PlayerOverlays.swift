@@ -43,6 +43,18 @@ struct PlayerLoadingOverlayView: View {
     }
 }
 
+struct PlayerBufferingOverlayHostView: View {
+    @ObservedObject var telemetry: PlayerHUDTelemetry
+    let bottomPadding: CGFloat
+
+    var body: some View {
+        PlayerBufferingOverlayView(
+            displayDownloadSpeedMBs: telemetry.displayDownloadSpeedMBs,
+            bottomPadding: bottomPadding
+        )
+    }
+}
+
 struct PlayerBufferingOverlayView: View {
     let displayDownloadSpeedMBs: Double
     let bottomPadding: CGFloat

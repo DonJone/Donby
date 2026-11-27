@@ -1,6 +1,6 @@
 # Module Map: Optional UHDNow Streaming Integration (`DonbyUHDModule` & `Modules/UHD`)
 
-> Last synced: `v2.1.3`. Load this doc for UHDNow REST/WebSocket protocol behavior, dual-mode artwork resolution, single-episode detail hydration, CDN line selection/speed test, Watch Party, and GPU Danmu.
+> Last synced: `v2.1.4`. Load this doc for UHDNow REST/WebSocket protocol behavior, dual-mode artwork resolution, single-episode detail hydration, CDN line selection/speed test, Watch Party, and GPU Danmu.
 
 ## 1. File Inventory (Target Split: `<= 800L` per file)
 - **`Sources/DonbyUHDModule/`** (Optional SwiftPM target; excluded cleanly when `DONBY_PURE=1`):

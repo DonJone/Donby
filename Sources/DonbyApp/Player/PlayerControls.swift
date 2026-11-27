@@ -3,6 +3,56 @@ import Foundation
 import DonbyCore
 import DonbyKernelC
 
+@MainActor
+final class PlayerHUDTelemetry: ObservableObject {
+    @Published var currentTime: Double = 0
+    @Published var bufferedAheadSeconds: Double = 0
+    @Published var duration: Double = 1
+    @Published var displayDownloadSpeedMBs: Double = 0
+    @Published var kernelStats = DKRuntimeStats()
+
+    func updateCurrentTime(_ value: Double, force: Bool = false) {
+        if force ? (currentTime != value) : (abs(currentTime - value) > 0.05) {
+            currentTime = value
+        }
+    }
+
+    func updateBufferedAhead(_ value: Double) {
+        if abs(bufferedAheadSeconds - value) > 0.25 {
+            bufferedAheadSeconds = value
+        }
+    }
+
+    func updateDuration(_ value: Double) {
+        if abs(duration - value) > 0.01 {
+            duration = value
+        }
+    }
+
+    func updateDownloadSpeed(_ value: Double) {
+        if value == 0.0 {
+            if displayDownloadSpeedMBs != 0.0 {
+                displayDownloadSpeedMBs = 0.0
+            }
+        } else if abs(displayDownloadSpeedMBs - value) > 0.05 || (value < 0.01 && displayDownloadSpeedMBs > 0) {
+            displayDownloadSpeedMBs = value
+        }
+    }
+
+    func updateKernelStats(_ freshStats: DKRuntimeStats, forceUpdate: Bool = false) {
+        if forceUpdate ||
+            kernelStats.width != freshStats.width ||
+            kernelStats.height != freshStats.height ||
+            kernelStats.is_hw_accelerated != freshStats.is_hw_accelerated ||
+            kernelStats.is_hdr != freshStats.is_hdr ||
+            kernelStats.is_dolby_vision != freshStats.is_dolby_vision ||
+            abs(kernelStats.fps - freshStats.fps) > 0.05 ||
+            abs(kernelStats.video_bitrate_mbps - freshStats.video_bitrate_mbps) > 0.1 {
+            kernelStats = freshStats
+        }
+    }
+}
+
 public enum PlayerDrawerTab: String, CaseIterable, Identifiable {
     case playlist = "播放列表"
     case tracks = "音轨与字幕"

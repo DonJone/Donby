@@ -5,18 +5,19 @@ import DonbyCore
 public struct RecordsView: View {
     @EnvironmentObject private var appState: AppState
     @State private var filterMode: String = "全部"
+    @State private var filteredRecords: [WatchRecordItem] = []
     @State private var showClearAlert: Bool = false
 
     public init() {}
 
-    private var filteredRecords: [WatchRecordItem] {
+    private func recomputeFilteredRecords() {
         var list = appState.watchHistory
         if filterMode == "Emby" {
             list = list.filter { $0.sourceType == "Emby" || $0.sourceType == "UHDNow" || $0.embyItemId != nil }
         } else if filterMode == "本地与直链" {
             list = list.filter { $0.embyItemId == nil && ($0.sourceType == "本地文件" || $0.sourceType == "网络直链" || $0.sourceType == "Local") }
         }
-        return list
+        filteredRecords = list
     }
 
     public var body: some View {
@@ -98,6 +99,15 @@ public struct RecordsView: View {
             }
         }
         .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+        .onAppear {
+            recomputeFilteredRecords()
+        }
+        .donbyOnChange(of: filterMode) { _ in
+            recomputeFilteredRecords()
+        }
+        .donbyOnChange(of: appState.watchHistory) { _ in
+            recomputeFilteredRecords()
+        }
         .alert("清除观看记录", isPresented: $showClearAlert) {
             Button("取消", role: .cancel) {}
             Button("确认清除全部", role: .destructive) {
@@ -133,7 +143,8 @@ public struct RecordsView: View {
             // Artwork / Poster Thumbnail
             RecordArtworkThumbnailView(
                 record: record,
-                server: appState.activeServer
+                server: appState.activeServer,
+                isLightMode: appState.isLightMode
             )
 
             // Info and Progress

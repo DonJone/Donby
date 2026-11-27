@@ -64,7 +64,8 @@ public struct EmbyMainView: View {
                         NativeEmbyHomeView(
                             carouselItems: appState.carouselItems,
                             showCarousel: appState.showCarousel,
-                            shelves: homeShelves,
+                            shelves: appState.cachedHomeShelves,
+                            homeRevision: appState.homeRevision,
                             appearance: appearance,
                             appState: appState,
                             onSelectItem: { item in appState.openDetail(for: item) },
@@ -123,85 +124,6 @@ public struct EmbyMainView: View {
                 }
             }
         }
-    }
-
-    private var homeShelves: [HomeShelfSection] {
-        var result: [HomeShelfSection] = []
-        if appState.showMyMedia && !appState.libraryViews.isEmpty {
-            var counts: [String: Int] = [:]
-            for lib in appState.libraryViews {
-                if let count = lib.childCount ?? appState.latestByLibrary[lib.id]?.count {
-                    counts[lib.id] = count
-                }
-            }
-            result.append(HomeShelfSection(
-                id: "my_media",
-                title: "我的媒体",
-                kind: .library,
-                items: appState.libraryViews,
-                countsByLibrary: counts
-            ))
-        }
-        if appState.showContinueWatching {
-            var continueItems = appState.resumeItems
-            if !appState.nextUpItems.isEmpty {
-                var seenIds = Set(continueItems.map(\.id))
-                var seenSeriesIds = Set(continueItems.compactMap { item -> String? in
-                    if let sid = item.seriesId, !sid.isEmpty { return sid }
-                    return item.isSeries ? item.id : nil
-                })
-                for candidate in appState.nextUpItems {
-                    guard seenIds.insert(candidate.id).inserted else { continue }
-                    if let sid = candidate.seriesId, !sid.isEmpty {
-                        guard seenSeriesIds.insert(sid).inserted else { continue }
-                    }
-                    continueItems.append(candidate)
-                }
-            }
-            if !continueItems.isEmpty {
-                result.append(HomeShelfSection(
-                    id: "continue_watching",
-                    title: "继续观看",
-                    kind: .landscape,
-                    items: continueItems
-                ))
-            }
-        }
-        if appState.showFavorites && !appState.favoriteItems.isEmpty {
-            result.append(HomeShelfSection(
-                id: "my_favorites",
-                title: "我的收藏",
-                kind: .poster,
-                items: appState.favoriteItems
-            ))
-        }
-        if let extShelves = extCenter.plugin?.homeShelves(for: appState.activeServer) {
-            result.append(contentsOf: extShelves)
-        }
-        let allowAnimeOnHome = HomeHeroCurator.isAnimeFocusedServer(
-            serverName: appState.activeServer?.name,
-            libraryViews: appState.libraryViews,
-            explicitAnimeMode: appState.activeServer.flatMap { extCenter.plugin?.isAnimeModeActive(for: $0) }
-        )
-        for lib in appState.libraryViews {
-            if !allowAnimeOnHome && HomeHeroCurator.isAnimeLibraryName(lib.name) {
-                continue
-            }
-            if let items = appState.latestByLibrary[lib.id], !items.isEmpty {
-                let displayItems = allowAnimeOnHome
-                    ? items
-                    : items.filter { !HomeHeroCurator.isAnimeOrAnimation($0, libraryName: lib.name) }
-                guard !displayItems.isEmpty else { continue }
-                result.append(HomeShelfSection(
-                    id: "lib_\(lib.id)",
-                    title: lib.name,
-                    kind: .poster,
-                    items: displayItems,
-                    library: lib
-                ))
-            }
-        }
-        return result
     }
 
     private var embyTopToolbar: some View {

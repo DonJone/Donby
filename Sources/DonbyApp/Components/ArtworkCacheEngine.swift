@@ -232,13 +232,13 @@ public final class ArtworkImageCache: @unchecked Sendable {
         let options: [CFString: Any]
         if isPreThumb || maxPixelSize >= 2400 {
             options = [
-                kCGImageSourceShouldCacheImmediately: false,
+                kCGImageSourceShouldCacheImmediately: true,
                 kCGImageSourceShouldCache: false
             ]
         } else {
             options = [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceShouldCacheImmediately: false,
+                kCGImageSourceShouldCacheImmediately: true,
                 kCGImageSourceShouldCache: false,
                 kCGImageSourceCreateThumbnailWithTransform: true,
                 kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
@@ -263,6 +263,24 @@ public final class ArtworkImageCache: @unchecked Sendable {
         let h = image.height
         guard w > 0, h > 0 else { return image }
 
+        let (targetCS, targetICC): (CGColorSpace, Data?) = {
+            colorSpaceLock.lock()
+            defer { colorSpaceLock.unlock() }
+            return (_displayColorSpace, _displayColorSpaceICC)
+        }()
+
+        if image.bitsPerComponent == 8 && image.bitsPerPixel == 32 {
+            let alpha = image.alphaInfo
+            let byteOrder = image.bitmapInfo.intersection(.byteOrderMask)
+            let isLittleFirst = (alpha == .noneSkipFirst || alpha == .premultipliedFirst) && byteOrder == .byteOrder32Little
+            let isStandard32bpp = (alpha == .noneSkipLast || alpha == .premultipliedLast) && (byteOrder == .byteOrder32Big || byteOrder.isEmpty)
+            if isLittleFirst || isStandard32bpp,
+               let imgCS = image.colorSpace,
+               imgCS == targetCS || (targetICC != nil && (imgCS.copyICCData() as Data?) == targetICC) {
+                return image
+            }
+        }
+
         let hasAlpha: Bool = {
             switch image.alphaInfo {
             case .first, .last, .premultipliedFirst, .premultipliedLast, .alphaOnly:
@@ -280,7 +298,7 @@ public final class ArtworkImageCache: @unchecked Sendable {
             height: h,
             bitsPerComponent: 8,
             bytesPerRow: 0,
-            space: activeDisplayColorSpace,
+            space: targetCS,
             bitmapInfo: bitmapInfo
         ) else {
             return image

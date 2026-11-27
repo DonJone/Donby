@@ -6,9 +6,10 @@ import DonbyKernelC
 
 public struct DetailView: View {
     @EnvironmentObject var appState: AppState
-    @ObservedObject var downloadManager = DonbyDownloadManager.shared
     public let initialItem: EmbyItem
     public let preferOfflineFocus: Bool
+
+    @State var observedDownloadIndex: DonbyDownloadStatusIndex = DonbyDownloadManager.shared.statusIndex
 
     @State var item: EmbyItem
     @State var selectedSourceId: String = ""
@@ -182,7 +183,11 @@ public struct DetailView: View {
         .task(id: detailRatingsTaskKey) {
             await loadDetailMultiPlatformRatings()
         }
-        .task(id: downloadManager.statusIndex) {
+        .onReceive(DonbyDownloadManager.shared.$statusIndex) { nextIndex in
+            guard isDownloadIndexRelevant(nextIndex) else { return }
+            observedDownloadIndex = nextIndex
+        }
+        .task(id: detailCompletedDownloadSignature) {
             await refreshOfflineAndCacheSnapshots()
         }
         .onDisappear {
@@ -191,6 +196,36 @@ public struct DetailView: View {
         .task(id: "\(item.id)|\(heroTargetEpisode?.id ?? "")|\(selectedSourceId)|\(Int(effectivePlayButtonStartSeconds))|\(isLoadingDetails)|\(appState.detailPreloadEnabled)|\(appState.detailPreloadSeconds)") {
             await runDetailPrewarmAndPreload()
         }
+    }
+
+    private var detailCompletedDownloadSignature: String {
+        let itemDone = observedDownloadIndex.completedItemIds.contains(item.id)
+        let initDone = observedDownloadIndex.completedItemIds.contains(initialItem.id)
+        let seriesCnt = observedDownloadIndex.downloadedCount(forSeries: item)
+        let epDoneCount = episodes.reduce(0) { $0 + (observedDownloadIndex.completedItemIds.contains($1.id) ? 1 : 0) }
+        return "\(initialItem.id)|\(itemDone)|\(initDone)|\(seriesCnt)|\(epDoneCount)"
+    }
+
+    private func isDownloadIndexRelevant(_ nextIndex: DonbyDownloadStatusIndex) -> Bool {
+        if item.isSeries || initialItem.isSeries {
+            if observedDownloadIndex.downloadedCount(forSeries: item) != nextIndex.downloadedCount(forSeries: item) ||
+               observedDownloadIndex.downloadedCount(forSeries: initialItem) != nextIndex.downloadedCount(forSeries: initialItem) {
+                return true
+            }
+        }
+        if observedDownloadIndex.completedItemIds.contains(item.id) != nextIndex.completedItemIds.contains(item.id) ||
+           observedDownloadIndex.inProgressByItemId[item.id] != nextIndex.inProgressByItemId[item.id] ||
+           observedDownloadIndex.completedItemIds.contains(initialItem.id) != nextIndex.completedItemIds.contains(initialItem.id) ||
+           observedDownloadIndex.inProgressByItemId[initialItem.id] != nextIndex.inProgressByItemId[initialItem.id] {
+            return true
+        }
+        for ep in episodes {
+            if observedDownloadIndex.completedItemIds.contains(ep.id) != nextIndex.completedItemIds.contains(ep.id) ||
+               observedDownloadIndex.inProgressByItemId[ep.id] != nextIndex.inProgressByItemId[ep.id] {
+                return true
+            }
+        }
+        return false
     }
 
     private var floatingTopNavBar: some View {

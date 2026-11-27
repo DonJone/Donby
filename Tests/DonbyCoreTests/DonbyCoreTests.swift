@@ -8,7 +8,7 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "2.1.3")
+        #expect(DonbyAppInfo.fallbackVersion == "2.1.4")
     }
 
     @Test func resolvedPlaybackResourceLocalOrOfflineDetection() {
@@ -772,5 +772,21 @@ struct DonbyCoreTests {
         #expect(!TurboStreamingSessionHub.isLikelyNonMediaErrorContentType("video/x-matroska"))
         #expect(!TurboStreamingSessionHub.isLikelyNonMediaErrorContentType("application/octet-stream"))
         #expect(!TurboStreamingSessionHub.isLikelyNonMediaErrorContentType(""))
+    }
+
+    @Test func downloadStatusIndexQuantizationAndEqualityStability() throws {
+        let q: (Double) -> Double = { (max(0.0, min(1.0, $0)) * 100.0).rounded() / 100.0 }
+        let a = DonbyDownloadStatusIndex(revision: 3, completedItemIds: ["m1"], inProgressByItemId: ["m2": q(0.421)], completedCountBySeriesId: ["s1": 2], completedCountBySeriesName: ["show": 2])
+        let b = DonbyDownloadStatusIndex(revision: 3, completedItemIds: ["m1"], inProgressByItemId: ["m2": q(0.424)], completedCountBySeriesId: ["s1": 2], completedCountBySeriesName: ["show": 2])
+        let c = DonbyDownloadStatusIndex(revision: 4, completedItemIds: ["m1"], inProgressByItemId: ["m2": q(0.429)], completedCountBySeriesId: ["s1": 2], completedCountBySeriesName: ["show": 2])
+        #expect(a == b)
+        #expect(a != c)
+        let mk: (String, String, String) throws -> EmbyItem = { id, name, type in
+            try JSONDecoder().decode(EmbyItem.self, from: Data(#"{"Id":"\#(id)","Name":"\#(name)","Type":"\#(type)"}"#.utf8))
+        }
+        #expect(a.badgeText(for: try mk("m1", "M1", "Movie")) == "已下载")
+        #expect(a.badgeText(for: try mk("m2", "M2", "Movie")) == "42%")
+        #expect(c.badgeText(for: try mk("m2", "M2", "Movie")) == "43%")
+        #expect(a.badgeText(for: try mk("s1", "Show", "Series")) == "已下2集")
     }
 }

@@ -261,6 +261,12 @@ public struct DKMetalVideoView: NSViewRepresentable {
         private var maxTickGapMs: Double = 0
         private var _onFirstFrameRendered: (() -> Void)?
         private var _onRenderDiagnostic: ((String) -> Void)?
+        private var lastViewportVideoW: Int = 0
+        private var lastViewportVideoH: Int = 0
+        private var lastViewportDrawableW: CGFloat = 0
+        private var lastViewportDrawableH: CGFloat = 0
+        private var lastViewportMetrics: (canvasW: Int32, canvasH: Int32, marginT: Int32, marginB: Int32, marginL: Int32, marginR: Int32) = (0, 0, 0, 0, 0, 0)
+        private let subtitleSyncBox = SubtitleSyncBox()
         public var onRenderDiagnostic: ((String) -> Void)? {
             get {
                 playerLock.lock()
@@ -287,14 +293,9 @@ public struct DKMetalVideoView: NSViewRepresentable {
         }
 
         private final class SubtitleSyncBox {
-            unowned let view: DKMetalLayerView
-            var updatedSerial: UInt64
+            weak var view: DKMetalLayerView?
+            var updatedSerial: UInt64 = 0
             var changed: Bool = false
-
-            init(view: DKMetalLayerView, serial: UInt64) {
-                self.view = view
-                self.updatedSerial = serial
-            }
         }
 
         public func startDisplayLink(for view: DKMetalLayerView, player: OpaquePointer?) {
@@ -304,6 +305,11 @@ public struct DKMetalVideoView: NSViewRepresentable {
             self.lastPts = -1.0
             self.lastBufferPtr = nil
             self.lastSubSerial = UInt64.max
+            self.lastViewportVideoW = 0
+            self.lastViewportVideoH = 0
+            self.lastViewportDrawableW = 0
+            self.lastViewportDrawableH = 0
+            self.lastViewportMetrics = (0, 0, 0, 0, 0, 0)
             self._player = player
             self.didNotifyFirstFrame = false
             self.firstFrameRenderUptime = 0
@@ -332,6 +338,11 @@ public struct DKMetalVideoView: NSViewRepresentable {
             lastPts = -1.0
             lastBufferPtr = nil
             lastSubSerial = UInt64.max
+            lastViewportVideoW = 0
+            lastViewportVideoH = 0
+            lastViewportDrawableW = 0
+            lastViewportDrawableH = 0
+            lastViewportMetrics = (0, 0, 0, 0, 0, 0)
             didNotifyFirstFrame = false
             firstFrameRenderUptime = 0
             lastPresentedFrameUptime = 0
@@ -359,6 +370,12 @@ public struct DKMetalVideoView: NSViewRepresentable {
             lastPts = -1.0
             lastBufferPtr = nil
             lastSubSerial = UInt64.max
+            lastViewportVideoW = 0
+            lastViewportVideoH = 0
+            lastViewportDrawableW = 0
+            lastViewportDrawableH = 0
+            lastViewportMetrics = (0, 0, 0, 0, 0, 0)
+            subtitleSyncBox.view = nil
             playerLock.unlock()
         }
 
@@ -411,23 +428,41 @@ public struct DKMetalVideoView: NSViewRepresentable {
             let subClockPts = masterPos > 0 ? masterPos : max(0.0, pts)
             let videoW = max(640, CVPixelBufferGetWidth(pixbuf))
             let videoH = max(360, CVPixelBufferGetHeight(pixbuf))
-            let vp = v.subtitleViewportMetrics(videoWidth: videoW, videoHeight: videoH)
-            dk_player_set_subtitle_viewport(p, vp.canvasW, vp.canvasH, Int32(videoW), Int32(videoH), vp.marginT, vp.marginB, vp.marginL, vp.marginR)
-            let syncBox = SubtitleSyncBox(view: v, serial: prevSubSerial)
-            let boxPtr = Unmanaged.passUnretained(syncBox).toOpaque()
+            let drawSize = v.currentDrawableSize
+            playerLock.lock()
+            let vpChanged = (videoW != lastViewportVideoW || videoH != lastViewportVideoH || drawSize.width != lastViewportDrawableW || drawSize.height != lastViewportDrawableH)
+            var vp = lastViewportMetrics
+            playerLock.unlock()
+            if vpChanged {
+                vp = v.subtitleViewportMetrics(videoWidth: videoW, videoHeight: videoH)
+                dk_player_set_subtitle_viewport(p, vp.canvasW, vp.canvasH, Int32(videoW), Int32(videoH), vp.marginT, vp.marginB, vp.marginL, vp.marginR)
+                playerLock.lock()
+                if _player == p {
+                    lastViewportVideoW = videoW
+                    lastViewportVideoH = videoH
+                    lastViewportDrawableW = drawSize.width
+                    lastViewportDrawableH = drawSize.height
+                    lastViewportMetrics = vp
+                }
+                playerLock.unlock()
+            }
+            subtitleSyncBox.view = v
+            subtitleSyncBox.updatedSerial = prevSubSerial
+            subtitleSyncBox.changed = false
+            let boxPtr = Unmanaged.passUnretained(subtitleSyncBox).toOpaque()
             dk_player_sync_subtitle_rgba(p, subClockPts, vp.canvasW, vp.canvasH, prevSubSerial, { rgba, w, h, serial, ctx in
                 guard let ctx else { return }
                 let box = Unmanaged<SubtitleSyncBox>.fromOpaque(ctx).takeUnretainedValue()
                 box.updatedSerial = serial
                 box.changed = true
                 if let rgba, w > 0, h > 0 {
-                    box.view.updateSubtitleOverlay(rgbaPtr: rgba, width: Int(w), height: Int(h))
+                    box.view?.updateSubtitleOverlay(rgbaPtr: rgba, width: Int(w), height: Int(h))
                 } else {
-                    box.view.updateSubtitleOverlay(rgbaPtr: nil, width: 0, height: 0)
+                    box.view?.updateSubtitleOverlay(rgbaPtr: nil, width: 0, height: 0)
                 }
             }, boxPtr)
             let tSub = ProcessInfo.processInfo.systemUptime
-            let subtitleChanged = syncBox.changed
+            let subtitleChanged = subtitleSyncBox.changed
             if subtitleChanged {
                 var by0: Int32 = 0
                 var by1: Int32 = 0
@@ -484,7 +519,7 @@ public struct DKMetalVideoView: NSViewRepresentable {
                     }
                     lastPts = pts
                     lastBufferPtr = bufPtr
-                    lastSubSerial = syncBox.updatedSerial
+                    lastSubSerial = subtitleSyncBox.updatedSerial
                     if !didNotifyFirstFrame {
                         didNotifyFirstFrame = true
                         notifyKernelFirstFrame = true

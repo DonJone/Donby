@@ -20,8 +20,15 @@ public struct DonbyVisualEffectView: NSViewRepresentable {
     }
 
     public func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
-        nsView.material = material
-        nsView.blendingMode = blendingMode
+        if nsView.material != material {
+            nsView.material = material
+        }
+        if nsView.blendingMode != blendingMode {
+            nsView.blendingMode = blendingMode
+        }
+        if nsView.state != .active {
+            nsView.state = .active
+        }
     }
 
     public func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSVisualEffectView, context: Context) -> CGSize? {
@@ -217,16 +224,15 @@ public struct LiquidGlassCapsuleButton: View {
                 if let tint {
                     Capsule(style: .continuous).fill(tint)
                 } else {
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule(style: .continuous)
-                                .fill(Color.white.opacity(isHovered ? 1.0 : 0.95))
+                    let clampedProgress = min(1.0, max(0.0, progressFraction))
+                    ZStack(alignment: .leading) {
+                        Capsule(style: .continuous)
+                            .fill(Color.white.opacity(isHovered ? 1.0 : 0.95))
 
-                            if progressFraction > 0 {
-                                Rectangle()
-                                    .fill(Color.black.opacity(0.08))
-                                    .frame(width: geo.size.width * min(1.0, max(0.0, progressFraction)))
-                            }
+                        if clampedProgress > 0 {
+                            Rectangle()
+                                .fill(Color.black.opacity(0.08))
+                                .scaleEffect(x: clampedProgress, y: 1, anchor: .leading)
                         }
                     }
                     .clipShape(Capsule(style: .continuous))

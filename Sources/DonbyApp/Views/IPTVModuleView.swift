@@ -6,6 +6,7 @@ public struct IPTVModuleView: View {
     @EnvironmentObject private var appState: AppState
     @State private var selectedGroup: String = "全部"
     @State private var searchText: String = ""
+    @State private var filteredChannels: [IPTVChannelItem] = []
     @State private var showAddChannelSheet: Bool = false
     @State private var showImportM3USheet: Bool = false
 
@@ -18,7 +19,7 @@ public struct IPTVModuleView: View {
 
     public init() {}
 
-    private var filteredChannels: [IPTVChannelItem] {
+    private func recomputeFilteredChannels() {
         var list = appState.iptvChannels
         if selectedGroup != "全部" {
             list = list.filter { $0.group == selectedGroup }
@@ -27,7 +28,7 @@ public struct IPTVModuleView: View {
         if !q.isEmpty {
             list = list.filter { $0.name.lowercased().contains(q) || $0.group.lowercased().contains(q) || $0.urlString.lowercased().contains(q) }
         }
-        return list
+        filteredChannels = list
     }
 
     public var body: some View {
@@ -145,6 +146,18 @@ public struct IPTVModuleView: View {
             }
         }
         .background(DonbyGlassPalette.canvas(isLight: appState.isLightMode))
+        .onAppear {
+            recomputeFilteredChannels()
+        }
+        .donbyOnChange(of: selectedGroup) { _ in
+            recomputeFilteredChannels()
+        }
+        .donbyOnChange(of: searchText) { _ in
+            recomputeFilteredChannels()
+        }
+        .donbyOnChange(of: appState.iptvChannels.map { "\($0.id)|\($0.name)|\($0.group)|\($0.urlString)" }) { _ in
+            recomputeFilteredChannels()
+        }
         .sheet(isPresented: $showAddChannelSheet) {
             addChannelSheetContent
         }

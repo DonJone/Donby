@@ -119,15 +119,11 @@ public struct MainWindowView: View {
                 .zIndex(95)
             }
 
-            if let toast = appState.toastMessage {
-                ToastBannerView(
-                    toast: toast,
-                    isLightMode: appState.activePlayback == nil && appState.isLightMode
-                )
-                .padding(.bottom, 26)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-                .zIndex(100)
-            }
+            DonbyToastOverlayView(
+                store: appState.toastStore,
+                isLightMode: appState.activePlayback == nil && appState.isLightMode
+            )
+            .zIndex(100)
         }
         .task(id: appState.isStartingPlayback) {
             if appState.isStartingPlayback {
@@ -501,6 +497,19 @@ private struct SidebarServerItemButton: View {
         .onHover { isHovered = $0 }
         .contextMenu {
             ServerContextMenuItems(server: server)
+        }
+    }
+}
+
+private struct DonbyToastOverlayView: View {
+    @ObservedObject var store: DonbyToastStore
+    let isLightMode: Bool
+
+    var body: some View {
+        if let toast = store.message {
+            ToastBannerView(toast: toast, isLightMode: isLightMode)
+                .padding(.bottom, 26)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }
 }

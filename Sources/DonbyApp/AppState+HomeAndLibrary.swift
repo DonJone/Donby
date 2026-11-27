@@ -731,8 +731,8 @@ extension AppState {
 // MARK: - Multi-Tier Server Home Cache Store
 public final class ServerHomeCacheStore {
     public static let shared = ServerHomeCacheStore()
-    private var inMemorySnapshots: [UUID: ServerHomeSnapshot] = [:]
-    private let cacheDirectoryURL: URL
+    var inMemorySnapshots: [UUID: ServerHomeSnapshot] = [:]
+    let cacheDirectoryURL: URL
 
     public struct ServerHomeSnapshot: Codable {
         public var libraryViews: [EmbyItem]

@@ -4,15 +4,15 @@
 
 ## 1. Component Responsibilities
 - `PlayerView.swift`: Root `PlayerView` shell, `init(session:)`, `DKMetalVideoView` (`onFirstFrameRendered` + `onRenderDiagnostic` `[Render]` logging), gesture/`NSEvent` monitor wiring, `showControlsAndResetTimer()`, `syncVisiblePlaybackStateFromBox()`, `adjustVolume()`.
-- `PlayerControls.swift`: `PlayerDrawerTab`, `TracksDrawerSection`, `PlayerAutoHideBox`, `OpeningPlayerBox`, `MiniVolumeSlider`, `PlayerConsoleIconButton`, `PlayerCircleMenu`, `PlayerTimelineScrubberView`.
+- `PlayerControls.swift`: `PlayerDrawerTab`, `TracksDrawerSection`, `PlayerHUDTelemetry` (quantized HUD telemetry isolating leaf observers `PlayerTopSpeedView`, `PlayerSpecBadgeHostView`, `PlayerBottomControlBarView`, `PlayerBufferingOverlayHostView`, `PlayerMediaInfoDrawerContentView` from `PlayerView.body`), `PlayerAutoHideBox`, `OpeningPlayerBox`, `MiniVolumeSlider`, `PlayerConsoleIconButton`, `PlayerCircleMenu`, `PlayerTimelineScrubberView`.
 - `PlayerOverlays.swift`: Stateless overlays:
   - `PlayerLoadingOverlayView`: Startup loading pill (`"正在加载..."` + Cancel); stays visible until `DKMetalVideoView.onFirstFrameRendered` sets `hasRenderedFirstFrame = true` (prevents black-screen flash between `dk_open` and first presented frame).
   - `PlayerBufferingOverlayView`: Delayed rebuffer pill (`"正在缓冲..."` + live MB/s); only appears after `>= 0.48s` of continuous stall so brief micro-stalls do not flash UI chrome.
   - `PlayerErrorOverlayView`: Failure card with Retry, Switch Line, Open Logs, Exit actions.
   - `PlayerSkipBannerView`: Floating intro/outro skip pill anchored above `bottomControlBar`.
 - `PlayerView+HUD.swift`: `topOSDBar` (back/title, resolution/codec/HDR spec badges, `DonbyPlayerCompanion.makeTopBarControls`, drawer triggers) and `bottomControlBar` (`PlayerTimelineScrubberView`, play/pause, adjacent episode buttons, `MiniVolumeSlider`, and 5 `PlayerCircleMenu` popups).
-- `PlayerView+Drawers.swift`: `rightDrawerPanel(tab:)` (`.playlist`, `.tracks` 2-section segmented pill `轨道` | `样式与对齐` via `PlayerDrawerSegmentedPill`, `.mediaInfo`, `.watchParty`).
-- `PlayerSubtitleStyleDrawerView.swift`: Standalone `View` owning `@State private var showMoreSubtitleOptions`; dragging size/position sliders sets `isAdjustingSubtitleLayout = true` to fade the drawer (`0.42` opacity) and suspend control-bar lift while aligning subtitles against the live frame.
+- `PlayerView+Drawers.swift`: `rightDrawerPanel(tab:)` (`.playlist` with `LazyVStack`, `.tracks` 2-section segmented pill `轨道` | `样式与对齐` via `PlayerDrawerSegmentedPill`, `.mediaInfo`, `.watchParty`).
+- `PlayerSubtitleStyleDrawerView.swift`: Standalone `View` owning `@State private var showMoreSubtitleOptions` and live-preview `draftScale`/`draftVerticalPos` (calling `onLivePreviewStyle` during drag and committing on `onEditingChanged(false)`).
 
 ## 2. Critical UI Invariants (DO NOT BREAK)
 1. **Menu Flicker Prevention (`v1.4.7`, `v1.4.15`)**:

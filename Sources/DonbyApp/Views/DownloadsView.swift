@@ -600,7 +600,7 @@ public struct DownloadsView: View {
     }
 
     private var cachedAssetsSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        LazyVStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Text("可转存的播放缓存 (\(cachedAssets.count))")
                     .font(.system(size: 13.5, weight: .bold))

@@ -237,6 +237,9 @@ enum NativeCardLayerCache {
             symbol.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1.0)
         }
         if let rendered {
+            if symbolCGCache.count >= 256 {
+                symbolCGCache.removeAll(keepingCapacity: true)
+            }
             symbolCGCache[cacheKey] = rendered
         }
         let scale = min(targetRect.width / symbolSize.width, targetRect.height / symbolSize.height)
@@ -275,6 +278,13 @@ enum NativeCardLayerCache {
         isLight ? filmPlaceholderLightImage : filmPlaceholderDarkImage
     }
 
+    private static func storeIcon(_ image: CGImage, forKey key: String) {
+        if iconCache.count >= 256 {
+            iconCache.removeAll(keepingCapacity: true)
+        }
+        iconCache[key] = image
+    }
+
     static func favoriteHeartImage(accentColor: NSColor, colorKey overrideKey: String? = nil) -> CGImage? {
         let key = "fav_heart|\(overrideKey ?? colorKey(accentColor))"
         if let cached = iconCache[key] { return cached }
@@ -287,7 +297,7 @@ enum NativeCardLayerCache {
                 in: rect
             )
         }
-        if let image { iconCache[key] = image }
+        if let image { storeIcon(image, forKey: key) }
         return image
     }
 
@@ -298,7 +308,7 @@ enum NativeCardLayerCache {
         let image = renderCGImage(widthPt: 22, heightPt: 22) { _, rect in
             drawTintedSymbol(name: "info.circle", pointSize: 13.5, weight: .regular, color: color, in: rect.insetBy(dx: 3, dy: 3))
         }
-        if let image { iconCache[key] = image }
+        if let image { storeIcon(image, forKey: key) }
         return image
     }
 
@@ -320,7 +330,7 @@ enum NativeCardLayerCache {
             )
             drawTintedSymbol(name: "play.fill", pointSize: iconSize, weight: .bold, color: .white, in: iconRect)
         }
-        if let image { iconCache[key] = image }
+        if let image { storeIcon(image, forKey: key) }
         return image
     }
 
@@ -343,7 +353,7 @@ enum NativeCardLayerCache {
                 ctx: ctx
             )
         }
-        if let image { iconCache[key] = image }
+        if let image { storeIcon(image, forKey: key) }
         return image
     }
 
@@ -366,7 +376,7 @@ enum NativeCardLayerCache {
         if let cached = pillCache[cacheKey] {
             return cached
         }
-        if pillCache.count > 384 {
+        if pillCache.count >= 512 {
             pillCache.removeAll(keepingCapacity: true)
         }
 

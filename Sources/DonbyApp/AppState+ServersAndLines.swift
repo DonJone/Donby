@@ -178,10 +178,11 @@ extension AppState {
             return
         }
         activeSyncDomainsCount += 1
-        isSyncingDomains = true
+        if !isSyncingDomains { isSyncingDomains = true }
         defer {
             activeSyncDomainsCount = max(0, activeSyncDomainsCount - 1)
-            isSyncingDomains = activeSyncDomainsCount > 0
+            let next = activeSyncDomainsCount > 0
+            if isSyncingDomains != next { isSyncingDomains = next }
         }
 
         if isUsingUHDExtension(for: server), let ext = DonbyAppExtensionCenter.shared.plugin {
@@ -244,10 +245,11 @@ extension AppState {
         let server = servers[idx]
         guard !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         activePingLinesCount += 1
-        isPingingLines = true
+        if !isPingingLines { isPingingLines = true }
         defer {
             activePingLinesCount = max(0, activePingLinesCount - 1)
-            isPingingLines = activePingLinesCount > 0
+            let next = activePingLinesCount > 0
+            if isPingingLines != next { isPingingLines = next }
         }
 
         let mainURL = server.mainLineURL

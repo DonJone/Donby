@@ -94,7 +94,7 @@ extension PlayerView {
             ScrollView(showsIndicators: false) {
                 switch tab {
                 case .playlist:
-                    VStack(alignment: .leading, spacing: 8) {
+                    LazyVStack(alignment: .leading, spacing: 8) {
                         ForEach(Array(session.episodesQueue.enumerated()), id: \.offset) { _, ep in
                             let isCurrent = ep.id == currentItem.id
                             Button { switchToEpisode(ep) } label: {
@@ -317,6 +317,9 @@ extension PlayerView {
                                 onAutoAlignDual: { runAutoAlignDualSubtitles() },
                                 onUndoAlign: { undoLastSubtitleAlignment() },
                                 onResetScale: { resetSecondarySubtitleTimeScale() },
+                                onLivePreviewStyle: { preview in
+                                    applyKernelSubtitleStyle(styleOverride: preview)
+                                },
                                 drawerDelayStepButton: { label, action in
                                     AnyView(drawerDelayStepButton(label, action: action))
                                 }
@@ -325,62 +328,15 @@ extension PlayerView {
                     }
 
                 case .mediaInfo:
-                    VStack(alignment: .leading, spacing: 10) {
-                        drawerGlassCard {
-                            osdInfoRow("解码方式", kernelStats.is_hw_accelerated ? "硬件解码" : "软件解码")
-                            osdInfoRow("动态范围", kernelStats.is_dolby_vision ? "Dolby Vision" : (kernelStats.is_hdr ? "HDR10" : "SDR"))
-                            if !currentResource.isLocalOrOfflineMedia {
-                                osdInfoRow("当前速率", String(format: "%.1f MB/s", max(0.0, displayDownloadSpeedMBs)))
-                            }
-                            osdInfoRow("缓冲时长", String(format: "+%.1f 秒", bufferedAheadSeconds))
-                            osdInfoRow("预读缓存", "\(kernelStats.cached_bytes / 1024 / 1024) MB")
-                            osdInfoRow(
-                                "加载方式",
-                                currentResource.isLocalOrOfflineMedia
-                                    ? "本地离线文件"
-                                    : (activeTurboHandle != nil ? "多线程并发 (\(appState.effectiveConnectionBudget(for: session.server)) 线程)" : "顺序读取")
-                            )
-                            osdInfoRow("分辨率", "\(kernelStats.width) × \(kernelStats.height)")
-                            osdInfoRow("帧率", String(format: "%.3f fps", kernelStats.fps))
-                            osdInfoRow("视频编码", Self.cString(from: kernelStats.video_codec))
-                            osdInfoRow("音频编码", Self.cString(from: kernelStats.audio_codec))
-                            osdInfoRow("播放线路", session.server.activeLineName)
-                        }
-
-                        Button {
-                            exportRedactedDiagnostics()
-                        } label: {
-                            HStack {
-                                Image(systemName: "doc.on.clipboard")
-                                Text("复制脱敏诊断报告")
-                                Spacer()
-                                Image(systemName: "checkmark.shield").font(.system(size: 11)).foregroundStyle(.green)
-                            }
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.white)
-                            .padding(11)
-                            .background(drawerRowBackground(isSelected: false))
-                            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-
-                        Button {
-                            showLogSheet = true
-                        } label: {
-                            HStack {
-                                Image(systemName: "terminal.fill")
-                                Text("查看运行日志 (快捷键 L)")
-                                Spacer()
-                                Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(.white.opacity(0.55))
-                            }
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(drawerSelectedAccentTint())
-                            .padding(11)
-                            .background(drawerRowBackground(isSelected: false))
-                            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
+                    PlayerMediaInfoDrawerContentView(
+                        telemetry: telemetry,
+                        isLocalOrOfflineMedia: currentResource.isLocalOrOfflineMedia,
+                        isTurboActive: activeTurboHandle != nil,
+                        connectionBudget: appState.effectiveConnectionBudget(for: session.server),
+                        activeLineName: session.server.activeLineName,
+                        onExportDiagnostics: { exportRedactedDiagnostics() },
+                        onShowLogs: { showLogSheet = true }
+                    )
 
                 case .watchParty:
                     watchPartyDrawerContent
@@ -413,6 +369,100 @@ extension PlayerView {
             Text(key).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.6))
             Spacer()
             Text(val).font(.system(size: 11.5, weight: .semibold, design: .monospaced)).foregroundStyle(.white).lineLimit(1)
+        }
+        .padding(.vertical, 3)
+    }
+}
+
+private struct PlayerMediaInfoDrawerContentView: View {
+    @ObservedObject var telemetry: PlayerHUDTelemetry
+    let isLocalOrOfflineMedia: Bool
+    let isTurboActive: Bool
+    let connectionBudget: Int
+    let activeLineName: String
+    let onExportDiagnostics: () -> Void
+    let onShowLogs: () -> Void
+
+    var body: some View {
+        let stats = telemetry.kernelStats
+        VStack(alignment: .leading, spacing: 10) {
+            PlayerDrawerGlassCard {
+                mediaInfoRow("解码方式", stats.is_hw_accelerated ? "硬件解码" : "软件解码")
+                mediaInfoRow("动态范围", stats.is_dolby_vision ? "Dolby Vision" : (stats.is_hdr ? "HDR10" : "SDR"))
+                if !isLocalOrOfflineMedia {
+                    mediaInfoRow("当前速率", String(format: "%.1f MB/s", max(0.0, telemetry.displayDownloadSpeedMBs)))
+                }
+                mediaInfoRow("缓冲时长", String(format: "+%.1f 秒", telemetry.bufferedAheadSeconds))
+                mediaInfoRow("预读缓存", "\(stats.cached_bytes / 1024 / 1024) MB")
+                mediaInfoRow(
+                    "加载方式",
+                    isLocalOrOfflineMedia
+                        ? "本地离线文件"
+                        : (isTurboActive ? "多线程并发 (\(connectionBudget) 线程)" : "顺序读取")
+                )
+                mediaInfoRow("分辨率", "\(stats.width) × \(stats.height)")
+                mediaInfoRow("帧率", String(format: "%.3f fps", stats.fps))
+                mediaInfoRow("视频编码", PlayerView.cString(from: stats.video_codec))
+                mediaInfoRow("音频编码", PlayerView.cString(from: stats.audio_codec))
+                mediaInfoRow("播放线路", activeLineName)
+            }
+
+            Button {
+                onExportDiagnostics()
+            } label: {
+                HStack {
+                    Image(systemName: "doc.on.clipboard")
+                    Text("复制脱敏诊断报告")
+                    Spacer()
+                    Image(systemName: "checkmark.shield").font(.system(size: 11)).foregroundStyle(.green)
+                }
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color.white.opacity(0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.6)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                onShowLogs()
+            } label: {
+                HStack {
+                    Image(systemName: "terminal")
+                    Text("查看运行日志 (快捷键 L)")
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(.white.opacity(0.55))
+                }
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.86))
+                .padding(11)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color.white.opacity(0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.6)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func mediaInfoRow(_ title: String, _ value: String) -> some View {
+        HStack {
+            Text(title).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.6))
+            Spacer()
+            Text(value).font(.system(size: 11.5, weight: .semibold, design: .monospaced)).foregroundStyle(.white).lineLimit(1)
         }
         .padding(.vertical, 3)
     }

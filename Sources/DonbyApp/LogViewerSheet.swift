@@ -11,6 +11,7 @@ public struct LogViewerSheet: View {
 
     @State private var selectedFilter: LogFilter = .all
     @State private var searchText: String = ""
+    @State private var cachedFilteredEntries: [DonbyLogEntry] = []
     @State private var autoScroll: Bool = true
     @State private var copiedFeedback: Bool = false
 
@@ -43,8 +44,9 @@ public struct LogViewerSheet: View {
         self.isModal = isModal
     }
 
-    private var filteredEntries: [DonbyLogEntry] {
-        logger.entries.filter { entry in
+    private func recomputeFilteredEntries() {
+        let trimmedSearch = searchText.trimmingCharacters(in: .whitespaces)
+        cachedFilteredEntries = logger.entries.filter { entry in
             let matchesFilter: Bool
             switch selectedFilter {
             case .all:
@@ -58,9 +60,9 @@ public struct LogViewerSheet: View {
             }
 
             guard matchesFilter else { return false }
-            if searchText.trimmingCharacters(in: .whitespaces).isEmpty { return true }
-            return entry.message.localizedCaseInsensitiveContains(searchText) ||
-                   entry.subsystem.localizedCaseInsensitiveContains(searchText)
+            if trimmedSearch.isEmpty { return true }
+            return entry.message.localizedCaseInsensitiveContains(trimmedSearch) ||
+                   entry.subsystem.localizedCaseInsensitiveContains(trimmedSearch)
         }
     }
 
@@ -182,7 +184,7 @@ public struct LogViewerSheet: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 4) {
-                        ForEach(filteredEntries) { entry in
+                        ForEach(cachedFilteredEntries) { entry in
                             logRow(entry)
                                 .id(entry.id)
                         }
@@ -198,7 +200,14 @@ public struct LogViewerSheet: View {
                 .padding(.horizontal, isModal ? 18 : 24)
                 .padding(.bottom, 4)
                 .donbyOnChange(of: logger.entries.count) { _ in
-                    if autoScroll, let last = filteredEntries.last {
+                    recomputeFilteredEntries()
+                    if autoScroll, let last = cachedFilteredEntries.last {
+                        proxy.scrollTo(last.id, anchor: .bottom)
+                    }
+                }
+                .donbyOnChange(of: logger.entries.last?.id) { _ in
+                    recomputeFilteredEntries()
+                    if autoScroll, let last = cachedFilteredEntries.last {
                         proxy.scrollTo(last.id, anchor: .bottom)
                     }
                 }
@@ -209,7 +218,7 @@ public struct LogViewerSheet: View {
 
             // Footer
             HStack(spacing: 12) {
-                Text("共 \(filteredEntries.count) / \(logger.entries.count) 条日志")
+                Text("共 \(cachedFilteredEntries.count) / \(logger.entries.count) 条日志")
                     .font(.system(size: 11))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: isLight))
                     .fixedSize()
@@ -223,6 +232,17 @@ public struct LogViewerSheet: View {
             .padding(.horizontal, isModal ? 18 : 24)
             .padding(.vertical, 10)
             .background(DonbyGlassPalette.canvas(isLight: isLight))
+        }
+        .onAppear {
+            recomputeFilteredEntries()
+        }
+        .donbyOnChange(of: selectedFilter) { _ in
+            recomputeFilteredEntries()
+        }
+        .task(id: searchText) {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard !Task.isCancelled else { return }
+            recomputeFilteredEntries()
         }
 
         if isModal {

@@ -21,9 +21,46 @@ struct PlayerSubtitleStyleDrawerView: View {
     let onAutoAlignDual: () -> Void
     let onUndoAlign: () -> Void
     let onResetScale: () -> Void
+    let onLivePreviewStyle: ((SubtitleStyleConfiguration) -> Void)?
     let drawerDelayStepButton: (String, @escaping () -> Void) -> AnyView
 
     @State private var showMoreSubtitleOptions: Bool = false
+    @State private var draftScale: Double? = nil
+    @State private var draftVerticalPos: Double? = nil
+
+    private var activeScale: Double {
+        draftScale ?? appState.subtitleStyle.scale
+    }
+
+    private var activeVerticalPos: Double {
+        draftVerticalPos ?? appState.subtitleStyle.verticalPositionPercent
+    }
+
+    private var scaleBinding: Binding<Double> {
+        Binding(
+            get: { draftScale ?? appState.subtitleStyle.scale },
+            set: { newVal in
+                draftScale = newVal
+                var preview = appState.subtitleStyle
+                preview.scale = newVal
+                if let v = draftVerticalPos { preview.verticalPositionPercent = v }
+                onLivePreviewStyle?(preview)
+            }
+        )
+    }
+
+    private var verticalPosBinding: Binding<Double> {
+        Binding(
+            get: { draftVerticalPos ?? appState.subtitleStyle.verticalPositionPercent },
+            set: { newVal in
+                draftVerticalPos = newVal
+                var preview = appState.subtitleStyle
+                if let s = draftScale { preview.scale = s }
+                preview.verticalPositionPercent = newVal
+                onLivePreviewStyle?(preview)
+            }
+        )
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -196,11 +233,14 @@ struct PlayerSubtitleStyleDrawerView: View {
                 HStack {
                     Text("大小").font(.system(size: 11.5, weight: .medium)).foregroundStyle(.white.opacity(0.9))
                     Spacer()
-                    Text(String(format: "%.2fx", appState.subtitleStyle.scale))
+                    Text(String(format: "%.2fx", activeScale))
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.72))
-                    if abs(appState.subtitleStyle.scale - 1.0) > 0.01 {
-                        Button { appState.subtitleStyle.scale = 1.0 } label: {
+                    if abs(activeScale - 1.0) > 0.01 {
+                        Button {
+                            draftScale = nil
+                            appState.subtitleStyle.scale = 1.0
+                        } label: {
                             Text("重置")
                                 .font(.system(size: 10.5, weight: .semibold))
                                 .foregroundStyle(accentTint)
@@ -212,13 +252,17 @@ struct PlayerSubtitleStyleDrawerView: View {
                     }
                 }
                 DonbySlider(
-                    value: $appState.subtitleStyle.scale,
+                    value: scaleBinding,
                     in: 0.6...1.8,
                     step: 0.05,
                     isLightMode: false,
                     accentColor: accentTint,
                     onEditingChanged: { editing in
                         withAnimation(.easeInOut(duration: 0.15)) { isAdjustingSubtitleLayout = editing }
+                        if !editing, let committed = draftScale {
+                            draftScale = nil
+                            appState.subtitleStyle.scale = committed
+                        }
                     }
                 )
             }
@@ -227,11 +271,14 @@ struct PlayerSubtitleStyleDrawerView: View {
                 HStack {
                     Text("位置").font(.system(size: 11.5, weight: .medium)).foregroundStyle(.white.opacity(0.9))
                     Spacer()
-                    Text("\(Int(appState.subtitleStyle.verticalPositionPercent))%")
+                    Text("\(Int(activeVerticalPos))%")
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.72))
-                    if abs(appState.subtitleStyle.verticalPositionPercent - 92.0) > 0.5 {
-                        Button { appState.subtitleStyle.verticalPositionPercent = 92.0 } label: {
+                    if abs(activeVerticalPos - 92.0) > 0.5 {
+                        Button {
+                            draftVerticalPos = nil
+                            appState.subtitleStyle.verticalPositionPercent = 92.0
+                        } label: {
                             Text("重置")
                                 .font(.system(size: 10.5, weight: .semibold))
                                 .foregroundStyle(accentTint)
@@ -243,13 +290,17 @@ struct PlayerSubtitleStyleDrawerView: View {
                     }
                 }
                 DonbySlider(
-                    value: $appState.subtitleStyle.verticalPositionPercent,
+                    value: verticalPosBinding,
                     in: 60...100,
                     step: 1,
                     isLightMode: false,
                     accentColor: accentTint,
                     onEditingChanged: { editing in
                         withAnimation(.easeInOut(duration: 0.15)) { isAdjustingSubtitleLayout = editing }
+                        if !editing, let committed = draftVerticalPos {
+                            draftVerticalPos = nil
+                            appState.subtitleStyle.verticalPositionPercent = committed
+                        }
                     }
                 )
             }

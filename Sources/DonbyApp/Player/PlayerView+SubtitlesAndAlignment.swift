@@ -100,9 +100,9 @@ extension PlayerView {
         )
     }
 
-    func applyKernelSubtitleStyle() {
+    func applyKernelSubtitleStyle(styleOverride: SubtitleStyleConfiguration? = nil) {
         guard let handle = playerHandle else { return }
-        var cfg = Self.makeKernelSubtitleStyleConfig(appState.subtitleStyle, anchorMode: resolvedDualAnchorMode())
+        var cfg = Self.makeKernelSubtitleStyleConfig(styleOverride ?? appState.subtitleStyle, anchorMode: resolvedDualAnchorMode())
         dk_player_set_subtitle_style(handle, &cfg)
         subtitleStyleRevision &+= 1
     }

@@ -1,19 +1,20 @@
 # Module Map: Metal EDR Video Renderer (`DonbyMetalRenderer`)
 
-> Last synced: `v2.1.3`. Load this doc for CVDisplayLink presentation, Metal shaders, HDR10/Dolby Vision EDR tone mapping, discrete/dual-GPU display routing, GPU snapshots, first-frame callbacks, and subtitle overlay rendering.
+> Last synced: `v2.1.4`. Load this doc for CVDisplayLink presentation, Metal shaders, HDR10/Dolby Vision EDR tone mapping, discrete/dual-GPU display routing, GPU snapshots, first-frame callbacks, and subtitle overlay rendering.
 
 ## 1. File Inventory & Core Symbols
 - `Sources/DonbyMetalRenderer/DKMetalShadersAndPipeline.swift`
   - `DKVertexUniforms` — vertex scale, subtitle lift/nit parameters, and UV crop uniforms.
+  - `DKToneMapConstants` (`[[buffer(1)]]` on `fragment_video_master`) & 16-byte `DKSubtitleFragmentUniforms` (on `fragment_subtitle`) — slimmed fragment uniforms preserving the 3088-byte `DKGpuColorUniformsMSL` layout.
   - `DKMetalPipelineSet` — compiled & cached Metal render pipelines (`videoPipeline` for NV12/P010/DoVi -> linear EDR `.rgba16Float`, `bgraPipeline` fallback, and `subPipeline` for linear-space alpha-blended subtitles).
   - `DKMetalLayerView.metalShaderSource` & `prewarmPipelines()` — embedded MSL shaders (`vertex_main`, `fragment_video_master`, `fragment_bgra`, `fragment_subtitle`) and startup pipeline prewarming.
 - `Sources/DonbyMetalRenderer/DKMetalLayerView.swift`
-  - `DKMetalLayerView` — `NSView` hosting `CAMetalLayer` (`pixelFormat = .rgba16Float`, `wantsExtendedDynamicRangeContent = true`, `colorspace = extendedLinearDisplayP3` / SDR fallback), stored state (`hasExternalDisplayLink`, `lastRenderSkipReason`), EDR headroom observer, layout/drawable sizing, subtitle lift/occlusion controls, and `setupMetal()`.
+  - `DKMetalLayerView` — `NSView` hosting `CAMetalLayer` (`pixelFormat = .rgba16Float`, `wantsExtendedDynamicRangeContent = true`, `colorspace = extendedLinearDisplayP3` / SDR fallback), stored state (`hasExternalDisplayLink`, `lastRenderSkipReason`), EDR headroom observer, layout/drawable sizing (with size-diff guards in `layout()`/`updateDrawableSize()`), subtitle lift/occlusion controls (`subtitleLiftDirty` fast-path), and `setupMetal()`.
 - `Sources/DonbyMetalRenderer/DKMetalLayerView+Rendering.swift`
   - `DKMetalLayerView` rendering extension — `CVMetalTextureCache` frame upload (`renderLocked`, `renderBiPlanar`, `renderBGRA`), skip diagnostics (`_lastRenderSkipReason`), 3-slot subtitle `MTLTexture` ring (`updateSubtitleOverlay`), `subtitleViewportMetrics`, and `OffscreenMetalContext` / `renderOffscreenCGImage` for GPU sRGB snapshot/thumbnail rendering.
 - `Sources/DonbyMetalRenderer/DKMetalVideoView.swift`
   - `DisplayLinkDriver` — manages `CVDisplayLink` callbacks and `.common`-mode 60Hz timer fallback.
-  - `DKMetalVideoView` + `Coordinator` + `SubtitleSyncBox` — SwiftUI `NSViewRepresentable` bridge, `onRenderDiagnostic` startup stall logger, and `dk_player_notify_metal_first_frame` dispatch.
+  - `DKMetalVideoView` + `Coordinator` (cached viewport metrics, reusable `SubtitleSyncBox`) + `SubtitleSyncBox` — SwiftUI `NSViewRepresentable` bridge, `onRenderDiagnostic` startup stall logger, and `dk_player_notify_metal_first_frame` dispatch.
 
 ## 2. Key Rendering Behaviors
 - **HDR10 & Dolby Vision EDR Pipeline**:

@@ -44,14 +44,9 @@ extension PlayerView {
     func handleProgressTimerTick() {
         let hudVisible = showControls || activeDrawer != nil
         if currentResource.isLocalOrOfflineMedia {
-            if displayDownloadSpeedMBs != 0.0 {
-                displayDownloadSpeedMBs = 0.0
-            }
+            telemetry.updateDownloadSpeed(0.0)
         } else if playerHandle == nil && (showControls || isOpeningMedia) {
-            let liveWireSpeed = activeTurboHandle?.currentWireSpeedMBs ?? 0.0
-            if abs(displayDownloadSpeedMBs - liveWireSpeed) > 0.05 || (liveWireSpeed < 0.01 && displayDownloadSpeedMBs > 0) {
-                displayDownloadSpeedMBs = liveWireSpeed
-            }
+            telemetry.updateDownloadSpeed(activeTurboHandle?.currentWireSpeedMBs ?? 0.0)
         }
             guard let handle = playerHandle, !isScrubbing else { return }
             let nowUptime = ProcessInfo.processInfo.systemUptime
@@ -60,8 +55,8 @@ extension PlayerView {
             let isSettlingSeek = sinceSeek < 2.5 && abs(newPos - lastSeekCommitTarget) > 8.0
             if !isSettlingSeek {
                 autoHideBox.liveCurrentTime = newPos
-                if hudVisible && abs(currentTime - newPos) > 0.05 {
-                    currentTime = newPos
+                if hudVisible {
+                    telemetry.updateCurrentTime(newPos)
                 }
             }
             let livePos = autoHideBox.liveCurrentTime
@@ -86,42 +81,25 @@ extension PlayerView {
             }
             let newBuffered = dk_player_get_buffered_duration(handle)
             autoHideBox.liveBufferedAheadSeconds = newBuffered
-            if hudVisible && abs(bufferedAheadSeconds - newBuffered) > 0.25 {
-                bufferedAheadSeconds = newBuffered
+            if hudVisible {
+                telemetry.updateBufferedAhead(newBuffered)
             }
             let dur = dk_player_get_duration(handle)
             if dur > 0 {
-                if abs(duration - dur) > 0.01 { duration = dur }
-            } else if currentItem.durationSeconds > 0 && abs(duration - currentItem.durationSeconds) > 0.01 {
-                duration = currentItem.durationSeconds
+                telemetry.updateDuration(dur)
+            } else if currentItem.durationSeconds > 0 {
+                telemetry.updateDuration(currentItem.durationSeconds)
             }
-            if showControls || activeDrawer == .mediaInfo || isWaitingForSeekOrBuffer || kernelStats.width == 0 {
+            if showControls || activeDrawer == .mediaInfo || isWaitingForSeekOrBuffer || telemetry.kernelStats.width == 0 {
                 var freshStats = DKRuntimeStats()
                 dk_player_get_stats(handle, &freshStats)
-                if activeDrawer == .mediaInfo ||
-                    kernelStats.width != freshStats.width ||
-                    kernelStats.height != freshStats.height ||
-                    kernelStats.is_hw_accelerated != freshStats.is_hw_accelerated ||
-                    kernelStats.is_hdr != freshStats.is_hdr ||
-                    kernelStats.is_dolby_vision != freshStats.is_dolby_vision ||
-                    abs(kernelStats.fps - freshStats.fps) > 0.05 ||
-                    abs(kernelStats.video_bitrate_mbps - freshStats.video_bitrate_mbps) > 0.1 {
-                    kernelStats = freshStats
-                }
+                telemetry.updateKernelStats(freshStats, forceUpdate: activeDrawer == .mediaInfo)
                 if currentResource.isLocalOrOfflineMedia {
-                    if displayDownloadSpeedMBs != 0.0 {
-                        displayDownloadSpeedMBs = 0.0
-                    }
+                    telemetry.updateDownloadSpeed(0.0)
                 } else if let turboHandle = activeTurboHandle {
-                    let turboSpeed = turboHandle.currentWireSpeedMBs
-                    if abs(displayDownloadSpeedMBs - turboSpeed) > 0.05 || (turboSpeed < 0.01 && displayDownloadSpeedMBs > 0) {
-                        displayDownloadSpeedMBs = turboSpeed
-                    }
+                    telemetry.updateDownloadSpeed(turboHandle.currentWireSpeedMBs)
                 } else {
-                    let kernelSpeed = max(0.0, freshStats.download_speed_mbs)
-                    if abs(displayDownloadSpeedMBs - kernelSpeed) > 0.05 || (kernelSpeed < 0.01 && displayDownloadSpeedMBs > 0) {
-                        displayDownloadSpeedMBs = kernelSpeed
-                    }
+                    telemetry.updateDownloadSpeed(max(0.0, freshStats.download_speed_mbs))
                 }
             }
 
@@ -139,7 +117,7 @@ extension PlayerView {
             if pState == DK_STATE_ENDED && !didHandlePlaybackEnded {
                 didHandlePlaybackEnded = true
                 isPlaying = false
-                currentTime = livePos
+                telemetry.updateCurrentTime(livePos, force: true)
                 finishedItemPendingCleanup = (currentItem.id, currentResource.mediaSource.id)
                 companionBox.companion?.onPlaybackEnded(livePos: livePos, playbackSpeed: playbackSpeed)
                 if let ext = DonbyMediaServiceRegistry.shared.provider(for: session.server.type), !session.server.accessToken.isEmpty {
@@ -171,7 +149,7 @@ extension PlayerView {
                     itemId: currentItem.id,
                     played: true,
                     positionSeconds: 0,
-                    durationSeconds: duration,
+                    durationSeconds: telemetry.duration,
                     persistDiskNow: true
                 )
                 if let idx = session.episodesQueue.firstIndex(where: { $0.id == currentItem.id }),
@@ -238,10 +216,10 @@ extension PlayerView {
         openingErrorMessage = nil
         didHandlePlaybackEnded = false
         finishedItemPendingCleanup = nil
-        currentTime = max(0, startSeconds)
-        duration = 1
-        bufferedAheadSeconds = 0
-        displayDownloadSpeedMBs = 0.0
+        telemetry.updateCurrentTime(max(0, startSeconds), force: true)
+        telemetry.updateDuration(1)
+        telemetry.updateBufferedAhead(0)
+        telemetry.updateDownloadSpeed(0.0)
         localExternalSubtitleName = nil
         secondaryLocalSubtitleName = nil
         activeSecondarySubtitleSelection = .off
@@ -536,8 +514,8 @@ extension PlayerView {
         releasePlaybackNetworkPriority()
         episodeSwitchTask?.cancel()
         episodeSwitchTask = nil
-        displayDownloadSpeedMBs = 0.0
-        bufferedAheadSeconds = 0
+        telemetry.updateDownloadSpeed(0.0)
+        telemetry.updateBufferedAhead(0)
         skipBannerLabel = nil
         isAutoAligningSubtitle = false
         lastAutoAlignSummary = nil
@@ -561,7 +539,7 @@ extension PlayerView {
             didHandlePlaybackEnded = false
             finishedItemPendingCleanup = nil
             autoHideBox.liveCurrentTime = 0
-            currentTime = 0
+            telemetry.updateCurrentTime(0, force: true)
             dk_player_seek(handle, 0, true)
             dk_player_play(handle)
             isPlaying = true
@@ -584,7 +562,7 @@ extension PlayerView {
     }
 
     func seekRelative(_ delta: Double) {
-        let target = max(0, min(duration, autoHideBox.liveCurrentTime + delta))
+        let target = max(0, min(telemetry.duration, autoHideBox.liveCurrentTime + delta))
         seekTo(target)
     }
 
@@ -596,7 +574,7 @@ extension PlayerView {
         autoHideBox.lastObservedPos = seconds
         autoHideBox.lastObservedPosUptime = lastSeekCommitUptime
         autoHideBox.liveCurrentTime = seconds
-        currentTime = seconds
+        telemetry.updateCurrentTime(seconds, force: true)
         if let handle = playerHandle {
             dk_player_seek(handle, seconds, accurate)
             activeTurboHandle?.wakeWaitingReads()

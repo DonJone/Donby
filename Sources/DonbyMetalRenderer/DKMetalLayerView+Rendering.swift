@@ -290,7 +290,8 @@ extension DKMetalLayerView {
     private func encodeSubtitleOverlayIfNeeded(
         encoder: MTLRenderCommandEncoder,
         scale: SIMD2<Float>,
-        uniforms: inout DKGpuColorUniforms
+        edrHeadroom: Float,
+        transferFn: Int32
     ) {
         guard hasActiveSubtitle,
               let subPipe = pipelineSubtitle,
@@ -308,10 +309,11 @@ extension DKMetalLayerView {
             pad: SIMD2<Float>(peakNits, liftNDC),
             uvRect: SIMD4<Float>(0, 0, 1, 1)
         )
+        var subFU = DKSubtitleFragmentUniforms(edr_headroom: edrHeadroom, transfer_fn: transferFn)
         encoder.setRenderPipelineState(subPipe)
         encoder.setVertexBytes(&subVU, length: MemoryLayout<DKVertexUniforms>.stride, index: 0)
         encoder.setFragmentTexture(subTex, index: 0)
-        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<DKGpuColorUniforms>.stride, index: 0)
+        encoder.setFragmentBytes(&subFU, length: MemoryLayout<DKSubtitleFragmentUniforms>.stride, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
 
@@ -366,15 +368,17 @@ extension DKMetalLayerView {
         let uMax = widthY > 0 ? min(1.0, Float(cleanW) / Float(widthY)) : 1.0
         let vMax = heightY > 0 ? min(1.0, Float(cleanH) / Float(heightY)) : 1.0
         var vu = DKVertexUniforms(scale: scale, uvRect: SIMD4<Float>(0.0, 0.0, uMax, vMax))
+        var tm = DKToneMapConstants(uniforms: uniforms)
 
         encoder.setRenderPipelineState(pipeline)
         encoder.setVertexBytes(&vu, length: MemoryLayout<DKVertexUniforms>.stride, index: 0)
         encoder.setFragmentTexture(yTex, index: 0)
         encoder.setFragmentTexture(uvTex, index: 1)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<DKGpuColorUniforms>.stride, index: 0)
+        encoder.setFragmentBytes(&tm, length: MemoryLayout<DKToneMapConstants>.stride, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
 
-        encodeSubtitleOverlayIfNeeded(encoder: encoder, scale: scale, uniforms: &uniforms)
+        encodeSubtitleOverlayIfNeeded(encoder: encoder, scale: scale, edrHeadroom: uniforms.edr_headroom, transferFn: uniforms.transfer_fn)
         encoder.endEncoding()
 
         buffer.present(drawable)
@@ -419,9 +423,7 @@ extension DKMetalLayerView {
         encoder.setFragmentTexture(bgraTex, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
 
-        var sdrUniforms = DKGpuColorUniforms()
-        sdrUniforms.edr_headroom = currentEDRHeadroom
-        encodeSubtitleOverlayIfNeeded(encoder: encoder, scale: scale, uniforms: &sdrUniforms)
+        encodeSubtitleOverlayIfNeeded(encoder: encoder, scale: scale, edrHeadroom: currentEDRHeadroom, transferFn: 0)
         encoder.endEncoding()
 
         buffer.present(drawable)
@@ -565,11 +567,13 @@ extension DKMetalLayerView {
             let uMax = widthY > 0 ? min(1.0, Float(cleanW) / Float(widthY)) : 1.0
             let vMax = heightY > 0 ? min(1.0, Float(cleanH) / Float(heightY)) : 1.0
             var vu = DKVertexUniforms(scale: SIMD2<Float>(1, 1), uvRect: SIMD4<Float>(0, 0, uMax, vMax))
+            var tm = DKToneMapConstants(uniforms: uniforms)
             enc.setRenderPipelineState(videoPipe)
             enc.setVertexBytes(&vu, length: MemoryLayout<DKVertexUniforms>.stride, index: 0)
             enc.setFragmentTexture(yTex, index: 0)
             enc.setFragmentTexture(uvTex, index: 1)
             enc.setFragmentBytes(&uniforms, length: MemoryLayout<DKGpuColorUniforms>.stride, index: 0)
+            enc.setFragmentBytes(&tm, length: MemoryLayout<DKToneMapConstants>.stride, index: 1)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
 
@@ -581,10 +585,11 @@ extension DKMetalLayerView {
             if let sTex = dev.makeTexture(descriptor: sDesc) {
                 sTex.replace(region: MTLRegionMake2D(0, 0, subtitleWidth, subtitleHeight), mipmapLevel: 0, withBytes: subPtr, bytesPerRow: subtitleWidth * 4)
                 var svu = DKVertexUniforms(scale: SIMD2<Float>(1, 1), uvRect: SIMD4<Float>(0, 0, 1, 1))
+                var subFU = DKSubtitleFragmentUniforms(edr_headroom: uniforms.edr_headroom, transfer_fn: uniforms.transfer_fn)
                 enc.setRenderPipelineState(subPipe)
                 enc.setVertexBytes(&svu, length: MemoryLayout<DKVertexUniforms>.stride, index: 0)
                 enc.setFragmentTexture(sTex, index: 0)
-                enc.setFragmentBytes(&uniforms, length: MemoryLayout<DKGpuColorUniforms>.stride, index: 0)
+                enc.setFragmentBytes(&subFU, length: MemoryLayout<DKSubtitleFragmentUniforms>.stride, index: 0)
                 enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             }
         }

@@ -19,6 +19,7 @@ public struct FilesModuleView: View {
     @State private var searchQuery: String = ""
     @State private var filterChip: String = "全部"
     @State private var offlineGroups: [OfflineLibraryGroup] = []
+    @State private var filteredOfflineGroups: [OfflineLibraryGroup] = []
     private let filterChips = ["全部", "剧集", "电影", "文件夹与直链"]
 
     private let supportedTypes: [UTType] = [
@@ -37,10 +38,13 @@ public struct FilesModuleView: View {
         folderNavStack.last ?? appState.browsingFolder
     }
 
-    private var filteredOfflineGroups: [OfflineLibraryGroup] {
-        guard filterChip != "文件夹与直链" else { return [] }
+    private func recomputeFilteredOfflineGroups() {
+        guard filterChip != "文件夹与直链" else {
+            filteredOfflineGroups = []
+            return
+        }
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return offlineGroups.filter { group in
+        filteredOfflineGroups = offlineGroups.filter { group in
             if filterChip == "剧集" && !group.isSeries { return false }
             if filterChip == "电影" && group.isSeries { return false }
             if q.isEmpty { return true }
@@ -101,6 +105,15 @@ public struct FilesModuleView: View {
         .sheet(isPresented: $showDirectURLSheet) {
             directURLSheetContent
         }
+        .onAppear {
+            recomputeFilteredOfflineGroups()
+        }
+        .donbyOnChange(of: filterChip) { _ in
+            recomputeFilteredOfflineGroups()
+        }
+        .donbyOnChange(of: searchQuery) { _ in
+            recomputeFilteredOfflineGroups()
+        }
         .donbyOnChange(of: appState.browsingFolder?.id) { _ in
             folderNavStack = []
         }
@@ -110,6 +123,7 @@ public struct FilesModuleView: View {
                 DonbyOfflineLibraryStorage.scanOfflineLibrary(entries: entries)
             }.value
             self.offlineGroups = scanned
+            recomputeFilteredOfflineGroups()
         }
         .task(id: appState.localFolders.map(\.id)) {
             let folders = appState.localFolders

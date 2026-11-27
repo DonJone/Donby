@@ -1,6 +1,6 @@
 # Module Map: Build, Packaging & Release Pipeline
 
-> Last synced: `v2.1.3`. Load this doc for compiling Swift/Rust/C11 (`arm64`, `x86_64`, `universal`), `DONBY_PURE=1` pure builds, bundling dylibs, signing `/Applications/Donby.app`, DMG/ZIP packaging, channel-aware local GitHub Releases, agent doc-sync gates, and dual-arch CI.
+> Last synced: `v2.1.4`. Load this doc for compiling Swift/Rust/C11 (`arm64`, `x86_64`, `universal`), `DONBY_PURE=1` pure builds, bundling dylibs, signing `/Applications/Donby.app`, DMG/ZIP packaging, channel-aware local GitHub Releases, agent doc-sync gates, and dual-arch CI.
 
 ## 1. File Inventory
 - `Package.swift` — SwiftPM manifest compiling pure-C11 `DonbyKernelC` (`dk_ffi_shim*.c`), linking `build_kernel/libdonby_kernel.a` (`KernelRust`) into `DonbyKernelC` and `DonbyNetwork`, optional `DonbyUHDModule` (omitted alongside `Modules/UHD` when `DONBY_PURE=1` sets `-DDONBY_PURE_BUILD`), and `DonbyCoreTests`.

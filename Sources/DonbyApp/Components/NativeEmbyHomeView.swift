@@ -202,10 +202,12 @@ private final class NativeHomeShelfView: FlippedLayerHostView, NSCollectionViewD
         self.onPlayItem = onPlayItem
         self.onOpenLibrary = onOpenLibrary
 
+        let prevAppearance = self.cardAppearance
         let themeChanged = (lastIsLightMode != appearance.isLightMode)
         let itemsChanged = (self.items != section.items)
         let countsChanged = (self.countsByLibrary != section.countsByLibrary)
-        let appearanceChanged = (self.cardAppearance != appearance)
+        let visualThemeMatches = prevAppearance.map { appearance.matchesVisualTheme(of: $0) } ?? false
+        let statusIndexChanged = (prevAppearance?.downloadStatusIndex != appearance.downloadStatusIndex)
 
         self.library = section.library
         self.cardAppearance = appearance
@@ -227,7 +229,7 @@ private final class NativeHomeShelfView: FlippedLayerHostView, NSCollectionViewD
         moreButton.isHidden = (section.library == nil)
         CATransaction.commit()
 
-        if itemsChanged || countsChanged || appearanceChanged {
+        if itemsChanged || countsChanged || !visualThemeMatches {
             for (_, task) in prefetchTasks {
                 task.cancel()
             }
@@ -235,6 +237,27 @@ private final class NativeHomeShelfView: FlippedLayerHostView, NSCollectionViewD
             self.items = section.items
             self.countsByLibrary = section.countsByLibrary
             collectionView.reloadData()
+        } else if statusIndexChanged, let prevIndex = prevAppearance?.downloadStatusIndex {
+            let nextIndex = appearance.downloadStatusIndex
+            for visibleItem in collectionView.visibleItems() {
+                guard let indexPath = collectionView.indexPath(for: visibleItem),
+                      indexPath.item >= 0,
+                      indexPath.item < items.count else { continue }
+                let item = items[indexPath.item]
+                let badgeChanged = prevIndex.badgeText(for: item) != nextIndex.badgeText(for: item)
+                let downloadedChanged = prevIndex.isItemDownloaded(item) != nextIndex.isItemDownloaded(item)
+                guard badgeChanged || downloadedChanged else { continue }
+                switch visibleItem {
+                case let cell as NativeLibraryCollectionItem:
+                    cell.configure(library: item, itemCount: countsByLibrary[item.id], appearance: appearance, allowAsyncLoad: isViewportActive)
+                case let cell as NativeLandscapeCollectionItem:
+                    cell.configure(item: item, appearance: appearance, allowAsyncLoad: isViewportActive)
+                case let cell as NativePosterCollectionItem:
+                    cell.configure(item: item, cardWidth: 152, appearance: appearance, allowAsyncLoad: isViewportActive)
+                default:
+                    break
+                }
+            }
         }
     }
 
@@ -377,6 +400,7 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
     public let carouselItems: [EmbyItem]
     public let showCarousel: Bool
     public let shelves: [HomeShelfSection]
+    public let homeRevision: Int
     public let appearance: DonbyCardAppearance
     public let appState: AppState
     public let onSelectItem: (EmbyItem) -> Void
@@ -387,6 +411,7 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
         carouselItems: [EmbyItem],
         showCarousel: Bool,
         shelves: [HomeShelfSection],
+        homeRevision: Int = 0,
         appearance: DonbyCardAppearance,
         appState: AppState,
         onSelectItem: @escaping (EmbyItem) -> Void,
@@ -396,6 +421,7 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
         self.carouselItems = carouselItems
         self.showCarousel = showCarousel
         self.shelves = shelves
+        self.homeRevision = homeRevision
         self.appearance = appearance
         self.appState = appState
         self.onSelectItem = onSelectItem
@@ -439,6 +465,7 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
             carouselItems: carouselItems,
             showCarousel: showCarousel,
             shelves: shelves,
+            homeRevision: homeRevision,
             appearance: appearance
         )
         return scrollView
@@ -452,6 +479,7 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
             carouselItems: carouselItems,
             showCarousel: showCarousel,
             shelves: shelves,
+            homeRevision: homeRevision,
             appearance: appearance
         )
     }
@@ -475,8 +503,10 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
         private var orderedShelfViews: [NativeHomeShelfView] = []
 
         private var lastCarouselItems: [EmbyItem] = []
+        private var lastCarouselIds: [String] = []
+        private var lastCarouselRatings: [String: MultiPlatformRatings] = [:]
         private var lastShowCarousel: Bool = false
-        private var lastShelves: [HomeShelfSection] = []
+        private var lastHomeRevision: Int = -1
         private var lastAppearance: DonbyCardAppearance?
         private var currentWidth: CGFloat = 960
         private var currentCarouselHeight: CGFloat = 365
@@ -557,19 +587,43 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
             carouselItems: [EmbyItem],
             showCarousel: Bool,
             shelves: [HomeShelfSection],
+            homeRevision: Int,
             appearance: DonbyCardAppearance
         ) {
+            let carouselIds = carouselItems.map(\.id)
+            var carouselRatings: [String: MultiPlatformRatings] = [:]
+            carouselRatings.reserveCapacity(carouselItems.count)
+            for item in carouselItems {
+                if let rating = appState.multiPlatformRatingsByItemId[item.id] {
+                    carouselRatings[item.id] = rating
+                }
+            }
+
+            if lastHomeRevision == homeRevision &&
+               lastShowCarousel == showCarousel &&
+               lastCarouselIds == carouselIds &&
+               lastAppearance == appearance &&
+               lastCarouselRatings == carouselRatings {
+                return
+            }
+
             let themeChanged = (lastAppearance?.isLightMode != appearance.isLightMode)
-            let carouselChanged = (lastShowCarousel != showCarousel) || (lastCarouselItems != carouselItems) || (lastAppearance != appearance)
-            let shelvesChanged = (lastShelves != shelves) || (lastAppearance != appearance)
+            let visualThemeChanged = lastAppearance.map { !appearance.matchesVisualTheme(of: $0) } ?? true
+            let carouselChanged = (lastShowCarousel != showCarousel) ||
+                (lastCarouselItems != carouselItems) ||
+                (lastCarouselRatings != carouselRatings) ||
+                visualThemeChanged
+            let shelvesChanged = (lastHomeRevision != homeRevision) || (lastAppearance != appearance)
 
             if !themeChanged && !carouselChanged && !shelvesChanged {
                 return
             }
 
             lastCarouselItems = carouselItems
+            lastCarouselIds = carouselIds
+            lastCarouselRatings = carouselRatings
             lastShowCarousel = showCarousel
-            lastShelves = shelves
+            lastHomeRevision = homeRevision
             lastAppearance = appearance
 
             if themeChanged, let scrollView, let documentView {

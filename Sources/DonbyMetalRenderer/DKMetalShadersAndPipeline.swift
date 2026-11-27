@@ -1,8 +1,49 @@
 import AppKit
 import Metal
 import simd
+import DonbyKernelC
 
 // MARK: - Metal Vertex Uniforms & Pipeline Cache
+
+struct DKToneMapConstants {
+    var wSrc: Float
+    var maxLum: Float
+    var ks: Float
+    var dstPeakNits: Float
+
+    init(uniforms: DKGpuColorUniforms) {
+        let headroom = max(uniforms.edr_headroom, 1.0)
+        let dstPeak = Float(203.0) * headroom
+        let srcPeak: Float = (uniforms.transfer_fn == 2)
+            ? max(uniforms.source_peak_nits, 1000.0)
+            : max(uniforms.source_peak_nits, 203.0)
+        let w = max(Self.nitsToPQ(srcPeak), 1e-4)
+        let mLum = min(max(Self.nitsToPQ(dstPeak) / w, 0.05), 1.0)
+        let k = max(1.5 * mLum - 0.5, 0.10)
+        self.wSrc = w
+        self.maxLum = mLum
+        self.ks = k
+        self.dstPeakNits = dstPeak
+    }
+
+    private static func nitsToPQ(_ nits: Float) -> Float {
+        let y = min(max(nits / 10000.0, 0.0), 1.0)
+        let m1: Float = 2610.0 / 16384.0
+        let m2: Float = (2523.0 / 4096.0) * 128.0
+        let c1: Float = 3424.0 / 4096.0
+        let c2: Float = (2413.0 / 4096.0) * 32.0
+        let c3: Float = (2392.0 / 4096.0) * 32.0
+        let ym = powf(y, m1)
+        return powf((c1 + c2 * ym) / (1.0 + c3 * ym), m2)
+    }
+}
+
+struct DKSubtitleFragmentUniforms {
+    var edr_headroom: Float
+    var transfer_fn: Int32
+    var pad0: UInt32 = 0
+    var pad1: UInt32 = 0
+}
 
 struct DKVertexUniforms {
     var scale: SIMD2<Float>
@@ -153,6 +194,20 @@ extension DKMetalLayerView {
 
     static_assert(sizeof(DKGpuColorUniformsMSL) == 3088, "DKGpuColorUniformsMSL layout mismatch");
 
+    struct DKToneMapConstantsMSL {
+        float wSrc;
+        float maxLum;
+        float ks;
+        float dstPeakNits;
+    };
+
+    struct DKSubtitleFragmentUniformsMSL {
+        float edr_headroom;
+        int transfer_fn;
+        uint pad0;
+        uint pad1;
+    };
+
     vertex VertexOut vertex_main(uint vertexID [[vertex_id]],
                                  constant VertexUniforms &vu [[buffer(0)]]) {
         float2 positions[4] = {
@@ -217,14 +272,13 @@ extension DKMetalLayerView {
     }
 
     // ITU-R BT.2390-10 Hermite spline perceptual tone mapping in PQ domain
-    inline float bt2390_eetf_nits(float inNits, float srcPeakNits, float dstPeakNits) {
-        if (dstPeakNits >= srcPeakNits - 1.0f) {
-            return min(inNits, dstPeakNits);
+    inline float bt2390_eetf_nits(float inNits, float srcPeakNits, constant DKToneMapConstantsMSL &tm) {
+        if (tm.dstPeakNits >= srcPeakNits - 1.0f) {
+            return min(inNits, tm.dstPeakNits);
         }
-        float wSrc = max(nits_to_pq_scalar(srcPeakNits), 1e-4f);
-        float e1 = clamp(nits_to_pq_scalar(inNits) / wSrc, 0.0f, 1.0f);
-        float maxLum = clamp(nits_to_pq_scalar(dstPeakNits) / wSrc, 0.05f, 1.0f);
-        float ks = max(1.5f * maxLum - 0.5f, 0.10f);
+        float e1 = clamp(nits_to_pq_scalar(inNits) / tm.wSrc, 0.0f, 1.0f);
+        float maxLum = tm.maxLum;
+        float ks = tm.ks;
         float e2 = e1;
         if (e1 > ks) {
             float t = clamp((e1 - ks) / max(1.0f - ks, 1e-5f), 0.0f, 1.0f);
@@ -235,7 +289,7 @@ extension DKMetalLayerView {
             float p2 = -2.0f * t3 + 3.0f * t2;
             e2 = p0 * ks + p1 * (1.0f - ks) + p2 * maxLum;
         }
-        return pq_to_nits_scalar(clamp(e2 * wSrc, 0.0f, 1.0f));
+        return pq_to_nits_scalar(clamp(e2 * tm.wSrc, 0.0f, 1.0f));
     }
 
     inline float3 hlg_inverse_oetf(float3 e) {
@@ -334,7 +388,8 @@ extension DKMetalLayerView {
     fragment float4 fragment_video_master(VertexOut in [[stage_in]],
                                           texture2d<float, access::sample> texY [[texture(0)]],
                                           texture2d<float, access::sample> texUV [[texture(1)]],
-                                          constant DKGpuColorUniformsMSL &u [[buffer(0)]]) {
+                                          constant DKGpuColorUniformsMSL &u [[buffer(0)]],
+                                          constant DKToneMapConstantsMSL &tm [[buffer(1)]]) {
         constexpr sampler s(address::clamp_to_edge, filter::linear);
         float ySample = texY.sample(s, in.texCoord).r;
         float2 uvSample = texUV.sample(s, in.texCoord).rg;
@@ -378,7 +433,7 @@ extension DKMetalLayerView {
                 float lumC = dot(lin, float3(0.2627002f, 0.6779981f, 0.0593017f));
                 float sigNits = mix(maxC, lumC, 0.25f);
                 if (sigNits > 1e-4f) {
-                    float mappedNits = bt2390_eetf_nits(sigNits, srcPeak, dstPeakNits);
+                    float mappedNits = bt2390_eetf_nits(sigNits, srcPeak, tm);
                     lin *= (mappedNits / sigNits);
                 }
                 float postMax = max(lin.r, max(lin.g, lin.b));
@@ -404,7 +459,7 @@ extension DKMetalLayerView {
                 float lumC = dot(lin, float3(0.2627002f, 0.6779981f, 0.0593017f));
                 float sigNits = mix(maxC, lumC, 0.25f);
                 if (sigNits > 1e-4f) {
-                    float mappedNits = bt2390_eetf_nits(sigNits, srcPeak, dstPeakNits);
+                    float mappedNits = bt2390_eetf_nits(sigNits, srcPeak, tm);
                     lin *= (mappedNits / sigNits);
                 }
                 float postMax = max(lin.r, max(lin.g, lin.b));
@@ -435,7 +490,7 @@ extension DKMetalLayerView {
     // Premultiplied RGBA8 subtitle overlay blended in linear Display P3 light with steady SDR/HDR paper-white calibration
     fragment float4 fragment_subtitle(VertexOut in [[stage_in]],
                                       texture2d<float, access::sample> texSub [[texture(0)]],
-                                      constant DKGpuColorUniformsMSL &u [[buffer(0)]]) {
+                                      constant DKSubtitleFragmentUniformsMSL &u [[buffer(0)]]) {
         constexpr sampler s(address::clamp_to_edge, filter::linear);
         float4 sub = texSub.sample(s, in.texCoord);
         if (sub.a <= 1e-4f) {

@@ -16,9 +16,6 @@ public struct PlayerView: View {
     @State var currentItem: EmbyItem
     @State var currentResource: DonbyCore.ResolvedPlaybackResource
     @State var isPlaying: Bool = true
-    @State var currentTime: Double = 0
-    @State var bufferedAheadSeconds: Double = 0
-    @State var duration: Double = 1
     @State var isScrubbing: Bool = false
     @State var scrubTime: Double = 0
     @State var volume: Float = 1.0
@@ -40,13 +37,11 @@ public struct PlayerView: View {
     @State var kernelAudioTracks: [MediaStream] = []
     @State var kernelSubtitleTracks: [MediaStream] = []
     @State var didHandlePlaybackEnded: Bool = false
-    @State var kernelStats = DKRuntimeStats()
     @State var autoHideBox = PlayerAutoHideBox()
     @State var mouseMonitor: Any? = nil
     @State var keyMonitor: Any? = nil
     @State var lastRecordedPosition: Double = -10
     @State var activePlaybackGeneration: Int = 0
-    @State var displayDownloadSpeedMBs: Double = 0.0
     @State private var bottomControlBarHeight: CGFloat = 96
     @State var activeTurboHandle: TurboStreamByteHandle? = nil
     @State var playbackNetworkPriorityToken: UUID? = nil
@@ -74,6 +69,7 @@ public struct PlayerView: View {
     @State var lastSubtitleAlignUndo: SubtitleAlignUndoState? = nil
     @State var secondarySubtitleTimeScale: Double = 1.0
     @State var isSecondaryAlignedToPrimary: Bool = false
+    @StateObject var telemetry = PlayerHUDTelemetry()
     @StateObject var companionBox = DonbyPlayerCompanionBox()
 
 
@@ -157,8 +153,8 @@ public struct PlayerView: View {
                     exitPlayer()
                 }
             } else if isWaitingForSeekOrBuffer && openingErrorMessage == nil {
-                PlayerBufferingOverlayView(
-                    displayDownloadSpeedMBs: displayDownloadSpeedMBs,
+                PlayerBufferingOverlayHostView(
+                    telemetry: telemetry,
                     bottomPadding: showControls ? (bottomControlBarHeight + 18) : 34
                 )
             }
@@ -356,21 +352,12 @@ public struct PlayerView: View {
     }
 
     func syncVisiblePlaybackStateFromBox() {
-        if abs(currentTime - autoHideBox.liveCurrentTime) > 0.05 {
-            currentTime = autoHideBox.liveCurrentTime
-        }
-        if abs(bufferedAheadSeconds - autoHideBox.liveBufferedAheadSeconds) > 0.25 {
-            bufferedAheadSeconds = autoHideBox.liveBufferedAheadSeconds
-        }
+        telemetry.updateCurrentTime(autoHideBox.liveCurrentTime)
+        telemetry.updateBufferedAhead(autoHideBox.liveBufferedAheadSeconds)
         if currentResource.isLocalOrOfflineMedia {
-            if displayDownloadSpeedMBs != 0.0 {
-                displayDownloadSpeedMBs = 0.0
-            }
+            telemetry.updateDownloadSpeed(0.0)
         } else if let turboHandle = activeTurboHandle {
-            let turboSpeed = turboHandle.currentWireSpeedMBs
-            if abs(displayDownloadSpeedMBs - turboSpeed) > 0.05 || (turboSpeed < 0.01 && displayDownloadSpeedMBs > 0) {
-                displayDownloadSpeedMBs = turboSpeed
-            }
+            telemetry.updateDownloadSpeed(turboHandle.currentWireSpeedMBs)
         }
     }
 

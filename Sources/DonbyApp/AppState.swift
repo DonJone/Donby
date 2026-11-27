@@ -23,11 +23,22 @@ public final class AppState: ObservableObject {
     public static weak var sharedInstance: AppState?
 
     @Published public var selectedTab: MainNavigationTab = .servers
-    @Published public var openedServerId: UUID? = nil
+    @Published public var openedServerId: UUID? = nil {
+        didSet { if !isLoadingFromDisk { refreshCachedHomeShelvesIfNeeded() } }
+    }
     @Published public var selectedLibrary: EmbyItem? = nil
     @Published public var detailStack: [EmbyItem] = []
     @Published public var detailOfflineFocusIds: Set<String> = []
-    @Published public var activePlayback: ActivePlaybackSession? = nil
+    @Published public var activePlayback: ActivePlaybackSession? = nil {
+        didSet {
+            if activePlayback == nil, let pending = pendingDownloadStatusIndex {
+                pendingDownloadStatusIndex = nil
+                if downloadStatusIndex != pending {
+                    downloadStatusIndex = pending
+                }
+            }
+        }
+    }
     @Published public var preferredSettingsTabRaw: String = "基础设置"
     @Published public var isSidebarCollapsed: Bool = false
     @Published public var isWindowFullScreen: Bool = false
@@ -38,7 +49,11 @@ public final class AppState: ObservableObject {
 
     @Published public var serverEditorRequest: ServerEditorRequest? = nil
     @Published public var linePickerServer: EmbyServerConfig? = nil
-    @Published public var toastMessage: ToastMessage? = nil
+    public let toastStore = DonbyToastStore()
+    public var toastMessage: ToastMessage? {
+        get { toastStore.message }
+        set { toastStore.message = newValue }
+    }
     @Published public var showLogViewer: Bool = false
     @Published public var isStartingPlayback: Bool = false
 
@@ -47,12 +62,20 @@ public final class AppState: ObservableObject {
     }
 
     @Published public var servers: [EmbyServerConfig] = [] {
-        didSet { if !isLoadingFromDisk { saveServersToDisk() } }
+        didSet {
+            if !isLoadingFromDisk {
+                saveServersToDisk()
+                refreshCachedHomeShelvesIfNeeded()
+            }
+        }
     }
     @Published public var activeServerId: UUID? = nil {
         didSet {
-            if !isLoadingFromDisk, let id = activeServerId {
-                UserDefaults.standard.set(id.uuidString, forKey: "donby.activeServerId")
+            if !isLoadingFromDisk {
+                if let id = activeServerId {
+                    UserDefaults.standard.set(id.uuidString, forKey: "donby.activeServerId")
+                }
+                refreshCachedHomeShelvesIfNeeded()
             }
         }
     }
@@ -68,17 +91,34 @@ public final class AppState: ObservableObject {
 
     @Published public var isLoadingHome: Bool = false
     @Published public var homeErrorMessage: String? = nil
-    @Published public var libraryViews: [EmbyItem] = []
+    @Published public var libraryViews: [EmbyItem] = [] {
+        didSet { if !isLoadingFromDisk { refreshCachedHomeShelvesIfNeeded() } }
+    }
     @Published public var carouselItems: [EmbyItem] = []
     @Published public var multiPlatformRatingsByItemId: [String: MultiPlatformRatings] = [:]
-    @Published public var resumeItems: [EmbyItem] = []
-    @Published public var nextUpItems: [EmbyItem] = []
-    @Published public var latestByLibrary: [String: [EmbyItem]] = [:]
-    @Published public var favoriteItems: [EmbyItem] = []
+    @Published public var resumeItems: [EmbyItem] = [] {
+        didSet { if !isLoadingFromDisk { refreshCachedHomeShelvesIfNeeded() } }
+    }
+    @Published public var nextUpItems: [EmbyItem] = [] {
+        didSet { if !isLoadingFromDisk { refreshCachedHomeShelvesIfNeeded() } }
+    }
+    @Published public var latestByLibrary: [String: [EmbyItem]] = [:] {
+        didSet { if !isLoadingFromDisk { refreshCachedHomeShelvesIfNeeded() } }
+    }
+    @Published public var favoriteItems: [EmbyItem] = [] {
+        didSet { if !isLoadingFromDisk { refreshCachedHomeShelvesIfNeeded() } }
+    }
+    @Published public internal(set) var cachedHomeShelves: [HomeShelfSection] = []
+    @Published public internal(set) var homeRevision: Int = 0
     @Published public var iconSets: [IconLibrarySet] = []
 
     @Published public var urlMediaItems: [LocalOrURLMediaItem] = [] {
-        didSet { if !isLoadingFromDisk { saveURLMediaToDisk() } }
+        didSet {
+            if !isLoadingFromDisk {
+                didMutateURLMediaBeforeHydration = true
+                saveURLMediaToDisk()
+            }
+        }
     }
 
     private let localFoldersStorageKey = "donby.localFolders.v1"
@@ -92,11 +132,22 @@ public final class AppState: ObservableObject {
     @AppStorage("donby.defaultFilesFolderId") public var defaultFilesFolderId: String = ""
 
     @Published public var iptvChannels: [IPTVChannelItem] = [] {
-        didSet { if !isLoadingFromDisk { saveIPTVChannelsToDisk() } }
+        didSet {
+            if !isLoadingFromDisk {
+                didMutateIPTVChannelsBeforeHydration = true
+                saveIPTVChannelsToDisk()
+            }
+        }
     }
-    private var isLoadingFromDisk: Bool = false
+    var isLoadingFromDisk: Bool = false
+    var didMutateURLMediaBeforeHydration: Bool = false
+    var didMutateIPTVChannelsBeforeHydration: Bool = false
+    var didMutateWatchHistoryBeforeHydration: Bool = false
+    var didMutateCachedSeriesNamesBeforeHydration: Bool = false
 
-    @Published public var watchHistory: [WatchRecordItem] = []
+    @Published public var watchHistory: [WatchRecordItem] = [] {
+        didSet { if !isLoadingFromDisk { didMutateWatchHistoryBeforeHydration = true } }
+    }
     var saveWatchHistoryTask: Task<Void, Never>? = nil
     var lastRecordedWatchItemId: String? = nil
     var lastRecordedWatchPosition: Double = -1.0
@@ -120,9 +171,15 @@ public final class AppState: ObservableObject {
     @AppStorage("donby.appearanceMode.v2") public var appearanceModeRaw: String = AppAppearanceMode.light.rawValue
     @AppStorage("donby.showCarousel") public var showCarousel: Bool = true
     @AppStorage("donby.mdblistAPIKey") public var mdblistAPIKey: String = ""
-    @AppStorage("donby.showMyMedia") public var showMyMedia: Bool = true
-    @AppStorage("donby.showContinueWatching") public var showContinueWatching: Bool = true
-    @AppStorage("donby.showFavorites") public var showFavorites: Bool = true
+    @AppStorage("donby.showMyMedia") public var showMyMedia: Bool = true {
+        didSet { if !isLoadingFromDisk { refreshCachedHomeShelvesIfNeeded() } }
+    }
+    @AppStorage("donby.showContinueWatching") public var showContinueWatching: Bool = true {
+        didSet { if !isLoadingFromDisk { refreshCachedHomeShelvesIfNeeded() } }
+    }
+    @AppStorage("donby.showFavorites") public var showFavorites: Bool = true {
+        didSet { if !isLoadingFromDisk { refreshCachedHomeShelvesIfNeeded() } }
+    }
     @AppStorage("donby.showNextUp") public var showNextUp: Bool = true
     @AppStorage("donby.hideWatchedInLatest") public var hideWatchedInLatest: Bool = false
     @AppStorage("donby.showResolutionBadge") public var showResolutionBadge: Bool = true
@@ -194,6 +251,7 @@ public final class AppState: ObservableObject {
         }
     }
     private var downloadStatusCancellable: AnyCancellable? = nil
+    private var pendingDownloadStatusIndex: DonbyDownloadStatusIndex? = nil
     @Published public private(set) var downloadStatusIndex: DonbyDownloadStatusIndex = .empty
     @AppStorage("donby.turboEnabled") public var turboEnabled: Bool = true
     @AppStorage("donby.turboConnectionBudget") public var turboConnectionBudget: Int = 4
@@ -301,12 +359,14 @@ public final class AppState: ObservableObject {
     public var currentDetailItem: EmbyItem? { detailStack.last }
 
     private let serversStorageKey = "donby.servers.v2"
-    private let urlMediaStorageKey = "donby.urlMedia.v3"
-    private let iptvChannelsStorageKey = "donby.iptvChannels.v3"
+    let urlMediaStorageKey = "donby.urlMedia.v3"
+    let iptvChannelsStorageKey = "donby.iptvChannels.v3"
     let watchHistoryStorageKey = "donby.watchHistory.v3"
     let cachedSeriesNamesStorageKey = "donby.cachedSeriesNames.v1"
     let searchHistoryStorageKey = "donby.searchHistory.v1"
-    @Published public var cachedSeriesNames: [String: String] = [:]
+    @Published public var cachedSeriesNames: [String: String] = [:] {
+        didSet { if !isLoadingFromDisk { didMutateCachedSeriesNamesBeforeHydration = true } }
+    }
 
     // Persistent search state (survives navigating into DetailView and returning) & Search History
     @Published public var searchHistory: [String] = []
@@ -330,11 +390,7 @@ public final class AppState: ObservableObject {
         self.searchHistory = UserDefaults.standard.stringArray(forKey: searchHistoryStorageKey) ?? []
         isLoadingFromDisk = true
         loadServersFromDisk()
-        loadURLMediaFromDisk()
         loadLocalFoldersFromDisk()
-        loadCachedSeriesNamesFromDisk()
-        loadIPTVChannelsFromDisk()
-        loadWatchHistoryFromDisk()
         if let subData = UserDefaults.standard.data(forKey: "donby.subtitleStyle.v1"),
            var decodedStyle = try? jsonDecoder.decode(SubtitleStyleConfiguration.self, from: subData) {
             decodedStyle.primaryDelaySeconds = 0
@@ -358,6 +414,7 @@ public final class AppState: ObservableObject {
             self.globalPreferredSecondarySubtitle = decodedGlobalSec
         }
         isLoadingFromDisk = false
+        scheduleAsyncDiskHydration()
 
         DonbyOfflineLibraryStorage.ensureRootDirectories()
         let moviesDonbyPath = DonbyOfflineLibraryStorage.moviesDonbyRootURL.path
@@ -374,7 +431,13 @@ public final class AppState: ObservableObject {
         self.downloadStatusCancellable = DonbyDownloadManager.shared.$statusIndex
             .receive(on: RunLoop.main)
             .sink { [weak self] nextIdx in
-                self?.downloadStatusIndex = nextIdx
+                guard let self else { return }
+                if self.activePlayback != nil {
+                    self.pendingDownloadStatusIndex = nextIdx
+                } else if self.downloadStatusIndex != nextIdx {
+                    self.pendingDownloadStatusIndex = nil
+                    self.downloadStatusIndex = nextIdx
+                }
             }
 
         Task {
@@ -577,37 +640,9 @@ public final class AppState: ObservableObject {
             DonbyAppExtensionCenter.shared.plugin?.resetHomeShelves()
         }
 
-        // Instantaneous switch from memory/disk snapshot
-        if let snap = ServerHomeCacheStore.shared.snapshot(for: server.id), !snap.libraryViews.isEmpty {
-            self.libraryViews = snap.libraryViews
-            self.resumeItems = snap.resumeItems
-            self.nextUpItems = snap.nextUpItems
-            self.favoriteItems = snap.favoriteItems
-            self.latestByLibrary = snap.latestByLibrary
-            if !snap.latestByLibrary.isEmpty {
-                let explicitAnime = DonbyAppExtensionCenter.shared.plugin?.isAnimeModeActive(for: server)
-                self.carouselItems = HomeHeroCurator.selectHeroItems(
-                    libraryViews: snap.libraryViews,
-                    latestByLibrary: snap.latestByLibrary,
-                    fallbackResumes: snap.resumeItems,
-                    serverName: server.name,
-                    explicitAnimeMode: explicitAnime
-                )
-            } else {
-                self.carouselItems = snap.carouselItems
-            }
-            self.isLoadingHome = false
-            let snapshotCarousel = self.carouselItems
-            Task { [weak self] in
-                let cached = await MultiPlatformRatingService.shared.cachedRatingsByItemId(for: snapshotCarousel)
-                guard !cached.isEmpty else { return }
-                await MainActor.run {
-                    guard let self else { return }
-                    for (itemId, rating) in cached {
-                        self.multiPlatformRatingsByItemId[itemId] = rating
-                    }
-                }
-            }
+        // Instantaneous switch from in-memory snapshot; fall back to off-main-thread disk decode on miss
+        if let snap = ServerHomeCacheStore.shared.cachedSnapshotInMemory(for: server.id), !snap.libraryViews.isEmpty {
+            applyHomeSnapshot(snap, for: server)
         } else {
             self.libraryViews = []
             self.resumeItems = []
@@ -616,10 +651,53 @@ public final class AppState: ObservableObject {
             self.latestByLibrary = [:]
             self.carouselItems = []
             self.isLoadingHome = !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let targetServer = server
+            Task { [weak self] in
+                guard let snap = await ServerHomeCacheStore.shared.loadSnapshotFromDiskAsync(for: targetServer.id),
+                      !snap.libraryViews.isEmpty else { return }
+                await MainActor.run {
+                    guard let self,
+                          self.openedServerId == targetServer.id,
+                          self.libraryViews.isEmpty else { return }
+                    self.applyHomeSnapshot(snap, for: targetServer)
+                }
+            }
         }
 
         Task { await loadActiveServerHome(syncDomains: true) }
         PlaybackIntentCoordinator.shared.warmServerOnConnectOrLaunch(server: server)
+    }
+
+    private func applyHomeSnapshot(_ snap: ServerHomeCacheStore.ServerHomeSnapshot, for server: EmbyServerConfig) {
+        self.libraryViews = snap.libraryViews
+        self.resumeItems = snap.resumeItems
+        self.nextUpItems = snap.nextUpItems
+        self.favoriteItems = snap.favoriteItems
+        self.latestByLibrary = snap.latestByLibrary
+        if !snap.latestByLibrary.isEmpty {
+            let explicitAnime = DonbyAppExtensionCenter.shared.plugin?.isAnimeModeActive(for: server)
+            self.carouselItems = HomeHeroCurator.selectHeroItems(
+                libraryViews: snap.libraryViews,
+                latestByLibrary: snap.latestByLibrary,
+                fallbackResumes: snap.resumeItems,
+                serverName: server.name,
+                explicitAnimeMode: explicitAnime
+            )
+        } else {
+            self.carouselItems = snap.carouselItems
+        }
+        self.isLoadingHome = false
+        let snapshotCarousel = self.carouselItems
+        Task { [weak self] in
+            let cached = await MultiPlatformRatingService.shared.cachedRatingsByItemId(for: snapshotCarousel)
+            guard !cached.isEmpty else { return }
+            await MainActor.run {
+                guard let self else { return }
+                for (itemId, rating) in cached {
+                    self.multiPlatformRatingsByItemId[itemId] = rating
+                }
+            }
+        }
     }
 
     public func selectSidebarModule(_ tab: MainNavigationTab) {

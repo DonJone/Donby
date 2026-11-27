@@ -61,6 +61,13 @@ public final class DKMetalLayerView: NSView {
     private var _controlsOcclusionHeightPoints: CGFloat = 0.0
     private var _antiOcclusionEnabled: Bool = false
     private var cachedViewPointSize: CGSize = .zero
+    private var subtitleLiftDirty: Bool = false
+
+    var currentDrawableSize: CGSize {
+        sizeLock.lock()
+        defer { sizeLock.unlock() }
+        return cachedDrawableSize
+    }
 
     public var subtitleHDRPeakNits: Float {
         get { sizeLock.lock(); defer { sizeLock.unlock() }; return _subtitleHDRPeakNits }
@@ -81,7 +88,10 @@ public final class DKMetalLayerView: NSView {
             sizeLock.lock()
             let changed = abs(_controlsOcclusionHeightPoints - newValue) > 0.5
             _controlsOcclusionHeightPoints = newValue
-            if changed { _needsRedrawOnSameFrame = true }
+            if changed {
+                _needsRedrawOnSameFrame = true
+                subtitleLiftDirty = true
+            }
             sizeLock.unlock()
         }
     }
@@ -92,22 +102,29 @@ public final class DKMetalLayerView: NSView {
             sizeLock.lock()
             let changed = (_antiOcclusionEnabled != newValue)
             _antiOcclusionEnabled = newValue
-            if changed { _needsRedrawOnSameFrame = true }
+            if changed {
+                _needsRedrawOnSameFrame = true
+                subtitleLiftDirty = true
+            }
             sizeLock.unlock()
         }
     }
 
     public func updateSubtitleVerticalBounds(y0: Int32, y1: Int32, canvasH: Int32) {
         sizeLock.lock()
-        subtitleBoundsY0 = y0
-        subtitleBoundsY1 = y1
-        subtitleCanvasH = canvasH
+        if subtitleBoundsY0 != y0 || subtitleBoundsY1 != y1 || subtitleCanvasH != canvasH {
+            subtitleBoundsY0 = y0
+            subtitleBoundsY1 = y1
+            subtitleCanvasH = canvasH
+            subtitleLiftDirty = true
+        }
         sizeLock.unlock()
     }
 
     public func stepSubtitleLiftAnimation(dt: Float) -> Bool {
         sizeLock.lock()
         defer { sizeLock.unlock() }
+        guard subtitleLiftDirty else { return false }
         let targetNDC: Float
         let viewH = Float(max(1.0, cachedViewPointSize.height))
         if !_antiOcclusionEnabled || _controlsOcclusionHeightPoints <= 0.5 {
@@ -115,6 +132,7 @@ public final class DKMetalLayerView: NSView {
         } else if subtitleCanvasH <= 0 || subtitleBoundsY1 <= subtitleBoundsY0 {
             // Keep existing lift offset across brief inter-cue silence so newly appearing subtitles
             // NEVER play a bottom-to-top slide-up entrance animation.
+            subtitleLiftDirty = false
             return false
         } else {
             let subBottomRatio = Float(subtitleBoundsY1) / Float(subtitleCanvasH)
@@ -130,6 +148,7 @@ public final class DKMetalLayerView: NSView {
                 targetNDC = 0.0
             }
         }
+        subtitleLiftDirty = false
         // Traditional instant cinema placement: snap directly to target position with zero bottom-up slide animation.
         if abs(targetNDC - currentSubtitleLiftNDC) > 0.0001 {
             currentSubtitleLiftNDC = targetNDC
@@ -227,11 +246,13 @@ public final class DKMetalLayerView: NSView {
 
     public override func layout() {
         super.layout()
-        updateDrawableSize()
+        let sizeChanged = updateDrawableSize()
         updateScreenHeadroom()
-        needsRedrawOnSameFrame = true
-        if !hasExternalDisplayLink {
-            renderLastPixelBuffer()
+        if sizeChanged {
+            needsRedrawOnSameFrame = true
+            if !hasExternalDisplayLink {
+                renderLastPixelBuffer()
+            }
         }
     }
 
@@ -270,10 +291,11 @@ public final class DKMetalLayerView: NSView {
         return (pb, uniforms, currentEDRHeadroom)
     }
 
-    private func updateDrawableSize() {
+    @discardableResult
+    private func updateDrawableSize() -> Bool {
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
         let size = bounds.size
-        guard size.width > 0, size.height > 0 else { return }
+        guard size.width > 0, size.height > 0 else { return false }
 
         let targetSize = CGSize(
             width: max(1, size.width * scale),
@@ -285,10 +307,15 @@ public final class DKMetalLayerView: NSView {
         }
 
         sizeLock.lock()
-        cachedDrawableSize = targetSize
-        cachedViewPointSize = size
-        layoutGeneration &+= 1
+        let changed = (targetSize != cachedDrawableSize || size != cachedViewPointSize)
+        if changed {
+            cachedDrawableSize = targetSize
+            cachedViewPointSize = size
+            layoutGeneration &+= 1
+            subtitleLiftDirty = true
+        }
         sizeLock.unlock()
+        return changed
     }
 
     nonisolated public static func preferredMetalDevice(for screen: NSScreen?) -> MTLDevice? {

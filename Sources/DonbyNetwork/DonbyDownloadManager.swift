@@ -22,6 +22,7 @@ public final class DonbyDownloadManager: ObservableObject {
     private let storageFileURL: URL
     private var statusRevision: Int = 0
     private var lastProgressStatusSync: TimeInterval = 0
+    private var playableBackingFileCache: [String: (localPath: String?, exists: Bool)] = [:]
 
     public var isYieldingForPlayback: Bool {
         !playbackPriorityTokens.isEmpty
@@ -524,7 +525,7 @@ public final class DonbyDownloadManager: ObservableObject {
         let now = ProcessInfo.processInfo.systemUptime
         if now - lastProgressStatusSync >= 1.0 {
             lastProgressStatusSync = now
-            rebuildStatusIndex()
+            rebuildStatusIndex(forceFileCheck: false)
         }
     }
 
@@ -556,7 +557,20 @@ public final class DonbyDownloadManager: ObservableObject {
         scheduleQueue()
     }
 
-    private func rebuildStatusIndex() {
+    private func cachedHasPlayableBackingFile(for entry: DownloadEntry, forceFileCheck: Bool) -> Bool {
+        if !forceFileCheck, let cached = playableBackingFileCache[entry.assetKey], cached.localPath == entry.localVideoFilePath {
+            return cached.exists
+        }
+        let exists = hasPlayableBackingFile(for: entry)
+        playableBackingFileCache[entry.assetKey] = (localPath: entry.localVideoFilePath, exists: exists)
+        return exists
+    }
+
+    private func rebuildStatusIndex(forceFileCheck: Bool = true) {
+        if forceFileCheck {
+            let validKeys = Set(entries.map(\.assetKey))
+            playableBackingFileCache = playableBackingFileCache.filter { validKeys.contains($0.key) }
+        }
         var completedIds = Set<String>()
         var inProgress: [String: Double] = [:]
         var seriesIdCounts: [String: Int] = [:]
@@ -564,23 +578,28 @@ public final class DonbyDownloadManager: ObservableObject {
         var seenSeriesEpisodes = Set<String>()
 
         for entry in entries {
-            if entry.status == .completed && hasPlayableBackingFile(for: entry) {
+            if entry.status == .completed && cachedHasPlayableBackingFile(for: entry, forceFileCheck: forceFileCheck) {
                 completedIds.insert(entry.itemId)
-                if entry.itemSnapshot.isEpisode {
-                    let uniqueEpKey = entry.itemId
-                    if seenSeriesEpisodes.insert(uniqueEpKey).inserted {
-                        if let sId = entry.itemSnapshot.seriesId, !sId.isEmpty {
-                            seriesIdCounts[sId, default: 0] += 1
-                        }
-                        if let sName = entry.itemSnapshot.seriesName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-                           !sName.isEmpty {
-                            seriesNameCounts[sName, default: 0] += 1
-                        }
+                if entry.itemSnapshot.isEpisode, seenSeriesEpisodes.insert(entry.itemId).inserted {
+                    if let sId = entry.itemSnapshot.seriesId, !sId.isEmpty {
+                        seriesIdCounts[sId, default: 0] += 1
+                    }
+                    if let sName = entry.itemSnapshot.seriesName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+                       !sName.isEmpty {
+                        seriesNameCounts[sName, default: 0] += 1
                     }
                 }
             } else if entry.status == .downloading || entry.status == .queued {
-                inProgress[entry.itemId] = max(inProgress[entry.itemId] ?? 0, entry.progressFraction)
+                let quantized = (max(0.0, min(1.0, entry.progressFraction)) * 100.0).rounded() / 100.0
+                inProgress[entry.itemId] = max(inProgress[entry.itemId] ?? 0, quantized)
             }
+        }
+
+        if statusIndex.completedItemIds == completedIds &&
+           statusIndex.inProgressByItemId == inProgress &&
+           statusIndex.completedCountBySeriesId == seriesIdCounts &&
+           statusIndex.completedCountBySeriesName == seriesNameCounts {
+            return
         }
 
         statusRevision &+= 1

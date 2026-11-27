@@ -36,17 +36,21 @@ public struct DonbyCardAppearance: Equatable, Sendable {
         server?.usesUHDLogo == true
     }
 
+    public func matchesVisualTheme(of other: DonbyCardAppearance) -> Bool {
+        server?.id == other.server?.id &&
+        server?.activeBaseURL == other.server?.activeBaseURL &&
+        server?.accessToken == other.server?.accessToken &&
+        server?.usesUHDLogo == other.server?.usesUHDLogo &&
+        isLightMode == other.isLightMode &&
+        accentColor == other.accentColor &&
+        accentTextColor == other.accentTextColor &&
+        showResolutionBadge == other.showResolutionBadge &&
+        showRatingBadge == other.showRatingBadge &&
+        isMonochromeTheme == other.isMonochromeTheme
+    }
+
     public static func == (lhs: DonbyCardAppearance, rhs: DonbyCardAppearance) -> Bool {
-        lhs.server?.id == rhs.server?.id &&
-        lhs.server?.activeBaseURL == rhs.server?.activeBaseURL &&
-        lhs.server?.accessToken == rhs.server?.accessToken &&
-        lhs.server?.usesUHDLogo == rhs.server?.usesUHDLogo &&
-        lhs.isLightMode == rhs.isLightMode &&
-        lhs.accentColor == rhs.accentColor &&
-        lhs.accentTextColor == rhs.accentTextColor &&
-        lhs.showResolutionBadge == rhs.showResolutionBadge &&
-        lhs.showRatingBadge == rhs.showRatingBadge &&
-        lhs.isMonochromeTheme == rhs.isMonochromeTheme &&
+        lhs.matchesVisualTheme(of: rhs) &&
         lhs.downloadStatusIndex == rhs.downloadStatusIndex
     }
 }

@@ -175,7 +175,7 @@ extension DetailView {
             }
         }
         let targetSeriesId = initialItem.isSeries ? initialItem.id : (initialItem.seriesId ?? initialItem.id)
-        for entry in downloadManager.entries where entry.status == .completed {
+        for entry in DonbyDownloadManager.shared.entries where entry.status == .completed {
             let snap = entry.hydratedItemSnapshot
             let matchesSeries = (snap.seriesId == targetSeriesId) || (snap.seriesName == item.name)
             if matchesSeries && seenIds.insert(snap.id).inserted {
@@ -191,7 +191,7 @@ extension DetailView {
     }
 
     private func isEpisodeWatched(_ ep: EmbyItem) -> Bool {
-        let localPath = downloadManager.activeOrCompletedEntry(for: ep.id)?.localVideoFilePath
+        let localPath = DonbyDownloadManager.shared.activeOrCompletedEntry(for: ep.id)?.localVideoFilePath
         return appState.isItemWatchedOfflineOrLocal(ep, localVideoPath: localPath)
     }
 
@@ -201,7 +201,7 @@ extension DetailView {
             return exact.id
         }
         if preferOfflineFocus {
-            let downloadedInSeason = eps.filter { downloadManager.completedEntry(for: $0.id) != nil }
+            let downloadedInSeason = eps.filter { DonbyDownloadManager.shared.completedEntry(for: $0.id) != nil }
             if let unwatchedDownloaded = downloadedInSeason.first(where: { !isEpisodeWatched($0) }) {
                 return unwatchedDownloaded.id
             }
@@ -223,7 +223,7 @@ extension DetailView {
     }
 
     func refreshOfflineAndCacheSnapshots() async {
-        let entries = downloadManager.entries
+        let entries = DonbyDownloadManager.shared.entries
         let target = initialItem
         let (group, assets) = await Task.detached(priority: .userInitiated) {
             let groups = DonbyOfflineLibraryStorage.scanOfflineLibrary(entries: entries)

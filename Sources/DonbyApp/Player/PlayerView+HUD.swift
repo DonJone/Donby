@@ -65,9 +65,7 @@ extension PlayerView {
                 }
 
                 if !currentResource.isLocalOrOfflineMedia {
-                    Text(String(format: "%.1f MB/s", max(0.0, displayDownloadSpeedMBs)))
-                        .font(.system(size: 14.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.white)
+                    PlayerTopSpeedView(telemetry: telemetry)
                 }
             }
         }
@@ -100,7 +98,7 @@ extension PlayerView {
     }
 
     private var specVideoCodecString: String {
-        let vCodec = Self.cString(from: kernelStats.video_codec)
+        let vCodec = Self.cString(from: telemetry.kernelStats.video_codec)
         if !vCodec.isEmpty && vCodec != "Unknown" {
             let uc = vCodec.uppercased()
             if uc.contains("HEVC") || uc.contains("H265") { return "HEVC" }
@@ -116,14 +114,14 @@ extension PlayerView {
     }
 
     private var specDynamicRangeString: String {
-        if kernelStats.is_dolby_vision { return "DOVI" }
-        if kernelStats.is_hdr { return "HDR" }
+        if telemetry.kernelStats.is_dolby_vision { return "DOVI" }
+        if telemetry.kernelStats.is_hdr { return "HDR" }
         return "SDR"
     }
 
     private var specResolutionString: String {
-        let w = kernelStats.width > 0 ? kernelStats.width : Int32(currentItem.primaryVideoStream?.width ?? 0)
-        let h = kernelStats.height > 0 ? kernelStats.height : Int32(currentItem.primaryVideoStream?.height ?? 0)
+        let w = telemetry.kernelStats.width > 0 ? telemetry.kernelStats.width : Int32(currentItem.primaryVideoStream?.width ?? 0)
+        let h = telemetry.kernelStats.height > 0 ? telemetry.kernelStats.height : Int32(currentItem.primaryVideoStream?.height ?? 0)
         if w >= 3600 || h >= 2000 { return "2160P" }
         if w >= 2500 || h >= 1400 { return "1440P" }
         if w >= 1800 || h >= 1000 { return "1080P" }
@@ -140,13 +138,13 @@ extension PlayerView {
     }
 
     private var specFpsString: String {
-        let fps = kernelStats.fps > 0 ? kernelStats.fps : 24.0
+        let fps = telemetry.kernelStats.fps > 0 ? telemetry.kernelStats.fps : 24.0
         return "\(Int(fps.rounded()))FPS"
     }
 
     private var specBitrateString: String? {
-        if kernelStats.video_bitrate_mbps > 0.05 {
-            return String(format: "%.1fmbps", kernelStats.video_bitrate_mbps)
+        if telemetry.kernelStats.video_bitrate_mbps > 0.05 {
+            return String(format: "%.1fmbps", telemetry.kernelStats.video_bitrate_mbps)
         }
         if let br = currentItem.primaryVideoStream?.bitRate, br > 0 {
             return String(format: "%.1fmbps", Double(br) / 1_000_000.0)
@@ -155,183 +153,39 @@ extension PlayerView {
     }
 
     var bottomControlBar: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Badges row positioned above the bottom control bar on the left
-            HStack(spacing: 6) {
-                playerSpecBadge(text: kernelStats.is_hw_accelerated ? "HW" : "SW")
-                playerSpecBadge(text: specVideoCodecString)
-                playerSpecBadge(text: specDynamicRangeString)
-                playerSpecBadge(text: specResolutionString)
-                playerSpecBadge(text: specFpsString)
-                if let br = specBitrateString {
-                    playerSpecBadge(text: br)
+        PlayerBottomControlBarView(
+            telemetry: telemetry,
+            currentItem: currentItem,
+            episodesCount: session.episodesQueue.count,
+            isPlaying: isPlaying,
+            isScrubbing: $isScrubbing,
+            scrubTime: $scrubTime,
+            showRemainingTime: $showRemainingTime,
+            volume: $volume,
+            isMuted: $isMuted,
+            accentColor: drawerSelectedAccentTint(),
+            onAdjacentEpisode: { playAdjacentEpisode(offset: $0) },
+            onSeekRelative: { seekRelative($0) },
+            onTogglePlayPause: { togglePlayPause() },
+            onCommitSeek: { seekTo($0) },
+            onToggleMute: {
+                isMuted.toggle()
+                if let handle = playerHandle {
+                    dk_player_set_volume(handle, volume, isMuted)
                 }
-            }
-            .padding(.leading, 24)
-            .padding(.bottom, 8)
-
-            // Main single unified horizontal control bar
-            HStack(spacing: 14) {
-                // Left controls: Previous, Rewind 10s, Play/Pause, Forward 10s, Next, Current Time
-                HStack(spacing: 6) {
-                    PlayerConsoleIconButton(
-                        systemImage: "backward.end.fill",
-                        fontSize: 13.5,
-                        isDisabled: session.episodesQueue.count <= 1,
-                        tooltip: "上一集"
-                    ) {
-                        playAdjacentEpisode(offset: -1)
-                    }
-
-                    PlayerConsoleIconButton(
-                        systemImage: "gobackward.10",
-                        fontSize: 14.5,
-                        tooltip: "快退 10 秒"
-                    ) {
-                        seekRelative(-10)
-                    }
-
-                    PlayerConsoleIconButton(
-                        systemImage: isPlaying ? "pause.fill" : "play.fill",
-                        fontSize: 15,
-                        fontWeight: .bold,
-                        size: 34,
-                        prominent: true,
-                        tooltip: isPlaying ? "暂停 (空格)" : "播放 (空格)"
-                    ) {
-                        togglePlayPause()
-                    }
-
-                    PlayerConsoleIconButton(
-                        systemImage: "goforward.10",
-                        fontSize: 14.5,
-                        tooltip: "快进 10 秒"
-                    ) {
-                        seekRelative(10)
-                    }
-
-                    PlayerConsoleIconButton(
-                        systemImage: "forward.end.fill",
-                        fontSize: 13.5,
-                        isDisabled: session.episodesQueue.count <= 1,
-                        tooltip: "下一集"
-                    ) {
-                        playAdjacentEpisode(offset: 1)
-                    }
-
-                    Text(formatTime(isScrubbing ? scrubTime : currentTime))
-                        .font(.system(size: 13, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.white)
-                        .frame(minWidth: 46, alignment: .leading)
-                        .padding(.leading, 4)
+            },
+            onVolumeChanged: { v in
+                if let handle = playerHandle {
+                    dk_player_set_volume(handle, v, isMuted)
                 }
-
-                // Center: sleek timeline scrubber
-                PlayerTimelineScrubberView(
-                    currentTime: currentTime,
-                    bufferedAheadSeconds: bufferedAheadSeconds,
-                    duration: duration,
-                    accentColor: drawerSelectedAccentTint(),
-                    isScrubbing: $isScrubbing,
-                    scrubTime: $scrubTime,
-                    onCommitSeek: { target in seekTo(target) }
-                )
-
-                // Right controls: Duration, Volume Icon, Mini Volume Slider, 5 Unified Circular Glass Buttons
-                HStack(spacing: 8) {
-                    Button { showRemainingTime.toggle() } label: {
-                        Text(showRemainingTime ? "-\(formatTime(max(0, duration - currentTime)))" : formatTime(duration))
-                            .font(.system(size: 13, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.white)
-                            .frame(minWidth: 48, minHeight: 28, alignment: .trailing)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("切换显示总时长 / 剩余时长")
-
-                    PlayerConsoleIconButton(
-                        systemImage: isMuted || volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill",
-                        fontSize: 13.5,
-                        tooltip: isMuted ? "取消静音" : "静音"
-                    ) {
-                        isMuted.toggle()
-                        if let handle = playerHandle {
-                            dk_player_set_volume(handle, volume, isMuted)
-                        }
-                    }
-
-                    MiniVolumeSlider(volume: $volume, isMuted: $isMuted) { v in
-                        if let handle = playerHandle {
-                            dk_player_set_volume(handle, v, isMuted)
-                        }
-                    }
-                    .padding(.trailing, 4)
-
-                    // 1. Audio tracks circular glass button
-                    PlayerCircleMenu(tooltip: "音频轨道") {
-                        Image(systemName: "waveform")
-                            .font(.system(size: 13, weight: .semibold))
-                    } menuItems: {
-                        audioMenuContent
-                    }
-
-                    // 2. Subtitle circular glass button
-                    PlayerCircleMenu(tooltip: "字幕选择") {
-                        Image(systemName: "captions.bubble")
-                            .font(.system(size: 12.5, weight: .semibold))
-                    } menuItems: {
-                        subtitleMenuContent
-                    }
-
-                    // 3. ( D ) Decoder & display info circular glass button
-                    PlayerCircleMenu(tooltip: "解码与显示信息") {
-                        Text("D")
-                            .font(.system(size: 12.5, weight: .bold, design: .rounded))
-                    } menuItems: {
-                        decoderMenuContent
-                    }
-
-                    // 4. Playback speed circular glass button (open-arc speedometer, zero double-ring)
-                    PlayerCircleMenu(tooltip: "播放速度") {
-                        Image(systemName: "speedometer")
-                            .font(.system(size: 13, weight: .semibold))
-                    } menuItems: {
-                        speedMenuContent
-                    }
-
-                    // 5. More options circular glass button
-                    PlayerCircleMenu(tooltip: "更多选项") {
-                        Image(systemName: "ellipsis")
-                            .font(.system(size: 13, weight: .bold))
-                    } menuItems: {
-                        moreMenuContent
-                    }
-                }
-            }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 14)
-            .background(
-                LinearGradient(
-                    colors: [Color.black.opacity(0.72), Color.black.opacity(0.92)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-            .overlay(
-                Rectangle()
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [Color.white.opacity(0.14), Color.clear],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: 0.6
-                    ),
-                alignment: .top
-            )
-            .contentShape(Rectangle())
-            .onTapGesture {}
-        }
+            },
+            formatTime: { formatTime($0) },
+            audioMenu: { AnyView(audioMenuContent) },
+            subtitleMenu: { AnyView(subtitleMenuContent) },
+            decoderMenu: { AnyView(decoderMenuContent) },
+            speedMenu: { AnyView(speedMenuContent) },
+            moreMenu: { AnyView(moreMenuContent) }
+        )
     }
 
     // MARK: - Dropdown Menu Contents for Bottom Control Bar Circular Buttons
@@ -478,8 +332,8 @@ extension PlayerView {
     @ViewBuilder
     private var decoderMenuContent: some View {
         Section("媒体信息") {
-            Text("解码: \(kernelStats.is_hw_accelerated ? "硬件解码" : "软件解码")")
-            Text("动态范围: \(kernelStats.is_dolby_vision ? "Dolby Vision" : (kernelStats.is_hdr ? "HDR10" : "SDR"))")
+            Text("解码: \(telemetry.kernelStats.is_hw_accelerated ? "硬件解码" : "软件解码")")
+            Text("动态范围: \(telemetry.kernelStats.is_dolby_vision ? "Dolby Vision" : (telemetry.kernelStats.is_hdr ? "HDR10" : "SDR"))")
             Text("分辨率: \(specResolutionString)")
             Text("帧率: \(specFpsString)")
             if let br = specBitrateString {
@@ -490,7 +344,7 @@ extension PlayerView {
         Section("解码与线路") {
             Button(appState.enableHardwareDecode ? "切换为软件解码" : "启用硬件解码") {
                 appState.enableHardwareDecode.toggle()
-                startNativeKernelPlayback(startSeconds: currentTime)
+                startNativeKernelPlayback(startSeconds: telemetry.currentTime)
             }
             Button("切换播放线路 (\(session.server.activeLineName))...") {
                 appState.linePickerServer = session.server
@@ -531,15 +385,15 @@ extension PlayerView {
                 seekTo(skipPref.introSeconds)
                 appState.showToast("已跳至片头结束点 \(formatTime(skipPref.introSeconds))", icon: "forward.end.alt.fill")
             }
-            Button("设当前位置为本季片头结束 (\(formatTime(currentTime)))") {
+            Button("设当前位置为本季片头结束 (\(formatTime(telemetry.currentTime)))") {
                 appState.updateSeasonSkipPreference(serverId: session.server.id, item: currentItem) { pref in
-                    pref.introSeconds = currentTime
+                    pref.introSeconds = telemetry.currentTime
                     pref.hasUserMarkedIntro = true
                 }
-                appState.showToast("已记忆本季片头长度：\(formatTime(currentTime))", icon: "checkmark.circle.fill")
+                appState.showToast("已记忆本季片头长度：\(formatTime(telemetry.currentTime))", icon: "checkmark.circle.fill")
             }
-            Button("设当前位置为本季片尾开始 (剩余 \(formatTime(max(0, duration - currentTime))))") {
-                let tailLen = max(0, duration - currentTime)
+            Button("设当前位置为本季片尾开始 (剩余 \(formatTime(max(0, telemetry.duration - telemetry.currentTime))))") {
+                let tailLen = max(0, telemetry.duration - telemetry.currentTime)
                 appState.updateSeasonSkipPreference(serverId: session.server.id, item: currentItem) { pref in
                     pref.outroSeconds = tailLen
                     pref.hasUserMarkedOutro = true
@@ -572,6 +426,274 @@ extension PlayerView {
         }
         Button("退出播放 (Esc)") {
             exitPlayer()
+        }
+    }
+}
+
+private struct PlayerTopSpeedView: View {
+    @ObservedObject var telemetry: PlayerHUDTelemetry
+
+    var body: some View {
+        Text(String(format: "%.1f MB/s", max(0.0, telemetry.displayDownloadSpeedMBs)))
+            .font(.system(size: 14.5, weight: .semibold, design: .monospaced))
+            .foregroundStyle(.white)
+    }
+}
+
+private struct PlayerSpecBadgeHostView: View {
+    @ObservedObject var telemetry: PlayerHUDTelemetry
+    let currentItem: EmbyItem
+
+    var body: some View {
+        let stats = telemetry.kernelStats
+        HStack(spacing: 6) {
+            badge(stats.is_hw_accelerated ? "HW" : "SW")
+            badge(videoCodecString(stats: stats))
+            badge(stats.is_dolby_vision ? "DOVI" : (stats.is_hdr ? "HDR" : "SDR"))
+            badge(resolutionString(stats: stats))
+            badge("\(Int((stats.fps > 0 ? stats.fps : 24.0).rounded()))FPS")
+            if let br = bitrateString(stats: stats) {
+                badge(br)
+            }
+        }
+    }
+
+    private func badge(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: .bold, design: .monospaced))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(Color.black.opacity(0.65))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6)
+            )
+    }
+
+    private func videoCodecString(stats: DKRuntimeStats) -> String {
+        let vCodec = PlayerView.cString(from: stats.video_codec)
+        if !vCodec.isEmpty && vCodec != "Unknown" {
+            let uc = vCodec.uppercased()
+            if uc.contains("HEVC") || uc.contains("H265") { return "HEVC" }
+            if uc.contains("H264") || uc.contains("AVC") { return "AVC" }
+            if uc.contains("AV1") { return "AV1" }
+            if uc.contains("VP9") { return "VP9" }
+            return uc
+        }
+        if let tag = currentItem.videoCodecTag {
+            return tag.uppercased()
+        }
+        return "HEVC"
+    }
+
+    private func resolutionString(stats: DKRuntimeStats) -> String {
+        let w = stats.width > 0 ? stats.width : Int32(currentItem.primaryVideoStream?.width ?? 0)
+        let h = stats.height > 0 ? stats.height : Int32(currentItem.primaryVideoStream?.height ?? 0)
+        if w >= 3600 || h >= 2000 { return "2160P" }
+        if w >= 2500 || h >= 1400 { return "1440P" }
+        if w >= 1800 || h >= 1000 { return "1080P" }
+        if w >= 1200 || h >= 700  { return "720P" }
+        if h > 0     { return "\(h)P" }
+        if let res = currentItem.resolutionBadge, !res.isEmpty {
+            let u = res.uppercased()
+            if u.contains("4K") { return "2160P" }
+            if u.contains("1080") { return "1080P" }
+            if u.contains("720") { return "720P" }
+            return u
+        }
+        return "2160P"
+    }
+
+    private func bitrateString(stats: DKRuntimeStats) -> String? {
+        if stats.video_bitrate_mbps > 0.05 {
+            return String(format: "%.1fmbps", stats.video_bitrate_mbps)
+        }
+        if let br = currentItem.primaryVideoStream?.bitRate, br > 0 {
+            return String(format: "%.1fmbps", Double(br) / 1_000_000.0)
+        }
+        return nil
+    }
+}
+
+private struct PlayerBottomControlBarView: View {
+    @ObservedObject var telemetry: PlayerHUDTelemetry
+    let currentItem: EmbyItem
+    let episodesCount: Int
+    let isPlaying: Bool
+    @Binding var isScrubbing: Bool
+    @Binding var scrubTime: Double
+    @Binding var showRemainingTime: Bool
+    @Binding var volume: Float
+    @Binding var isMuted: Bool
+    let accentColor: Color
+    let onAdjacentEpisode: (Int) -> Void
+    let onSeekRelative: (Double) -> Void
+    let onTogglePlayPause: () -> Void
+    let onCommitSeek: (Double) -> Void
+    let onToggleMute: () -> Void
+    let onVolumeChanged: (Float) -> Void
+    let formatTime: (Double) -> String
+    let audioMenu: () -> AnyView
+    let subtitleMenu: () -> AnyView
+    let decoderMenu: () -> AnyView
+    let speedMenu: () -> AnyView
+    let moreMenu: () -> AnyView
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            PlayerSpecBadgeHostView(telemetry: telemetry, currentItem: currentItem)
+                .padding(.leading, 24)
+                .padding(.bottom, 8)
+
+            HStack(spacing: 14) {
+                HStack(spacing: 6) {
+                    PlayerConsoleIconButton(
+                        systemImage: "backward.end.fill",
+                        fontSize: 13.5,
+                        isDisabled: episodesCount <= 1,
+                        tooltip: "上一集"
+                    ) {
+                        onAdjacentEpisode(-1)
+                    }
+
+                    PlayerConsoleIconButton(
+                        systemImage: "gobackward.10",
+                        fontSize: 14.5,
+                        tooltip: "快退 10 秒"
+                    ) {
+                        onSeekRelative(-10)
+                    }
+
+                    PlayerConsoleIconButton(
+                        systemImage: isPlaying ? "pause.fill" : "play.fill",
+                        fontSize: 15,
+                        fontWeight: .bold,
+                        size: 34,
+                        prominent: true,
+                        tooltip: isPlaying ? "暂停 (空格)" : "播放 (空格)"
+                    ) {
+                        onTogglePlayPause()
+                    }
+
+                    PlayerConsoleIconButton(
+                        systemImage: "goforward.10",
+                        fontSize: 14.5,
+                        tooltip: "快进 10 秒"
+                    ) {
+                        onSeekRelative(10)
+                    }
+
+                    PlayerConsoleIconButton(
+                        systemImage: "forward.end.fill",
+                        fontSize: 13.5,
+                        isDisabled: episodesCount <= 1,
+                        tooltip: "下一集"
+                    ) {
+                        onAdjacentEpisode(1)
+                    }
+
+                    Text(formatTime(isScrubbing ? scrubTime : telemetry.currentTime))
+                        .font(.system(size: 13, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 46, alignment: .leading)
+                        .padding(.leading, 4)
+                }
+
+                PlayerTimelineScrubberView(
+                    currentTime: telemetry.currentTime,
+                    bufferedAheadSeconds: telemetry.bufferedAheadSeconds,
+                    duration: telemetry.duration,
+                    accentColor: accentColor,
+                    isScrubbing: $isScrubbing,
+                    scrubTime: $scrubTime,
+                    onCommitSeek: onCommitSeek
+                )
+
+                HStack(spacing: 8) {
+                    Button { showRemainingTime.toggle() } label: {
+                        Text(showRemainingTime ? "-\(formatTime(max(0, telemetry.duration - telemetry.currentTime)))" : formatTime(telemetry.duration))
+                            .font(.system(size: 13, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.white)
+                            .frame(minWidth: 48, minHeight: 28, alignment: .trailing)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("切换显示总时长 / 剩余时长")
+
+                    PlayerConsoleIconButton(
+                        systemImage: isMuted || volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill",
+                        fontSize: 13.5,
+                        tooltip: isMuted ? "取消静音" : "静音"
+                    ) {
+                        onToggleMute()
+                    }
+
+                    MiniVolumeSlider(volume: $volume, isMuted: $isMuted) { v in
+                        onVolumeChanged(v)
+                    }
+                    .padding(.trailing, 4)
+
+                    PlayerCircleMenu(tooltip: "音频轨道") {
+                        Image(systemName: "waveform")
+                            .font(.system(size: 13, weight: .semibold))
+                    } menuItems: {
+                        audioMenu()
+                    }
+
+                    PlayerCircleMenu(tooltip: "字幕选择") {
+                        Image(systemName: "captions.bubble")
+                            .font(.system(size: 12.5, weight: .semibold))
+                    } menuItems: {
+                        subtitleMenu()
+                    }
+
+                    PlayerCircleMenu(tooltip: "解码与显示信息") {
+                        Text("D")
+                            .font(.system(size: 12.5, weight: .bold, design: .rounded))
+                    } menuItems: {
+                        decoderMenu()
+                    }
+
+                    PlayerCircleMenu(tooltip: "播放速度") {
+                        Image(systemName: "speedometer")
+                            .font(.system(size: 13, weight: .semibold))
+                    } menuItems: {
+                        speedMenu()
+                    }
+
+                    PlayerCircleMenu(tooltip: "更多选项") {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 13, weight: .bold))
+                    } menuItems: {
+                        moreMenu()
+                    }
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 14)
+            .background(
+                LinearGradient(
+                    colors: [Color.black.opacity(0.72), Color.black.opacity(0.92)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+            .overlay(
+                Rectangle()
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.14), Color.clear],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 0.6
+                    ),
+                alignment: .top
+            )
+            .contentShape(Rectangle())
+            .onTapGesture {}
         }
     }
 }

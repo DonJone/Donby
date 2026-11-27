@@ -187,7 +187,7 @@ extension DetailView {
     }
 
     private func episodeCardItem(_ ep: EmbyItem, isSelected: Bool) -> some View {
-        let epDownloadEntry = downloadManager.activeOrCompletedEntry(for: ep.id)
+        let epDownloadEntry = DonbyDownloadManager.shared.activeOrCompletedEntry(for: ep.id)
         let isEpDownloaded = (epDownloadEntry?.status == .completed)
         let isEpDownloading = (epDownloadEntry?.status == .downloading || epDownloadEntry?.status == .queued)
         let isEpWatched = appState.isItemWatchedOfflineOrLocal(ep, localVideoPath: epDownloadEntry?.localVideoFilePath)
@@ -273,14 +273,9 @@ extension DetailView {
                     .strokeBorder(
                         isSelected
                             ? (appState.isLightMode ? appState.accentColor : Color.white)
-                            : (appState.isLightMode ? Color.black.opacity(0.06) : Color.white.opacity(0.06)),
-                        lineWidth: isSelected ? 2.2 : 0.65
+                            : (appState.isLightMode ? Color.black.opacity(0.08) : Color.white.opacity(0.08)),
+                        lineWidth: isSelected ? 2.2 : 0.75
                     )
-            )
-            .shadow(
-                color: Color.black.opacity(isSelected ? 0.28 : (appState.isLightMode ? 0.10 : 0.30)),
-                radius: isSelected ? 10 : 6,
-                y: isSelected ? 4 : 3
             )
             .contentShape(Rectangle())
             .onHover { isHovering in

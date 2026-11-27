@@ -484,7 +484,7 @@ public struct UHDDanmuPickerSheet: View {
                         .font(.system(size: 11.5, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.65))
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 4) {
+                        LazyVStack(alignment: .leading, spacing: 4) {
                             ForEach(animes) { anime in
                                 let isSel = selectedAnime?.animeId == anime.animeId
                                 Button {
@@ -515,7 +515,7 @@ public struct UHDDanmuPickerSheet: View {
                         .font(.system(size: 11.5, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.65))
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 4) {
+                        LazyVStack(alignment: .leading, spacing: 4) {
                             ForEach(episodes) { ep in
                                 Button {
                                     Task { await pickEpisode(ep) }

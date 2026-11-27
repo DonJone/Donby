@@ -414,17 +414,24 @@ public struct PersonAvatarView: View {
 
 // MARK: - Watch Record Poster & Video Frame Thumbnail View
 public struct RecordArtworkThumbnailView: View {
-    @EnvironmentObject private var appState: AppState
     public let record: WatchRecordItem
     public let server: EmbyServerConfig?
+    public let isLightMode: Bool
     public var width: CGFloat = 78
     public var height: CGFloat = 114
 
     @State private var thumbnail: NSImage? = nil
 
-    public init(record: WatchRecordItem, server: EmbyServerConfig?, width: CGFloat = 78, height: CGFloat = 114) {
+    public init(
+        record: WatchRecordItem,
+        server: EmbyServerConfig?,
+        isLightMode: Bool = false,
+        width: CGFloat = 78,
+        height: CGFloat = 114
+    ) {
         self.record = record
         self.server = server
+        self.isLightMode = isLightMode
         self.width = width
         self.height = height
     }
@@ -442,16 +449,16 @@ public struct RecordArtworkThumbnailView: View {
                     .frame(width: width, height: height)
                     .clipped()
             } else {
-                (appState.isLightMode ? Color(red: 0.91, green: 0.92, blue: 0.94) : Color(red: 0.10, green: 0.11, blue: 0.14))
+                (isLightMode ? Color(red: 0.91, green: 0.92, blue: 0.94) : Color(red: 0.10, green: 0.11, blue: 0.14))
                     .frame(width: width, height: height)
 
                 VStack(spacing: 5) {
                     Image(systemName: (record.sourceType == "Local" || record.sourceType == "本地文件") ? "play.rectangle.fill" : "film")
                         .font(.system(size: 22))
-                        .foregroundStyle(appState.isLightMode ? Color.black.opacity(0.28) : Color.white.opacity(0.35))
+                        .foregroundStyle(isLightMode ? Color.black.opacity(0.28) : Color.white.opacity(0.35))
                     Text(record.sourceType)
                         .font(.system(size: 9.5, weight: .semibold))
-                        .foregroundStyle(appState.isLightMode ? Color.black.opacity(0.40) : Color.white.opacity(0.40))
+                        .foregroundStyle(isLightMode ? Color.black.opacity(0.40) : Color.white.opacity(0.40))
                 }
             }
         }

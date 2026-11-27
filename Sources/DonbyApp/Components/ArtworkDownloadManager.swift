@@ -154,10 +154,11 @@ public final class ArtworkDownloadManager: @unchecked Sendable {
 
     private init() {
         let config = URLSessionConfiguration.default
+        config.urlCache = nil
         config.httpMaximumConnectionsPerHost = 8
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 30
-        config.requestCachePolicy = .returnCacheDataElseLoad
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
         self.coordinator = ArtworkDownloadCoordinator(session: URLSession(configuration: config))
     }
 

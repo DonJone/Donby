@@ -244,7 +244,7 @@ extension DetailView {
                                     if let dlSummary = heroDownloadedBadgeText {
                                         DonbyDownloadedBadgePill(
                                             text: dlSummary,
-                                            isCompleted: downloadManager.completedEntry(for: item.id) != nil || item.isSeries,
+                                            isCompleted: observedDownloadIndex.completedItemIds.contains(item.id) || item.isSeries,
                                             accentColor: appState.overlayAccentColor,
                                             fontSize: 10.5
                                         )
@@ -278,15 +278,14 @@ extension DetailView {
 
     private var heroDownloadedBadgeText: String? {
         if item.isSeries {
-            let cnt = downloadManager.statusIndex.downloadedCount(forSeries: item)
+            let cnt = observedDownloadIndex.downloadedCount(forSeries: item)
             return cnt > 0 ? "已下载 \(cnt) 集" : nil
         }
-        if downloadManager.completedEntry(for: item.id) != nil {
+        if observedDownloadIndex.completedItemIds.contains(item.id) {
             return "已下载"
         }
-        if let active = downloadManager.activeOrCompletedEntry(for: item.id),
-           active.status == .downloading || active.status == .queued {
-            return String(format: "下载中 %.0f%%", active.progressFraction * 100)
+        if let prog = observedDownloadIndex.inProgressByItemId[item.id] {
+            return String(format: "下载中 %.0f%%", max(0, min(1, prog)) * 100)
         }
         return nil
     }
@@ -305,7 +304,7 @@ extension DetailView {
 
     @ViewBuilder
     private var detailDownloadButton: some View {
-        let matchingEntry = downloadManager.entries.first {
+        let matchingEntry = DonbyDownloadManager.shared.entries.first {
             $0.itemId == item.id && (selectedSourceId.isEmpty || $0.mediaSourceId == selectedSourceId)
         }
         let cachedSummary = (matchingEntry == nil) ? cachedProgressSnapshot(

@@ -76,11 +76,26 @@ extension AppState {
             var targetItem = item
             var resolvedQueue = episodesQueue
             if item.isSeries {
-                let offlineLibraryGroup = DonbyOfflineLibraryStorage.scanOfflineLibrary(entries: DonbyDownloadManager.shared.entries)
-                    .first(where: { $0.displayItem.id == item.id || $0.displayItem.name == item.name })
+                let trimmedHost = server.host.trimmingCharacters(in: .whitespacesAndNewlines)
+                let needsOfflineScan = preferOffline
+                    || trimmedHost.isEmpty
+                    || DonbyDownloadManager.shared.statusIndex.isItemDownloaded(item)
+                let offlineLibraryGroup: OfflineLibraryGroup?
+                if needsOfflineScan {
+                    let entries = DonbyDownloadManager.shared.entries
+                    let targetId = item.id
+                    let targetName = item.name
+                    offlineLibraryGroup = await Task.detached(priority: .userInitiated) {
+                        DonbyOfflineLibraryStorage.scanOfflineLibrary(entries: entries)
+                            .first(where: { $0.displayItem.id == targetId || $0.displayItem.name == targetName })
+                    }.value
+                    guard currentStartGen == playbackStartGeneration else { return }
+                } else {
+                    offlineLibraryGroup = nil
+                }
 
                 let eps: [EmbyItem]
-                if (preferOffline || server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty),
+                if (preferOffline || trimmedHost.isEmpty),
                    let offlineGroup = offlineLibraryGroup {
                     let allOfflineEps = offlineGroup.episodesBySeason.keys.sorted().flatMap { seasonKey in
                         (offlineGroup.episodesBySeason[seasonKey] ?? []).sorted {
