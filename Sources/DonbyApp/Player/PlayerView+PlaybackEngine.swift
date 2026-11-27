@@ -43,6 +43,16 @@ private func dkTurboCloseCB(_ opaque: UnsafeMutableRawPointer?) {
 extension PlayerView {
     func handleProgressTimerTick() {
         let hudVisible = showControls || activeDrawer != nil
+        if currentResource.isLocalOrOfflineMedia {
+            if displayDownloadSpeedMBs != 0.0 {
+                displayDownloadSpeedMBs = 0.0
+            }
+        } else if playerHandle == nil && (showControls || isOpeningMedia) {
+            let liveWireSpeed = activeTurboHandle?.currentWireSpeedMBs ?? 0.0
+            if abs(displayDownloadSpeedMBs - liveWireSpeed) > 0.05 || (liveWireSpeed < 0.01 && displayDownloadSpeedMBs > 0) {
+                displayDownloadSpeedMBs = liveWireSpeed
+            }
+        }
             guard let handle = playerHandle, !isScrubbing else { return }
             let nowUptime = ProcessInfo.processInfo.systemUptime
             let newPos = dk_player_get_position(handle)
@@ -98,13 +108,20 @@ extension PlayerView {
                     abs(kernelStats.video_bitrate_mbps - freshStats.video_bitrate_mbps) > 0.1 {
                     kernelStats = freshStats
                 }
-                if let turboHandle = activeTurboHandle {
+                if currentResource.isLocalOrOfflineMedia {
+                    if displayDownloadSpeedMBs != 0.0 {
+                        displayDownloadSpeedMBs = 0.0
+                    }
+                } else if let turboHandle = activeTurboHandle {
                     let turboSpeed = turboHandle.currentWireSpeedMBs
                     if abs(displayDownloadSpeedMBs - turboSpeed) > 0.05 || (turboSpeed < 0.01 && displayDownloadSpeedMBs > 0) {
                         displayDownloadSpeedMBs = turboSpeed
                     }
-                } else if abs(displayDownloadSpeedMBs - freshStats.download_speed_mbs) > 0.05 {
-                    displayDownloadSpeedMBs = freshStats.download_speed_mbs
+                } else {
+                    let kernelSpeed = max(0.0, freshStats.download_speed_mbs)
+                    if abs(displayDownloadSpeedMBs - kernelSpeed) > 0.05 || (kernelSpeed < 0.01 && displayDownloadSpeedMBs > 0) {
+                        displayDownloadSpeedMBs = kernelSpeed
+                    }
                 }
             }
 

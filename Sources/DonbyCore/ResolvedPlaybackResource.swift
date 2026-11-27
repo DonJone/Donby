@@ -37,4 +37,22 @@ public struct ResolvedPlaybackResource: Sendable, Equatable {
     public init(streamURL: URL, originStreamURL: URL? = nil, downloadURL: URL? = nil, headers: [String: String], playSessionId: String, mediaSource: MediaSourceInfo, subtitleURLs: [SubtitleResourceItem], isDirectStream: Bool, routeNote: String) {
         self.streamURL = streamURL; self.originStreamURL = originStreamURL; self.downloadURL = downloadURL; self.headers = headers; self.playSessionId = playSessionId; self.mediaSource = mediaSource; self.subtitleURLs = subtitleURLs; self.isDirectStream = isDirectStream; self.routeNote = routeNote
     }
+
+    public var isLocalOrOfflineMedia: Bool {
+        if playSessionId.hasPrefix("offline-") {
+            return true
+        }
+        let scheme = streamURL.scheme?.lowercased() ?? ""
+        if streamURL.isFileURL || scheme == "file" {
+            return true
+        }
+        if let unescaped = streamURL.absoluteString.removingPercentEncoding?.lowercased(),
+           unescaped.hasPrefix("file://") {
+            return true
+        }
+        if scheme.isEmpty && streamURL.path.hasPrefix("/") {
+            return true
+        }
+        return false
+    }
 }

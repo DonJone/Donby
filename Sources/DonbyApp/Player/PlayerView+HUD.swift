@@ -64,9 +64,11 @@ extension PlayerView {
                     companion.makeTopBarControls(activeDrawer: $activeDrawer)
                 }
 
-                Text(String(format: "%.1f MB/s", max(0.0, displayDownloadSpeedMBs)))
-                    .font(.system(size: 14.5, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.white)
+                if !currentResource.isLocalOrOfflineMedia {
+                    Text(String(format: "%.1f MB/s", max(0.0, displayDownloadSpeedMBs)))
+                        .font(.system(size: 14.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white)
+                }
             }
         }
         .padding(.horizontal, 24)

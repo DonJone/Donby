@@ -364,6 +364,16 @@ public struct PlayerView: View {
         if abs(bufferedAheadSeconds - autoHideBox.liveBufferedAheadSeconds) > 0.25 {
             bufferedAheadSeconds = autoHideBox.liveBufferedAheadSeconds
         }
+        if currentResource.isLocalOrOfflineMedia {
+            if displayDownloadSpeedMBs != 0.0 {
+                displayDownloadSpeedMBs = 0.0
+            }
+        } else if let turboHandle = activeTurboHandle {
+            let turboSpeed = turboHandle.currentWireSpeedMBs
+            if abs(displayDownloadSpeedMBs - turboSpeed) > 0.05 || (turboSpeed < 0.01 && displayDownloadSpeedMBs > 0) {
+                displayDownloadSpeedMBs = turboSpeed
+            }
+        }
     }
 
     func showControlsAndResetTimer() {

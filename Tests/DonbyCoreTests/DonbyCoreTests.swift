@@ -8,7 +8,22 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "2.1.1")
+        #expect(DonbyAppInfo.fallbackVersion == "2.1.2")
+    }
+
+    @Test func resolvedPlaybackResourceLocalOrOfflineDetection() {
+        let src = MediaSourceInfo(id: "src-1", name: "4K", path: "/video.mkv", container: "mkv")
+        func makeResource(_ url: URL, sessionId: String = "s-1") -> ResolvedPlaybackResource {
+            ResolvedPlaybackResource(
+                streamURL: url, headers: [:], playSessionId: sessionId,
+                mediaSource: src, subtitleURLs: [], isDirectStream: true, routeNote: ""
+            )
+        }
+        #expect(makeResource(URL(fileURLWithPath: "/Users/test/Movies/Donby/movie.mkv")).isLocalOrOfflineMedia)
+        #expect(makeResource(URL(string: "https://cdn.example.com/fallback.mkv")!, sessionId: "offline-abc").isLocalOrOfflineMedia)
+        #expect(makeResource(URL(string: "/tmp/sample.mp4")!).isLocalOrOfflineMedia)
+        #expect(!makeResource(URL(string: "https://cdn.example.com/emby/Videos/123/stream.mkv")!).isLocalOrOfflineMedia)
+        #expect(!makeResource(URL(string: "http://192.168.1.10:8096/emby/Videos/123/stream.mkv")!).isLocalOrOfflineMedia)
     }
 
     @Test func heroTopEdgeSynthesizerPreservesExactColorContrastAndSuppressesOutlierSpike() {

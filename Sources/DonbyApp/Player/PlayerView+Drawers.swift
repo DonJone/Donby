@@ -329,10 +329,17 @@ extension PlayerView {
                         drawerGlassCard {
                             osdInfoRow("解码方式", kernelStats.is_hw_accelerated ? "硬件解码" : "软件解码")
                             osdInfoRow("动态范围", kernelStats.is_dolby_vision ? "Dolby Vision" : (kernelStats.is_hdr ? "HDR10" : "SDR"))
-                            osdInfoRow("当前速率", String(format: "%.1f MB/s", max(0.0, displayDownloadSpeedMBs)))
+                            if !currentResource.isLocalOrOfflineMedia {
+                                osdInfoRow("当前速率", String(format: "%.1f MB/s", max(0.0, displayDownloadSpeedMBs)))
+                            }
                             osdInfoRow("缓冲时长", String(format: "+%.1f 秒", bufferedAheadSeconds))
                             osdInfoRow("预读缓存", "\(kernelStats.cached_bytes / 1024 / 1024) MB")
-                            osdInfoRow("加载方式", activeTurboHandle != nil ? "多线程并发 (\(appState.effectiveConnectionBudget(for: session.server)) 线程)" : "顺序读取")
+                            osdInfoRow(
+                                "加载方式",
+                                currentResource.isLocalOrOfflineMedia
+                                    ? "本地离线文件"
+                                    : (activeTurboHandle != nil ? "多线程并发 (\(appState.effectiveConnectionBudget(for: session.server)) 线程)" : "顺序读取")
+                            )
                             osdInfoRow("分辨率", "\(kernelStats.width) × \(kernelStats.height)")
                             osdInfoRow("帧率", String(format: "%.3f fps", kernelStats.fps))
                             osdInfoRow("视频编码", Self.cString(from: kernelStats.video_codec))

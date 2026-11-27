@@ -1,6 +1,6 @@
 # Module Map: Player Surface & Playback UI (`Sources/DonbyApp/Player/*`)
 
-> Last synced: `v2.1.1`. Load this index for any task inside `Sources/DonbyApp/Player/`, then load ONLY the relevant sub-doc below.
+> Last synced: `v2.1.2`. Load this index for any task inside `Sources/DonbyApp/Player/`, then load ONLY the relevant sub-doc below.
 
 ## 1. Sub-Doc Routing
 

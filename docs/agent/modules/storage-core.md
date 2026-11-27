@@ -1,6 +1,6 @@
 # Module Map: Core Models, Policies & Storage (`DonbyCore`)
 
-> Last synced: `v2.1.1`. Load this doc for shared data models, generic service-provider extension seam (`DonbyMediaServiceRegistry`), `DONBY_HOME` storage path isolation, unified `DonbyAppInfo.version`, AES-256-GCM local credential vault, async file logger, hero top-edge strip synthesis (`HeroTopEdgeSynthesizer`), subtitle encoding/transform/auto-alignment policies (Silero VAD + audio-first dual-subtitle aligner), diagnostics redaction, playback health state machine, update manifest parsing, and `DonbyCoreTests`.
+> Last synced: `v2.1.2`. Load this doc for shared data models, generic service-provider extension seam (`DonbyMediaServiceRegistry`), `DONBY_HOME` storage path isolation, unified `DonbyAppInfo.version`, AES-256-GCM local credential vault, async file logger, hero top-edge strip synthesis (`HeroTopEdgeSynthesizer`), subtitle encoding/transform/auto-alignment policies (Silero VAD + audio-first dual-subtitle aligner), diagnostics redaction, playback health state machine, update manifest parsing, and `DonbyCoreTests`.
 
 | If your task involves... | File | Entry Symbols |
 | :--- | :--- | :--- |
@@ -34,7 +34,7 @@
 - `Sources/DonbyCore/EmbyServerModels.swift` — `EmbyClientError`, `EmbyExtServerDomainsResponse`, `EmbyExtDomainItem`, `EmbyCountsResponse`, `ServerType`, `ServerLineInfo` (`cleanDisplayName` normalizing CDN labels to `Cloudflare Pro CDN` / `Cloudflare CDN` / `中国大陆 CDN` and auto-stripping legacy `" · ..."` descriptions, `cleanDisplayHost`, optional speed/exit cache), `EmbyServerConfig` (backward-compatible `keepSignedIn`, `lastLoginDate`, `tokenExpiresAt`), `EmbyAuthenticateResponse`, `EmbyUser`, `EmbySystemInfo`.
 - `Sources/DonbyCore/EmbyModels.swift` — `EmbyItemsResponse`, `EmbyItem` (`withSeriesName`, `withDetailEnrichment`, `withInheritedArtworkFallback`, badge/stream helpers), `EmbyUserData`, `MediaSourceInfo` (version scoring & `preferredSource(for:)`), `MediaStream`, `EmbyPerson`, `EmbyNameIdPair`.
 - `Sources/DonbyCore/EmbyChapterInfo.swift` — `EmbyChapterInfo` model.
-- `Sources/DonbyCore/ResolvedPlaybackResource.swift` — `ResolvedPlaybackResource` stream resolution payload.
+- `Sources/DonbyCore/ResolvedPlaybackResource.swift` — `ResolvedPlaybackResource` stream resolution payload (`isLocalOrOfflineMedia` helper distinguishing `offline-` sessions, `file://`, and bare local paths from remote streams).
 - `Sources/DonbyCore/MediaServiceProvider.swift` — `DonbyMediaServiceProvider` (including default `prewarmEdgeRoutes(server:)`) / `DonbyMediaServiceRegistry` (decoupled extension seam allowing optional modules like `DonbyUHDModule` to register/unregister at runtime without coupling `DonbyCore` or `DonbyNetwork`).
 - `Sources/DonbyCore/AppStateModels.swift` — `MainNavigationTab`, `ActivePlaybackSession`, `WatchRecordItem` (persists `mediaType` & `seriesId`), `LocalMediaFolder`, `IPTVChannelItem`, `AppThemeColor`, `AppAppearanceMode`.
 - `Sources/DonbyCore/AppUpdatePolicies.swift` — `DonbyAppInfo` (single Swift source of truth for `version` & `fallbackVersion`), `AppReleaseInfo`, `AppVersionComparator`, `GitHubReleaseDTO`, `StaticManifestDTO` (`latest.json`).
