@@ -410,6 +410,14 @@ public final class UHDAppExtensionPlugin: DonbyAppUIExtensionPlugin {
         return await UHDImdbBridge.shared.resolveImdbIds(for: items, server: server, maxCount: maxCount)
     }
 
+    public func metadataCacheSizeBytes() async -> Int64 {
+        await UHDImdbBridge.shared.diskCacheSizeBytes()
+    }
+
+    public func clearMetadataCacheAsync() async {
+        await UHDImdbBridge.shared.clearCache()
+    }
+
     public func authenticateAndConfigureServer(
         draft: EmbyServerConfig,
         loginCode: String?,

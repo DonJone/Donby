@@ -1,6 +1,6 @@
 # App Sub-Map: Server, Files, Settings, Downloads & Utility Views
 
-> Last synced: `v2.1.5`. Parent: [app/INDEX.md](INDEX.md). Covers 12 files (`ServerViews.swift`, `ServerConfigSheet.swift`, and 10 files under `Sources/DonbyApp/Views/`).
+> Last synced: `v2.1.7`. Parent: [app/INDEX.md](INDEX.md). Covers 12 files (`ServerViews.swift`, `ServerConfigSheet.swift`, and 10 files under `Sources/DonbyApp/Views/`).
 
 ## 1. File Inventory & Responsibilities
 - **Servers & Line Switching**:
@@ -11,7 +11,7 @@
   - `Views/FilesModuleView+FolderBrowser.swift` — Recursive folder drill-down UI (`folderDetailHeader`, `folderDetailContent`, `subfolderNavigationCard`, `folderVideoCard`, `formatByteCount`) + `private LocalFileThumbView`.
   - `Views/FilesModuleView+CardsAndSheets.swift` — Overview cards (`emptyFolderPlaceholderCard`, `localFolderCard`, `openAddFolderDialog`, `dropZoneCard`, `dropOverlay`, `fileMediaCard`, `emptyFilesPlaceholder`) and `directURLSheetContent`.
 - **Settings & Software Updates**:
-  - `Views/SettingsView.swift` — `SettingsSectionTab`, sidebar + `generalSettingsTab` (hosts `DonbyExtensionSettingsCard()`), `playerSettingsTab`, `networkSettingsTab`, `settingsCard`, `settingsHeader`, `SettingsTabRowButton`.
+  - `Views/SettingsView.swift` — `SettingsSectionTab`, sidebar + `generalSettingsTab` (hosts `DonbyExtensionSettingsCard()`), `playerSettingsTab`, `networkSettingsTab` (unified image+metadata cache size display, budget slider wired to `ImageMetadataCacheCoordinator.shared.updateDiskLimitMB`, and unified `clearAllAsync()`), `settingsCard`, `settingsHeader`, `SettingsTabRowButton`.
   - `Views/SettingsView+About.swift` — `aboutSettingsTab`, `shortcutRow`, `softwareUpdateCard`, `updateStateBanner`, `updateDateFormatter` (`AppUpdateManager.shared`).
 - **Downloads & Offline Library**:
   - `Views/DownloadsView.swift` — Poster-wall vs queue mode (`LazyVStack`) switching, header bar, structural snapshot diffing (isolating 2Hz transfer updates from poster wall), debounced cancellable async disk/library scan (`scheduleRefreshDiskUsage`), queue/cache management.

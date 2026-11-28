@@ -65,6 +65,7 @@ public struct EmbyMainView: View {
                         NativeEmbyHomeView(
                             carouselItems: appState.carouselItems,
                             showCarousel: appState.showCarousel,
+                            isLoadingHome: appState.isLoadingHome,
                             shelves: appState.cachedHomeShelves,
                             homeRevision: appState.homeRevision,
                             appearance: appearance,
@@ -206,7 +207,7 @@ public struct EmbyMainView: View {
                     action: {
                         guard !appState.isLoadingHome else { return }
                         Task {
-                            await appState.loadActiveServerHome(syncDomains: true)
+                            await appState.loadActiveServerHome(syncDomains: true, forceRefresh: true)
                             if appState.homeErrorMessage == nil {
                                 appState.showToast("已刷新首页并同步云端线路", icon: "checkmark.circle.fill")
                             } else {
@@ -433,7 +434,7 @@ public struct EmbyMainView: View {
                 .lineLimit(2)
             Spacer()
             Button {
-                Task { await appState.loadActiveServerHome(syncDomains: true) }
+                Task { await appState.loadActiveServerHome(syncDomains: true, forceRefresh: true) }
             } label: {
                 HStack(spacing: 5) {
                     RefreshVectorIcon(

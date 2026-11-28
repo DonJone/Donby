@@ -92,6 +92,9 @@ extension AppState {
                 openedServerId = server.id
                 applyHomeSnapshot(snap, for: server)
             }
+            if !ServerHomeCacheStore.shared.isSnapshotFresh(for: server.id) {
+                Task { await loadActiveServerHome(syncDomains: true, forceRefresh: false) }
+            }
         } else {
             performBatchedHomeShelfUpdate {
                 activeServerId = server.id
@@ -103,21 +106,27 @@ extension AppState {
                 self.latestByLibrary = [:]
             }
             self.carouselItems = []
-            self.isLoadingHome = !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let hasHost = !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            self.isLoadingHome = hasHost
             let targetServer = server
             Task { [weak self] in
-                guard let snap = await ServerHomeCacheStore.shared.loadSnapshotFromDiskAsync(for: targetServer.id),
-                      !snap.libraryViews.isEmpty else { return }
+                let snap = await ServerHomeCacheStore.shared.loadSnapshotFromDiskAsync(for: targetServer.id)
                 await MainActor.run {
-                    guard let self,
-                          self.openedServerId == targetServer.id,
-                          self.libraryViews.isEmpty else { return }
-                    self.applyHomeSnapshot(snap, for: targetServer)
+                    guard let self, self.openedServerId == targetServer.id else { return }
+                    if let snap, !snap.libraryViews.isEmpty {
+                        if self.libraryViews.isEmpty {
+                            self.applyHomeSnapshot(snap, for: targetServer)
+                        }
+                        if !ServerHomeCacheStore.shared.isSnapshotFresh(for: targetServer.id) {
+                            Task { await self.loadActiveServerHome(syncDomains: true, forceRefresh: false) }
+                        }
+                    } else if hasHost {
+                        Task { await self.loadActiveServerHome(syncDomains: true, forceRefresh: false) }
+                    }
                 }
             }
         }
 
-        Task { await loadActiveServerHome(syncDomains: true) }
         PlaybackIntentCoordinator.shared.warmServerOnConnectOrLaunch(server: server)
     }
 
@@ -140,7 +149,7 @@ extension AppState {
 
         let explicitAnime = DonbyAppExtensionCenter.shared.plugin?.isAnimeModeActive(for: server)
         let serverName = server.name
-        let shouldRecurate = !snap.latestByLibrary.isEmpty
+        let shouldRecurate = snap.carouselItems.isEmpty && !snap.latestByLibrary.isEmpty
         let initialCarousel = snap.carouselItems
 
         Task.detached(priority: .userInitiated) { [weak self] in
@@ -157,11 +166,21 @@ extension AppState {
                 nextCarousel = initialCarousel
             }
             let cached = await MultiPlatformRatingService.shared.cachedRatingsByItemId(for: nextCarousel)
+            if let firstHero = nextCarousel.first,
+               MediaArtworkView.cachedCGImageInMemory(item: firstHero, kind: .backdrop, maxWidth: 2200) == nil {
+                _ = await MediaArtworkView.loadOrFetchCGImage(
+                    server: server,
+                    item: firstHero,
+                    kind: .backdrop,
+                    maxWidth: 2200,
+                    priority: .high
+                )
+            }
             await MainActor.run {
                 guard let self,
                       self.homeCurationGeneration == curationGeneration,
                       self.openedServerId == targetServerId else { return }
-                if self.carouselItems != nextCarousel {
+                if shouldRecurate && self.carouselItems != nextCarousel {
                     self.carouselItems = nextCarousel
                 }
                 if !cached.isEmpty {

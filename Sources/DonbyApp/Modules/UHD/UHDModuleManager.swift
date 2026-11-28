@@ -119,7 +119,7 @@ public final class UHDModuleManager: ObservableObject {
         appState.librarySearchQueryById.removeAll()
         resetHomeShelves()
         appState.isLoadingHome = true
-        await appState.loadActiveServerHome(syncDomains: false)
+        await appState.loadActiveServerHome(syncDomains: false, forceRefresh: true)
     }
 
     public func saveLibraryCollections(
@@ -137,7 +137,7 @@ public final class UHDModuleManager: ObservableObject {
         if let existing = librarySettingsByServer[server.id] {
             librarySettingsByServer[server.id] = UHDLibrarySettings(preferences: saved, collections: existing.collections)
         }
-        await appState.loadActiveServerHome(syncDomains: false)
+        await appState.loadActiveServerHome(syncDomains: false, forceRefresh: true)
         return saved
     }
 
@@ -429,6 +429,7 @@ public final class UHDModuleManager: ObservableObject {
         }
 
         var workingServer = server
+        let hadCachedHome = !appState.libraryViews.isEmpty || !appState.carouselItems.isEmpty
 
         do {
             if libraryModeByServer[workingServer.id] == nil,
@@ -474,18 +475,20 @@ public final class UHDModuleManager: ObservableObject {
             async let hotTask = UHDStreamClient.shared.fetchHot(server: resolvedServer, limit: 20, mode: activeMode)
 
             guard isCurrentGeneration() else { return }
-            if appState.libraryViews != views { appState.libraryViews = views }
+            if !hadCachedHome && appState.libraryViews != views { appState.libraryViews = views }
 
             let states = (try? await statesTask) ?? (resume: [], nextUp: [])
             let favs = (try? await favTask)?.items ?? []
             let hot = (try? await hotTask) ?? []
 
             guard isCurrentGeneration() else { return }
-            if appState.resumeItems != states.resume { appState.resumeItems = states.resume }
-            if appState.nextUpItems != states.nextUp { appState.nextUpItems = states.nextUp }
-            if appState.favoriteItems != favs { appState.favoriteItems = favs }
-            if self.hotItems != hot { self.hotItems = hot }
-            if !self.animeHotItems.isEmpty { self.animeHotItems = [] }
+            if !hadCachedHome {
+                if appState.resumeItems != states.resume { appState.resumeItems = states.resume }
+                if appState.nextUpItems != states.nextUp { appState.nextUpItems = states.nextUp }
+                if appState.favoriteItems != favs { appState.favoriteItems = favs }
+                if self.hotItems != hot { self.hotItems = hot }
+                if !self.animeHotItems.isEmpty { self.animeHotItems = [] }
+            }
 
             let homePrewarmTargets = Array((states.resume + states.nextUp).filter { !$0.isSeries }.prefix(3))
             if !homePrewarmTargets.isEmpty {
@@ -499,7 +502,6 @@ public final class UHDModuleManager: ObservableObject {
 
             var latestMap: [String: [EmbyItem]] = [:]
             var topRatedCandidates: [EmbyItem] = []
-            let hadCachedLatest = !appState.latestByLibrary.isEmpty
             let hideWatched = appState.hideWatchedInLatest
             let allowAnime = (activeMode == .anime)
 
@@ -539,7 +541,7 @@ public final class UHDModuleManager: ObservableObject {
                 for await (viewId, items, topItems) in group {
                     guard isCurrentGeneration() else { return }
                     latestMap[viewId] = items
-                    if !hadCachedLatest && appState.latestByLibrary[viewId] != items {
+                    if !hadCachedHome && appState.latestByLibrary[viewId] != items {
                         appState.latestByLibrary[viewId] = items
                     }
                     topRatedCandidates.append(contentsOf: topItems)
@@ -547,6 +549,10 @@ public final class UHDModuleManager: ObservableObject {
             }
 
             guard isCurrentGeneration() else { return }
+            if hadCachedHome {
+                if self.hotItems != hot { self.hotItems = hot }
+                if !self.animeHotItems.isEmpty { self.animeHotItems = [] }
+            }
             appState.finalizeHomeContent(
                 for: server.id,
                 libraryViews: views,
@@ -583,7 +589,7 @@ public final class UHDModuleManager: ObservableObject {
                     appState.servers[idx].tokenExpiresAt = outcome.auth.expiresAt
                     appState.servers[idx].lastLoginDate = Date()
                 }
-                await appState.loadActiveServerHome(syncDomains: false)
+                await appState.loadActiveServerHome(syncDomains: false, forceRefresh: true)
                 return
             }
             if isAuthExpired, let idx = appState.servers.firstIndex(where: { $0.id == server.id }) {

@@ -202,7 +202,7 @@ extension AppState {
         scanFolderHierarchy(path: path).videos
     }
 
-    public func loadActiveServerHome(syncDomains: Bool = false) async {
+    public func loadActiveServerHome(syncDomains: Bool = false, forceRefresh: Bool = false) async {
         guard let server = activeServer else { return }
         homeLoadGeneration &+= 1
         let currentGen = homeLoadGeneration
@@ -219,7 +219,8 @@ extension AppState {
             return
         }
 
-        if self.libraryViews.isEmpty {
+        let hadCachedHome = !self.libraryViews.isEmpty || !self.carouselItems.isEmpty
+        if !hadCachedHome {
             isLoadingHome = true
         }
         homeErrorMessage = nil
@@ -364,7 +365,7 @@ extension AppState {
 
             let views = initialViews
             guard currentGen == homeLoadGeneration else { return }
-            if self.libraryViews != views {
+            if !hadCachedHome && self.libraryViews != views {
                 self.libraryViews = views
             }
 
@@ -373,14 +374,15 @@ extension AppState {
             let favs = (try? await favTask)?.items ?? []
 
             guard currentGen == homeLoadGeneration else { return }
-            performBatchedHomeShelfUpdate {
-                if self.resumeItems != resumes { self.resumeItems = resumes }
-                if !self.nextUpItems.isEmpty { self.nextUpItems = [] }
-                if self.favoriteItems != favs { self.favoriteItems = favs }
+            if !hadCachedHome {
+                performBatchedHomeShelfUpdate {
+                    if self.resumeItems != resumes { self.resumeItems = resumes }
+                    if !self.nextUpItems.isEmpty { self.nextUpItems = [] }
+                    if self.favoriteItems != favs { self.favoriteItems = favs }
+                }
             }
 
             var latestMap: [String: [EmbyItem]] = [:]
-            let hadCachedLatest = !self.latestByLibrary.isEmpty
 
             await withTaskGroup(of: (String, [EmbyItem]).self) { group in
                 for view in views {
@@ -397,7 +399,7 @@ extension AppState {
                 for await (viewId, items) in group {
                     guard currentGen == self.homeLoadGeneration else { return }
                     latestMap[viewId] = items
-                    if !hadCachedLatest && self.latestByLibrary[viewId] != items {
+                    if !hadCachedHome && self.latestByLibrary[viewId] != items {
                         self.latestByLibrary[viewId] = items
                     }
                 }
@@ -456,7 +458,7 @@ extension AppState {
         let apiKey = self.mdblistAPIKey
         let preset = self.preferredVersionPreset
         let cache302 = self.enable302Cache
-        self.isLoadingHome = false
+        ServerHomeCacheStore.shared.markSyncedNow(for: serverId, explicitAnimeMode: explicitAnimeMode)
 
         if let activeSrv = targetServer {
             PlaybackIntentCoordinator.shared.warmServerOnConnectOrLaunch(server: activeSrv)
@@ -713,9 +715,20 @@ public final class ServerHomeCacheStore {
 
     public func clear(for serverId: UUID) {
         inMemorySnapshots.removeValue(forKey: serverId)
+        Task { @MainActor in
+            self.clearModeCache(for: serverId)
+        }
         DispatchQueue.global(qos: .utility).async { [cacheDirectoryURL] in
-            let file = cacheDirectoryURL.appendingPathComponent("home_\(serverId.uuidString).json")
-            try? FileManager.default.removeItem(at: file)
+            let prefix = "home_\(serverId.uuidString)"
+            if let urls = try? FileManager.default.contentsOfDirectory(
+                at: cacheDirectoryURL,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) {
+                for url in urls where url.lastPathComponent.hasPrefix(prefix) && url.pathExtension == "json" {
+                    try? FileManager.default.removeItem(at: url)
+                }
+            }
         }
     }
 }

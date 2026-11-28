@@ -444,6 +444,40 @@ public actor MultiPlatformRatingService {
             try? data.write(to: url, options: .atomic)
         }
     }
+
+    public func diskCacheSizeBytes() -> Int64 {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: cacheFileURL().path)
+        return (attrs?[.size] as? Int64) ?? 0
+    }
+
+    public func clearCache() {
+        memoryCache.removeAll()
+        didLoadDiskCache = true
+        try? FileManager.default.removeItem(at: cacheFileURL())
+    }
+
+    public func pruneIfNeeded(maxBytes: Int64) {
+        guard maxBytes > 0, diskCacheSizeBytes() > maxBytes else { return }
+        if memoryCache.isEmpty {
+            didLoadDiskCache = false
+        }
+        loadDiskCacheIfNeeded()
+        guard !memoryCache.isEmpty else { return }
+        let sortedKeys = memoryCache.sorted { $0.value.fetchedAt < $1.value.fetchedAt }.map(\.key)
+        var removedCount = 0
+        let batchSize = max(1, sortedKeys.count / 4)
+        for key in sortedKeys {
+            memoryCache.removeValue(forKey: key)
+            removedCount += 1
+            if removedCount % batchSize == 0 || memoryCache.isEmpty {
+                saveDiskCache()
+                if diskCacheSizeBytes() <= maxBytes { break }
+            }
+        }
+        if memoryCache.isEmpty {
+            try? FileManager.default.removeItem(at: cacheFileURL())
+        }
+    }
 }
 
 // MARK: - DTOs

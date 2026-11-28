@@ -414,6 +414,7 @@ private final class NativeHomeShelfView: FlippedLayerHostView, NSCollectionViewD
 public struct NativeEmbyHomeView: NSViewRepresentable {
     public let carouselItems: [EmbyItem]
     public let showCarousel: Bool
+    public let isLoadingHome: Bool
     public let shelves: [HomeShelfSection]
     public let homeRevision: Int
     public let appearance: DonbyCardAppearance
@@ -423,25 +424,14 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
     public let onOpenLibrary: (EmbyItem) -> Void
 
     public init(
-        carouselItems: [EmbyItem],
-        showCarousel: Bool,
-        shelves: [HomeShelfSection],
-        homeRevision: Int = 0,
-        appearance: DonbyCardAppearance,
-        appState: AppState,
-        onSelectItem: @escaping (EmbyItem) -> Void,
-        onPlayItem: @escaping (EmbyItem) -> Void,
-        onOpenLibrary: @escaping (EmbyItem) -> Void
+        carouselItems: [EmbyItem], showCarousel: Bool, isLoadingHome: Bool = false,
+        shelves: [HomeShelfSection], homeRevision: Int = 0, appearance: DonbyCardAppearance,
+        appState: AppState, onSelectItem: @escaping (EmbyItem) -> Void,
+        onPlayItem: @escaping (EmbyItem) -> Void, onOpenLibrary: @escaping (EmbyItem) -> Void
     ) {
-        self.carouselItems = carouselItems
-        self.showCarousel = showCarousel
-        self.shelves = shelves
-        self.homeRevision = homeRevision
-        self.appearance = appearance
-        self.appState = appState
-        self.onSelectItem = onSelectItem
-        self.onPlayItem = onPlayItem
-        self.onOpenLibrary = onOpenLibrary
+        self.carouselItems = carouselItems; self.showCarousel = showCarousel; self.isLoadingHome = isLoadingHome
+        self.shelves = shelves; self.homeRevision = homeRevision; self.appearance = appearance
+        self.appState = appState; self.onSelectItem = onSelectItem; self.onPlayItem = onPlayItem; self.onOpenLibrary = onOpenLibrary
     }
 
     public func makeCoordinator() -> Coordinator {
@@ -477,11 +467,8 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
 
         context.coordinator.attach(scrollView: scrollView, documentView: documentView)
         context.coordinator.update(
-            carouselItems: carouselItems,
-            showCarousel: showCarousel,
-            shelves: shelves,
-            homeRevision: homeRevision,
-            appearance: appearance
+            carouselItems: carouselItems, showCarousel: showCarousel, isLoadingHome: isLoadingHome,
+            shelves: shelves, homeRevision: homeRevision, appearance: appearance
         )
         return scrollView
     }
@@ -491,11 +478,8 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
         context.coordinator.onPlayItem = onPlayItem
         context.coordinator.onOpenLibrary = onOpenLibrary
         context.coordinator.update(
-            carouselItems: carouselItems,
-            showCarousel: showCarousel,
-            shelves: shelves,
-            homeRevision: homeRevision,
-            appearance: appearance
+            carouselItems: carouselItems, showCarousel: showCarousel, isLoadingHome: isLoadingHome,
+            shelves: shelves, homeRevision: homeRevision, appearance: appearance
         )
     }
 
@@ -520,6 +504,7 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
         private var lastCarouselItems: [EmbyItem] = []
         private var lastCarouselIds: [String] = []
         private var lastShowCarousel: Bool = false
+        private var lastIsLoadingHome: Bool = false
         private var lastHomeRevision: Int = -1
         private var lastAppearance: DonbyCardAppearance?
         private var currentWidth: CGFloat = 960
@@ -615,27 +600,21 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
         }
 
         func update(
-            carouselItems: [EmbyItem],
-            showCarousel: Bool,
-            shelves: [HomeShelfSection],
-            homeRevision: Int,
-            appearance rawAppearance: DonbyCardAppearance
+            carouselItems: [EmbyItem], showCarousel: Bool, isLoadingHome: Bool,
+            shelves: [HomeShelfSection], homeRevision: Int, appearance rawAppearance: DonbyCardAppearance
         ) {
             let appearance = rawAppearance.withDownloadStatusIndex(appState.downloadStatusStore.statusIndex)
             let carouselIds = carouselItems.map(\.id)
 
-            if lastHomeRevision == homeRevision &&
-               lastShowCarousel == showCarousel &&
-               lastCarouselIds == carouselIds &&
-               lastAppearance == appearance {
+            if lastHomeRevision == homeRevision && lastShowCarousel == showCarousel &&
+               lastIsLoadingHome == isLoadingHome && lastCarouselIds == carouselIds && lastAppearance == appearance {
                 return
             }
 
             let themeChanged = (lastAppearance?.isLightMode != appearance.isLightMode)
             let visualThemeChanged = lastAppearance.map { !appearance.matchesVisualTheme(of: $0) } ?? true
-            let carouselChanged = (lastShowCarousel != showCarousel) ||
-                (lastCarouselItems != carouselItems) ||
-                visualThemeChanged
+            let carouselChanged = (lastShowCarousel != showCarousel) || (lastIsLoadingHome != isLoadingHome) ||
+                (lastCarouselItems != carouselItems) || visualThemeChanged
             let shelvesChanged = (lastHomeRevision != homeRevision) || (lastAppearance != appearance)
 
             if !themeChanged && !carouselChanged && !shelvesChanged {
@@ -645,6 +624,7 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
             lastCarouselItems = carouselItems
             lastCarouselIds = carouselIds
             lastShowCarousel = showCarousel
+            lastIsLoadingHome = isLoadingHome
             lastHomeRevision = homeRevision
             lastAppearance = appearance
 
@@ -656,7 +636,7 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
             }
 
             if carouselChanged {
-                updateCarousel(items: carouselItems, visible: showCarousel, appearance: appearance)
+                updateCarousel(items: carouselItems, visible: showCarousel, isLoadingHome: isLoadingHome, appearance: appearance)
             }
 
             if shelvesChanged {
@@ -667,9 +647,9 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
             layoutDocument(width: width)
         }
 
-        private func updateCarousel(items: [EmbyItem], visible: Bool, appearance: DonbyCardAppearance) {
+        private func updateCarousel(items: [EmbyItem], visible: Bool, isLoadingHome: Bool, appearance: DonbyCardAppearance) {
             guard let documentView else { return }
-            let shouldShow = visible && !items.isEmpty
+            let shouldShow = visible && (!items.isEmpty || isLoadingHome)
             if !shouldShow {
                 carouselHostingView?.removeFromSuperview()
                 carouselHostingView = nil

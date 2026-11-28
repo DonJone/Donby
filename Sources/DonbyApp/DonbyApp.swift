@@ -247,7 +247,7 @@ public struct DonbyApp: App {
 
                 Button("刷新首页") {
                     guard appState.activePlayback == nil else { return }
-                    Task { await appState.loadActiveServerHome(syncDomains: true) }
+                    Task { await appState.loadActiveServerHome(syncDomains: true, forceRefresh: true) }
                 }
                 .keyboardShortcut("r", modifiers: [.command])
                 .disabled(appState.activePlayback != nil)

@@ -91,6 +91,17 @@ actor UHDImdbBridge {
         return resolved
     }
 
+    func diskCacheSizeBytes() -> Int64 {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: cacheFileURL().path)
+        return (attrs?[.size] as? Int64) ?? 0
+    }
+
+    func clearCache() {
+        tmdbToImdb.removeAll()
+        didLoad = true
+        try? FileManager.default.removeItem(at: cacheFileURL())
+    }
+
     private func cacheFileURL() -> URL {
         DonbyStoragePaths.cachesDirectoryURL.appendingPathComponent("uhd_tmdb_imdb_map_v1.json")
     }

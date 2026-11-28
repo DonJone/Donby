@@ -9,6 +9,7 @@ public struct MainWindowView: View {
     @ObservedObject private var updater = AppUpdateManager.shared
     @State private var showDelayedResolvePill: Bool = false
     @State private var escapeKeyMonitor: Any? = nil
+    @State private var hasMountedServerHome: Bool = false
 
     public init() {}
 
@@ -33,27 +34,36 @@ public struct MainWindowView: View {
                 }
 
                 let hasDetail = (appState.currentDetailItem != nil)
+                let isShowingServerHome = (appState.openedServerId != nil)
                 ZStack(alignment: .topLeading) {
-                    Group {
-                        if appState.openedServerId != nil {
+                    ZStack {
+                        if hasMountedServerHome || isShowingServerHome {
                             EmbyMainView()
-                        } else {
-                            switch appState.selectedTab {
-                            case .files:
-                                FilesModuleView()
-                            case .servers:
-                                ServerListView()
-                            case .iptv:
-                                IPTVModuleView()
-                            case .records:
-                                RecordsView()
-                            case .downloads:
-                                DownloadsView()
-                            case .search:
-                                GlobalSearchView()
-                            case .settings:
-                                SettingsView()
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .opacity(isShowingServerHome ? 1 : 0)
+                                .allowsHitTesting(isShowingServerHome)
+                                .accessibilityHidden(!isShowingServerHome)
+                        }
+                        if !isShowingServerHome {
+                            Group {
+                                switch appState.selectedTab {
+                                case .files:
+                                    FilesModuleView()
+                                case .servers:
+                                    ServerListView()
+                                case .iptv:
+                                    IPTVModuleView()
+                                case .records:
+                                    RecordsView()
+                                case .downloads:
+                                    DownloadsView()
+                                case .search:
+                                    GlobalSearchView()
+                                case .settings:
+                                    SettingsView()
+                                }
                             }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -61,6 +71,12 @@ public struct MainWindowView: View {
                     .opacity(hasDetail ? 0 : 1)
                     .allowsHitTesting(!hasDetail)
                     .accessibilityHidden(hasDetail)
+                    .onAppear {
+                        if appState.openedServerId != nil { hasMountedServerHome = true }
+                    }
+                    .onChange(of: appState.openedServerId) { newId in
+                        if newId != nil { hasMountedServerHome = true }
+                    }
 
                     if let detailItem = appState.currentDetailItem {
                         DetailView(

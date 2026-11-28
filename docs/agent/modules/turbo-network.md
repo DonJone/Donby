@@ -1,6 +1,6 @@
 # Module Map: Turbo Cache, Streaming & Network (`DonbyNetwork`)
 
-> Last synced: `v2.1.6`. Load this doc for `DonbyNetwork` streaming, seek latency, HTTP/2 Range, Architecture 2A `KernelRust` slab/sparse caching, intent-aware preloading (`PlaybackIntentCoordinator`), route warm store (`NetworkRouteWarmStore`), Emby API (including standard Emby fallback when UHD extension is disabled), offline downloads, and channel-aware auto-updates. For optional `DonbyUHDModule` & `Modules/UHD`, load [uhd-module.md](uhd-module.md).
+> Last synced: `v2.1.7`. Load this doc for `DonbyNetwork` streaming, seek latency, HTTP/2 Range, Architecture 2A `KernelRust` slab/sparse caching, intent-aware preloading (`PlaybackIntentCoordinator`), route warm store (`NetworkRouteWarmStore`), Emby API (including standard Emby fallback when UHD extension is disabled), offline downloads, and channel-aware auto-updates. For optional `DonbyUHDModule` & `Modules/UHD`, load [uhd-module.md](uhd-module.md).
 
 | If your task involves... | File | Entry Symbols |
 | :--- | :--- | :--- |
@@ -42,8 +42,8 @@
 - `Sources/DonbyNetwork/EmbyPlaybackInfoResponse.swift` — `EmbyPlaybackInfoResponse` DTO (`MediaSources`, `PlaySessionId`).
 - `Sources/DonbyNetwork/OfflineMediaLibrary.swift` — `DonbyOfflineLibraryStorage`, `OfflineSeriesSidecar`, `OfflineEpisodeOrMovieSidecar`, pinned chunk-to-offline linkage.
 - `Sources/DonbyNetwork/AppUpdateManager.swift` — channel-aware (`AppUpdateChannel`: `.stable` vs `.prerelease`) GitHub Releases / `latest.json` checker, `.app.zip` download, `ditto` hot-replace preserving `/Applications/Donby.app` inode.
-- `Sources/DonbyNetwork/MultiPlatformRatingService.swift` — `MultiPlatformRatingService` actor fetching and caching 8-platform ratings (`cachedRatingsByItemId`, `cachedRating`, `enrichRatings`, `enrichRating` for Metacritic, RT Critics/Audience, Letterboxd, RogerEbert, IMDb + votes, Trakt + votes, TMDB + votes, plus Cinemeta major awards & production countries) via MDBList batch API (with automatic zero-key-to-MDBList cache upgrade when API key is configured), zero-key `IMDbOfficialRatingsStore`, and Cinemeta with `DONBY_HOME`-isolated 14-day disk cache (`multi_platform_ratings_v2.json`).
-- `Sources/DonbyNetwork/IMDbOfficialRatingsStore.swift` — `IMDbOfficialRatingsStore` actor managing IMDb's free daily public ratings dataset (`datasets.imdbws.com/title.ratings.tsv.gz`, 7-day `DONBY_HOME`-isolated cache, skipped in isolated test homes) with streaming `libz` (`gzopen`/`gzread`) lookups for exact `averageRating` and `numVotes`.
+- `Sources/DonbyNetwork/MultiPlatformRatingService.swift` — `MultiPlatformRatingService` actor fetching and caching 8-platform ratings (`cachedRatingsByItemId`, `cachedRating`, `enrichRatings`, `enrichRating` for Metacritic, RT Critics/Audience, Letterboxd, RogerEbert, IMDb + votes, Trakt + votes, TMDB + votes, plus Cinemeta major awards & production countries) via MDBList batch API (with automatic zero-key-to-MDBList cache upgrade when API key is configured), zero-key `IMDbOfficialRatingsStore`, and Cinemeta with `DONBY_HOME`-isolated 14-day disk cache (`multi_platform_ratings_v2.json`), plus `diskCacheSizeBytes()`, `pruneIfNeeded(maxBytes:)`, and `clearCache()`.
+- `Sources/DonbyNetwork/IMDbOfficialRatingsStore.swift` — `IMDbOfficialRatingsStore` actor managing IMDb's free daily public ratings dataset (`datasets.imdbws.com/title.ratings.tsv.gz`, 7-day `DONBY_HOME`-isolated cache, skipped in isolated test homes) with streaming `libz` (`gzopen`/`gzread`) lookups for exact `averageRating` and `numVotes`, plus `diskCacheSizeBytes()` and `clearCache()`.
 
 ## 2. Streaming & Caching Architecture (`TurboCacheAndDownloadEngine`)
 - **Chunk Geometry**: `512 KiB` aligned chunks (`chunkSize`).

@@ -273,6 +273,7 @@ extension AppState {
                 if self.carouselItems != nextCarousel {
                     self.carouselItems = nextCarousel
                 }
+                self.isLoadingHome = false
                 if !cachedRatings.isEmpty {
                     self.mergeRatingsBatch(cachedRatings)
                 }
@@ -346,10 +347,26 @@ extension AppState {
         let iptvKey = iptvChannelsStorageKey
         let seriesKey = cachedSeriesNamesStorageKey
         let watchKey = watchHistoryStorageKey
-        let activeId = activeServer?.id
+        let allServers = servers
+        let activeSrv = activeServer
 
-        if let activeId {
-            ServerHomeCacheStore.shared.preload(serverId: activeId)
+        for server in allServers {
+            ServerHomeCacheStore.shared.preload(serverId: server.id)
+        }
+        if let activeSrv {
+            Task {
+                if let snap = await ServerHomeCacheStore.shared.loadSnapshotFromDiskAsync(for: activeSrv.id),
+                   let firstHero = snap.carouselItems.first,
+                   MediaArtworkView.cachedCGImageInMemory(item: firstHero, kind: .backdrop, maxWidth: 2200) == nil {
+                    _ = await MediaArtworkView.loadOrFetchCGImage(
+                        server: activeSrv,
+                        item: firstHero,
+                        kind: .backdrop,
+                        maxWidth: 2200,
+                        priority: .high
+                    )
+                }
+            }
         }
 
         Task.detached(priority: .userInitiated) { [weak self] in
@@ -486,9 +503,12 @@ extension AppState {
 private final class ServerHomeModeCacheBox {
     static let shared = ServerHomeModeCacheBox()
     var snapshotsByCompositeKey: [String: ServerHomeCacheStore.ServerHomeSnapshot] = [:]
+    var lastSyncedAtByCompositeKey: [String: Date] = [:]
 }
 
 extension ServerHomeCacheStore {
+    public static let swrFreshnessTTL: TimeInterval = 120
+
     private static func modeKey(for explicitAnimeMode: Bool?) -> String {
         switch explicitAnimeMode {
         case .some(true): return "anime"
@@ -518,10 +538,28 @@ extension ServerHomeCacheStore {
     }
 
     @MainActor
+    public func markSyncedNow(for serverId: UUID, explicitAnimeMode: Bool?, at date: Date = Date()) {
+        let key = explicitAnimeMode.map { Self.modeKey(for: $0) } ?? Self.resolveModeKey(for: serverId)
+        let cKey = Self.compositeKey(serverId: serverId, modeKey: key)
+        ServerHomeModeCacheBox.shared.lastSyncedAtByCompositeKey[cKey] = date
+    }
+
+    @MainActor
+    public func isSnapshotFresh(for serverId: UUID, ttl: TimeInterval = ServerHomeCacheStore.swrFreshnessTTL) -> Bool {
+        let key = Self.resolveModeKey(for: serverId)
+        let cKey = Self.compositeKey(serverId: serverId, modeKey: key)
+        let syncedAt = ServerHomeModeCacheBox.shared.lastSyncedAtByCompositeKey[cKey]
+            ?? cachedSnapshotInMemory(for: serverId)?.cachedAt
+        guard let syncedAt else { return false }
+        return Date().timeIntervalSince(syncedAt) < ttl
+    }
+
+    @MainActor
     public func save(_ snapshot: ServerHomeSnapshot, for serverId: UUID, explicitAnimeMode: Bool?) {
         let key = Self.modeKey(for: explicitAnimeMode)
         let cKey = Self.compositeKey(serverId: serverId, modeKey: key)
         ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] = snapshot
+        ServerHomeModeCacheBox.shared.lastSyncedAtByCompositeKey[cKey] = snapshot.cachedAt
         if key == "default" {
             inMemorySnapshots[serverId] = snapshot
         }
@@ -557,6 +595,9 @@ extension ServerHomeCacheStore {
         }.value
         if let decoded {
             ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] = decoded
+            if ServerHomeModeCacheBox.shared.lastSyncedAtByCompositeKey[cKey] == nil {
+                ServerHomeModeCacheBox.shared.lastSyncedAtByCompositeKey[cKey] = decoded.cachedAt
+            }
             if key == "default" {
                 inMemorySnapshots[serverId] = decoded
             }
@@ -578,11 +619,94 @@ extension ServerHomeCacheStore {
             await MainActor.run {
                 if ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] == nil {
                     ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] = snap
+                    if ServerHomeModeCacheBox.shared.lastSyncedAtByCompositeKey[cKey] == nil {
+                        ServerHomeModeCacheBox.shared.lastSyncedAtByCompositeKey[cKey] = snap.cachedAt
+                    }
                     if key == "default" {
                         self?.inMemorySnapshots[serverId] = snap
                     }
                 }
             }
         }
+    }
+
+    @MainActor
+    public func diskCacheSizeBytesAsync() async -> Int64 {
+        let dir = cacheDirectoryURL
+        return await Task.detached(priority: .utility) {
+            let fm = FileManager.default
+            guard let urls = try? fm.contentsOfDirectory(
+                at: dir,
+                includingPropertiesForKeys: [.fileSizeKey],
+                options: [.skipsHiddenFiles]
+            ) else { return 0 }
+            var total: Int64 = 0
+            for url in urls where url.lastPathComponent.hasPrefix("home_") && url.pathExtension == "json" {
+                if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                    total += Int64(size)
+                }
+            }
+            return total
+        }.value
+    }
+
+    @MainActor
+    public func clearModeCache(for serverId: UUID) {
+        let prefix = "\(serverId.uuidString)|"
+        for key in ServerHomeModeCacheBox.shared.snapshotsByCompositeKey.keys where key.hasPrefix(prefix) {
+            ServerHomeModeCacheBox.shared.snapshotsByCompositeKey.removeValue(forKey: key)
+        }
+        for key in ServerHomeModeCacheBox.shared.lastSyncedAtByCompositeKey.keys where key.hasPrefix(prefix) {
+            ServerHomeModeCacheBox.shared.lastSyncedAtByCompositeKey.removeValue(forKey: key)
+        }
+    }
+
+    @MainActor
+    public func clearAllAsync() async {
+        inMemorySnapshots.removeAll()
+        ServerHomeModeCacheBox.shared.snapshotsByCompositeKey.removeAll()
+        ServerHomeModeCacheBox.shared.lastSyncedAtByCompositeKey.removeAll()
+        let dir = cacheDirectoryURL
+        await Task.detached(priority: .utility) {
+            let fm = FileManager.default
+            guard let urls = try? fm.contentsOfDirectory(
+                at: dir,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) else { return }
+            for url in urls where url.lastPathComponent.hasPrefix("home_") && url.pathExtension == "json" {
+                try? fm.removeItem(at: url)
+            }
+        }.value
+    }
+
+    @MainActor
+    public func pruneIfNeededAsync(maxBytes: Int64) async {
+        guard maxBytes > 0 else { return }
+        let dir = cacheDirectoryURL
+        await Task.detached(priority: .utility) {
+            let fm = FileManager.default
+            guard let urls = try? fm.contentsOfDirectory(
+                at: dir,
+                includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]
+            ) else { return }
+            var entries: [(url: URL, size: Int64, mtime: Date)] = []
+            var total: Int64 = 0
+            for url in urls where url.lastPathComponent.hasPrefix("home_") && url.pathExtension == "json" {
+                let vals = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+                let size = Int64(vals?.fileSize ?? 0)
+                let mtime = vals?.contentModificationDate ?? .distantPast
+                entries.append((url: url, size: size, mtime: mtime))
+                total += size
+            }
+            guard total > maxBytes else { return }
+            entries.sort { $0.mtime < $1.mtime }
+            for entry in entries {
+                guard total > maxBytes else { break }
+                try? fm.removeItem(at: entry.url)
+                total -= entry.size
+            }
+        }.value
     }
 }

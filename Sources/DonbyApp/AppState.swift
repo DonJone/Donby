@@ -204,7 +204,13 @@ public final class AppState: ObservableObject {
         didSet { if !isLoadingFromDisk { refreshCachedHomeShelvesIfNeeded() } }
     }
     @AppStorage("donby.showNextUp") public var showNextUp: Bool = true
-    @AppStorage("donby.hideWatchedInLatest") public var hideWatchedInLatest: Bool = false
+    @AppStorage("donby.hideWatchedInLatest") public var hideWatchedInLatest: Bool = false {
+        didSet {
+            if !isLoadingFromDisk, activeServer != nil {
+                Task { await loadActiveServerHome(syncDomains: false, forceRefresh: true) }
+            }
+        }
+    }
     @AppStorage("donby.showResolutionBadge") public var showResolutionBadge: Bool = true
     @AppStorage("donby.showRatingBadge") public var showRatingBadge: Bool = true
     @AppStorage("donby.controlBarStyle") public var controlBarStyleRaw: String = ControlBarPositionStyle.float.rawValue
@@ -284,6 +290,12 @@ public final class AppState: ObservableObject {
     @AppStorage("donby.turboConnectionBudget") public var turboConnectionBudget: Int = 4
     @AppStorage("donby.turboMemoryCacheMB") public var turboMemoryCacheMB: Int = 500
     @AppStorage("donby.turboDiskCacheMB") public var turboDiskCacheMB: Int = 2048
+    @AppStorage("donby.imageMetadataCacheLimitMB") public var imageMetadataCacheLimitMB: Int = 1024 {
+        didSet {
+            guard !isLoadingFromDisk else { return }
+            ImageMetadataCacheCoordinator.shared.updateDiskLimitMB(imageMetadataCacheLimitMB)
+        }
+    }
     @AppStorage("donby.turboPrefetchSeconds") public var turboPrefetchSeconds: Double = 60.0
     @AppStorage("donby.detailPreloadEnabled") public var detailPreloadEnabled: Bool = false
     @AppStorage("donby.detailPreloadSeconds") public var detailPreloadSeconds: Int = 15
@@ -479,9 +491,11 @@ public final class AppState: ObservableObject {
             }
 
         let maxCacheBytes = Int64(max(128, turboDiskCacheMB)) * 1024 * 1024
+        let imageMetaLimitMB = self.imageMetadataCacheLimitMB
         Task.detached(priority: .utility) {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             DonbyTurboCacheEngine.shared.enforceDiskBudget(maxDiskBytes: maxCacheBytes)
+            ImageMetadataCacheCoordinator.shared.updateDiskLimitMB(imageMetaLimitMB)
         }
         let serversSnapshot = self.servers
         Task {

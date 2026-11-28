@@ -192,6 +192,8 @@ public struct MainCarouselView: View {
         self.swipePublisher = swipePublisher
         self.onPlay = onPlay
         self.onSelectDetail = onSelectDetail
+        self._displayedItems = State(initialValue: stateBox.items)
+        self._currentItemId = State(initialValue: stateBox.items.first?.id)
     }
 
     private var currentItem: EmbyItem? {
@@ -410,6 +412,8 @@ public struct MainCarouselView: View {
                         priority: .low
                     )
                 }
+            } else if appState.isLoadingHome && appState.showCarousel {
+                heroSkeletonView
             }
         }
         .preferredColorScheme(stateBox.isLightMode ? .light : .dark)
@@ -419,8 +423,9 @@ public struct MainCarouselView: View {
         .onChange(of: stateBox.items) { newItems in
             syncDisplayedItems(newItems)
         }
-        .task(id: "\(appState.currentDetailItem != nil)|\(appState.activePlayback != nil)|\(appState.selectedLibrary != nil)|\(displayedItems.count)") {
-            guard appState.currentDetailItem == nil,
+        .task(id: "\(appState.openedServerId?.uuidString ?? "none")|\(appState.currentDetailItem != nil)|\(appState.activePlayback != nil)|\(appState.selectedLibrary != nil)|\(displayedItems.count)") {
+            guard appState.openedServerId != nil,
+                  appState.currentDetailItem == nil,
                   appState.activePlayback == nil,
                   appState.selectedLibrary == nil,
                   displayedItems.count > 1 else {
@@ -433,7 +438,8 @@ public struct MainCarouselView: View {
                    Date().timeIntervalSince(lastManualInteraction) > 5.0 {
                     syncDisplayedItems(pending, forceImmediate: true)
                 }
-                guard appState.currentDetailItem == nil,
+                guard appState.openedServerId != nil,
+                      appState.currentDetailItem == nil,
                       appState.activePlayback == nil,
                       appState.selectedLibrary == nil,
                       !stateBox.isScrolling,
@@ -450,6 +456,42 @@ public struct MainCarouselView: View {
                 }
             }
         }
+    }
+
+    private var heroSkeletonView: some View {
+        let isLight = stateBox.isLightMode
+        let baseStart = isLight ? Color(red: 0.91, green: 0.92, blue: 0.94) : Color(red: 0.12, green: 0.13, blue: 0.16)
+        let baseEnd = isLight ? Color(red: 0.85, green: 0.86, blue: 0.89) : Color(red: 0.08, green: 0.09, blue: 0.11)
+        let barFill = isLight ? Color.black.opacity(0.08) : Color.white.opacity(0.10)
+        let subFill = isLight ? Color.black.opacity(0.05) : Color.white.opacity(0.06)
+        return ZStack(alignment: .bottomLeading) {
+            LinearGradient(colors: [baseStart, baseEnd], startPoint: .topLeading, endPoint: .bottomTrailing)
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    RoundedRectangle(cornerRadius: 6).fill(barFill).frame(width: 56, height: 18)
+                    RoundedRectangle(cornerRadius: 6).fill(subFill).frame(width: 44, height: 18)
+                    RoundedRectangle(cornerRadius: 6).fill(subFill).frame(width: 78, height: 18)
+                }
+                RoundedRectangle(cornerRadius: 8).fill(barFill).frame(width: 280, height: 32)
+                VStack(alignment: .leading, spacing: 6) {
+                    RoundedRectangle(cornerRadius: 5).fill(subFill).frame(width: 420, height: 13)
+                    RoundedRectangle(cornerRadius: 5).fill(subFill).frame(width: 300, height: 13)
+                }
+                HStack(spacing: 12) {
+                    Capsule().fill(barFill).frame(width: 112, height: 38)
+                    Capsule().fill(subFill).frame(width: 88, height: 38)
+                }
+            }
+            .padding(.horizontal, 28)
+            .padding(.bottom, 24)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: stateBox.height)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(isLight ? Color.black.opacity(0.06) : Color.white.opacity(0.06), lineWidth: 0.65)
+        )
     }
 }
 

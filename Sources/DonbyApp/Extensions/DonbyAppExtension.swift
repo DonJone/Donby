@@ -209,6 +209,15 @@ public protocol DonbyAppUIExtensionPlugin: AnyObject {
         appState: AppState,
         notifyHost: @escaping () -> Void
     ) -> (any DonbyPlayerCompanion)?
+
+    // Optional Metadata Cache Hooks
+    func metadataCacheSizeBytes() async -> Int64
+    func clearMetadataCacheAsync() async
+}
+
+public extension DonbyAppUIExtensionPlugin {
+    func metadataCacheSizeBytes() async -> Int64 { 0 }
+    func clearMetadataCacheAsync() async {}
 }
 
 // MARK: - Central Extension Coordinator (Single Registration Seam)

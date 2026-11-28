@@ -170,6 +170,22 @@ public actor IMDbOfficialRatingsStore {
         return found
     }
 
+    // MARK: - Cache Size & Cleanup
+
+    public func diskCacheSizeBytes() -> Int64 {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: datasetFileURL().path)
+        return (attrs?[.size] as? Int64) ?? 0
+    }
+
+    public func clearCache() {
+        lookupCache.removeAll()
+        missCache.removeAll()
+        inFlightRefreshTask?.cancel()
+        inFlightRefreshTask = nil
+        lastFailedRefreshAt = nil
+        try? FileManager.default.removeItem(at: datasetFileURL())
+    }
+
     // MARK: - Private Download & Cache Management
 
     private func datasetFileURL() -> URL {

@@ -8,7 +8,7 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "2.1.6")
+        #expect(DonbyAppInfo.fallbackVersion == "2.1.7")
     }
 
     @Test func resolvedPlaybackResourceLocalOrOfflineDetection() {

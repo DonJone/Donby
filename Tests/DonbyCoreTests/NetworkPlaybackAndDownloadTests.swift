@@ -356,4 +356,60 @@ struct NetworkPlaybackAndDownloadTests {
         #expect(snap.1?.path == "/cdn")
         #expect(!snap.0)
     }
+
+    @Test func multiPlatformRatingServiceCacheSizePruneAndClear() async throws {
+        let ratingService = MultiPlatformRatingService.shared
+        await ratingService.clearCache()
+        defer { Task { await ratingService.clearCache() } }
+
+        let cacheURL = DonbyStoragePaths.cachesDirectoryURL.appendingPathComponent("multi_platform_ratings_v2.json")
+        try FileManager.default.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        let now = Date()
+        var entries: [String: MultiPlatformRatings] = [:]
+        for idx in 0..<8 {
+            let entry = MultiPlatformRatings(
+                tmdb: 7.5 + Double(idx) * 0.1,
+                imdb: 8.0,
+                imdbId: "tt000000\(idx)",
+                fetchedAt: now.addingTimeInterval(-Double(idx * 60))
+            )
+            entries["movie_\(idx)"] = entry
+        }
+        let encoded = try JSONEncoder().encode(entries)
+        try encoded.write(to: cacheURL, options: .atomic)
+
+        let initialSize = await ratingService.diskCacheSizeBytes()
+        #expect(initialSize == Int64(encoded.count))
+        #expect(initialSize > 100)
+
+        let halfBudget = initialSize / 2
+        await ratingService.pruneIfNeeded(maxBytes: halfBudget)
+        let prunedSize = await ratingService.diskCacheSizeBytes()
+        #expect(prunedSize <= halfBudget)
+        #expect(prunedSize > 0)
+
+        await ratingService.clearCache()
+        let clearedSize = await ratingService.diskCacheSizeBytes()
+        #expect(clearedSize == 0)
+    }
+
+    @Test func imdbOfficialRatingsStoreCacheSizeAndClear() async throws {
+        let store = IMDbOfficialRatingsStore.shared
+        await store.clearCache()
+        defer { Task { await store.clearCache() } }
+
+        let datasetURL = DonbyStoragePaths.cachesDirectoryURL.appendingPathComponent("imdb_official_ratings.tsv.gz")
+        try FileManager.default.createDirectory(at: datasetURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        let payload = Data(repeating: 0x42, count: 4096)
+        try payload.write(to: datasetURL, options: .atomic)
+
+        let measured = await store.diskCacheSizeBytes()
+        #expect(measured == Int64(payload.count))
+
+        await store.clearCache()
+        let afterClear = await store.diskCacheSizeBytes()
+        #expect(afterClear == 0)
+    }
 }

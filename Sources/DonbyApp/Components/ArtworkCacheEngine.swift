@@ -45,8 +45,8 @@ public final class ArtworkImageCache: @unchecked Sendable {
     private var aliasIndexDirty = false
     private var aliasFlushScheduled = false
     private var writesSinceLastPrune: Int = 0
-    private static let maxDiskCacheBytes: Int64 = 512 * 1024 * 1024
-    private static let pruneTargetBytes: Int64 = 410 * 1024 * 1024
+    private let budgetLock = NSLock()
+    private var _maxDiskCacheBytes: Int64 = 1024 * 1024 * 1024
     private static let maxDiskCacheAge: TimeInterval = 30 * 86400
     private static let aliasIndexFileName = "alias_index.json"
 
@@ -61,8 +61,8 @@ public final class ArtworkImageCache: @unchecked Sendable {
         thumbCGMemoryCache.countLimit = 1800
         thumbCGMemoryCache.totalCostLimit = 320 * 1024 * 1024 // 320 MB
 
-        fullCGMemoryCache.countLimit = 48
-        fullCGMemoryCache.totalCostLimit = 160 * 1024 * 1024 // 160 MB
+        fullCGMemoryCache.countLimit = 64
+        fullCGMemoryCache.totalCostLimit = 240 * 1024 * 1024 // 240 MB
 
         let base = DonbyStoragePaths.cachesDirectoryURL
         let dir = base.appendingPathComponent("com.don.Donby/ArtworkCache", isDirectory: true)
@@ -151,33 +151,18 @@ public final class ArtworkImageCache: @unchecked Sendable {
         private weak var operation: Operation?
 
         func install(continuation: CheckedContinuation<T?, Never>, operation: Operation) -> Bool {
-            lock.lock()
-            defer { lock.unlock() }
-            if cancelled {
-                return false
-            }
-            self.continuation = continuation
-            self.operation = operation
+            lock.lock(); defer { lock.unlock() }
+            guard !cancelled else { return false }
+            self.continuation = continuation; self.operation = operation
             return true
         }
-
         func finish(_ value: T?) {
-            lock.lock()
-            let cont = continuation
-            continuation = nil
-            lock.unlock()
+            lock.lock(); let cont = continuation; continuation = nil; lock.unlock()
             cont?.resume(returning: value)
         }
-
         func cancel() {
-            lock.lock()
-            cancelled = true
-            let cont = continuation
-            continuation = nil
-            let op = operation
-            lock.unlock()
-            op?.cancel()
-            cont?.resume(returning: nil)
+            lock.lock(); cancelled = true; let cont = continuation; continuation = nil; let op = operation; lock.unlock()
+            op?.cancel(); cont?.resume(returning: nil)
         }
     }
 
@@ -192,24 +177,14 @@ public final class ArtworkImageCache: @unchecked Sendable {
                 let op = BlockOperation()
                 op.queuePriority = priority
                 op.addExecutionBlock { [weak op] in
-                    if op?.isCancelled == true {
-                        state.finish(nil)
-                        return
-                    }
+                    if op?.isCancelled == true { state.finish(nil); return }
                     state.finish(work(op))
                 }
-                op.completionBlock = {
-                    state.finish(nil)
-                }
-                if state.install(continuation: continuation, operation: op) {
-                    decodeOperationQueue.addOperation(op)
-                } else {
-                    continuation.resume(returning: nil)
-                }
+                op.completionBlock = { state.finish(nil) }
+                if state.install(continuation: continuation, operation: op) { decodeOperationQueue.addOperation(op) }
+                else { continuation.resume(returning: nil) }
             }
-        } onCancel: {
-            state.cancel()
-        }
+        } onCancel: { state.cancel() }
     }
 
     private func diskFileName(for key: String) -> String {
@@ -716,30 +691,56 @@ public final class ArtworkImageCache: @unchecked Sendable {
         }
     }
 
-    private func pruneDiskCacheIfNeeded() {
-        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
-        guard let entries = try? fileManager.contentsOfDirectory(
-            at: cacheDirectoryURL,
-            includingPropertiesForKeys: keys,
-            options: [.skipsHiddenFiles]
-        ) else {
-            return
+    public func setMaxDiskCacheBytes(_ bytes: Int64) {
+        budgetLock.lock()
+        _maxDiskCacheBytes = bytes
+        budgetLock.unlock()
+        if bytes > 0 {
+            diskQueue.async { [weak self] in self?.pruneDiskCacheIfNeeded() }
         }
+    }
 
+    public func diskCacheSizeBytesAsync() async -> Int64 {
+        await withCheckedContinuation { continuation in
+            diskQueue.async { [weak self] in
+                guard let self else { continuation.resume(returning: 0); return }
+                continuation.resume(returning: self.scanDiskCacheByInode(removeExpired: false).totalBytes)
+            }
+        }
+    }
+
+    public func clearAllCacheAsync() async {
+        memoryCache.removeAllObjects()
+        thumbCGMemoryCache.removeAllObjects()
+        fullCGMemoryCache.removeAllObjects()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            diskQueue.async { [weak self] in
+                guard let self else { continuation.resume(); return }
+                self.aliasLock.lock()
+                self.aliasIndex.removeAll()
+                self.aliasIndexDirty = false
+                self.aliasLock.unlock()
+                if let entries = try? self.fileManager.contentsOfDirectory(at: self.cacheDirectoryURL, includingPropertiesForKeys: nil) {
+                    for url in entries { try? self.fileManager.removeItem(at: url) }
+                }
+                continuation.resume()
+            }
+        }
+    }
+
+    private func scanDiskCacheByInode(removeExpired: Bool) -> (byInode: [UInt64: (urls: [URL], size: Int64, mtime: Date)], totalBytes: Int64) {
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        guard let entries = try? fileManager.contentsOfDirectory(at: cacheDirectoryURL, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) else {
+            return ([:], 0)
+        }
         let cutoff = Date().addingTimeInterval(-Self.maxDiskCacheAge)
         var byInode: [UInt64: (urls: [URL], size: Int64, mtime: Date)] = [:]
-        var uniqueCount = 0
         var totalBytes: Int64 = 0
-
-        for url in entries {
-            if url.lastPathComponent == Self.aliasIndexFileName { continue }
-            guard let values = try? url.resourceValues(forKeys: Set(keys)),
-                  values.isRegularFile == true else {
-                continue
-            }
+        for url in entries where url.lastPathComponent != Self.aliasIndexFileName {
+            guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isRegularFile == true else { continue }
             let size = Int64(values.fileSize ?? 0)
             let mtime = values.contentModificationDate ?? .distantPast
-            if mtime < cutoff {
+            if removeExpired && mtime < cutoff {
                 try? fileManager.removeItem(at: url)
                 continue
             }
@@ -752,17 +753,22 @@ public final class ArtworkImageCache: @unchecked Sendable {
             } else {
                 byInode[inode] = ([url], size, mtime)
                 totalBytes += size
-                uniqueCount += 1
             }
         }
+        return (byInode, totalBytes)
+    }
 
-        if totalBytes > Self.maxDiskCacheBytes && uniqueCount > 0 {
-            let sorted = byInode.values.sorted { $0.mtime < $1.mtime }
-            for entry in sorted {
-                if totalBytes <= Self.pruneTargetBytes { break }
-                for url in entry.urls {
-                    try? fileManager.removeItem(at: url)
-                }
+    private func pruneDiskCacheIfNeeded() {
+        var (byInode, totalBytes) = scanDiskCacheByInode(removeExpired: true)
+        budgetLock.lock()
+        let limitBytes = _maxDiskCacheBytes
+        budgetLock.unlock()
+
+        if limitBytes > 0 && totalBytes > limitBytes && !byInode.isEmpty {
+            let pruneTarget = Int64(Double(limitBytes) * 0.80)
+            for entry in byInode.values.sorted(by: { $0.mtime < $1.mtime }) {
+                if totalBytes <= pruneTarget { break }
+                for url in entry.urls { try? fileManager.removeItem(at: url) }
                 totalBytes -= entry.size
             }
         }

@@ -170,7 +170,7 @@ extension AppState {
             showToast("已登录 \(server.name)", icon: "checkmark.circle.fill")
         }
 
-        await loadActiveServerHome(syncDomains: false)
+        await loadActiveServerHome(syncDomains: false, forceRefresh: true)
     }
 
     public func isUsingUHDExtension(for server: EmbyServerConfig) -> Bool {
@@ -194,7 +194,7 @@ extension AppState {
             }
             carouselItems = []
             Task {
-                await loadActiveServerHome(syncDomains: true)
+                await loadActiveServerHome(syncDomains: true, forceRefresh: true)
             }
         }
     }
@@ -269,7 +269,7 @@ extension AppState {
         showToast("已切换至线路：\(newLineName)", icon: "checkmark.circle.fill")
 
         if triggerReload, activeServer?.id == serverId {
-            Task { await loadActiveServerHome(syncDomains: false) }
+            Task { await loadActiveServerHome(syncDomains: false, forceRefresh: true) }
         }
     }
 

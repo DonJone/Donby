@@ -1,6 +1,6 @@
 # Module Map: Optional UHDNow Streaming Integration (`DonbyUHDModule` & `Modules/UHD`)
 
-> Last synced: `v2.1.5`. Load this doc for UHDNow REST/WebSocket protocol behavior, dual-mode artwork resolution, single-episode detail hydration, CDN line selection/speed test, Watch Party, and GPU Danmu.
+> Last synced: `v2.1.7`. Load this doc for UHDNow REST/WebSocket protocol behavior, dual-mode artwork resolution, single-episode detail hydration, CDN line selection/speed test, Watch Party, and GPU Danmu.
 
 ## 1. File Inventory (Target Split: `<= 800L` per file)
 - **`Sources/DonbyUHDModule/`** (Optional SwiftPM target; excluded cleanly when `DONBY_PURE=1`):
@@ -14,9 +14,9 @@
   - `UHDStreamClient+DTOMapping.swift` — DTO-to-domain mappers (`resolveItemType`, `resolveStateType`, `mapSummary`, `mapDetail`, `mapEpisode` with season poster / series fanart / series logo fallbacks, `mapPlaybackItem`, `mapVideoAsset`).
   - `UHDStreamClient+TeamAdmin.swift`, `UHDWatchPartyClient.swift`, `UHDDanmuClient.swift` — Team API v2 management, Watch Party REST + `@MainActor UHDWatchPartySession` WebSocket sync, and managed Danmu proxy (`DanmuSessionCache`).
 - **`Sources/DonbyApp/Modules/UHD/`** (UI plugin slots registered via `DonbyAppExtensionCenter`):
-  - `UHDModuleManager.swift` — toggle state, home loading (`resumeItems` + `nextUpItems` + `hotItems`, delegating hero curation to `AppState.finalizeHomeContent` with `explicitAnimeMode: activeMode == .anime`, skipping `fetchAnimeHot` and anime collection top-rated pulls in Normal Hall), `resolveSeriesStartEpisode`, Watch Party creation.
-  - `UHDAppExtensionPlugin.swift` — `DonbyAppUIExtensionPlugin` impl (`isAnimeModeActive`, `resolveImdbIds`, Normal Hall `homeShelves` excludes `uhd_anime_hot` and filters anime out of `uhd_hot`); `loadDetailPayload` upgrades episode stubs to full parent series detail while preserving the clicked episode as preferred selection so credits/seasons/playback-state and multi-platform ratings hydrate reliably.
-  - `UHDImdbBridge.swift` — `UHDImdbBridge` actor persisting `tmdbId -> imdbId` mappings (`uhd_tmdb_imdb_map_v1.json`) via lazy bounded `fetchItemDetail` calls so UHDNow hero candidates seamlessly connect to `IMDbOfficialRatingsStore` and Cinemeta awards/countries.
+  - `UHDModuleManager.swift` — toggle state, home loading (`resumeItems` + `nextUpItems` + `hotItems` with atomic background commit when cached home is already displayed, delegating hero curation to `AppState.finalizeHomeContent` with `explicitAnimeMode: activeMode == .anime`, skipping `fetchAnimeHot` and anime collection top-rated pulls in Normal Hall; `switchLibraryMode` & `saveLibraryCollections` force home refresh), `resolveSeriesStartEpisode`, Watch Party creation.
+  - `UHDAppExtensionPlugin.swift` — `DonbyAppUIExtensionPlugin` impl (`isAnimeModeActive`, `resolveImdbIds`, `metadataCacheSizeBytes`, `clearMetadataCacheAsync`, Normal Hall `homeShelves` excludes `uhd_anime_hot` and filters anime out of `uhd_hot`); `loadDetailPayload` upgrades episode stubs to full parent series detail while preserving the clicked episode as preferred selection so credits/seasons/playback-state and multi-platform ratings hydrate reliably.
+  - `UHDImdbBridge.swift` — `UHDImdbBridge` actor persisting `tmdbId -> imdbId` mappings (`uhd_tmdb_imdb_map_v1.json`, with `diskCacheSizeBytes()` and `clearCache()`) via lazy bounded `fetchItemDetail` calls so UHDNow hero candidates seamlessly connect to `IMDbOfficialRatingsStore` and Cinemeta awards/countries.
   - `UHDPlayerCompanionController.swift`, `UHDAccountDashboardView.swift`, `UHDSpeedTestPanelView.swift`, `UHDLibraryHubSheet.swift`, `UHDDiscoverySheets.swift`, `UHDWatchPartyViews.swift`, `UHDDanmuViews.swift` — companion controller, account dashboard, speed-test panel, Library Hub (mode switch, collection order, calendar/watch-party/account hub), discovery sheets, Watch Party & GPU Danmu views.
 
 ## 2. Network & Artwork Architecture Contracts

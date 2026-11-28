@@ -33,6 +33,11 @@ public struct SettingsView: View {
     @State private var hasLoadedCacheUsage: Bool = false
     @State private var isClearingCache: Bool = false
     @State private var cacheRefreshToken: Int = 0
+    @State private var imageCacheBytes: Int64 = 0
+    @State private var metadataCacheBytes: Int64 = 0
+    @State private var hasLoadedImageCacheUsage: Bool = false
+    @State private var isClearingImageCache: Bool = false
+    @State private var imageCacheRefreshToken: Int = 0
 
     private static let cacheByteFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
@@ -666,37 +671,91 @@ public struct SettingsView: View {
                     .font(.system(size: 11.5))
                     .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
             }
+
+            settingsCard(spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("图片与元数据缓存")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    Text("缓存海报、剧照、主页快照与多平台评分，加速多服务器切换与主页秒开")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                }
+
+                HStack {
+                    Text("图片与元数据缓存上限").font(.system(size: 13)).foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                    Spacer()
+                    DonbyGlassMenuPicker(options: [256, 512, 1024, 2048, 4096, 8192, 0], selection: $appState.imageMetadataCacheLimitMB, isLightMode: appState.isLightMode, accentColor: appState.accentColor, width: 170) { mb in
+                        switch mb {
+                        case 256: return "256 MB"
+                        case 512: return "512 MB"
+                        case 1024: return "1 GB (推荐)"
+                        case 2048: return "2 GB"
+                        case 4096: return "4 GB"
+                        case 8192: return "8 GB"
+                        case 0: return "无限制"
+                        default: return "\(mb) MB"
+                        }
+                    }
+                }
+                HStack {
+                    Group {
+                        if hasLoadedImageCacheUsage {
+                            let imgText = Self.cacheByteFormatter.string(fromByteCount: max(0, imageCacheBytes))
+                            let metaText = Self.cacheByteFormatter.string(fromByteCount: max(0, metadataCacheBytes))
+                            let totalText = Self.cacheByteFormatter.string(fromByteCount: max(0, imageCacheBytes + metadataCacheBytes))
+                            Text("图片缓存：\(imgText) · 元数据缓存：\(metaText)（共 \(totalText)）")
+                        } else {
+                            Text("图片与元数据缓存：计算中...")
+                        }
+                    }
+                    .font(.system(size: 11.5)).foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+                    Spacer()
+                    Button {
+                        guard !isClearingImageCache else { return }
+                        isClearingImageCache = true
+                        Task {
+                            await ImageMetadataCacheCoordinator.shared.clearAllAsync()
+                            isClearingImageCache = false
+                            imageCacheRefreshToken &+= 1
+                            appState.showToast("已清理图片与元数据缓存", icon: "checkmark.circle.fill")
+                        }
+                    } label: {
+                        Text("清理图片与元数据缓存")
+                            .font(.system(size: 12, weight: .semibold)).foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+                            .padding(.horizontal, 12).padding(.vertical, 6).frame(minHeight: 24).donbyLiquidGlassCapsule().contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain).disabled(isClearingImageCache)
+                }
+                .task(id: imageCacheRefreshToken) {
+                    let usage = await ImageMetadataCacheCoordinator.shared.measureUsageAsync()
+                    guard !Task.isCancelled else { return }
+                    imageCacheBytes = usage.imageBytes; metadataCacheBytes = usage.metadataBytes; hasLoadedImageCacheUsage = true
+                }
+                .onChange(of: appState.imageMetadataCacheLimitMB) { newLimit in
+                    Task {
+                        await ImageMetadataCacheCoordinator.shared.enforceDiskLimitMBAsync(newLimit)
+                        imageCacheRefreshToken &+= 1
+                    }
+                }
+            }
         }
     }
 
     /// Unified full-width Settings card container so every card across all tabs shares identical width and styling.
-    private func settingsCard<Content: View>(
-        alignment: HorizontalAlignment = .leading,
-        spacing: CGFloat = 14,
-        padding: CGFloat = 18,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: alignment, spacing: spacing) {
-            content()
-        }
-        .frame(maxWidth: .infinity, alignment: alignment == .center ? .center : .leading)
-        .padding(padding)
-        .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6)
-        )
+    private func settingsCard<Content: View>(alignment: HorizontalAlignment = .leading, spacing: CGFloat = 14, padding: CGFloat = 18, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: alignment, spacing: spacing) { content() }
+            .frame(maxWidth: .infinity, alignment: alignment == .center ? .center : .leading)
+            .padding(padding)
+            .background(DonbyGlassPalette.cardBackground(isLight: appState.isLightMode))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(DonbyGlassPalette.separator(isLight: appState.isLightMode), lineWidth: 0.6))
     }
 
     func settingsHeader(title: String, subtitle: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.system(size: 18, weight: .bold))
-                .foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
-            Text(subtitle)
-                .font(.system(size: 12))
-                .foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
+            Text(title).font(.system(size: 18, weight: .bold)).foregroundStyle(DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
+            Text(subtitle).font(.system(size: 12)).foregroundStyle(DonbyGlassPalette.secondaryText(isLight: appState.isLightMode))
         }
     }
 }
@@ -712,39 +771,21 @@ private struct SettingsTabRowButton: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 10) {
-                Image(systemName: tab.icon)
-                    .font(.system(size: 14))
+                Image(systemName: tab.icon).font(.system(size: 14)).frame(width: 20)
                     .foregroundStyle(isSelected ? appState.accentTextColor : (isHovered ? DonbyGlassPalette.primaryText(isLight: appState.isLightMode) : DonbyGlassPalette.secondaryText(isLight: appState.isLightMode)))
-                    .frame(width: 20)
-                Text(tab.rawValue)
-                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                Text(tab.rawValue).font(.system(size: 13, weight: isSelected ? .semibold : .regular))
                     .foregroundStyle(isSelected ? appState.accentTextColor : DonbyGlassPalette.primaryText(isLight: appState.isLightMode))
                 Spacer()
-                if showBadgeDot {
-                    Circle()
-                        .fill(isSelected ? appState.accentTextColor : appState.accentColor)
-                        .frame(width: 6, height: 6)
-                }
+                if showBadgeDot { Circle().fill(isSelected ? appState.accentTextColor : appState.accentColor).frame(width: 6, height: 6) }
             }
-            .padding(.horizontal, 14)
-            .frame(height: 34)
-            .background(
-                Group {
-                    if isSelected {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(appState.accentColor)
-                    } else if isHovered {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.07))
-                    } else {
-                        Color.clear
-                    }
-                }
-            )
+            .padding(.horizontal, 14).frame(height: 34)
+            .background(Group {
+                if isSelected { RoundedRectangle(cornerRadius: 8, style: .continuous).fill(appState.accentColor) }
+                else if isHovered { RoundedRectangle(cornerRadius: 8, style: .continuous).fill(appState.isLightMode ? Color.black.opacity(0.05) : Color.white.opacity(0.07)) }
+                else { Color.clear }
+            })
             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 10)
-        .onHover { isHovered = $0 }
+        .buttonStyle(.plain).padding(.horizontal, 10).onHover { isHovered = $0 }
     }
 }
