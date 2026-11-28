@@ -35,7 +35,7 @@ public final class ArtworkImageCache: @unchecked Sendable {
         let q = OperationQueue()
         q.name = "com.don.ArtworkDecode"
         q.qualityOfService = .userInitiated
-        q.maxConcurrentOperationCount = 4
+        q.maxConcurrentOperationCount = min(max(ProcessInfo.processInfo.activeProcessorCount, 6), 10)
         return q
     }()
     private let fileManager = FileManager.default
@@ -85,7 +85,7 @@ public final class ArtworkImageCache: @unchecked Sendable {
             self?.flushAliasIndexSync()
         }
 
-        diskQueue.async { [weak self] in
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.loadAliasIndex()
         }
 
@@ -168,14 +168,20 @@ public final class ArtworkImageCache: @unchecked Sendable {
 
     private func runOnDecodeQueue<T>(
         priority: Operation.QueuePriority = .normal,
+        escalator: ArtworkPriorityEscalator? = nil,
         _ work: @escaping @Sendable (Operation?) -> T?
     ) async -> T? {
         if Task.isCancelled { return nil }
         let state = DecodeState<T>()
+        let initialPriority = escalator.map { $0.currentPriority.rawValue > priority.rawValue ? $0.currentPriority : priority } ?? priority
         return await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
                 let op = BlockOperation()
-                op.queuePriority = priority
+                op.queuePriority = initialPriority
+                escalator?.registerBoostHook { [weak op] boosted in
+                    guard let op, boosted.rawValue > op.queuePriority.rawValue else { return }
+                    op.queuePriority = boosted
+                }
                 op.addExecutionBlock { [weak op] in
                     if op?.isCancelled == true { state.finish(nil); return }
                     state.finish(work(op))
@@ -248,8 +254,11 @@ public final class ArtworkImageCache: @unchecked Sendable {
         guard let rawCG else {
             return nil
         }
-        // Skip CPU Display P3 redraw for large images; let GPU handle display gamut mapping.
+        // Skip CPU Display P3 redraw for large or standard RGB/untagged images; let GPU handle display gamut mapping.
         if max(rawCG.width, rawCG.height) > 900 || clampedMaxPixel > 900 {
+            return rawCG
+        }
+        if rawCG.colorSpace == nil || rawCG.colorSpace?.model == .rgb {
             return rawCG
         }
         return normalizeToDisplaySpace(rawCG)
@@ -353,10 +362,12 @@ public final class ArtworkImageCache: @unchecked Sendable {
     }
 
     /// Checks multiple candidate disk keys in one bounded background decode task.
+    /// Fast-returns `nil` without entering `decodeOperationQueue` when no candidate file exists on disk.
     public func cgImageFromDiskBatchAsync(
         forKeys keys: [String],
         maxPixelSize: Int = 500,
-        priority: Operation.QueuePriority = .normal
+        priority: Operation.QueuePriority = .normal,
+        escalator: ArtworkPriorityEscalator? = nil
     ) async -> CGImage? {
         for key in keys {
             if let mem = cgImageFromMemory(for: key, maxPixelSize: maxPixelSize) {
@@ -369,56 +380,43 @@ public final class ArtworkImageCache: @unchecked Sendable {
         let diskThumbURL = isThumbBucket
             ? cacheDirectoryURL.appendingPathComponent(diskFileName(for: "\(primaryKey)#thumb_v1_\(maxPixelSize)"))
             : nil
+        let hasDiskThumb = diskThumbURL.map { access($0.path, R_OK) == 0 } ?? false
         var seenURLs = Set<URL>()
         var fileEntries: [(idx: Int, url: URL)] = []
         for (idx, key) in keys.enumerated() {
             let resolved = resolveDiskFileURL(for: key)
-            if seenURLs.insert(resolved).inserted {
-                fileEntries.append((idx, resolved))
-            }
+            if seenURLs.insert(resolved).inserted, access(resolved.path, R_OK) == 0 { fileEntries.append((idx, resolved)) }
             let direct = cacheDirectoryURL.appendingPathComponent(diskFileName(for: key))
-            if direct != resolved && seenURLs.insert(direct).inserted {
-                fileEntries.append((idx, direct))
-            }
+            if direct != resolved && seenURLs.insert(direct).inserted, access(direct.path, R_OK) == 0 { fileEntries.append((idx, direct)) }
         }
-        return await runOnDecodeQueue(priority: priority) { [weak self] op in
+        guard hasDiskThumb || !fileEntries.isEmpty else { return nil }
+        return await runOnDecodeQueue(priority: priority, escalator: escalator) { [weak self] op in
             if op?.isCancelled == true { return nil }
             guard let self else { return nil }
-            for key in keys {
-                if let mem = self.cgImageFromMemory(for: key, maxPixelSize: maxPixelSize) {
-                    return mem
-                }
-            }
+            for key in keys { if let mem = self.cgImageFromMemory(for: key, maxPixelSize: maxPixelSize) { return mem } }
             let memCache = self.targetCGMemoryCache(for: maxPixelSize)
-            if let diskThumbURL,
+            if hasDiskThumb, let diskThumbURL,
                let thumbCG = self.decodeCGThumbnail(fromURL: diskThumbURL, maxPixelSize: maxPixelSize, isPreThumb: true) {
-                self.diskQueue.async { [weak self] in
-                    self?.touchIfStale(diskThumbURL)
-                }
+                self.diskQueue.async { [weak self] in self?.touchIfStale(diskThumbURL) }
                 let cost = self.decodedByteCost(for: thumbCG)
                 for (idx, key) in keys.enumerated() {
                     memCache.setObject(thumbCG, forKey: self.cgCacheKey(for: key, maxPixelSize: maxPixelSize), cost: idx == 0 ? cost : 1)
                 }
                 return thumbCG
             }
-
             for (idx, fileURL) in fileEntries {
                 if op?.isCancelled == true { return nil }
-                guard let cgImg = self.decodeCGThumbnail(fromURL: fileURL, maxPixelSize: maxPixelSize) else {
-                    continue
-                }
+                guard let cgImg = self.decodeCGThumbnail(fromURL: fileURL, maxPixelSize: maxPixelSize) else { continue }
                 let sourceBytes = self.fileByteSize(at: fileURL)
                 self.diskQueue.async { [weak self] in
                     self?.touchIfStale(fileURL)
-                    if let self, let diskThumbURL, sourceBytes > 220_000, !ScrollActivityTracker.isScrolling {
+                    if let self, let diskThumbURL, sourceBytes > 24_000, !ScrollActivityTracker.isScrolling {
                         self.persistDiskThumbnail(cgImg, to: diskThumbURL)
                     }
                 }
                 let cost = self.decodedByteCost(for: cgImg)
                 memCache.setObject(cgImg, forKey: self.cgCacheKey(for: primaryKey, maxPixelSize: maxPixelSize), cost: cost)
-                if idx > 0 {
-                    memCache.setObject(cgImg, forKey: self.cgCacheKey(for: keys[idx], maxPixelSize: maxPixelSize), cost: 1)
-                }
+                if idx > 0 { memCache.setObject(cgImg, forKey: self.cgCacheKey(for: keys[idx], maxPixelSize: maxPixelSize), cost: 1) }
                 return cgImg
             }
             return nil
@@ -513,9 +511,10 @@ public final class ArtworkImageCache: @unchecked Sendable {
         for key: String,
         maxPixelSize: Int = 500,
         aliases: [String] = [],
-        priority: Operation.QueuePriority = .normal
+        priority: Operation.QueuePriority = .normal,
+        escalator: ArtworkPriorityEscalator? = nil
     ) async -> CGImage? {
-        await runOnDecodeQueue(priority: priority) { [weak self] op in
+        await runOnDecodeQueue(priority: priority, escalator: escalator) { [weak self] op in
             if op?.isCancelled == true { return nil }
             guard let self else { return nil }
             let cgImg = self.decodeCGThumbnail(from: data, maxPixelSize: maxPixelSize)
@@ -533,7 +532,7 @@ public final class ArtworkImageCache: @unchecked Sendable {
             self.diskQueue.async { [weak self] in
                 guard let self else { return }
                 self.writeRawDataToDisk(data, baseDir: self.cacheDirectoryURL, key: key, aliases: aliases)
-                if let diskThumbURL, let cgImg, data.count > 140_000 {
+                if let diskThumbURL, let cgImg, data.count > 24_000 {
                     self.persistDiskThumbnail(cgImg, to: diskThumbURL)
                 }
                 self.recordDiskWriteAndPruneIfNeeded()

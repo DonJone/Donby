@@ -185,10 +185,8 @@ extension AppState {
               openedServerId != nil else { return }
 
         homeShelvesComputeTask?.cancel()
+        homeShelvesComputeTask = nil
         homeShelvesGeneration &+= 1
-        let generation = homeShelvesGeneration
-        let targetOpenedId = openedServerId
-        let targetActiveId = activeServer?.id
         let (input, extShelves) = makeHomeShelvesComputationInput()
 
         if input.libraryViews.isEmpty
@@ -203,21 +201,13 @@ extension AppState {
             return
         }
 
-        homeShelvesComputeTask = Task.detached(priority: .userInitiated) { [weak self] in
-            let drafts = Self.computeHomeShelfDrafts(input: input)
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                guard let self,
-                      !Task.isCancelled,
-                      self.homeShelvesGeneration == generation,
-                      self.openedServerId == targetOpenedId,
-                      self.activeServer?.id == targetActiveId else { return }
-                let next = Self.materializeHomeShelves(drafts: drafts, extShelves: extShelves)
-                if self.cachedHomeShelves != next {
-                    self.cachedHomeShelves = next
-                    self.homeRevision &+= 1
-                }
-            }
+        // Compute synchronously on MainActor (< 0.5 ms in-memory array slicing) so
+        // NativeEmbyHomeView mounts immediately with populated shelves in the same turn.
+        let drafts = Self.computeHomeShelfDrafts(input: input)
+        let next = Self.materializeHomeShelves(drafts: drafts, extShelves: extShelves)
+        if cachedHomeShelves != next {
+            cachedHomeShelves = next
+            homeRevision &+= 1
         }
     }
 
@@ -278,6 +268,16 @@ extension AppState {
                     self.mergeRatingsBatch(cachedRatings)
                 }
                 ServerHomeCacheStore.shared.save(snapshot, for: serverId, explicitAnimeMode: explicitAnimeMode)
+                if let srv = targetServer, !nextCarousel.isEmpty {
+                    HomeArtworkPrewarmer.shared.prewarmShelfItems(
+                        server: srv,
+                        items: Array(nextCarousel.prefix(2)),
+                        kind: .backdrop,
+                        maxWidth: 2200,
+                        priority: .veryHigh,
+                        maxCount: 2
+                    )
+                }
                 return true
             }
             guard shouldEnrich else { return }
@@ -355,16 +355,17 @@ extension AppState {
         }
         if let activeSrv {
             Task {
-                if let snap = await ServerHomeCacheStore.shared.loadSnapshotFromDiskAsync(for: activeSrv.id),
-                   let firstHero = snap.carouselItems.first,
-                   MediaArtworkView.cachedCGImageInMemory(item: firstHero, kind: .backdrop, maxWidth: 2200) == nil {
-                    _ = await MediaArtworkView.loadOrFetchCGImage(
+                if let snap = await ServerHomeCacheStore.shared.loadSnapshotFromDiskAsync(for: activeSrv.id) {
+                    HomeArtworkPrewarmer.shared.prewarmHome(
                         server: activeSrv,
-                        item: firstHero,
-                        kind: .backdrop,
-                        maxWidth: 2200,
-                        priority: .high
+                        carouselItems: snap.carouselItems,
+                        libraryViews: snap.libraryViews,
+                        resumeItems: snap.resumeItems,
+                        nextUpItems: snap.nextUpItems,
+                        latestByLibrary: snap.latestByLibrary
                     )
+                } else if let baseURL = URL(string: activeSrv.activeBaseURL) {
+                    ArtworkDownloadManager.shared.prewarmOrigin(for: baseURL, server: activeSrv)
                 }
             }
         }
@@ -504,6 +505,7 @@ private final class ServerHomeModeCacheBox {
     static let shared = ServerHomeModeCacheBox()
     var snapshotsByCompositeKey: [String: ServerHomeCacheStore.ServerHomeSnapshot] = [:]
     var lastSyncedAtByCompositeKey: [String: Date] = [:]
+    var inFlightLoadsByCompositeKey: [String: Task<ServerHomeCacheStore.ServerHomeSnapshot?, Never>] = [:]
 }
 
 extension ServerHomeCacheStore {
@@ -588,45 +590,41 @@ extension ServerHomeCacheStore {
         if let mem = ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] {
             return mem
         }
-        let file = diskFileURL(serverId: serverId, modeKey: key)
-        let decoded = await Task.detached(priority: .userInitiated) { () -> ServerHomeSnapshot? in
-            guard let data = try? Data(contentsOf: file) else { return nil }
-            return try? JSONDecoder().decode(ServerHomeSnapshot.self, from: data)
-        }.value
-        if let decoded {
-            ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] = decoded
-            if ServerHomeModeCacheBox.shared.lastSyncedAtByCompositeKey[cKey] == nil {
-                ServerHomeModeCacheBox.shared.lastSyncedAtByCompositeKey[cKey] = decoded.cachedAt
-            }
-            if key == "default" {
-                inMemorySnapshots[serverId] = decoded
-            }
+        if let inFlight = ServerHomeModeCacheBox.shared.inFlightLoadsByCompositeKey[cKey] {
+            return await inFlight.value
         }
-        return decoded
+        let file = diskFileURL(serverId: serverId, modeKey: key)
+        let task = Task<ServerHomeSnapshot?, Never> { [weak self] in
+            let decoded = await Task.detached(priority: .userInitiated) { () -> ServerHomeSnapshot? in
+                guard let data = try? Data(contentsOf: file) else { return nil }
+                return try? JSONDecoder().decode(ServerHomeSnapshot.self, from: data)
+            }.value
+            ServerHomeModeCacheBox.shared.inFlightLoadsByCompositeKey.removeValue(forKey: cKey)
+            if let decoded {
+                if ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] == nil {
+                    ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] = decoded
+                }
+                if ServerHomeModeCacheBox.shared.lastSyncedAtByCompositeKey[cKey] == nil {
+                    ServerHomeModeCacheBox.shared.lastSyncedAtByCompositeKey[cKey] = decoded.cachedAt
+                }
+                if key == "default", self?.inMemorySnapshots[serverId] == nil {
+                    self?.inMemorySnapshots[serverId] = decoded
+                }
+            }
+            return ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] ?? decoded
+        }
+        ServerHomeModeCacheBox.shared.inFlightLoadsByCompositeKey[cKey] = task
+        return await task.value
     }
 
     @MainActor
     public func preload(serverId: UUID) {
         let key = Self.resolveModeKey(for: serverId)
         let cKey = Self.compositeKey(serverId: serverId, modeKey: key)
-        guard ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] == nil else { return }
-        let file = diskFileURL(serverId: serverId, modeKey: key)
-        Task.detached(priority: .utility) { [weak self] in
-            guard let data = try? Data(contentsOf: file),
-                  let snap = try? JSONDecoder().decode(ServerHomeSnapshot.self, from: data) else {
-                return
-            }
-            await MainActor.run {
-                if ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] == nil {
-                    ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] = snap
-                    if ServerHomeModeCacheBox.shared.lastSyncedAtByCompositeKey[cKey] == nil {
-                        ServerHomeModeCacheBox.shared.lastSyncedAtByCompositeKey[cKey] = snap.cachedAt
-                    }
-                    if key == "default" {
-                        self?.inMemorySnapshots[serverId] = snap
-                    }
-                }
-            }
+        guard ServerHomeModeCacheBox.shared.snapshotsByCompositeKey[cKey] == nil,
+              ServerHomeModeCacheBox.shared.inFlightLoadsByCompositeKey[cKey] == nil else { return }
+        Task { @MainActor [weak self] in
+            _ = await self?.loadSnapshotFromDiskAsync(for: serverId)
         }
     }
 

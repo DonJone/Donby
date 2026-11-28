@@ -264,6 +264,11 @@ extension AppState {
         } else {
             Task { await EmbyClient.shared.invalidatePlaybackCaches(serverId: serverId) }
         }
+        ArtworkDownloadManager.shared.clearNegativeCache()
+        HomeArtworkPrewarmer.shared.cancelAll()
+        if let baseURL = URL(string: updatedServer.activeBaseURL) {
+            ArtworkDownloadManager.shared.prewarmOrigin(for: baseURL, server: updatedServer)
+        }
         PlaybackIntentCoordinator.shared.warmServerOnConnectOrLaunch(server: updatedServer)
         let newLineName = servers[idx].activeLineName
         showToast("已切换至线路：\(newLineName)", icon: "checkmark.circle.fill")

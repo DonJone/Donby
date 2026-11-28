@@ -1,6 +1,6 @@
 # App Sub-Map: Home, Carousel, Library Grid & DetailView
 
-> Last synced: `v2.1.7`
+> Last synced: `v2.1.8`
 > Parent: [app/INDEX.md](INDEX.md). Covers 7 files: `EmbyMainView.swift`, `MainCarouselView.swift`, `Views/MLibListView.swift`, and `DetailView.swift` + 3 extensions.
 
 ## 1. File Inventory & Responsibilities

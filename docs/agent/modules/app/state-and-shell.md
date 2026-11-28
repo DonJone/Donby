@@ -1,6 +1,6 @@
 # App Sub-Map: Entry, Window Shell, AppState & Extension Seam
 
-> Last synced: `v2.1.7`. Parent: [app/INDEX.md](INDEX.md). Covers 12 files: `DonbyApp.swift`, `MainWindowView.swift`, `LogViewerSheet.swift`, `Extensions/DonbyAppExtension.swift`, and `AppState.swift` + 7 extensions.
+> Last synced: `v2.1.8`. Parent: [app/INDEX.md](INDEX.md). Covers 12 files: `DonbyApp.swift`, `MainWindowView.swift`, `LogViewerSheet.swift`, `Extensions/DonbyAppExtension.swift`, and `AppState.swift` + 7 extensions.
 
 ## 1. File Inventory & Responsibilities
 - `Sources/DonbyApp/DonbyApp.swift` — `AppDelegate` (auto-detaches residual mounted DMGs on launch, single-instance hygiene, `donby://` URL scheme dispatch), `DonbyApp` root scene (binds root window `preferredColorScheme` to `appState.colorScheme` to avoid light/dark flashes).

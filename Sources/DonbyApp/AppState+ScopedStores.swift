@@ -109,20 +109,18 @@ extension AppState {
             let hasHost = !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             self.isLoadingHome = hasHost
             let targetServer = server
-            Task { [weak self] in
+            Task { @MainActor [weak self] in
                 let snap = await ServerHomeCacheStore.shared.loadSnapshotFromDiskAsync(for: targetServer.id)
-                await MainActor.run {
-                    guard let self, self.openedServerId == targetServer.id else { return }
-                    if let snap, !snap.libraryViews.isEmpty {
-                        if self.libraryViews.isEmpty {
-                            self.applyHomeSnapshot(snap, for: targetServer)
-                        }
-                        if !ServerHomeCacheStore.shared.isSnapshotFresh(for: targetServer.id) {
-                            Task { await self.loadActiveServerHome(syncDomains: true, forceRefresh: false) }
-                        }
-                    } else if hasHost {
+                guard let self, self.openedServerId == targetServer.id else { return }
+                if let snap, !snap.libraryViews.isEmpty {
+                    if self.libraryViews.isEmpty {
+                        self.applyHomeSnapshot(snap, for: targetServer)
+                    }
+                    if !ServerHomeCacheStore.shared.isSnapshotFresh(for: targetServer.id) {
                         Task { await self.loadActiveServerHome(syncDomains: true, forceRefresh: false) }
                     }
+                } else if hasHost {
+                    Task { await self.loadActiveServerHome(syncDomains: true, forceRefresh: false) }
                 }
             }
         }
@@ -152,6 +150,15 @@ extension AppState {
         let shouldRecurate = snap.carouselItems.isEmpty && !snap.latestByLibrary.isEmpty
         let initialCarousel = snap.carouselItems
 
+        HomeArtworkPrewarmer.shared.prewarmHome(
+            server: server,
+            carouselItems: snap.carouselItems,
+            libraryViews: snap.libraryViews,
+            resumeItems: snap.resumeItems,
+            nextUpItems: snap.nextUpItems,
+            latestByLibrary: snap.latestByLibrary
+        )
+
         Task.detached(priority: .userInitiated) { [weak self] in
             let nextCarousel: [EmbyItem]
             if shouldRecurate {
@@ -162,20 +169,20 @@ extension AppState {
                     serverName: serverName,
                     explicitAnimeMode: explicitAnime
                 )
+                if !nextCarousel.isEmpty {
+                    HomeArtworkPrewarmer.shared.prewarmShelfItems(
+                        server: server,
+                        items: Array(nextCarousel.prefix(2)),
+                        kind: .backdrop,
+                        maxWidth: 2200,
+                        priority: .veryHigh,
+                        maxCount: 2
+                    )
+                }
             } else {
                 nextCarousel = initialCarousel
             }
             let cached = await MultiPlatformRatingService.shared.cachedRatingsByItemId(for: nextCarousel)
-            if let firstHero = nextCarousel.first,
-               MediaArtworkView.cachedCGImageInMemory(item: firstHero, kind: .backdrop, maxWidth: 2200) == nil {
-                _ = await MediaArtworkView.loadOrFetchCGImage(
-                    server: server,
-                    item: firstHero,
-                    kind: .backdrop,
-                    maxWidth: 2200,
-                    priority: .high
-                )
-            }
             await MainActor.run {
                 guard let self,
                       self.homeCurationGeneration == curationGeneration,

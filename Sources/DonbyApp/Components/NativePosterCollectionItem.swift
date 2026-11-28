@@ -383,6 +383,9 @@ final class NativePosterCollectionItem: NSCollectionViewItem, HoverableCollectio
             guard let self, !Task.isCancelled, self.currentItem?.id == targetId else { return }
             self.loadTask = nil
             guard let cgImage else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            defer { CATransaction.commit() }
             self.posterLayer.contents = cgImage
             self.posterLayer.isOpaque = NativeCardLayerCache.isOpaqueCGImage(cgImage)
             self.placeholderIconLayer.isHidden = true

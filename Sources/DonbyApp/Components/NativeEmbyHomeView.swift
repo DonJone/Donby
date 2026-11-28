@@ -66,6 +66,7 @@ private final class NativeHomeShelfView: FlippedLayerHostView, NSCollectionViewD
     private var lastTitle: String?
     private var lastIsLightMode: Bool?
     private(set) var isViewportActive: Bool = false
+    private var didPrefetchLeadingForCurrentItems: Bool = false
     private let isActivelyScrolling: () -> Bool
 
     var onSelectItem: ((EmbyItem) -> Void)?
@@ -166,17 +167,55 @@ private final class NativeHomeShelfView: FlippedLayerHostView, NSCollectionViewD
         guard isViewportActive != active else { return }
         isViewportActive = active
         guard active else { return }
-        for visibleItem in collectionView.visibleItems() {
-            switch visibleItem {
-            case let cell as NativeLibraryCollectionItem:
-                cell.startPendingArtworkLoadIfNeeded()
-            case let cell as NativeLandscapeCollectionItem:
-                cell.startPendingArtworkLoadIfNeeded()
-            case let cell as NativePosterCollectionItem:
-                cell.startPendingArtworkLoadIfNeeded()
-            default:
-                break
+        let visible = collectionView.visibleItems()
+        var maxVisibleIndex = -1
+        for visibleItem in visible {
+            if let ip = collectionView.indexPath(for: visibleItem) {
+                maxVisibleIndex = max(maxVisibleIndex, ip.item)
             }
+            switch visibleItem {
+            case let cell as NativeLibraryCollectionItem: cell.startPendingArtworkLoadIfNeeded()
+            case let cell as NativeLandscapeCollectionItem: cell.startPendingArtworkLoadIfNeeded()
+            case let cell as NativePosterCollectionItem: cell.startPendingArtworkLoadIfNeeded()
+            default: break
+            }
+        }
+        // Only enqueue .utility lookahead once horizontalScrollView has laid out visible items,
+        // so initial visible cells start their .high-priority loads without waiting behind lookahead.
+        if maxVisibleIndex >= 0 {
+            let lookaheadStart = maxVisibleIndex + 1
+            prefetchItemRange(lookaheadStart..<min(items.count, lookaheadStart + 6))
+        }
+    }
+
+    func prefetchLeadingItems(limit: Int = 8) {
+        guard !didPrefetchLeadingForCurrentItems, !items.isEmpty else { return }
+        didPrefetchLeadingForCurrentItems = true
+        prefetchItemRange(0..<min(items.count, limit))
+    }
+
+    private func prefetchItemRange(_ range: Range<Int>) {
+        guard !range.isEmpty else { return }
+        let server = cardAppearance?.server
+        for idx in range where prefetchTasks.count < 16 {
+            let indexPath = IndexPath(item: idx, section: 0)
+            guard prefetchTasks[indexPath] == nil else { continue }
+            let item = items[idx]
+            let (targetKind, targetWidth) = artworkTargetSpec(for: item)
+            if MediaArtworkView.cachedCGImageInMemory(item: item, kind: targetKind, maxWidth: targetWidth) != nil { continue }
+            prefetchTasks[indexPath] = Task(priority: .utility) { [weak self] in
+                await Self.runPrefetch(server: server, item: item, kind: targetKind, maxWidth: targetWidth)
+                guard !Task.isCancelled else { return }
+                _ = self?.prefetchTasks.removeValue(forKey: indexPath)
+            }
+        }
+    }
+
+    private func artworkTargetSpec(for item: EmbyItem) -> (EmbyImageKind, Int) {
+        switch kind {
+        case .library: return ((item.backdropImageTags?.isEmpty == false) ? .backdrop : .primary, 440)
+        case .landscape: return (.thumb, 500)
+        case .poster: return (.primary, 360)
         }
     }
 
@@ -229,6 +268,7 @@ private final class NativeHomeShelfView: FlippedLayerHostView, NSCollectionViewD
                 task.cancel()
             }
             prefetchTasks.removeAll()
+            didPrefetchLeadingForCurrentItems = false
             self.items = section.items
             self.countsByLibrary = section.countsByLibrary
             collectionView.reloadData()
@@ -365,26 +405,11 @@ private final class NativeHomeShelfView: FlippedLayerHostView, NSCollectionViewD
     func collectionView(_ collectionView: NSCollectionView, prefetchItemsAt indexPaths: [IndexPath]) {
         guard isViewportActive else { return }
         let server = cardAppearance?.server
-        for indexPath in indexPaths {
-            if prefetchTasks.count >= 12 { break }
+        for indexPath in indexPaths where prefetchTasks.count < 16 {
             guard indexPath.item >= 0, indexPath.item < items.count, prefetchTasks[indexPath] == nil else { continue }
             let item = items[indexPath.item]
-            let targetKind: EmbyImageKind
-            let targetWidth: Int
-            switch kind {
-            case .library:
-                targetKind = (item.backdropImageTags?.isEmpty == false) ? .backdrop : .primary
-                targetWidth = 440
-            case .landscape:
-                targetKind = .thumb
-                targetWidth = 500
-            case .poster:
-                targetKind = .primary
-                targetWidth = 360
-            }
-            if MediaArtworkView.cachedCGImageInMemory(item: item, kind: targetKind, maxWidth: targetWidth) != nil {
-                continue
-            }
+            let (targetKind, targetWidth) = artworkTargetSpec(for: item)
+            if MediaArtworkView.cachedCGImageInMemory(item: item, kind: targetKind, maxWidth: targetWidth) != nil { continue }
             prefetchTasks[indexPath] = Task(priority: .utility) { [weak self] in
                 await Self.runPrefetch(server: server, item: item, kind: targetKind, maxWidth: targetWidth)
                 guard !Task.isCancelled else { return }
@@ -393,21 +418,13 @@ private final class NativeHomeShelfView: FlippedLayerHostView, NSCollectionViewD
         }
     }
 
-    private nonisolated static func runPrefetch(
-        server: EmbyServerConfig?,
-        item: EmbyItem,
-        kind: EmbyImageKind,
-        maxWidth: Int
-    ) async {
+    private nonisolated static func runPrefetch(server: EmbyServerConfig?, item: EmbyItem, kind: EmbyImageKind, maxWidth: Int) async {
         if Task.isCancelled { return }
         _ = await MediaArtworkView.loadOrFetchCGImage(server: server, item: item, kind: kind, maxWidth: maxWidth, priority: .low)
     }
 
     func collectionView(_ collectionView: NSCollectionView, cancelPrefetchingForItemsAt indexPaths: [IndexPath]) {
-        for indexPath in indexPaths {
-            prefetchTasks[indexPath]?.cancel()
-            prefetchTasks.removeValue(forKey: indexPath)
-        }
+        for indexPath in indexPaths { prefetchTasks.removeValue(forKey: indexPath)?.cancel() }
     }
 }
 
@@ -762,13 +779,16 @@ public struct NativeEmbyHomeView: NSViewRepresentable {
         private func updateShelfViewportVisibility() {
             guard let sv = scrollView else { return }
             let visible = sv.contentView.bounds
-            let activeBounds = visible.width > 0 && visible.height > 0
-                ? visible.insetBy(dx: 0, dy: -180)
+            let baseBounds = visible.width > 0 && visible.height > 0
+                ? visible
                 : NSRect(x: 0, y: 0, width: max(400, currentWidth), height: 900)
+            let activeBounds = baseBounds.insetBy(dx: 0, dy: -360)
+            let lookaheadBounds = baseBounds.insetBy(dx: 0, dy: -960)
             for shelfView in orderedShelfViews {
-                let inRange = shelfView.frame.intersects(activeBounds)
-                if inRange {
+                if shelfView.frame.intersects(activeBounds) {
                     shelfView.setViewportActive(true)
+                } else if shelfView.frame.intersects(lookaheadBounds) {
+                    shelfView.prefetchLeadingItems(limit: 8)
                 }
             }
         }

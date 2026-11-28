@@ -13,6 +13,7 @@ public struct MediaArtworkView: View {
     public var kind: EmbyImageKind = .primary
     public var maxWidth: Int = 600
     public var alignment: Alignment = .center
+    public var priority: Operation.QueuePriority = .high
 
     @State private var loadedImage: CGImage? = nil
     @State private var loadedKey: String = ""
@@ -22,13 +23,11 @@ public struct MediaArtworkView: View {
         item: EmbyItem,
         kind: EmbyImageKind = .primary,
         maxWidth: Int = 600,
-        alignment: Alignment = .center
+        alignment: Alignment = .center,
+        priority: Operation.QueuePriority = .high
     ) {
-        self.server = server
-        self.item = item
-        self.kind = kind
-        self.maxWidth = maxWidth
-        self.alignment = alignment
+        self.server = server; self.item = item; self.kind = kind
+        self.maxWidth = maxWidth; self.alignment = alignment; self.priority = priority
     }
 
     nonisolated public static func resolvedTargetPixelSize(kind: EmbyImageKind, maxWidth: Int) -> Int {
@@ -183,14 +182,15 @@ public struct MediaArtworkView: View {
         let bucket = targetPixelSize >= 2400 ? "uhd" : (targetPixelSize > 900 ? "full" : "thumb")
         let coalesceKey = "\(primaryKey)#\(bucket)|\(server?.activeBaseURL ?? "")"
 
-        return await ArtworkDownloadManager.shared.cgLoadCoordinator.load(key: coalesceKey) {
+        return await ArtworkDownloadManager.shared.cgLoadCoordinator.load(key: coalesceKey, priority: priority) { escalator in
             if let mem = cachedCGImageInMemory(item: item, kind: kind, maxWidth: maxWidth) {
                 return mem
             }
             if let diskImg = await ArtworkImageCache.shared.cgImageFromDiskBatchAsync(
                 forKeys: checkKeys,
                 maxPixelSize: targetPixelSize,
-                priority: priority
+                priority: priority,
+                escalator: escalator
             ) {
                 return diskImg
             }
@@ -209,7 +209,8 @@ public struct MediaArtworkView: View {
                             for: primaryKey,
                             maxPixelSize: targetPixelSize,
                             aliases: aliases,
-                            priority: priority
+                            priority: priority,
+                            escalator: escalator
                         ) {
                             return decoded
                         }
@@ -217,12 +218,17 @@ public struct MediaArtworkView: View {
                     continue
                 }
                 guard let server, !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                if ArtworkDownloadManager.shared.isNegativelyCached(url) { continue }
                 do {
                     let req = EmbyClient.shared.makeImageRequest(url: url, server: server)
-                    let (data, resp) = try await ArtworkDownloadManager.shared.download(for: req, priority: priority)
+                    let (data, resp) = try await ArtworkDownloadManager.shared.download(for: req, priority: priority, escalator: escalator)
                     if Task.isCancelled { return nil }
-                    if let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
-                       data.count > 128 {
+                    if let http = resp as? HTTPURLResponse {
+                        if http.statusCode == 404 || http.statusCode == 410 {
+                            ArtworkDownloadManager.shared.recordNegativeMiss(url)
+                            continue
+                        }
+                        guard (200...299).contains(http.statusCode), data.count > 128 else { continue }
                         var aliases = [url.absoluteString]
                         if kind == .backdrop, item.isEpisode, let sId = item.seriesId {
                             aliases.append("series_\(sId)_backdrop")
@@ -232,7 +238,8 @@ public struct MediaArtworkView: View {
                             for: primaryKey,
                             maxPixelSize: targetPixelSize,
                             aliases: aliases,
-                            priority: priority
+                            priority: priority,
+                            escalator: escalator
                         ) {
                             return decoded
                         }
@@ -279,7 +286,7 @@ public struct MediaArtworkView: View {
             if resolvedImage != nil {
                 return
             }
-            if let img = await Self.loadOrFetchCGImage(server: server, item: item, kind: kind, maxWidth: maxWidth, priority: .high),
+            if let img = await Self.loadOrFetchCGImage(server: server, item: item, kind: kind, maxWidth: maxWidth, priority: priority),
                !Task.isCancelled {
                 await MainActor.run {
                     self.loadedImage = img

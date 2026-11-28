@@ -330,6 +330,9 @@ final class NativeLandscapeCollectionItem: NSCollectionViewItem, HoverableCollec
             guard let self, !Task.isCancelled, self.currentItem?.id == targetId else { return }
             self.loadTask = nil
             guard let cgImage else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            defer { CATransaction.commit() }
             self.artworkLayer.contents = cgImage
             self.artworkLayer.isOpaque = NativeCardLayerCache.isOpaqueCGImage(cgImage)
             self.placeholderIconLayer.isHidden = true
@@ -558,6 +561,9 @@ final class NativeLibraryCollectionItem: NSCollectionViewItem, HoverableCollecti
             guard let self, !Task.isCancelled, self.currentLibrary?.id == targetId else { return }
             self.loadTask = nil
             guard let cgImage else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            defer { CATransaction.commit() }
             self.artworkLayer.contents = cgImage
             self.artworkLayer.isOpaque = NativeCardLayerCache.isOpaqueCGImage(cgImage)
             self.placeholderIconLayer.isHidden = true

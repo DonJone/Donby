@@ -223,8 +223,14 @@ extension AppState {
         if !hadCachedHome {
             isLoadingHome = true
         }
+        if forceRefresh {
+            ArtworkDownloadManager.shared.clearNegativeCache()
+        }
         homeErrorMessage = nil
 
+        if let baseURL = URL(string: server.activeBaseURL) {
+            ArtworkDownloadManager.shared.prewarmOrigin(for: baseURL, server: server)
+        }
         if syncDomains && autoSyncDomains {
             Task { await syncExtDomains(for: server.id, showFeedback: false) }
         }
@@ -346,8 +352,12 @@ extension AppState {
         }
 
         do {
-            async let resumeTask = EmbyClient.shared.fetchResumeItems(server: embyServerForHome, limit: 16)
-            async let favTask = EmbyClient.shared.fetchItems(server: embyServerForHome, isFavorite: true, limit: 24)
+            enum EmbyHomeChunk: Sendable {
+                case resumes([EmbyItem])
+                case favorites([EmbyItem])
+                case latest(String, [EmbyItem])
+            }
+
             async let topMoviesTask = EmbyClient.shared.fetchItems(
                 server: embyServerForHome,
                 includeItemTypes: "Movie",
@@ -365,42 +375,84 @@ extension AppState {
 
             let views = initialViews
             guard currentGen == homeLoadGeneration else { return }
-            if !hadCachedHome && self.libraryViews != views {
-                self.libraryViews = views
-            }
-
-            let resumes = (try? await resumeTask) ?? []
-            let nextUps: [EmbyItem] = []
-            let favs = (try? await favTask)?.items ?? []
-
-            guard currentGen == homeLoadGeneration else { return }
             if !hadCachedHome {
-                performBatchedHomeShelfUpdate {
-                    if self.resumeItems != resumes { self.resumeItems = resumes }
-                    if !self.nextUpItems.isEmpty { self.nextUpItems = [] }
-                    if self.favoriteItems != favs { self.favoriteItems = favs }
-                }
+                if self.libraryViews != views { self.libraryViews = views }
+                HomeArtworkPrewarmer.shared.prewarmShelfItems(
+                    server: embyServerForHome, items: views, kind: .primary, maxWidth: 440, priority: .high, maxCount: 6
+                )
             }
 
+            var resumes: [EmbyItem] = []
+            let nextUps: [EmbyItem] = []
+            var favs: [EmbyItem] = []
             var latestMap: [String: [EmbyItem]] = [:]
 
-            await withTaskGroup(of: (String, [EmbyItem]).self) { group in
+            await withTaskGroup(of: EmbyHomeChunk.self) { group in
+                group.addTask {
+                    .resumes((try? await EmbyClient.shared.fetchResumeItems(server: embyServerForHome, limit: 16)) ?? [])
+                }
+                group.addTask {
+                    .favorites((try? await EmbyClient.shared.fetchItems(server: embyServerForHome, isFavorite: true, limit: 24))?.items ?? [])
+                }
                 for view in views {
                     group.addTask { [hideWatchedInLatest] in
                         let items = (try? await EmbyClient.shared.fetchLatestItems(
-                            server: embyServerForHome,
-                            parentId: view.id,
-                            limit: 16,
-                            hidePlayed: hideWatchedInLatest
+                            server: embyServerForHome, parentId: view.id, limit: 16, hidePlayed: hideWatchedInLatest
                         )) ?? []
-                        return (view.id, items)
+                        return .latest(view.id, items)
                     }
                 }
-                for await (viewId, items) in group {
+                var warmedLatestShelves = 0
+                for await chunk in group {
                     guard currentGen == self.homeLoadGeneration else { return }
-                    latestMap[viewId] = items
-                    if !hadCachedHome && self.latestByLibrary[viewId] != items {
-                        self.latestByLibrary[viewId] = items
+                    switch chunk {
+                    case .resumes(let items):
+                        resumes = items
+                        if !hadCachedHome {
+                            performBatchedHomeShelfUpdate {
+                                if self.resumeItems != items { self.resumeItems = items }
+                                if !self.nextUpItems.isEmpty { self.nextUpItems = [] }
+                            }
+                            HomeArtworkPrewarmer.shared.prewarmShelfItems(
+                                server: embyServerForHome, items: items, kind: .thumb, maxWidth: 500, priority: .high, maxCount: 6
+                            )
+                        }
+                    case .favorites(let items):
+                        favs = items
+                        if !hadCachedHome && self.favoriteItems != items { self.favoriteItems = items }
+                    case .latest(let viewId, let items):
+                        latestMap[viewId] = items
+                        if !hadCachedHome {
+                            if self.latestByLibrary[viewId] != items { self.latestByLibrary[viewId] = items }
+                            if self.carouselItems.isEmpty, !items.isEmpty {
+                                let preliminary = HomeHeroCurator.selectHeroItems(
+                                    libraryViews: views,
+                                    latestByLibrary: latestMap,
+                                    fallbackResumes: resumes,
+                                    serverName: embyServerForHome.name,
+                                    explicitAnimeMode: nil
+                                )
+                                if !preliminary.isEmpty {
+                                    let heroSlice = Array(preliminary.prefix(8))
+                                    self.carouselItems = heroSlice
+                                    HomeArtworkPrewarmer.shared.prewarmShelfItems(
+                                        server: embyServerForHome,
+                                        items: Array(heroSlice.prefix(2)),
+                                        kind: .backdrop,
+                                        maxWidth: 2200,
+                                        priority: .veryHigh,
+                                        maxCount: 2
+                                    )
+                                }
+                            }
+                            if warmedLatestShelves < 3, !items.isEmpty {
+                                let pri: Operation.QueuePriority = warmedLatestShelves == 0 ? .high : .normal
+                                HomeArtworkPrewarmer.shared.prewarmShelfItems(
+                                    server: embyServerForHome, items: items, kind: .primary, maxWidth: 360, priority: pri, maxCount: 8
+                                )
+                                warmedLatestShelves += 1
+                            }
+                        }
                     }
                 }
             }
@@ -461,6 +513,14 @@ extension AppState {
         ServerHomeCacheStore.shared.markSyncedNow(for: serverId, explicitAnimeMode: explicitAnimeMode)
 
         if let activeSrv = targetServer {
+            HomeArtworkPrewarmer.shared.prewarmHome(
+                server: activeSrv,
+                carouselItems: self.carouselItems,
+                libraryViews: libraryViews,
+                resumeItems: resumeItems,
+                nextUpItems: nextUpItems,
+                latestByLibrary: latestByLibrary
+            )
             PlaybackIntentCoordinator.shared.warmServerOnConnectOrLaunch(server: activeSrv)
             var seenContinue = Set<String>()
             let continueCandidates = (resumeItems + nextUpItems).filter { seenContinue.insert($0.id).inserted }

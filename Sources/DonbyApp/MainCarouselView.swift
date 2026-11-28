@@ -249,7 +249,8 @@ public struct MainCarouselView: View {
                         item: item,
                         kind: .backdrop,
                         maxWidth: 2200,
-                        alignment: .top
+                        alignment: .top,
+                        priority: .veryHigh
                     )
                     .id(item.id)
                     .frame(maxWidth: .infinity)
@@ -400,17 +401,28 @@ public struct MainCarouselView: View {
                 .task(id: "\(appState.activeServer?.activeBaseURL ?? "")|\(currentIndex)|\(displayedItems.count)") {
                     guard displayedItems.count > 1 else { return }
                     let nextIdx = (currentIndex + 1) % displayedItems.count
+                    let prevIdx = (currentIndex - 1 + displayedItems.count) % displayedItems.count
                     let nextItem = displayedItems[nextIdx]
+                    let prevItem = prevIdx != nextIdx ? displayedItems[prevIdx] : nil
                     let server = appState.activeServer
-                    try? await Task.sleep(nanoseconds: 800_000_000)
+                    try? await Task.sleep(nanoseconds: 250_000_000)
                     guard !Task.isCancelled else { return }
                     _ = await MediaArtworkView.loadOrFetchCGImage(
                         server: server,
                         item: nextItem,
                         kind: .backdrop,
-                        maxWidth: 1600,
-                        priority: .low
+                        maxWidth: 2200,
+                        priority: .normal
                     )
+                    if let prevItem, !Task.isCancelled {
+                        _ = await MediaArtworkView.loadOrFetchCGImage(
+                            server: server,
+                            item: prevItem,
+                            kind: .backdrop,
+                            maxWidth: 2200,
+                            priority: .low
+                        )
+                    }
                 }
             } else if appState.isLoadingHome && appState.showCarousel {
                 heroSkeletonView

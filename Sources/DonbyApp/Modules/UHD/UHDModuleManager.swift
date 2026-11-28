@@ -83,15 +83,21 @@ public final class UHDModuleManager: ObservableObject {
 
     public func currentLibraryMode(for serverId: UUID?) -> UHDLibraryMode {
         guard let serverId else { return .normal }
-        return libraryModeByServer[serverId] ?? .normal
+        if let mem = libraryModeByServer[serverId] { return mem }
+        if let raw = UserDefaults.standard.string(forKey: "uhd_library_mode_\(serverId.uuidString)"),
+           let cached = UHDLibraryMode(rawValue: raw) { return cached }
+        return .normal
+    }
+
+    private func setLibraryMode(_ mode: UHDLibraryMode, for serverId: UUID) {
+        libraryModeByServer[serverId] = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: "uhd_library_mode_\(serverId.uuidString)")
     }
 
     public func refreshLibrarySettings(server: EmbyServerConfig) async throws -> UHDLibrarySettings {
         let settings = try await UHDStreamClient.shared.fetchLibrarySettings(server: server)
         librarySettingsByServer[server.id] = settings
-        if libraryModeByServer[server.id] == nil {
-            libraryModeByServer[server.id] = settings.preferences.mode
-        }
+        if libraryModeByServer[server.id] == nil { setLibraryMode(settings.preferences.mode, for: server.id) }
         return settings
     }
 
@@ -109,7 +115,7 @@ public final class UHDModuleManager: ObservableObject {
                 librarySettingsByServer[server.id] = UHDLibrarySettings(preferences: saved, collections: existing.collections)
             }
         }
-        libraryModeByServer[server.id] = resolvedMode
+        setLibraryMode(resolvedMode, for: server.id)
         appState.selectedLibrary = nil
         appState.embyInlineSearchQuery = ""
         appState.embyInlineSearchResults = []
@@ -133,7 +139,7 @@ public final class UHDModuleManager: ObservableObject {
             mode: mode,
             collectionIds: collectionIds
         )
-        libraryModeByServer[server.id] = saved.mode
+        setLibraryMode(saved.mode, for: server.id)
         if let existing = librarySettingsByServer[server.id] {
             librarySettingsByServer[server.id] = UHDLibrarySettings(preferences: saved, collections: existing.collections)
         }
@@ -435,7 +441,7 @@ public final class UHDModuleManager: ObservableObject {
             if libraryModeByServer[workingServer.id] == nil,
                let settings = try? await UHDStreamClient.shared.fetchLibrarySettings(server: workingServer) {
                 librarySettingsByServer[workingServer.id] = settings
-                libraryModeByServer[workingServer.id] = settings.preferences.mode
+                setLibraryMode(settings.preferences.mode, for: workingServer.id)
             }
             let activeMode = currentLibraryMode(for: workingServer.id)
 
@@ -470,81 +476,86 @@ public final class UHDModuleManager: ObservableObject {
             }
 
             let resolvedServer = workingServer
-            async let statesTask = UHDStreamClient.shared.fetchPlaybackStates(server: resolvedServer, limit: 16)
-            async let favTask = UHDStreamClient.shared.fetchFavorites(server: resolvedServer, limit: 24)
-            async let hotTask = UHDStreamClient.shared.fetchHot(server: resolvedServer, limit: 20, mode: activeMode)
-
+            let hideWatched = appState.hideWatchedInLatest
+            let allowAnime = (activeMode == .anime)
             guard isCurrentGeneration() else { return }
             if !hadCachedHome && appState.libraryViews != views { appState.libraryViews = views }
 
-            let states = (try? await statesTask) ?? (resume: [], nextUp: [])
-            let favs = (try? await favTask)?.items ?? []
-            let hot = (try? await hotTask) ?? []
-
-            guard isCurrentGeneration() else { return }
-            if !hadCachedHome {
-                if appState.resumeItems != states.resume { appState.resumeItems = states.resume }
-                if appState.nextUpItems != states.nextUp { appState.nextUpItems = states.nextUp }
-                if appState.favoriteItems != favs { appState.favoriteItems = favs }
-                if self.hotItems != hot { self.hotItems = hot }
-                if !self.animeHotItems.isEmpty { self.animeHotItems = [] }
+            enum UHDHomeChunk: Sendable {
+                case states([EmbyItem], [EmbyItem]), favorites([EmbyItem]), hot([EmbyItem]), latest(String, [EmbyItem]), topRated([EmbyItem])
             }
-
-            let homePrewarmTargets = Array((states.resume + states.nextUp).filter { !$0.isSeries }.prefix(3))
-            if !homePrewarmTargets.isEmpty {
-                let targetSrv = workingServer
-                Task.detached(priority: .utility) {
-                    for target in homePrewarmTargets {
-                        _ = try? await UHDStreamClient.shared.fetchAssetMediaSources(server: targetSrv, item: target)
-                    }
-                }
-            }
-
+            var states: (resume: [EmbyItem], nextUp: [EmbyItem]) = ([], [])
+            var favs: [EmbyItem] = [], hot: [EmbyItem] = [], topRatedCandidates: [EmbyItem] = []
             var latestMap: [String: [EmbyItem]] = [:]
-            var topRatedCandidates: [EmbyItem] = []
-            let hideWatched = appState.hideWatchedInLatest
-            let allowAnime = (activeMode == .anime)
 
-            await withTaskGroup(of: (String, [EmbyItem], [EmbyItem]).self) { group in
-                let targetSrv = workingServer
+            await withTaskGroup(of: UHDHomeChunk.self) { group in
+                group.addTask {
+                    let s = (try? await UHDStreamClient.shared.fetchPlaybackStates(server: resolvedServer, limit: 16)) ?? (resume: [], nextUp: [])
+                    return .states(s.resume, s.nextUp)
+                }
+                group.addTask { .favorites((try? await UHDStreamClient.shared.fetchFavorites(server: resolvedServer, limit: 24))?.items ?? []) }
+                group.addTask { .hot((try? await UHDStreamClient.shared.fetchHot(server: resolvedServer, limit: 20, mode: activeMode)) ?? []) }
                 var topFetchCount = 0
                 for view in views {
-                    let isAnimeCollection = HomeHeroCurator.isAnimeLibraryName(view.name)
-                    let fetchTopRated = (allowAnime || !isAnimeCollection) && topFetchCount < 4
-                    if fetchTopRated { topFetchCount += 1 }
                     group.addTask {
-                        async let latestFetch = UHDStreamClient.shared.fetchCollectionItems(
-                            server: targetSrv,
-                            collectionId: view.id,
-                            mediaType: nil,
-                            sortBy: "asset_updated_at",
-                            sortOrder: "desc",
-                            limit: 16
-                        )
-                        async let topFetch: [EmbyItem] = fetchTopRated
-                            ? ((try? await UHDStreamClient.shared.fetchCollectionItems(
-                                server: targetSrv,
-                                collectionId: view.id,
-                                mediaType: nil,
-                                sortBy: "rating",
-                                sortOrder: "desc",
-                                limit: 24
-                            ).items) ?? [])
-                            : []
-
-                        let fetched = (try? await latestFetch.items) ?? []
-                        let filtered = hideWatched ? fetched.filter { $0.userData?.played != true } : fetched
-                        let topItems = await topFetch
-                        return (view.id, filtered, topItems)
+                        let fetched = (try? await UHDStreamClient.shared.fetchCollectionItems(server: resolvedServer, collectionId: view.id, mediaType: nil, sortBy: "asset_updated_at", sortOrder: "desc", limit: 16).items) ?? []
+                        return .latest(view.id, hideWatched ? fetched.filter { $0.userData?.played != true } : fetched)
+                    }
+                    if (allowAnime || !HomeHeroCurator.isAnimeLibraryName(view.name)) && topFetchCount < 4 {
+                        topFetchCount += 1
+                        group.addTask {
+                            .topRated((try? await UHDStreamClient.shared.fetchCollectionItems(server: resolvedServer, collectionId: view.id, mediaType: nil, sortBy: "rating", sortOrder: "desc", limit: 24).items) ?? [])
+                        }
                     }
                 }
-                for await (viewId, items, topItems) in group {
+                var warmedLatest = 0
+                @MainActor func assignPreliminaryCarouselIfNeeded() {
+                    guard !hadCachedHome, appState.carouselItems.isEmpty, isCurrentGeneration() else { return }
+                    let prelim = HomeHeroCurator.selectHeroItems(libraryViews: views, latestByLibrary: latestMap, extraCandidates: topRatedCandidates + hot, fallbackResumes: states.resume, serverName: workingServer.name, explicitAnimeMode: allowAnime)
+                    guard !prelim.isEmpty else { return }
+                    let slice = Array(prelim.prefix(8))
+                    appState.carouselItems = slice
+                    HomeArtworkPrewarmer.shared.prewarmShelfItems(server: resolvedServer, items: Array(slice.prefix(2)), kind: .backdrop, maxWidth: 2200, priority: .veryHigh, maxCount: 2)
+                }
+                for await chunk in group {
                     guard isCurrentGeneration() else { return }
-                    latestMap[viewId] = items
-                    if !hadCachedHome && appState.latestByLibrary[viewId] != items {
-                        appState.latestByLibrary[viewId] = items
+                    switch chunk {
+                    case .states(let resume, let nextUp):
+                        states = (resume, nextUp)
+                        if !hadCachedHome {
+                            if appState.resumeItems != resume { appState.resumeItems = resume }
+                            if appState.nextUpItems != nextUp { appState.nextUpItems = nextUp }
+                            HomeArtworkPrewarmer.shared.prewarmShelfItems(server: resolvedServer, items: resume + nextUp, kind: .thumb, maxWidth: 500, priority: .high, maxCount: 6)
+                        }
+                        let prewarmTargets = Array((resume + nextUp).filter { !$0.isSeries }.prefix(3))
+                        if !prewarmTargets.isEmpty {
+                            Task.detached(priority: .utility) { for t in prewarmTargets { _ = try? await UHDStreamClient.shared.fetchAssetMediaSources(server: resolvedServer, item: t) } }
+                        }
+                    case .favorites(let items):
+                        favs = items
+                        if !hadCachedHome && appState.favoriteItems != items { appState.favoriteItems = items }
+                    case .hot(let items):
+                        hot = items
+                        if !hadCachedHome {
+                            if self.hotItems != items { self.hotItems = items }
+                            if !self.animeHotItems.isEmpty { self.animeHotItems = [] }
+                            HomeArtworkPrewarmer.shared.prewarmShelfItems(server: resolvedServer, items: items, kind: .primary, maxWidth: 360, priority: .high, maxCount: 8)
+                            if !items.isEmpty { assignPreliminaryCarouselIfNeeded() }
+                        }
+                    case .latest(let viewId, let items):
+                        latestMap[viewId] = items
+                        if !hadCachedHome {
+                            if appState.latestByLibrary[viewId] != items { appState.latestByLibrary[viewId] = items }
+                            if warmedLatest < 3, !items.isEmpty {
+                                HomeArtworkPrewarmer.shared.prewarmShelfItems(server: resolvedServer, items: items, kind: .primary, maxWidth: 360, priority: warmedLatest == 0 ? .high : .normal, maxCount: 8)
+                                warmedLatest += 1
+                            }
+                            if !items.isEmpty { assignPreliminaryCarouselIfNeeded() }
+                        }
+                    case .topRated(let items):
+                        topRatedCandidates.append(contentsOf: items)
+                        if !items.isEmpty { assignPreliminaryCarouselIfNeeded() }
                     }
-                    topRatedCandidates.append(contentsOf: topItems)
                 }
             }
 
@@ -553,17 +564,7 @@ public final class UHDModuleManager: ObservableObject {
                 if self.hotItems != hot { self.hotItems = hot }
                 if !self.animeHotItems.isEmpty { self.animeHotItems = [] }
             }
-            appState.finalizeHomeContent(
-                for: server.id,
-                libraryViews: views,
-                resumeItems: states.resume,
-                nextUpItems: states.nextUp,
-                favoriteItems: favs,
-                latestByLibrary: latestMap,
-                extraHeroCandidates: topRatedCandidates,
-                serverName: workingServer.name,
-                explicitAnimeMode: allowAnime
-            )
+            appState.finalizeHomeContent(for: server.id, libraryViews: views, resumeItems: states.resume, nextUpItems: states.nextUp, favoriteItems: favs, latestByLibrary: latestMap, extraHeroCandidates: topRatedCandidates, serverName: workingServer.name, explicitAnimeMode: allowAnime)
         } catch {
             guard isCurrentGeneration() else { return }
             let isAuthExpired: Bool = {

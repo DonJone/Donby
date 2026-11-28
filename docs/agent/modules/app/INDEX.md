@@ -1,16 +1,16 @@
 # Module Map: Main App State, Views & Native UI (`Sources/DonbyApp/`)
 
-> Last synced: `v2.1.7`. Load this index for non-player `DonbyApp` tasks, then load ONLY the relevant sub-doc below.
+> Last synced: `v2.1.8`. Load this index for non-player `DonbyApp` tasks, then load ONLY the relevant sub-doc below.
 > For player surface/HUD/engine/subtitles (`Sources/DonbyApp/Player/*`), load [modules/player/INDEX.md](../player/INDEX.md).
 > For optional UHDNow UI (`Sources/DonbyApp/Modules/UHD/*`), load [modules/uhd-module.md](../uhd-module.md).
 
-## 1. Sub-Doc Routing (46 files across 5 domains)
+## 1. Sub-Doc Routing (47 files across 5 domains)
 
 | If your task involves... | Read Next | Source Files |
 | :--- | :--- | :--- |
 | App entry, window shell, sidebar/toolbar clamping, `AppState` & extensions, extension bootstrap, log viewer | [state-and-shell.md](state-and-shell.md) | `DonbyApp.swift`, `MainWindowView.swift`, `AppState*.swift` (7), `LogViewerSheet.swift`, `Extensions/DonbyAppExtension.swift` |
 | Emby home shelves, carousel swipe, category library grid, `DetailView` `#03` hero strip & seasons/episodes | [home-and-detail.md](home-and-detail.md) | `EmbyMainView.swift`, `MainCarouselView.swift`, `Views/MLibListView.swift`, `DetailView*.swift` (4) |
-| 120Hz AppKit `NSCollectionView`/`CALayer` cards, offscreen text/badge caches, artwork & metadata cache & loaders | [native-collection-and-artwork.md](native-collection-and-artwork.md) | `Components/Native*.swift` (6), `ArtworkCacheEngine.swift`, `ImageMetadataCacheCoordinator.swift`, `MediaArtworkViews.swift`, `HeroTopEdgeBackdrop.swift`, `MediaCards.swift` |
+| 120Hz AppKit `NSCollectionView`/`CALayer` cards, offscreen text/badge caches, artwork & metadata cache, prewarmer & loaders | [native-collection-and-artwork.md](native-collection-and-artwork.md) | `Components/Native*.swift` (6), `ArtworkCacheEngine.swift`, `ArtworkDownloadManager.swift`, `HomeArtworkPrewarmer.swift`, `ImageMetadataCacheCoordinator.swift`, `MediaArtworkViews.swift`, `HeroTopEdgeBackdrop.swift`, `MediaCards.swift` |
 | Liquid Glass surfaces, detached-hover menus, non-blue theme form controls, brand marks, rating badges & toolbar icons | [design-system.md](design-system.md) | `Components/LiquidGlassSystem.swift`, `DonbyThemeControls.swift`, `BrandMarks.swift`, `RatingBadgesStripView.swift`, `ToolbarIconsAndControls.swift` |
 | Server list/config/line picker, Files browser, Settings & updater, Downloads, Search, IPTV, Watch Records | [feature-views.md](feature-views.md) | `ServerViews.swift`, `ServerConfigSheet.swift`, `Views/{FilesModuleView*,SettingsView*,DownloadsView,DownloadRowCards,GlobalSearchView,IPTVModuleView,RecordsView}.swift` |
 
