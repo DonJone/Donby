@@ -8,7 +8,7 @@ import Testing
 struct DonbyCoreTests {
     @Test func appVersionFallbackNonEmpty() {
         #expect(!DonbyAppInfo.version.isEmpty)
-        #expect(DonbyAppInfo.fallbackVersion == "2.1.5")
+        #expect(DonbyAppInfo.fallbackVersion == "2.1.6")
     }
 
     @Test func resolvedPlaybackResourceLocalOrOfflineDetection() {
@@ -149,25 +149,22 @@ struct DonbyCoreTests {
     }
 
     @Test func playbackHealthPolicyBoundedRecovery() {
-        var policy = PlaybackHealthPolicy(stallBudgetSeconds: 10.0)
-        #expect(
-            policy.evaluate(now: 100, position: 10, bufferedAhead: 2, isPaused: false, isOpening: false, isEnded: false, isScrubbing: false, seekGeneration: 1)
-                == .none
-        )
-        #expect(
-            policy.evaluate(now: 105, position: 10.5, bufferedAhead: 2, isPaused: false, isOpening: false, isEnded: false, isScrubbing: false, seekGeneration: 1)
-                == .progressed
-        )
-        #expect(
-            policy.evaluate(now: 115, position: 10.5, bufferedAhead: 2, isPaused: false, isOpening: false, isEnded: false, isScrubbing: false, seekGeneration: 1)
-                == .recover
-        )
-        let failEval = policy.evaluate(now: 125, position: 10.5, bufferedAhead: 2, isPaused: false, isOpening: false, isEnded: false, isScrubbing: false, seekGeneration: 1)
-        if case .fail = failEval {
-            // expected bounded failure after single recovery attempt
-        } else {
-            Issue.record("Expected .fail after exhausted recovery, got \(failEval)")
-        }
+        var policy = PlaybackHealthPolicy()
+        #expect(policy.evaluate(now: 100, position: 10, bufferedAhead: 2, isPaused: false, isOpening: false, isEnded: false, isScrubbing: false, seekGeneration: 1) == .none)
+        #expect(policy.evaluate(now: 105, position: 10.5, bufferedAhead: 2, isPaused: false, isOpening: false, isEnded: false, isScrubbing: false, seekGeneration: 1) == .progressed)
+        #expect(policy.evaluate(now: 116, position: 10.5, bufferedAhead: 2, isPaused: false, isOpening: false, isEnded: false, isScrubbing: false, seekGeneration: 1) == .none)
+        #expect(policy.evaluate(now: 117, position: 10.5, bufferedAhead: 2, isPaused: false, isOpening: false, isEnded: false, isScrubbing: false, seekGeneration: 1) == .recover)
+        let failEval = policy.evaluate(now: 129, position: 10.5, bufferedAhead: 2, isPaused: false, isOpening: false, isEnded: false, isScrubbing: false, seekGeneration: 1)
+        if case .fail = failEval { } else { Issue.record("Expected .fail after exhausted recovery, got \(failEval)") }
+    }
+
+    @Test func playbackHealthPolicySeekGraceBounded() {
+        var policy = PlaybackHealthPolicy()
+        #expect(policy.evaluate(now: 100, position: 4268, bufferedAhead: 0, isPaused: false, isOpening: false, isEnded: false, isScrubbing: false, seekGeneration: 1, isSeeking: true) == .none)
+        #expect(policy.evaluate(now: 113, position: 4268, bufferedAhead: 0, isPaused: false, isOpening: false, isEnded: false, isScrubbing: false, seekGeneration: 1, isSeeking: true) == .none)
+        #expect(policy.evaluate(now: 120, position: 4268, bufferedAhead: 0, isPaused: false, isOpening: false, isEnded: false, isScrubbing: false, seekGeneration: 1, isSeeking: true) == .recover)
+        let failEval = policy.evaluate(now: 140, position: 4268, bufferedAhead: 0, isPaused: false, isOpening: false, isEnded: false, isScrubbing: false, seekGeneration: 1, isSeeking: true)
+        if case .fail = failEval { } else { Issue.record("Expected .fail after seek recovery timeout, got \(failEval)") }
     }
 
     @Test func serverCredentialStoreMigrationHydrationAndSafetyGuards() {

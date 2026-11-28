@@ -180,12 +180,26 @@ extension TurboStreamByteHandle {
             }
         }
 
-        // Check genuinely stalled or slow-crawling streams near cursor using adaptive CDN TTFB so slow edges
-        // never trigger rescue storms while throttled playhead streams get rescued before audio underruns.
-        let adaptiveColdRescue: TimeInterval = max(2.2, min(4.5, smoothedResponseTTFB * 2.5))
-        let crawlFloorBps: Double = measuredWireSpeedMBs >= 1.5 ? 480_000.0 : 360_000.0
         var stalledTasksToCancel: [URLSessionDataTask] = []
         var stalledLanesToReport: [Int] = []
+        for aid in Array(activeAttempts.keys) {
+            guard let rec = activeAttempts[aid], rec.trimmedEarly,
+                  rec.currentChunkIndex >= rec.endChunkExclusive || (now - rec.lastByteTimestamp) > 3.0 else { continue }
+            if let t = rec.task { stalledTasksToCancel.append(t) }
+            activeAttempts.removeValue(forKey: aid)
+            attemptBuffers.removeValue(forKey: aid)
+            if let rawBridge { dk_net_bridge_remove_attempt(rawBridge, aid) }
+            if rec.currentChunkIndex >= 0 && rec.currentChunkIndex < rec.endChunkExclusive {
+                for relIdx in rec.currentChunkIndex..<rec.endChunkExclusive {
+                    if activeDisplayAttempt[relIdx] == aid { activeDisplayAttempt.removeValue(forKey: relIdx) }
+                    if !activeAttempts.values.contains(where: { $0.covers(relIdx) }) {
+                        inFlightChunks.remove(relIdx); rescueChunks.remove(relIdx); chunkStartTime.removeValue(forKey: relIdx)
+                    }
+                }
+            }
+        }
+        let adaptiveColdRescue: TimeInterval = max(2.2, min(4.5, smoothedResponseTTFB * 2.5))
+        let crawlFloorBps: Double = measuredWireSpeedMBs >= 1.5 ? 480_000.0 : 360_000.0
         let activeHost = (effectiveStreamURL ?? streamURL).host
         for rec in activeAttempts.values where rec.currentChunkIndex >= currentChunk && rec.currentChunkIndex <= currentChunk + 2 && rec.currentChunkIndex < rec.endChunkExclusive {
             let idx = rec.currentChunkIndex
@@ -236,8 +250,10 @@ extension TurboStreamByteHandle {
                                 chunkStartTime.removeValue(forKey: relIdx)
                             }
                         }
-                    } else {
+                    } else if activeAttempts.count < effectiveCap + 1 {
                         trimSlowAttemptTailLocked(attemptId: rec.attemptId)
+                    } else {
+                        continue
                     }
                     rescueChunks.insert(idx)
                     chunkStartTime[idx] = now
@@ -257,9 +273,7 @@ extension TurboStreamByteHandle {
             }
         }
 
-        var totalStreamsInFlight = activeAttempts.values.filter {
-            $0.currentChunkIndex >= 0 && $0.currentChunkIndex < $0.endChunkExclusive && !$0.isRescue && !$0.trimmedEarly
-        }.count
+        var totalStreamsInFlight = activeAttempts.count
 
         if totalStreamsInFlight < effectiveCap {
             let maxChunk = totalChunks > 0 ? min(totalChunks - 1, currentChunk + ahead) : (currentChunk + min(ahead, 16))

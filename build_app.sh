@@ -88,7 +88,7 @@ if [ -f "Resources/silero_vad_16k.safetensors" ]; then
     cp "Resources/silero_vad_16k.safetensors" "$APP_DIR/Contents/Resources/silero_vad_16k.safetensors"
 fi
 
-APP_VERSION="${DONBY_VERSION:-2.1.5}"
+APP_VERSION="${DONBY_VERSION:-2.1.6}"
 BUILD_NUMBER="${DONBY_BUILD_NUMBER:-$(date -u +%Y%m%d%H%M)}"
 MIN_MACOS="${DONBY_MIN_MACOS:-13.0}"
 

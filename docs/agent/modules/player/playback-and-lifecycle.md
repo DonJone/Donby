@@ -1,6 +1,6 @@
 # Player Sub-Map: Playback Engine, Timers & Session Lifecycle
 
-> Last synced: `v2.1.5`. Parent: [player/INDEX.md](INDEX.md). Covers `PlayerView+PlaybackEngine.swift`, `PlayerView+TurboSetup.swift`, and `PlayerView+LifecycleAndSession.swift`.
+> Last synced: `v2.1.6`. Parent: [player/INDEX.md](INDEX.md). Covers `PlayerView+PlaybackEngine.swift`, `PlayerView+TurboSetup.swift`, and `PlayerView+LifecycleAndSession.swift`.
 
 ## 1. Native Kernel & Turbo Bridge (`PlayerView+PlaybackEngine.swift` & `PlayerView+TurboSetup.swift`)
 - `PlayerView+PlaybackEngine.swift` — C-ABI callbacks, kernel open/stop/seek, 0.25s progress loop, health recovery.
@@ -12,7 +12,7 @@
   - Every `Task.detached` -> `MainActor.run` callback MUST check `self.activePlaybackGeneration == thisGeneration` to drop stale callbacks after rapid seek/retry/episode switch.
 - **0.25s Progress Loop (`handleProgressTimerTick()`)**:
   - **Seek Settling Guard (`isSettlingSeek`)**: `0.75s` window (`abs(newPos - lastSeekCommitTarget) > 0.35`) after seek commit (`lastSeekCommitUptime` / `lastSeekCommitTarget`) so short and long seeks do not snap back to stale pre-seek PTS while the decoder flushes; `seekRelative(_:)` coalesces rapid arrow-key presses over `70ms`.
-  - **Stall / Health Policy**: Evaluates `autoHideBox.healthPolicy` (`PlaybackHealthPolicy`) without mutating SwiftUI `@State` (`recover` triggers reconnect at `livePos` with `resetHealthPolicy: false` so `.fail` remains reachable; `fail` surfaces `openingErrorMessage`).
+  - **Stall / Health Policy & Terminal Error Teardown**: Evaluates `autoHideBox.healthPolicy` (`PlaybackHealthPolicy`) with `isSeeking: dk_player_is_seeking(handle)` without mutating SwiftUI `@State` (`recover` triggers reconnect at `livePos` with `resetHealthPolicy: false` so `.fail` remains reachable). Both `DK_STATE_ERROR` and `PlaybackHealth` `.fail` call `stopNativeKernel()` before surfacing `openingErrorMessage` and `return` immediately so background kernel/Turbo tasks stop cleanly without dereferencing a torn-down `handle`.
   - **Side Effects**: Calls `evaluateIntroOutroSkipWindow()` (using `currentItemStartPositionSeconds` so episode 2+ auto-skip works), `prefetchNextEpisodeIfNearEnd()`, companion `onProgressTick(...)`, and periodic 5s local watch-progress saves (`autoHideBox.lastRecordedPosition`). Telemetry updates target narrow `telemetryBox` stores (`clock`, `speed`, `mediaStats`), gating HUD and legacy-drawer writes on visibility so hidden-HUD playback keeps `PlayerView.body` at `0 Hz`.
 
 ## 2. Session, Episode Switching & Companion (`PlayerView+LifecycleAndSession.swift`)

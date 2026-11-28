@@ -135,6 +135,7 @@ extension TurboStreamByteHandle {
             directFailedStarts.removeValue(forKey: startOffset)
             direct429Retries.removeValue(forKey: startOffset)
             directNextRetryTime.removeValue(forKey: startOffset)
+            directHedgedOffsets.remove(startOffset)
             appendDirectSliceLocked(startOffset: startOffset, data: data)
             let curMeta = store.currentMeta()
             let cs = Int64(curMeta.chunkSize)
@@ -390,6 +391,7 @@ extension TurboStreamByteHandle {
         directFailedStarts.removeAll()
         direct429Retries.removeAll()
         directNextRetryTime.removeAll()
+        directHedgedOffsets.removeAll()
         condition.broadcast()
         condition.unlock()
 
@@ -526,6 +528,7 @@ extension TurboStreamByteHandle {
             guard rel < partial.count else { return nil }
             let toCopy = copySlice(partial, offset: rel, into: buffer, maxCount: count)
             cursorOffset += Int64(toCopy)
+            if let rawBridge { dk_net_bridge_set_cursor(rawBridge, cursorOffset) }
             condition.broadcast()
             return toCopy
         }

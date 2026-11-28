@@ -431,6 +431,12 @@ pub unsafe extern "C" fn dk_player_get_state(player: *mut DKPlayer) -> DKPlayerS
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn dk_player_is_seeking(player: *const DKPlayer) -> bool {
+    let guard = ReaderGuard::acquire(player as *mut DKPlayer);
+    guard.player.is_some_and(|p| p.is_seeking())
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn dk_player_get_position(player: *mut DKPlayer) -> f64 {
     let guard = ReaderGuard::acquire(player);
     guard.player.map(|p| p.get_master_clock()).unwrap_or(0.0)

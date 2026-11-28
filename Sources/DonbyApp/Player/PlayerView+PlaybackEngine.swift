@@ -165,9 +165,13 @@ extension PlayerView {
                     return
                 }
             } else if pState == DK_STATE_ERROR && openingErrorMessage == nil {
+                stopNativeKernel()
                 isPlaying = false
+                isOpeningMedia = false
+                isWaitingForSeekOrBuffer = false
                 openingErrorMessage = "媒体流读取中断或网络连接异常，请检查网络或更换线路"
                 DonbyLogger.shared.log("播放内核报告流读取异常中断 (DK_STATE_ERROR)", level: .error, subsystem: "Player")
+                return
             }
 
             // Stall health check & auto-recovery
@@ -179,7 +183,8 @@ extension PlayerView {
                 isOpening: isOpeningMedia,
                 isEnded: didHandlePlaybackEnded,
                 isScrubbing: autoHideBox.isScrubbing,
-                seekGeneration: seekGeneration
+                seekGeneration: seekGeneration,
+                isSeeking: dk_player_is_seeking(handle)
             )
             switch healthEval {
             case .none, .progressed:
@@ -190,7 +195,10 @@ extension PlayerView {
                 startNativeKernelPlayback(startSeconds: livePos, resetHealthPolicy: false)
                 return
             case .fail(let reason):
+                stopNativeKernel()
                 isPlaying = false
+                isOpeningMedia = false
+                isWaitingForSeekOrBuffer = false
                 openingErrorMessage = "媒体流连续恢复失败，请尝试切换线路 (\(reason))"
                 DonbyLogger.shared.log("播放健康检查终止: \(reason)", level: .error, subsystem: "PlaybackHealth")
                 return

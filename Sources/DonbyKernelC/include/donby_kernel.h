@@ -193,6 +193,7 @@ void      dk_player_notify_metal_first_frame(DKPlayer* player);
 void      dk_player_sync_subtitle_rgba(DKPlayer* player, double pts, int32_t canvas_w, int32_t canvas_h, uint64_t last_serial, DKSubtitleRgbaCallback callback, void* context);
 
 DKPlayerState dk_player_get_state(DKPlayer* player);
+bool          dk_player_is_seeking(const DKPlayer* player);
 double        dk_player_get_position(DKPlayer* player);
 double        dk_player_get_duration(DKPlayer* player);
 double        dk_player_get_buffered_duration(DKPlayer* player);

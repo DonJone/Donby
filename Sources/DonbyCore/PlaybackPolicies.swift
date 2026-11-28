@@ -114,6 +114,7 @@ public enum PlaybackHealthEvaluation: Equatable, Sendable {
 
 public struct PlaybackHealthPolicy: Sendable {
     public var stallBudgetSeconds: TimeInterval
+    public var seekStallBudgetSeconds: TimeInterval
     private var baselinePosition: Double = -1.0
     private var baselineBuffered: Double = -1.0
     private var lastProgressTimestamp: TimeInterval = 0
@@ -121,8 +122,9 @@ public struct PlaybackHealthPolicy: Sendable {
     private var lastSeekGeneration: Int = -1
     public private(set) var recoveryUsed: Bool = false
 
-    public init(stallBudgetSeconds: TimeInterval = 12.0) {
+    public init(stallBudgetSeconds: TimeInterval = 12.0, seekStallBudgetSeconds: TimeInterval = 20.0) {
         self.stallBudgetSeconds = stallBudgetSeconds
+        self.seekStallBudgetSeconds = seekStallBudgetSeconds
     }
 
     public mutating func reset() {
@@ -142,7 +144,8 @@ public struct PlaybackHealthPolicy: Sendable {
         isOpening: Bool,
         isEnded: Bool,
         isScrubbing: Bool,
-        seekGeneration: Int
+        seekGeneration: Int,
+        isSeeking: Bool = false
     ) -> PlaybackHealthEvaluation {
         if isPaused || isOpening || isEnded || isScrubbing || seekGeneration != lastSeekGeneration {
             lastSeekGeneration = seekGeneration
@@ -175,15 +178,16 @@ public struct PlaybackHealthPolicy: Sendable {
             return .progressed
         }
 
+        let activeBudget = isSeeking ? max(stallBudgetSeconds, seekStallBudgetSeconds) : stallBudgetSeconds
         let stalledDuration = now - lastProgressTimestamp
-        if stalledDuration >= stallBudgetSeconds {
+        if stalledDuration >= activeBudget {
             lastProgressTimestamp = now
             if !recoveryUsed {
                 recoveryUsed = true
                 steadyProgressStartPosition = position
                 return .recover
             } else {
-                return .fail("自动恢复后仍无媒体进展 (超时 \(Int(stallBudgetSeconds)) 秒)，请检查网络或切换备用播放线路")
+                return .fail("自动恢复后仍无媒体进展 (超时 \(Int(activeBudget)) 秒)，请检查网络或切换备用播放线路")
             }
         }
 

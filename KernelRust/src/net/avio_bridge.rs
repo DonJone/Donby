@@ -407,7 +407,13 @@ impl DKStreamBridge {
         // Slow Path: invoke Swift TurboStreamByteHandle miss/wait handler (without holding any Rust lock)
         if let Some(cb) = self.miss_read_cb {
             if self.opaque != 0 {
-                return cb(self.opaque as *mut c_void, dst, count);
+                let n = cb(self.opaque as *mut c_void, dst, count);
+                if n > 0 {
+                    // Single source of truth: advance Rust cursor even if Swift's miss path
+                    // satisfied the read from an internal slice without calling set_cursor.
+                    self.cursor_offset.store(cur + n as i64, Ordering::Release);
+                }
+                return n;
             }
         }
         -1
@@ -627,6 +633,54 @@ mod tests {
         assert_eq!(count2, 1);
         assert_eq!(completed[0], 0);
         assert!(store.has_chunk(0));
+
+        unsafe { bridge.close() };
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn miss_read_advances_rust_cursor_without_swift_set_cursor() {
+        unsafe extern "C" fn mock_miss_read(
+            _opaque: *mut c_void,
+            dst: *mut u8,
+            count: i32,
+        ) -> i32 {
+            let n = count.min(16);
+            if n > 0 && !dst.is_null() {
+                std::ptr::write_bytes(dst, 0xAA, n as usize);
+            }
+            n
+        }
+
+        let root = std::env::temp_dir().join(format!("donby_bridge_cursor_{}", crate::net::next_store_id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = DKChunkStore::open(&root, 262_144, 65_536, false, false, &[]);
+        let dummy_opaque = 1usize as *mut c_void;
+        let bridge = DKStreamBridge::new(
+            store,
+            dummy_opaque,
+            Some(mock_miss_read),
+            None,
+            None,
+            None,
+        );
+        bridge.set_cursor_offset(1000);
+
+        let mut first = [0u8; 16];
+        let n1 = unsafe { bridge.avio_read(first.as_mut_ptr(), 16) };
+        assert_eq!(n1, 16);
+        assert!(first.iter().all(|&b| b == 0xAA));
+        assert_eq!(bridge.cursor_offset(), 1016);
+
+        let mut slice = vec![0xAAu8; 16];
+        slice.extend_from_slice(&[0xBBu8; 16]);
+        bridge.ingest_direct_slice(1000, &slice);
+
+        let mut second = [0u8; 16];
+        let n2 = unsafe { bridge.avio_read(second.as_mut_ptr(), 16) };
+        assert_eq!(n2, 16);
+        assert!(second.iter().all(|&b| b == 0xBB));
+        assert_eq!(bridge.cursor_offset(), 1032);
 
         unsafe { bridge.close() };
         let _ = std::fs::remove_dir_all(&root);

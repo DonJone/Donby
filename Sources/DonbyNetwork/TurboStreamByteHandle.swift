@@ -105,6 +105,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
     var directFailedStarts: [Int64: Int] = [:]
     var direct429Retries: [Int64: Int] = [:]
     var directNextRetryTime: [Int64: TimeInterval] = [:]
+    var directHedgedOffsets: Set<Int64> = []
 
     var coordinatorTask: Task<Void, Never>?
     public private(set) var rawBridge: OpaquePointer? = nil
@@ -262,7 +263,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
         }
         if let rawBridge {
             let nativeCursor = dk_net_bridge_get_cursor(rawBridge)
-            if nativeCursor > cursorOffset { cursorOffset = nativeCursor }
+            if nativeCursor != cursorOffset { cursorOffset = nativeCursor }
         }
         let currentOffset = cursorOffset
         condition.unlock()
@@ -428,7 +429,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                     }
                 }
 
-                if shouldMicroHedge {
+                if shouldMicroHedge && activeAttempts.count < dynamicConcurrencyCap + 1 {
                     trimSlowAttemptTailLocked(attemptId: cov.attemptId)
                     let desiredSkip = computeInitialByteSkipLocked(chunkIndex: targetChunk, offsetInChunk: offsetInChunk)
                     let stalledLane = cov.laneIndex
@@ -532,24 +533,38 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                 return -1
             }
             let now = ProcessInfo.processInfo.systemUptime
-            // Only treat an in-flight tail stream as covering `offset` if its received cursor is within 192 KiB;
-            // otherwise immediately launch an exact-offset 512 KiB micro-fetch on a healthy lane instead of
-            // waiting seconds for a throttled 2 MiB tail crawl to reach EOF Cues.
+            let activeHost = (effectiveStreamURL ?? streamURL).host
             var slowCoveringLane: Int? = nil
+            var stalledDirectLane: Int? = nil
             let coveredSoonByInFlight = directInFlightStarts.contains { (startOff, aid) in
                 let endOff = directInFlightEndOffsets[startOff] ?? (startOff + 524_287)
                 guard startOff <= offset && offset <= endOff else { return false }
+                let rec = activeAttempts[aid]
                 let received = Int64(attemptBuffers[aid]?.count ?? 0)
                 let dist = offset - (startOff + received)
-                if dist <= 196_608 || dynamicConcurrencyCap <= 1 {
+                let byteIdle = now - (rec?.lastByteTimestamp ?? now)
+                let hasHeaders = rec?.responseHeadersReceived ?? false
+                let hasFastAlt = TurboStreamingSessionHub.shared.hasVerifiedFastAlternateLane(forHost: activeHost, excludingLane: rec?.laneIndex)
+                let coldThreshold = hasFastAlt ? max(1.2, smoothedResponseTTFB * 1.6) : max(2.0, min(4.0, smoothedResponseTTFB * 2.5))
+                let isStalled = (received == 0 && !hasHeaders && byteIdle > coldThreshold) || ((received > 0 || hasHeaders) && byteIdle > 2.5)
+                if !isStalled && (dist <= 196_608 || dynamicConcurrencyCap <= 1) {
                     return true
                 }
-                slowCoveringLane = activeAttempts[aid]?.laneIndex
+                slowCoveringLane = rec?.laneIndex
+                if isStalled { stalledDirectLane = rec?.laneIndex }
                 return false
             }
+            let canHedgeStalled = directInFlightStarts[offset] != nil
+                && !directHedgedOffsets.contains(offset)
+                && dynamicConcurrencyCap > 1
+                && now >= last429BackoffUntil
+                && activeAttempts.count < dynamicConcurrencyCap + 1
             if now >= (directNextRetryTime[offset] ?? 0),
-               directInFlightStarts[offset] == nil,
-               !coveredSoonByInFlight {
+               !coveredSoonByInFlight,
+               (directInFlightStarts[offset] == nil || canHedgeStalled) {
+                if directInFlightStarts[offset] != nil {
+                    directHedgedOffsets.insert(offset)
+                }
                 let exactTailLen = max(65_536, min(524_288, totalSize - offset))
                 spawnDirectRangeFetchLocked(
                     startOffset: offset,
@@ -557,6 +572,12 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                     length: exactTailLen,
                     excludeLane: slowCoveringLane
                 )
+                if let lane = stalledDirectLane {
+                    condition.unlock()
+                    TurboStreamingSessionHub.shared.reportLaneStall(laneIndex: lane)
+                    condition.lock()
+                    continue
+                }
             }
             condition.wait(until: Date().addingTimeInterval(0.025))
         }
@@ -574,6 +595,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
             if rel < slice.data.count {
                 let toCopy = copySlice(slice.data, offset: rel, into: buffer, maxCount: count)
                 cursorOffset += Int64(toCopy)
+                if let rawBridge { dk_net_bridge_set_cursor(rawBridge, cursorOffset) }
                 condition.broadcast()
                 return toCopy
             }
@@ -584,6 +606,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                 if rel < buf.count {
                     let toCopy = copySlice(buf, offset: rel, into: buffer, maxCount: count)
                     cursorOffset += Int64(toCopy)
+                    if let rawBridge { dk_net_bridge_set_cursor(rawBridge, cursorOffset) }
                     condition.broadcast()
                     return toCopy
                 }
@@ -707,6 +730,7 @@ public final class TurboStreamByteHandle: @unchecked Sendable {
                         for sOff in matchingStarts {
                             directInFlightStarts.removeValue(forKey: sOff)
                             directInFlightEndOffsets.removeValue(forKey: sOff)
+                            directHedgedOffsets.remove(sOff)
                         }
                     } else if removed.currentChunkIndex >= 0 {
                         for cIdx in removed.currentChunkIndex..<removed.endChunkExclusive {

@@ -1,6 +1,6 @@
 # Module Map: Core Models, Policies & Storage (`DonbyCore`)
 
-> Last synced: `v2.1.5`. Load this doc for shared data models, generic service-provider extension seam (`DonbyMediaServiceRegistry`), `DONBY_HOME` storage path isolation, unified `DonbyAppInfo.version`, AES-256-GCM local credential vault, async file logger, hero top-edge strip synthesis (`HeroTopEdgeSynthesizer`), subtitle encoding/transform/auto-alignment policies (Silero VAD + audio-first dual-subtitle aligner), diagnostics redaction, playback health state machine, update manifest parsing, and `DonbyCoreTests`.
+> Last synced: `v2.1.6`. Load this doc for shared data models, generic service-provider extension seam (`DonbyMediaServiceRegistry`), `DONBY_HOME` storage path isolation, unified `DonbyAppInfo.version`, AES-256-GCM local credential vault, async file logger, hero top-edge strip synthesis (`HeroTopEdgeSynthesizer`), subtitle encoding/transform/auto-alignment policies (Silero VAD + audio-first dual-subtitle aligner), diagnostics redaction, playback health state machine, update manifest parsing, and `DonbyCoreTests`.
 
 | If your task involves... | File | Entry Symbols |
 | :--- | :--- | :--- |
@@ -29,7 +29,7 @@
   - `SubtitleLanguageBucket`, `SubtitleTrackPreference`, `SeriesSubtitleMemory`, `SubtitleTrackCandidate`, `SubtitleTrackMatcher` — cross-episode subtitle preference persistence and bilingual/Chinese track scoring.
 - `Sources/DonbyCore/PlaybackPolicies.swift`
   - `SeasonSkipPreference` (`introEnabled`, `outroEnabled`, `introSeconds`, `outroSeconds`, `SeasonSkipMode`: `.manual` / `.automatic`, `chapterDetection`), `PlaybackChapterItem`, `ChapterSkipDetector`.
-  - `PlaybackHealthPolicy` & `PlaybackHealthEvaluation` — bounded stall detection (monitors time progress `>= 0.1s` or buffer progress `>= 0.5s`; triggers `.recover` once before `.fail`).
+  - `PlaybackHealthPolicy` & `PlaybackHealthEvaluation` — bounded stall detection (monitors time progress `>= 0.1s` or buffer progress `>= 0.5s`; steady-state `stallBudgetSeconds = 12.0` vs bounded `seekStallBudgetSeconds = 20.0` when `isSeeking == true`; triggers `.recover` once before `.fail`).
   - `PlaybackDiagnosticsRedactor` — regex secret & host redaction (`token|password|passwd|pwd|authorization|api_key|x-emby-token|delivery_key` + `https?://<HOST>`).
 - `Sources/DonbyCore/EmbyServerModels.swift` — `EmbyClientError`, `EmbyExtServerDomainsResponse`, `EmbyExtDomainItem`, `EmbyCountsResponse`, `ServerType`, `ServerLineInfo` (`cleanDisplayName` normalizing CDN labels to `Cloudflare Pro CDN` / `Cloudflare CDN` / `中国大陆 CDN` and auto-stripping legacy `" · ..."` descriptions, `cleanDisplayHost`, optional speed/exit cache), `EmbyServerConfig` (backward-compatible `keepSignedIn`, `lastLoginDate`, `tokenExpiresAt`), `EmbyAuthenticateResponse`, `EmbyUser`, `EmbySystemInfo`.
 - `Sources/DonbyCore/EmbyModels.swift` — `EmbyItemsResponse`, `EmbyItem` (`withSeriesName`, `withDetailEnrichment`, `withInheritedArtworkFallback`, badge/stream helpers), `EmbyUserData`, `MediaSourceInfo` (version scoring & `preferredSource(for:)`), `MediaStream`, `EmbyPerson`, `EmbyNameIdPair`.

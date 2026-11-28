@@ -1,6 +1,6 @@
 # Module Map: Playback Kernel (`KernelRust` + `DonbyKernelC` ABI)
 
-> Last synced: `v2.1.5` (C++20 baseline archived on `legacy/cpp-kernel`). Read [../../decisions/003-rust-kernel-migration.md](../../decisions/003-rust-kernel-migration.md), [../../decisions/004-zero-serial-rtt-instant-play-v3.md](../../decisions/004-zero-serial-rtt-instant-play-v3.md), [../../decisions/005-zero-crate-rust-media-data-plane-2a.md](../../decisions/005-zero-crate-rust-media-data-plane-2a.md), and [../../decisions/006-intel-x64-and-hackintosh-support.md](../../decisions/006-intel-x64-and-hackintosh-support.md) for architecture rationale.
+> Last synced: `v2.1.6` (C++20 baseline archived on `legacy/cpp-kernel`). Read [../../decisions/003-rust-kernel-migration.md](../../decisions/003-rust-kernel-migration.md), [../../decisions/004-zero-serial-rtt-instant-play-v3.md](../../decisions/004-zero-serial-rtt-instant-play-v3.md), [../../decisions/005-zero-crate-rust-media-data-plane-2a.md](../../decisions/005-zero-crate-rust-media-data-plane-2a.md), and [../../decisions/006-intel-x64-and-hackintosh-support.md](../../decisions/006-intel-x64-and-hackintosh-support.md) for architecture rationale.
 
 ## 1. Sub-Document Routing
 
@@ -12,7 +12,7 @@
 
 ## 2. File Inventory
 
-- `Sources/DonbyKernelC/include/donby_kernel.h` (**FROZEN C ABI**) — 38 `dk_*` public entrypoints.
+- `Sources/DonbyKernelC/include/donby_kernel.h` (**FROZEN C ABI**) — 39 `dk_*` public entrypoints (including `dk_player_is_seeking`).
 - `Sources/DonbyKernelC/dk_ffi_shim_internal.h` (pure C11 internal header) — shared `DKShimStreamMeta`, callback typedefs, and cross-unit `dk_shim_*` prototypes.
 - `Sources/DonbyKernelC/dk_ffi_shim.c` (pure C11) — `_Static_assert` ABI checks, `av_log` bridge, packet/frame alloc, format open with PGS/DVD fast-probe bypass, custom AVIO, stream/chapter metadata, seek/read, shared codec helpers.
 - `Sources/DonbyKernelC/dk_ffi_video.c` (pure C11) — VideoToolbox hwaccel, `IOSurface`-backed `CVPixelBufferPool` + `SwsContext` fallback, HDR10/DoVi RPU `DKGpuColorUniforms` builder, thumbnail extraction.
@@ -27,14 +27,14 @@
   - `audio.rs` — AQ trampolines, `stop_reset_audio_queue`/`stop_dispose_audio_queue`, clock, `audio_decode_worker`, playback controls.
   - `audio_control.rs` — Per-player `"donby-aq-ctrl"` background worker for non-blocking `AudioQueuePause`/`AudioQueueStart` dispatch, seek barriers, and teardown sync.
   - `tracks.rs` — Auto-subtitle scoring, subtitle packet history, track/chapter getters, `select_track`.
-  - `c_api.rs` — 38 `#[no_mangle] extern "C" fn dk_*` thin ABI wrappers (including `dk_player_notify_metal_first_frame` `[StartupTiming]` emitter).
+  - `c_api.rs` — 39 `#[no_mangle] extern "C" fn dk_*` thin ABI wrappers (including `dk_player_is_seeking` and `dk_player_notify_metal_first_frame` `[StartupTiming]` emitter).
   - `c_api_net.rs` — `#[no_mangle] extern "C" fn dk_net_*` & `dk_player_attach_stream_bridge` C ABI wrappers for the 2A media data plane.
   - `net/` (zero-dependency 2A media data plane):
     - `net/mod.rs` — Darwin `SEEK_DATA`/`SEEK_HOLE` sparse extent helpers, physical-RAM-tiered budget sizing, and `PlaybackCompanionPacer`.
     - `net/slab.rs` — `GlobalSlabPool` fixed `512 KiB` page allocator with hard RAM cap and anchor pinning.
     - `net/disk_store.rs` — `DKChunkStore` sparse `media.bin` POSIX `pread`/`pwrite` storage and bounded background disk writer.
     - `net/disk_reconcile.rs` — `chunks.bitmap` binary codec, `SEEK_DATA` open-time reconciliation, legacy `.chk` folding, and tombstone removal.
-    - `net/avio_bridge.rs` — `DKStreamBridge` in-kernel `AVIO` fast path, partial slab ingestion, and `DKDownloadAssembler`.
+    - `net/avio_bridge.rs` — `DKStreamBridge` in-kernel `AVIO` fast path (authoritative `cursor_offset` sync across fast/miss paths), partial slab ingestion, and `DKDownloadAssembler`.
   - `abi.rs` — `#[repr(C)]` ABI structs, `DKGpuColorUniforms::default_sdr()`, C-string helpers, `offset_of!` tests.
   - `ffi.rs` — `extern "C"` bindings + RAII `Drop` wrappers (`AvPacket`, `AvFrame`, `OwnedPixelBuffer`).
   - `clock.rs` — Monotonic ns clock helpers, `ClockState`, `SpeedTracker`.
